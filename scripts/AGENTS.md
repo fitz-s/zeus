@@ -21,7 +21,7 @@ Use `architecture/script_manifest.yaml` for:
 - target DB and danger classification
 - reuse/disposal policy
 
-Use `python scripts/topology_doctor.py --scripts --json` to check that top-level
+Use `python3 scripts/topology_doctor.py --scripts --json` to check that top-level
 scripts are registered and safe for their declared class.
 
 ## Class Quick Guide

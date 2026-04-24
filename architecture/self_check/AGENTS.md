@@ -12,4 +12,4 @@ Self-check procedures for agent entry into the Zeus codebase.
 ## Rules
 
 - These checklists are governance-level — changes require explicit approval
-- The zero-context entry checklist must stay aligned with root `AGENTS.md` "Default Navigation" and "What To Read By Task".
+- The zero-context entry checklist must stay aligned with root `AGENTS.md` "Navigation & Task Routing" and "What to read by task".

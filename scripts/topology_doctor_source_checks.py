@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,69 @@ def run_source(api: Any) -> Any:
                 )
             )
 
+    # Downstream freshness: check that claimed downstream matches actual imports
+    import_graph = _compute_import_graph(api.ROOT)
+    for path in sorted(files.keys()):
+        if not path.startswith("src/") or "__init__" in path:
+            continue
+        actual_importers = sorted(import_graph.get(path, set()))
+        actual_src = [f for f in actual_importers if f.startswith("src/")]
+        claimed = sorted((files.get(path) or {}).get("downstream", []))
+        missing = set(actual_src) - set(claimed)
+        # Warn if >=3 actual importers are missing from claimed downstream
+        if len(missing) >= 3:
+            issues.append(
+                api._warning(
+                    "source_downstream_drift",
+                    path,
+                    f"downstream stale: {len(missing)} importers missing (have {len(claimed)}, need {len(actual_src)})",
+                )
+            )
+
     return api.StrictResult(ok=not issues, issues=issues)
+
+
+def _compute_import_graph(root: Path) -> dict[str, set[str]]:
+    """Build {file: set_of_importers} from AST-parsed imports."""
+    from collections import defaultdict
+
+    importers: dict[str, set[str]] = defaultdict(set)
+    src_dir = root / "src"
+    if not src_dir.exists():
+        return importers
+
+    src_files = sorted(
+        str(p.relative_to(root))
+        for p in src_dir.rglob("*.py")
+        if "__pycache__" not in str(p)
+    )
+
+    module_to_file: dict[str, str] = {}
+    for f in src_files:
+        mod = f.replace("/", ".").replace(".py", "")
+        module_to_file[mod] = f
+        if f.endswith("__init__.py"):
+            pkg_mod = mod.rsplit(".", 1)[0]
+            module_to_file[pkg_mod] = f
+
+    for src_file in src_files:
+        if "__init__" in src_file:
+            continue
+        try:
+            tree = ast.parse((root / src_file).read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src."):
+                target = module_to_file.get(node.module)
+                if target and target != src_file and "__init__" not in target:
+                    importers[target].add(src_file)
+                parent = node.module.rsplit(".", 1)[0]
+                target = module_to_file.get(parent)
+                if target and target != src_file and "__init__" not in target:
+                    importers[target].add(src_file)
+
+    return dict(importers)
 
 
 def expected_zone_for_agents_path(rationale: dict[str, Any], agents_rel: str) -> str | None:

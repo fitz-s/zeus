@@ -1,47 +1,67 @@
-# src/data AGENTS
+# src/data AGENTS — Zone K2/K3 (Data Ingestion)
 
-Data binds real-world feeds to the correct Zeus truth planes: settlement daily
-observations, current/Day0 observations, historical hourly features, forecast
-snapshots, forecast-skill rows, and market data.
+Module book: `docs/reference/modules/data.md`
+Machine registry: `architecture/module_manifest.yaml`
 
-## Read this before editing
+## WHY this zone matters
 
-- Module book: `docs/reference/modules/data.md`
-- Machine registry: `architecture/module_manifest.yaml`
-- Source-role law and current facts: `docs/authority/zeus_current_architecture.md`,
-  `architecture/city_truth_contract.yaml`, `config/cities.json`,
-  `docs/operations/current_source_validity.md`, `docs/operations/current_data_state.md`
+Data is the **truth-binding layer** — where physical atmospheric reality enters
+Zeus as tradeable information. Every feed serves exactly one truth plane
+(settlement, Day0, hourly, forecast-skill). Collapsing these roles is the
+#1 catastrophic failure class in Zeus, because the system will silently trade
+on wrong source truth with no runtime error.
 
-## Top hazards
+The money path starts here: if the source is wrong, every downstream
+computation (P_raw, calibration, edge, sizing) is economically worthless
+regardless of mathematical correctness.
 
-- endpoint availability is not source correctness
-- settlement daily, Day0 current, historical hourly, and forecast-skill truth
-  must not collapse into one feed family
-- quota/proxy workarounds must not silently change semantic provider selection
-- hourly aggregation and v2 migration paths can destroy extrema or source tags
+## Key files
 
-## Canonical truth surfaces
+| File | What it does | Danger level |
+|------|-------------|--------------|
+| `daily_obs_append.py` | Settlement-adjacent daily observation writer | CRITICAL — settlement truth enters here |
+| `observation_client.py` | Current observation chain (Day0 monitoring) | HIGH — Day0 truth source |
+| `tier_resolver.py` | Source-tier routing (which provider for which role) | HIGH — wrong tier = wrong truth plane |
+| `hourly_instants_append.py` | Legacy hourly observation path | HIGH — extrema preservation |
+| `observation_instants_v2_writer.py` | V2 hourly write contract | HIGH — version/source tagging |
+| `forecasts_append.py` | Forecast write family (TIGGE ENS) | HIGH — signal source |
+| `market_scanner.py` | Venue discovery path (Polymarket markets) | MEDIUM |
+| `polymarket_client.py` | Market data client (book, prices) | MEDIUM |
 
-- `daily_obs_append.py`
-- `observation_client.py`
-- `hourly_instants_append.py`
-- `observation_instants_v2_writer.py`
-- `tier_resolver.py`
-- `forecasts_append.py`
-- `market_scanner.py`
+## Domain rules
 
-## High-risk files
+- **Feed roles are non-fungible.** Settlement daily source ≠ Day0 monitoring
+  source ≠ historical hourly source ≠ forecast-skill source. Each serves a
+  distinct truth plane defined in `zeus_current_architecture.md` §4–§6.
+- **Endpoint availability is not source correctness.** A 200 response from
+  an API does not prove the station, product, date mapping, or settlement
+  semantics are correct for the target city.
+- **Provider selection is audit-bound, not code-inferred.** The correct
+  settlement source for a city comes from `current_source_validity.md` and
+  `city_truth_contract.yaml`, not from what endpoint is reachable.
+- **Hourly aggregation must preserve the extrema** required by the target
+  metric: daily max for high track, daily min for low track. Averaging or
+  sampling destroys the signal.
+- **Quota/proxy workarounds must not silently change semantic provider.**
+  If a rate limit forces a fallback, it must be recorded as a degradation,
+  not treated as equivalent source truth.
+- **WU/HKO settlement observations settle on integers.** All settlement-path
+  writes must flow through `SettlementSemantics` (INV-06).
 
-| File | Role |
-|------|------|
-| `daily_obs_append.py` | settlement-adjacent daily observation writer |
-| `observation_client.py` | current observation chain |
-| `hourly_instants_append.py` | legacy hourly path |
-| `observation_instants_v2_writer.py` | v2 hourly write contract |
-| `tier_resolver.py` | source-tier routing |
-| `forecasts_append.py` | forecast write family |
-| `market_scanner.py` | venue discovery path |
-| `polymarket_client.py` | market data client |
+## Common mistakes
+
+- Using an airport station code as the city settlement station without proving
+  WU uses that station for the city's displayed temperature
+- Treating Open-Meteo (grid reanalysis) as settlement-adjacent — it is never
+  a settlement source, only a calibration/feature backup
+- Collapsing Day0 monitoring source with final daily settlement source — they
+  may differ in station, timing, and aggregation method
+- Aggregating hourly observations without checking whether the peak/trough
+  falls in the correct local calendar day (DST case study in domain model §15)
+- `config/cities.json` provides runtime config seeds, NOT current source
+  validity. Always cross-reference with `current_source_validity.md`
+- Adding new data sources without updating `city_truth_contract.yaml` and
+  `source_rationale.yaml` — makes the source invisible to future agents
 
 ## Required tests
 
@@ -55,13 +75,6 @@ snapshots, forecast-skill rows, and market data.
 - `tests/test_obs_v2_writer.py`
 - `tests/test_hk_rejects_vhhh_source.py`
 - `tests/test_hourly_clients_parse.py`
-
-## Do not assume
-
-- a 200 response means the source/station is semantically correct
-- current source facts can be inferred from code comments alone
-- Open-Meteo or another grid source is safe for settlement-adjacent logic
-- legacy and v2 write families can coexist without explicit version/source tags
 
 ## Planning lock
 

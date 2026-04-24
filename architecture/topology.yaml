@@ -165,12 +165,6 @@ root_governed_files:
     zone: root
     authority_role: registry
     forbidden_misread: Root operating law must be read before narrower scopes.
-  - path: "README.md"
-    status: active
-    scope: global
-    zone: root
-    authority_role: orientation
-    forbidden_misread: Orientation document for human/professor review; does not outrank AGENTS.md, machine manifests, or executable authority.
   - path: "workspace_map.md"
     status: active
     scope: global
@@ -207,8 +201,26 @@ root_governed_files:
     zone: root
     authority_role: scratch_artifact
     forbidden_misread: Root-level DB artifact is not canonical; canonical world DB path is state/zeus-world.db.
+  - path: "README.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    forbidden_misread: Orientation document for human/professor review; does not outrank AGENTS.md, machine manifests, or executable authority.
 
 state_surfaces:
+  - path: "state/README.md"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Directory placeholder explaining untracked state policy; not runtime truth.
+  - path: "state/.gitkeep"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Git directory placeholder; not runtime truth.
   - path: "state/LIVE_LOCK"
     status: active
     scope: runtime
@@ -419,18 +431,6 @@ state_surfaces:
     zone: state
     authority_role: runtime_support
     forbidden_misread: Auto-pause fail-closed tombstone is runtime evidence, not canonical trade truth.
-  - path: "state/README.md"
-    status: active
-    scope: runtime
-    zone: state
-    authority_role: runtime_support
-    forbidden_misread: Directory placeholder explaining untracked state policy; not runtime truth.
-  - path: "state/.gitkeep"
-    status: active
-    scope: runtime
-    zone: state
-    authority_role: runtime_support
-    forbidden_misread: Git directory marker; not runtime truth.
 
 required_active_pointers:
   - path: "docs/operations/current_state.md"
@@ -475,7 +475,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-23_graph_rendering_integration/plan.md
+    - docs/operations/task_2026-04-23_midstream_remediation/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
@@ -529,7 +529,7 @@ docs_subroots:
     role: operations
     requires_agents: true
     allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml"]
+    allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql"]
   - path: "docs/runbooks"
     role: runbook
     requires_agents: true
@@ -651,8 +651,8 @@ digest_profiles:
       - ".omx/**"
     gates:
       - "pytest -q tests/test_instrument_invariants.py"
-      - "python scripts/validate_assumptions.py"
-      - "python scripts/semantic_linter.py"
+      - "python3 scripts/validate_assumptions.py"
+      - "python3 scripts/semantic_linter.py"
       - "rg settlement banker-rounding patterns in active src/scripts"
     downstream:
       - "src/signal/ensemble_signal.py"
@@ -684,7 +684,7 @@ digest_profiles:
       - ".claude/worktrees/**"
     gates:
       - "pytest -q tests/test_replay_time_provenance.py tests/test_backtest_settlement_value_outcome.py"
-      - "python scripts/audit_replay_fidelity.py"
+      - "python3 scripts/audit_replay_fidelity.py"
     downstream:
       - "state/zeus_backtest.db"
       - "docs/operations/current_data_state.md"
@@ -719,8 +719,8 @@ digest_profiles:
       - ".claude/worktrees/**"
       - ".omx/**"
     gates:
-      - "python scripts/topology_doctor.py --data-rebuild"
-      - "python scripts/topology_doctor.py --scripts"
+      - "python3 scripts/topology_doctor.py --data-rebuild"
+      - "python3 scripts/topology_doctor.py --scripts"
       - "pytest -q tests/test_rebuild_pipeline.py tests/test_rebuild_validators.py tests/test_data_rebuild_relationships.py"
     downstream:
       - "state/zeus-world.db"
@@ -761,9 +761,9 @@ digest_profiles:
       - ".omx/**"
       - "docs/archives/work_packets/**"
     gates:
-      - "python scripts/topology_doctor.py --scripts"
-      - "python scripts/topology_doctor.py --naming-conventions"
-      - "python scripts/topology_doctor.py --freshness-metadata --changed-files <files>"
+      - "python3 scripts/topology_doctor.py --scripts"
+      - "python3 scripts/topology_doctor.py --naming-conventions"
+      - "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <files>"
       - "pytest -q tests/test_topology_doctor.py -k scripts"
     downstream:
       - "architecture/script_manifest.yaml"
@@ -795,7 +795,7 @@ digest_profiles:
       - "state/*.db"
       - ".claude/worktrees/**"
     gates:
-      - "python scripts/topology_doctor.py --history-lore"
+      - "python3 scripts/topology_doctor.py --history-lore"
       - "pytest -q tests/test_topology_doctor.py -k history_lore"
     downstream:
       - "AGENTS.md"
@@ -835,8 +835,8 @@ digest_profiles:
       - "state/*.db"
       - "scripts/**"
     gates:
-      - "python scripts/topology_doctor.py --reference-replacement"
-      - "python scripts/topology_doctor.py --context-budget"
+      - "python3 scripts/topology_doctor.py --reference-replacement"
+      - "python3 scripts/topology_doctor.py --context-budget"
       - "pytest -q tests/test_topology_doctor.py -k 'reference_replacement or context_budget or digest'"
     downstream:
       - "docs/reference/AGENTS.md"
@@ -845,3 +845,300 @@ digest_profiles:
     stop_conditions:
       - "Do not broaden this package into stale scripts, state artifacts, DB cleanup, or active data-improvement work."
       - "Do not set delete_allowed=true for a reference doc while unique_remaining is nonempty."
+  - id: "modify pipeline logic"
+    match:
+      - "evaluator"
+      - "cycle_runner"
+      - "cycle_runtime"
+      - "forecast"
+      - "calibration"
+      - "platt"
+      - "market fusion"
+      - "market_fusion"
+      - "ensemble"
+      - "signal"
+      - "monte carlo"
+      - "p_raw"
+      - "p_cal"
+    file_patterns:
+      - "src/engine/**"
+      - "src/signal/**"
+      - "src/calibration/**"
+      - "src/strategy/market_analysis.py"
+      - "src/strategy/market_fusion.py"
+      - "src/strategy/kelly.py"
+    required_law:
+      - "High and low temperature families must not mix in calibration, Platt fitting, replay bin lookup, or settlement rebuild identity."
+      - "Point-in-time truth beats hindsight truth (INV-06). Learning must preserve decision-time conditions."
+      - "SettlementSemantics is the canonical rounding law. WMO asymmetric half-up: floor(x + 0.5)."
+      - "Missing data is first-class truth (INV-09). Do not coerce missing values to zero or skip them silently."
+    allowed_files:
+      - "src/engine/evaluator.py"
+      - "src/engine/cycle_runner.py"
+      - "src/engine/cycle_runtime.py"
+      - "src/signal/ensemble_signal.py"
+      - "src/signal/day0_signal.py"
+      - "src/calibration/store.py"
+      - "src/calibration/platt.py"
+      - "src/strategy/market_analysis.py"
+      - "src/strategy/market_fusion.py"
+      - "src/strategy/kelly.py"
+      - "src/strategy/oracle_penalty.py"
+      - "tests/test_ensemble_signal.py"
+      - "tests/test_platt.py"
+      - "tests/test_kelly.py"
+      - "tests/test_market_analysis.py"
+      - "tests/test_cross_module_invariants.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/state/**"
+      - "src/contracts/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_cross_module_invariants.py"
+      - "pytest -q tests/test_instrument_invariants.py"
+      - "pytest -q tests/test_cross_module_relationships.py"
+      - "pytest -q tests/test_ensemble_signal.py tests/test_platt.py tests/test_kelly.py tests/test_market_analysis.py"
+    downstream:
+      - "src/execution/executor.py"
+      - "src/engine/monitor_refresh.py"
+      - "src/riskguard/risk_level.py"
+      - "state/zeus_trades.db"
+    stop_conditions:
+      - "Do not modify settlement_semantics.py or observation_atom.py — those are K0 frozen kernel."
+      - "Do not mix high and low temperature calibration families in the same code path."
+      - "Any DB schema change or lifecycle grammar change belongs to a separate packet."
+    reference_reads:
+      - "docs/reference/zeus_domain_model.md"
+      - "docs/reference/zeus_math_spec.md"
+  - id: "modify execution or lifecycle"
+    match:
+      - "executor"
+      - "lifecycle"
+      - "reconciliation"
+      - "exit trigger"
+      - "exit_trigger"
+      - "monitor_refresh"
+      - "harvester"
+      - "settlement harvest"
+      - "dedup"
+      - "chronicler"
+      - "position lifecycle"
+      - "position_write"
+      - "order fill"
+      - "order placement"
+    file_patterns:
+      - "src/execution/**"
+      - "src/state/lifecycle_manager.py"
+      - "src/state/chain_reconciliation.py"
+      - "src/engine/monitor_refresh.py"
+    required_law:
+      - "Exit is not local close (INV-01). Monitor decisions must not directly imply terminal economic closure."
+      - "Settlement is not exit (INV-02). Exit execution and final market settlement are distinct lifecycle facts."
+      - "Lifecycle grammar is finite and authoritative (INV-07). No code may invent phase strings outside the LifecyclePhase enum."
+      - "Canonical write path has one transaction boundary (INV-08). Event append and projection update must succeed or fail together."
+      - "Chain (CLOB) > Chronicler (event log) > Portfolio (local cache). Local-only state that contradicts chain truth must be voided."
+    allowed_files:
+      - "src/execution/executor.py"
+      - "src/execution/exit_triggers.py"
+      - "src/execution/harvester.py"
+      - "src/engine/monitor_refresh.py"
+      - "src/state/chain_reconciliation.py"
+      - "src/state/lifecycle_manager.py"
+      - "src/state/ledger.py"
+      - "src/state/projection.py"
+      - "tests/test_executor.py"
+      - "tests/test_lifecycle.py"
+      - "tests/test_dt4_chain_three_state.py"
+      - "tests/test_chronicle_dedup.py"
+      - "tests/test_entry_exit_symmetry.py"
+      - "tests/test_pnl_flow_and_audit.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/contracts/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_cross_module_invariants.py"
+      - "pytest -q tests/test_lifecycle.py tests/test_executor.py tests/test_entry_exit_symmetry.py"
+      - "pytest -q tests/test_dt4_chain_three_state.py tests/test_chronicle_dedup.py"
+      - "pytest -q tests/test_pnl_flow_and_audit.py"
+    downstream:
+      - "src/engine/cycle_runner.py"
+      - "src/riskguard/risk_level.py"
+      - "state/zeus_trades.db"
+    stop_conditions:
+      - "Do not modify LifecyclePhase enum values without a governance packet."
+      - "Do not bypass chain reconciliation truth hierarchy: chain > chronicler > portfolio."
+      - "Do not merge exit intent with settlement — they are distinct lifecycle facts."
+      - "Any schema migration belongs to a separate packet."
+    reference_reads:
+      - "docs/reference/zeus_execution_lifecycle_reference.md"
+  - id: "modify risk or strategy"
+    match:
+      - "risk"
+      - "kelly"
+      - "strategy"
+      - "drawdown"
+      - "edge decay"
+      - "edge_decay"
+      - "position size"
+      - "position_size"
+      - "riskguard"
+      - "risk level"
+      - "risk_level"
+      - "trailing loss"
+      - "sizing"
+    file_patterns:
+      - "src/riskguard/**"
+      - "src/strategy/**"
+    required_law:
+      - "Risk must change behavior (INV-05). Advisory-only risk outputs are forbidden."
+      - "strategy_key is the sole governance key (INV-04). edge_source, discovery_mode, and entry_method are metadata."
+      - "Overall risk level = max of all individual levels. Computation error or broken truth input → RED. Fail-closed."
+      - "RED risk must cancel all pending orders and sweep all active positions."
+    allowed_files:
+      - "src/riskguard/risk_level.py"
+      - "src/riskguard/policy.py"
+      - "src/strategy/kelly.py"
+      - "src/strategy/market_analysis.py"
+      - "src/strategy/market_fusion.py"
+      - "src/strategy/oracle_penalty.py"
+      - "src/strategy/risk_limits.py"
+      - "tests/test_riskguard.py"
+      - "tests/test_kelly.py"
+      - "tests/test_kelly_cascade_bounds.py"
+      - "tests/test_kelly_live_safety_cap.py"
+      - "tests/test_market_analysis.py"
+      - "tests/test_live_safety_invariants.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/state/**"
+      - "src/contracts/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_cross_module_invariants.py"
+      - "pytest -q tests/test_riskguard.py tests/test_kelly.py tests/test_kelly_cascade_bounds.py tests/test_kelly_live_safety_cap.py"
+      - "pytest -q tests/test_live_safety_invariants.py"
+    downstream:
+      - "src/engine/evaluator.py"
+      - "src/execution/executor.py"
+      - "src/engine/monitor_refresh.py"
+    stop_conditions:
+      - "Do not weaken risk level escalation — fail-closed is mandatory."
+      - "Do not create advisory-only risk outputs."
+      - "Do not conflate strategy_key with edge_source or discovery_mode."
+    reference_reads:
+      - "docs/reference/zeus_risk_strategy_reference.md"
+  - id: "modify data ingestion"
+    match:
+      - "ingestion"
+      - "observation"
+      - "hourly"
+      - "daily"
+      - "source"
+      - "coverage"
+      - "wu"
+      - "weather underground"
+      - "metar"
+      - "asos"
+      - "openmeteo"
+      - "ingest"
+      - "append"
+      - "daily_obs"
+    file_patterns:
+      - "src/data/**"
+      - "src/types/observation_atom.py"
+    required_law:
+      - "High and low temperature families must not mix in ingestion, observation storage, or dual-track identity."
+      - "IngestionGuard layers enforce temporal, range, and format validity before any DB write."
+      - "Settlement values flow through SettlementSemantics.assert_settlement_value() — no unguarded writes."
+      - "DB commits must precede derived JSON export writes."
+    allowed_files:
+      - "src/data/daily_obs_append.py"
+      - "src/data/hourly_instants_append.py"
+      - "src/data/ingestion_guard.py"
+      - "src/data/tier_resolver.py"
+      - "src/data/rebuild_validators.py"
+      - "src/data/hole_scanner.py"
+      - "src/data/observation_instants_v2_writer.py"
+      - "src/types/observation_atom.py"
+      - "tests/test_ingestion_guard.py"
+      - "tests/test_observation_atom.py"
+      - "tests/test_observation_contract.py"
+      - "tests/test_obs_v2_writer.py"
+      - "tests/test_hk_rejects_vhhh_source.py"
+      - "tests/test_tier_resolver.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/contracts/settlement_semantics.py"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_ingestion_guard.py tests/test_observation_atom.py tests/test_observation_contract.py"
+      - "pytest -q tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_tier_resolver.py"
+      - "pytest -q tests/test_instrument_invariants.py"
+    downstream:
+      - "state/zeus-world.db"
+      - "src/calibration/store.py"
+      - "src/signal/ensemble_signal.py"
+    stop_conditions:
+      - "Do not modify settlement_semantics.py — use it, do not change it."
+      - "Do not write to zeus-world.db without IngestionGuard validation."
+      - "Do not mix high/low temperature rows in the same ingestion path."
+    reference_reads:
+      - "docs/reference/zeus_data_and_replay_reference.md"
+  - id: "modify types or contracts"
+    match:
+      - "types"
+      - "contracts"
+      - "settlement_semantics"
+      - "observation_atom"
+      - "metric identity"
+      - "metric_identity"
+      - "provenance"
+      - "kernel"
+      - "frozen"
+    file_patterns:
+      - "src/contracts/**"
+      - "src/types/**"
+    required_law:
+      - "K0 frozen kernel requires a governance packet before modification."
+      - "SettlementSemantics.assert_settlement_value() gates every DB write of settlement values."
+      - "Lifecycle grammar is finite and authoritative (INV-07). No code may invent phase strings outside the enum."
+      - "Canonical authority is append-first and projection-backed (INV-03)."
+    allowed_files:
+      - "src/contracts/settlement_semantics.py"
+      - "src/contracts/provenance_registry.py"
+      - "src/types/observation_atom.py"
+      - "src/types/metric_identity.py"
+      - "tests/test_instrument_invariants.py"
+      - "tests/test_observation_atom.py"
+      - "tests/test_metric_identity_spine.py"
+      - "tests/test_provenance_enforcement.py"
+      - "tests/test_architecture_contracts.py"
+    forbidden_files:
+      - "state/*.db"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "pytest -q tests/test_instrument_invariants.py tests/test_architecture_contracts.py"
+      - "pytest -q tests/test_observation_atom.py tests/test_metric_identity_spine.py tests/test_provenance_enforcement.py"
+      - "pytest -q tests/test_cross_module_invariants.py"
+      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files>"
+    downstream:
+      - "src/engine/evaluator.py"
+      - "src/execution/executor.py"
+      - "src/data/daily_obs_append.py"
+      - "src/signal/ensemble_signal.py"
+      - "src/calibration/store.py"
+    stop_conditions:
+      - "K0 changes require explicit governance packet approval before merge."
+      - "Do not break downstream contracts — all consumers must still compile and pass tests."
+      - "Do not weaken settlement_semantics guards."
+    reference_reads:
+      - "docs/reference/zeus_market_settlement_reference.md"
+      - "docs/reference/zeus_domain_model.md"
+

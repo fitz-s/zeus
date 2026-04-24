@@ -4,6 +4,12 @@ Documentation root for the tracked docs mesh.
 
 Module book: `docs/reference/modules/docs_system.md`
 
+## System understanding first
+
+Before navigating the docs mesh, understand the trading system:
+- **What Zeus does and how it trades**: `reference/zeus_domain_model.md`
+- **Binding laws of the trading machine**: `authority/zeus_current_architecture.md`
+
 This directory is a router, not a co-equal authority plane to source code or
 machine manifests. Use it to find the right live docs surface quickly.
 
@@ -41,6 +47,7 @@ body or bundle.
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |
 | `artifacts/` | Active evidence artifacts and inventories; not authority -> `artifacts/AGENTS.md` |
+| `artifacts/tigge_data_training_handoff_2026-04-23.md` | Dated TIGGE asset/training handoff for completed raw, extraction, validation, and next Zeus training steps |
 
 ## Rules
 

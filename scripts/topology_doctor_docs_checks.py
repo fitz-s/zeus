@@ -10,11 +10,42 @@ preserves the existing public helper surface during migration.
 
 from __future__ import annotations
 
-import glob
+import fnmatch
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match a path against a glob pattern with ** recursive support.
+
+    Replaces glob.translate() which requires Python 3.13+.
+    Handles both simple globs (docs/reference/*.md) and recursive
+    patterns (docs/operations/task_*/**).
+    """
+    if "**" in pattern:
+        parts = pattern.split("**")
+        if len(parts) == 2:
+            prefix = parts[0].rstrip("/")
+            suffix = parts[1].lstrip("/")
+            if not prefix:
+                # Pattern like **/*.md — match any path ending with suffix
+                return fnmatch.fnmatch(path.split("/")[-1], suffix) if suffix else True
+            # Extract the directory part of the path at the same depth as prefix
+            prefix_depth = prefix.count("/") + 1
+            path_parts = path.split("/")
+            if len(path_parts) < prefix_depth:
+                return False
+            dir_part = "/".join(path_parts[:prefix_depth])
+            if not fnmatch.fnmatch(dir_part, prefix):
+                return False
+            # If there's a suffix pattern, match the filename against it
+            if suffix:
+                return fnmatch.fnmatch(path_parts[-1], suffix)
+            # ** with no suffix matches any descendant
+            return len(path_parts) > prefix_depth
+    return fnmatch.fnmatch(path, pattern)
 
 
 INTERNAL_PATH_PATTERN = re.compile(
@@ -162,15 +193,15 @@ def docs_registry_path_matches(path: str, entry: dict[str, Any]) -> bool:
     raw = str(entry.get("path") or "")
     if entry.get("coverage_scope") == "descendants" and entry.get("parent_coverage_allowed"):
         pattern = raw + ("**" if raw.endswith("/") else "/**")
-        return re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+        return _glob_match(path, pattern)
     if any(char in raw for char in "*?["):
-        return re.match(glob.translate(raw, recursive=True, include_hidden=True, seps="/"), path) is not None
+        return _glob_match(path, raw)
     return path == raw
 
 
 def docs_registry_parent_allowed(path: str) -> bool:
     return any(
-        re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+        _glob_match(path, pattern)
         for pattern in DOCS_REGISTRY_PARENT_PATTERNS
     )
 

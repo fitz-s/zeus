@@ -10,6 +10,7 @@ over making binary artifacts default reads.
 |------|---------|
 | `polymarket_city_settlement_audit_2026-04-14.md` | Historical evidence snapshot for city settlement-source/station changes; not current authority |
 | `tigge_cloud_wiring_snapshot_2026-04-19.md` | Dated local/cloud TIGGE wiring snapshot and 2026-04-21 rebalance evidence; not a durable runbook |
+| `tigge_data_training_handoff_2026-04-23.md` | Dated handoff for completed TIGGE raw/extraction/validation state and the next Zeus training steps |
 | `zeus_architecture_deep_map_2026-04-16.md` | Legacy architecture deep-map snapshot; extracted to `docs/reference/zeus_architecture_reference.md`, evidence only |
 
 ## Rules

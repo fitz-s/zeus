@@ -9,15 +9,12 @@ Use it after `AGENTS.md` to answer two questions quickly:
 
 ## Default route
 
-1. read `AGENTS.md`
-2. read this map
-3. read the scoped `AGENTS.md` for the directory you will touch
-4. load the relevant manifest or active packet
-5. read code or evidence only after the route is narrow
-
-Default navigation command:
-
-`python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+1. read `AGENTS.md` (establishes the money path and probability chain)
+2. run the topology digest for your task — this gives you `allowed_files`,
+   `forbidden_files`, `gates`, and `stop_conditions`:
+   `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+3. read the scoped `AGENTS.md` for the module the digest routes you to
+4. read code and evidence only after the route is narrow
 
 ## Visibility classes
 
@@ -46,7 +43,7 @@ Default navigation command:
 | `docs/artifacts/` | Active evidence artifacts | `docs/artifacts/AGENTS.md` |
 | `architecture/` | Machine-checkable workspace law | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
-| `.code-review-graph/` | Tracked derived online context | graph status via `python scripts/topology_doctor.py --code-review-graph-status --json` |
+| `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
 | `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
 
@@ -99,6 +96,6 @@ When adding, renaming, or deleting a file:
 
 Run:
 
-`python scripts/topology_doctor.py --context-budget --json`
+`python3 scripts/topology_doctor.py --context-budget --json`
 
 after a material boot-surface rewrite.

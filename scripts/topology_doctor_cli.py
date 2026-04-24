@@ -165,6 +165,14 @@ def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
         print("\nhistory_lore:")
         for card in payload["history_lore"]:
             print(f"- {card['id']} [{card['severity']}/{card['status']}]: {card['zero_context_digest']}")
+    if payload.get("gate_trust"):
+        print("\ngate_trust:")
+        for entry in payload["gate_trust"]:
+            status = entry["status"]
+            print(f"- {entry['gate']}: {status}")
+            if status == "audit_required":
+                for untrusted in entry.get("untrusted_tests", []):
+                    print(f"  ⚠ audit_required: {untrusted}")
 
 
 def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:

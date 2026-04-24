@@ -5,10 +5,14 @@ Scope: authority order, boot order, planning lock, packet doctrine, autonomy lim
 
 ---
 
-## 1. Purpose
+## 1. Purpose & Runtime Supra-Authority
 
-This file defines how work is allowed to happen in Zeus:
+This file defines how work is allowed to happen in Zeus (change-control protocol, execution packets, planning locks, autonomy limits). 
 
+**CRITICAL WARNING:** Runtime Reality Outranks Delivery Protocol. 
+Any agent executing a task involving runtime logic, truth planes, or physics MUST ingest the Runtime Semantic Constitution (`zeus_current_architecture.md`) and the domain model *before* applying the governance rules in this file. Following correct packet disciplines does not excuse semantic violations of the trading machine.
+
+It defines:
 - who outranks whom
 - how agents boot into the right mental model
 - when planning lock applies
@@ -16,7 +20,7 @@ This file defines how work is allowed to happen in Zeus:
 - what autonomy may and may not do
 - how authority surfaces stay clean
 
-It is the single default entrypoint for delivery/change-control law.
+It is the single default entrypoint for workspace governance and delivery law.
 
 ---
 
@@ -46,17 +50,18 @@ For every non-trivial task:
 
 1. `AGENTS.md`
 2. `workspace_map.md`
-3. `docs/authority/zeus_current_architecture.md`
-4. classify task class
-5. `architecture/task_boot_profiles.yaml`
-6. `architecture/fatal_misreads.yaml`
-7. `architecture/city_truth_contract.yaml` if city/source/date/settlement/
+3. `docs/reference/zeus_domain_model.md`
+4. `docs/authority/zeus_current_architecture.md`
+5. classify task class
+6. scoped `src/<module>/AGENTS.md` for the module you will touch
+7. `architecture/task_boot_profiles.yaml`
+8. `architecture/fatal_misreads.yaml`
+9. `architecture/city_truth_contract.yaml` if city/source/date/settlement/
    hourly/Day0/calibration truth is involved
-8. `docs/operations/current_state.md`
-9. profile-required current-fact surfaces, if fresh enough
-10. scoped `AGENTS.md`
-11. targeted code/tests
-12. graph/topology Stage 2
+10. `docs/operations/current_state.md`
+11. profile-required current-fact surfaces, if fresh enough
+12. targeted code/tests
+13. graph/topology Stage 2
 
 For governance or docs-authority work, also read:
 
@@ -102,7 +107,7 @@ Plan before touching:
 
 Machine check:
 
-`python scripts/topology_doctor.py --planning-lock --changed-files <files...> --plan-evidence <plan file>`
+`python3 scripts/topology_doctor.py --planning-lock --changed-files <files...> --plan-evidence <plan file>`
 
 No broad autopilot, no packet-less architecture editing, and no authority
 rewrite by momentum.

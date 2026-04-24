@@ -26,4 +26,4 @@ into machine-checkable law.
 
 ## Current Topology Tool
 
-Use `python scripts/topology_doctor.py digest --task "<task>" --files <paths>` for bounded task context. Use `python scripts/topology_doctor.py --docs` for Packet 3 docs-mesh checks.
+Use `python3 scripts/topology_doctor.py digest --task "<task>" --files <paths>` for bounded task context. Use `python3 scripts/topology_doctor.py --docs` for Packet 3 docs-mesh checks.

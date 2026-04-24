@@ -77,7 +77,7 @@ cards:
         - tests/test_fdr.py
         - tests/test_day0_runtime_observation_context.py
       gates:
-        - python scripts/topology_doctor.py --runtime-modes
+        - python3 scripts/topology_doctor.py --runtime-modes
     residual_risk: >
       Mode-specific behavior is spread through evaluator, cycle_runner,
       executor, and tests; digest routing must keep the mode concept visible.
@@ -184,7 +184,7 @@ cards:
       tests:
         - tests/test_topology_doctor.py
       gates:
-        - python scripts/topology_doctor.py --history-lore
+        - python3 scripts/topology_doctor.py --history-lore
     residual_risk: >
       The first lore registry is hand-curated. A later pruning package should
       remove or archive low-density historical surfaces after their useful lore
@@ -242,8 +242,8 @@ cards:
       tests:
         - tests/test_topology_doctor.py
       gates:
-        - python scripts/topology_doctor.py --docs
-        - python scripts/topology_doctor.py --history-lore
+        - python3 scripts/topology_doctor.py --docs
+        - python3 scripts/topology_doctor.py --history-lore
     residual_risk: >
       Local ignored archive bundles can still be opened manually. The gate is
       procedural unless a future secret-scan or archive-reader tool enforces
@@ -299,8 +299,8 @@ cards:
       tests:
         - tests/test_instrument_invariants.py
       gates:
-        - python scripts/semantic_linter.py
-        - python scripts/topology_doctor.py --strict
+        - python3 scripts/semantic_linter.py
+        - python3 scripts/topology_doctor.py --strict
     residual_risk: >
       New scripts or data rebuild code can still bypass SettlementSemantics
       unless script and semantic gates are run.
@@ -361,8 +361,8 @@ cards:
         - tests/test_replay_time_provenance.py
         - tests/test_backtest_settlement_value_outcome.py
       gates:
-        - python scripts/topology_doctor.py --data-rebuild
-        - python scripts/audit_replay_fidelity.py
+        - python3 scripts/topology_doctor.py --data-rebuild
+        - python3 scripts/audit_replay_fidelity.py
     residual_risk: >
       Diagnostics can still influence human/agent reasoning unless digest
       routing reminds agents that reports are non-promotion.
@@ -424,8 +424,8 @@ cards:
         - tests/test_authority_gate.py
         - tests/test_semantic_linter.py
       gates:
-        - python scripts/semantic_linter.py
-        - python scripts/topology_doctor.py --data-rebuild
+        - python3 scripts/semantic_linter.py
+        - python3 scripts/topology_doctor.py --data-rebuild
     residual_risk: >
       Operator scripts are still a named perimeter gap unless script manifest
       and review gates classify their write targets.
@@ -485,8 +485,8 @@ cards:
         - tests/test_riskguard.py
         - tests/test_cross_module_relationships.py
       gates:
-        - python scripts/topology_doctor.py --source
-        - python scripts/verify_truth_surfaces.py
+        - python3 scripts/topology_doctor.py --source
+        - python3 scripts/verify_truth_surfaces.py
     residual_risk: >
       Legacy files still exist as historical artifacts; agents can misread them
       unless topology/state classifications are checked.
@@ -586,8 +586,8 @@ cards:
       tests:
         - tests/test_topology_doctor.py
       gates:
-        - python scripts/topology_doctor.py --docs
-        - python scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>
+        - python3 scripts/topology_doctor.py --docs
+        - python3 scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path <record>
       docs:
         - docs/operations/current_state.md
         - docs/operations/runtime_artifact_inventory.md
@@ -800,7 +800,7 @@ cards:
       tests:
         - tests/test_topology_doctor.py
       gates:
-        - python scripts/topology_doctor.py --scripts
+        - python3 scripts/topology_doctor.py --scripts
         - pytest -q tests/test_topology_doctor.py -k scripts
     residual_risk: >
       Per-script reuse metadata is still incomplete for many legacy long-lived
@@ -853,8 +853,8 @@ cards:
         - tests/test_architecture_contracts.py
         - tests/test_live_execution.py
       gates:
-        - python scripts/topology_doctor.py --strict
-        - python scripts/check_kernel_manifests.py
+        - python3 scripts/topology_doctor.py --strict
+        - python3 scripts/check_kernel_manifests.py
     residual_risk: >
       Historical paper artifacts and tests still exist, so agents must check
       current live-only law before using them.
@@ -962,7 +962,7 @@ cards:
         - tests/test_topology_doctor.py
         - tests/test_data_rebuild_relationships.py
       gates:
-        - python scripts/topology_doctor.py --data-rebuild
+        - python3 scripts/topology_doctor.py --data-rebuild
     residual_risk: >
       Some certification criteria are intentionally target_not_certified or
       deferred, so agents must keep live math blocked until future packets prove
@@ -1358,7 +1358,7 @@ cards:
         - tests/test_structural_linter.py
         - tests/test_no_bare_float_seams.py
       gates:
-        - python scripts/semantic_linter.py
+        - python3 scripts/semantic_linter.py
         - pytest -q tests/test_structural_linter.py
     residual_risk: >
       The hook syntax is non-obvious when read locally without topology/lore.
@@ -1529,7 +1529,7 @@ cards:
         - tests/test_truth_surface_health.py
         - tests/test_cross_module_invariants.py
       gates:
-        - python scripts/topology_doctor.py --docs
+        - python3 scripts/topology_doctor.py --docs
     residual_risk: >
       Humans still prefer readable JSON over canonical truth. Module books and
       docs routing reduce but do not eliminate that temptation.
@@ -1585,7 +1585,7 @@ cards:
         - tests/test_exit_authority.py
         - tests/test_live_safety_invariants.py
       gates:
-        - python scripts/topology_doctor.py --tests
+        - python3 scripts/topology_doctor.py --tests
     residual_risk: >
       Cross-module exit failures still require human review because graph and
       local tests each see only slices of the behavior.
@@ -1634,8 +1634,8 @@ cards:
         - docs/archive_registry.md
         - docs/operations/current_state.md
       gates:
-        - python scripts/topology_doctor.py --work-record
-        - python scripts/topology_doctor.py --change-receipts
+        - python3 scripts/topology_doctor.py --work-record
+        - python3 scripts/topology_doctor.py --change-receipts
     residual_risk: >
       Humans can still delay commits. The protocol lowers loss probability but
       cannot eliminate it.

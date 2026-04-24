@@ -1,44 +1,80 @@
-# src/state AGENTS
+# src/state AGENTS — Zone K0/K1 (Truth Ownership)
 
-State is Zeus's truth and transition zone. This directory owns canonical DB
-truth, append/projection discipline, lifecycle legality, reconciliation, and
-portfolio read models.
+Module book: `docs/reference/modules/state.md`
+Machine registry: `architecture/module_manifest.yaml`
 
-## Read this before editing
+## WHY this zone matters
 
-- Module book: `docs/reference/modules/state.md`
-- Machine registry: `architecture/module_manifest.yaml`
-- Runtime/lifecycle law: `docs/authority/zeus_current_architecture.md`,
-  `docs/authority/zeus_current_delivery.md`, `architecture/invariants.yaml`
+State owns **canonical truth** — the single source of what Zeus's positions are,
+what has happened to them, and what on-chain reality says. If you corrupt
+append-first discipline, lifecycle grammar, or reconciliation semantics, Zeus
+either hallucinates positions (trading on phantom state) or fails to reconcile
+with on-chain reality (missing real fills or voiding live positions).
 
-## Top hazards
+The truth hierarchy is absolute:
+`Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`
 
-- canonical DB/event truth outranks JSON/CSV/status exports
-- lifecycle transitions belong to `lifecycle_manager.py`, not ad hoc callers
-- append/projection ordering and transaction boundaries are load-bearing
-- chain reconciliation must preserve unknown vs known-empty semantics
+Everything downstream — JSON exports, status summaries, reports — is derived.
+Derived surfaces may never become truth by being convenient.
 
-## Canonical truth surfaces
+## Key files
 
-- `db.py`
-- `ledger.py`
-- `projection.py`
-- `lifecycle_manager.py`
-- `chain_reconciliation.py`
-- `portfolio.py`
+| File | What it does | Danger level |
+|------|-------------|--------------|
+| `db.py` | Canonical DB write/query substrate | CRITICAL — all truth flows through here |
+| `lifecycle_manager.py` | Sole lifecycle transition authority | CRITICAL — only legal phase transitions |
+| `ledger.py` | Append-only event spine | CRITICAL — canonical event history |
+| `projection.py` | Deterministic projection fold from events | CRITICAL — current state from events |
+| `chain_reconciliation.py` | On-chain truth convergence | HIGH — Chain > local |
+| `portfolio.py` | Runtime position read model | HIGH — what evaluator/executor see |
+| `portfolio_loader_policy.py` | DB-vs-fallback load discipline | HIGH — truth source selection |
+| `decision_chain.py` | Point-in-time decision lineage | MEDIUM |
 
-## High-risk files
+## Domain rules
 
-| File | Role |
-|------|------|
-| `db.py` | canonical write/query substrate |
-| `portfolio.py` | runtime position truth and read model |
-| `portfolio_loader_policy.py` | DB-vs-fallback load discipline |
-| `lifecycle_manager.py` | sole lifecycle authority |
-| `chain_reconciliation.py` | outer-truth convergence |
-| `ledger.py` | append-only event spine |
-| `projection.py` | deterministic projection fold |
-| `decision_chain.py` | point-in-time decision lineage |
+- **Append-first discipline is load-bearing.** The canonical write path is:
+  1. append domain event to `position_events`
+  2. fold deterministic projection to `position_current`
+  3. event append and projection update in one transaction boundary
+  
+  Separating steps 1 and 2 into different transactions creates torn state.
+
+- **Lifecycle phases come only from `LifecyclePhase` enum.** The 9 legal
+  phases are: `pending_entry → active → day0_window → pending_exit →
+  economically_closed → settled`. Terminal: `voided`, `quarantined`,
+  `admin_closed`. No code may invent phase strings.
+
+- **Exit intent ≠ economic close ≠ settlement.** These are three separate
+  lifecycle events with different semantic meaning:
+  - EXIT_INTENT: the decision to exit (phase stays current until order posts)
+  - EXIT_ORDER_FILLED: economically closed (P&L locked)
+  - SETTLED: market resolution confirmed (final truth)
+
+- **Void requires known absence, not unknown chain status.** If the chain
+  status is unknown/stale, you cannot void a local position — it might exist
+  on-chain. Only known absence (chain confirmed "not present") permits void.
+
+- **DB commits must precede JSON export writes.** The canonical truth is the
+  DB. JSON/status files are derived exports that must trail, never lead.
+
+- **`strategy_key` is the sole governance identity.** All position attribution,
+  risk policy resolution, and performance slicing flows through `strategy_key`.
+  Do not invent parallel governance keys.
+
+## Common mistakes
+
+- Setting `phase = "holding"` or similar string literals instead of routing
+  through `lifecycle_manager.apply_transition()` → violates INV-01/INV-08
+- Separating `INSERT INTO position_events` from `UPDATE position_current` into
+  separate transactions → torn state if process crashes between them
+- Treating `positions-live.json` as canonical truth instead of querying
+  `position_current` from DB → JSON can be stale or partially written
+- Collapsing unknown chain status into "empty" → premature void of a position
+  that actually exists on-chain (the most expensive possible error)
+- "Small schema tweak" that actually changes truth ownership, transaction
+  boundaries, or projection semantics → this is always architecture work
+- Reading `portfolio.py` cache after a write without going through the
+  proper refresh path → stale read model
 
 ## Required tests
 
@@ -49,13 +85,6 @@ portfolio read models.
 - `tests/test_b070_control_overrides_history_v2.py`
 - `tests/test_chronicle_dedup.py`
 - `tests/test_cross_module_invariants.py`
-
-## Do not assume
-
-- a derived JSON/status file can stand in for canonical truth
-- unknown chain status can be collapsed into empty
-- a small schema or lifecycle tweak is not architecture work
-- append-only history tables are dead just because a VIEW hides them
 
 ## Planning lock
 

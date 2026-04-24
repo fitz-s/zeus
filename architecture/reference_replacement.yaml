@@ -133,6 +133,37 @@ entries:
       P1 populated this as the compact canonical failure-mode reference after
       demoting the legacy pathology registry to reports evidence.
 
+  - path: docs/reference/zeus_execution_lifecycle_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - lifecycle state machine with phase transitions and write gates
+      - chain reconciliation logic and dedup contract
+      - executor order placement and authority contracts
+      - exit trigger evaluation and monitoring lanes
+      - settlement harvest flow and learning pipeline
+    allowed_action: keep_conditional
+    rationale: >
+      Code-grounded reference for the execution and lifecycle subsystems.
+      Contains exact thresholds, transition tables, and invariant anchors.
+
+  - path: docs/reference/zeus_risk_strategy_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - risk level state machine with runtime behavior table
+      - strategy family taxonomy with alpha profiles
+      - Kelly sizing formula and position limits
+      - edge decay model and confidence interval construction
+    allowed_action: keep_conditional
+    rationale: >
+      Code-grounded reference for risk management and strategy classification.
+      Contains exact formulas, risk escalation rules, and sizing parameters.
+
   - path: docs/reference/zeus_math_spec.md
     default_read: false
     replacement_status: partial_replacement_candidate
@@ -169,7 +200,7 @@ entries:
             path: architecture/history_lore.yaml
             locator: WMO_ROUNDING_BANKER_FAILURE
         gates:
-          - python scripts/semantic_linter.py
+          - python3 scripts/semantic_linter.py
           - pytest -q tests/test_instrument_invariants.py
         invalidation_condition: "Only an explicit WU/Polymarket settlement-source rule change."
       - claim_id: ZEUS_MATH_SPEC_REFERENCE_ONLY
@@ -193,8 +224,8 @@ entries:
             path: architecture/topology.yaml
             locator: "reference artifact extraction"
         gates:
-          - python scripts/topology_doctor.py --reference-replacement
-          - python scripts/topology_doctor.py --context-budget
+          - python3 scripts/topology_doctor.py --reference-replacement
+          - python3 scripts/topology_doctor.py --context-budget
         invalidation_condition: "Only a governance packet may promote this fact spec into authority."
       - claim_id: DECISION_GROUP_INDEPENDENCE
         source:
@@ -211,7 +242,7 @@ entries:
             path: tests/test_data_rebuild_relationships.py
             locator: decision_group
         gates:
-          - python scripts/topology_doctor.py --data-rebuild
+          - python3 scripts/topology_doctor.py --data-rebuild
           - pytest -q tests/test_data_rebuild_relationships.py
         invalidation_condition: "Only a strategy-math packet may redefine calibration sample independence."
       - claim_id: OPEN_BOUNDARY_BINS
@@ -229,6 +260,6 @@ entries:
             path: tests/test_data_rebuild_relationships.py
             locator: "R4/R5 Bin ±inf"
         gates:
-          - python scripts/topology_doctor.py --data-rebuild
+          - python3 scripts/topology_doctor.py --data-rebuild
           - pytest -q tests/test_data_rebuild_relationships.py
         invalidation_condition: "Only a market-contract topology packet may replace open-boundary bin semantics."

@@ -1,0 +1,57 @@
+ZEUS TOPOLOGY SYSTEM DEEP EVALUATION PACKAGE
+Date: 2026-04-24
+Repo: https://github.com/fitz-s/zeus/tree/data-improve
+Baseline commit supplied by user: baae2a4a3f143a328e056dc3f400fb1752ddc128
+
+Ruling: partially sound: structurally sound as a machine-readable governance/routing kernel, but cognitively underfed and still over-coupled to broad repo-health noise.
+
+Package contents:
+- README.md
+- 00_executive_ruling.md
+- 01_plan_delta_vs_current_repo.md
+- 02_topology_system_state_of_the_union.md
+- 03_authority_vs_cognition_gap.md
+- 04_issue_model_and_lane_model_audit.md
+- 05_manifest_ownership_audit.md
+- 06_topology_doctor_architecture_audit.md
+- 07_context_pack_and_graph_integration_audit.md
+- 08_hidden_routes_and_hidden_obligations.md
+- 09_module_book_density_audit.md
+- 10_topology_system_material_extraction_plan.md
+- 11_recommended_authority_layout.md
+- 12_packetized_execution_plan.md
+- 13_decision_register.md
+- 14_not_now.md
+- 15_open_questions.md
+- 16_machine_readable_summary.json
+- 17_apply_order.md
+- module_books_expansion/topology_system_expanded.md
+- module_books_expansion/code_review_graph_expanded.md
+- module_books_expansion/docs_system_expanded.md
+- module_books_expansion/manifests_system_expanded.md
+- module_books_expansion/topology_doctor_system_expanded.md
+- module_books_expansion/closeout_and_receipts_system_expanded.md
+- repair_blueprints/p0_scope_and_lane_repair.md
+- repair_blueprints/p1_issue_model_repair.md
+- repair_blueprints/p2_module_book_rehydration.md
+- repair_blueprints/p3_manifest_ownership_normalization.md
+- repair_blueprints/p4_context_pack_and_graph_extraction.md
+- repair_blueprints/p5_topology_doctor_test_resegmentation.md
+- prompts/codex_p0_execute_topology_lane_repair.md
+- prompts/codex_p1_execute_issue_model.md
+- prompts/codex_p2_expand_topology_books.md
+- prompts/codex_p3_normalize_manifest_ownership.md
+- prompts/codex_p4_graph_and_context_pack.md
+- prompts/codex_review_after_p0.md
+- prompts/codex_closeout.md
+- validation/validation_matrix.md
+- validation/topology_doctor_regression_commands.md
+- validation/live_repo_health_commands.md
+- validation/graph_context_validation.md
+- validation/fixture_vs_live_test_split.md
+
+Evidence posture:
+- Uploaded planning artifact was treated as input, not as implementation approval.
+- Public branch files were inspected through GitHub/web surfaces.
+- Tracked .code-review-graph/graph.db was treated as derived structural context; direct binary introspection was not used as authority.
+- This package is a planning/evaluation package, not a patch set.

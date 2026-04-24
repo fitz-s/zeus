@@ -153,7 +153,7 @@ Three reconciliation rules (run every cycle before trading):
 2. **Local exists, NOT on chain** → VOID immediately (local state is a hallucination)
 3. **Chain exists, NOT local** → QUARANTINE 48h (unknown asset, forced exit eval)
 
-Reconciliation is mandatory on every cycle (Zeus is live-only; paper mode was decommissioned in Phase 1).
+Reconciliation is mandatory on every cycle (Zeus is live; paper mode was decommissioned in Phase 1).
 
 **Key file**: `src/state/chain_reconciliation.py`
 
@@ -215,7 +215,7 @@ Critical distinctions:
 | ORANGE | No new entries, exit at favorable prices |
 | RED | Cancel all pending, exit all immediately |
 
-Advisory-only risk is explicitly forbidden. If a risk level doesn't change behavior, it violates INV-05.
+Advisory-only risk is forbidden. If a risk level doesn't change behavior, it violates INV-05.
 
 Overall level = max of all individual levels. Fail-closed: any computation error → RED.
 
@@ -230,7 +230,7 @@ Zeus's edges fall into four categories with fundamentally different risk/alpha p
 - **Edge source**: Observed fact — temperature has already crossed a bin threshold post-peak
 - **Risk**: Near-zero (post-peak + already crossed ≈ near-certain)
 - **Requires**: Observation speed (frequent WU/ASOS polling, ideally every 3–5 min in Day0 window)
-- **Does NOT require**: ENS forecast, Platt calibration, bootstrap CI
+- **Independent of**: ENS forecast, Platt calibration, bootstrap CI
 - **Alpha decay**: Very slow — this is not a predictive edge, it's an observation speed advantage
 - **Key insight**: Only strategy where increasing operational frequency directly increases edge
 
@@ -239,7 +239,7 @@ Zeus's edges fall into four categories with fundamentally different risk/alpha p
 - **Edge source**: Retail cognitive bias (prospect theory, lottery effect → shoulder bins overpriced)
 - **Risk**: Tail risk (extreme weather events cause large losses)
 - **Requires**: Basic climatological probability estimates
-- **Does NOT require**: Precise ENS signals — a rough "this bin wins ~5% historically" suffices
+- **Independent of**: Precise ENS signals — a rough "this bin wins ~5% historically" suffices
 - **Alpha decay**: Moderate — as more bots enter, shoulder overpricing narrows
 
 ### Strategy C: Center Bin Buy (predictive, moderate durability)

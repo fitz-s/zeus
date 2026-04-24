@@ -1,122 +1,262 @@
 # Zeus Failure Modes Reference
 
-Purpose: canonical descriptive reference for durable failure classes,
-pathologies, and mitigation patterns. This file is not law; current authority,
-manifests, tests, and executable source win on disagreement.
+Durable reference for failure classes with code-grounded examples, invariant
+anchors, and the exact contracts that prevent recurrence.
 
-Extracted from: `docs/reports/zeus_pathology_registry_2026-04-16.md`,
-`docs/reports/task_2026-04-18_external_reality_review.md`,
-`docs/operations/known_gaps.md`, bug-audit reassessment notes, and
-`architecture/history_lore.yaml`.
+Authority: executable source, tests, machine manifests, and authority docs win
+on disagreement with this document.
 
-## Truth And Authority Failure Modes
+---
 
-Recurring class: a convenient projection, report, archive, or JSON file is
-treated as if it were canonical truth.
+## 1. Settlement & Rounding Failures
 
-Examples:
+### 1.1 Rounding rule mismatch
 
-- JSON/status exports promoted above DB/event truth.
-- Backtest/replay diagnostics used as live authorization.
-- Archive evidence treated as current law.
-- LLM summary accepted without manifest/test/evidence support.
+**Failure**: Using Python `round()`, `numpy.round`, or `int()` for settlement
+values produces incorrect integers. Python banker's rounding (`round(0.5) = 0`,
+`round(1.5) = 2`) differs from WMO half-up (`floor(x + 0.5)`), producing
+systematic settlement prediction errors at .5 boundaries.
 
-Mitigation: classify the surface, route through manifests/tests/current packet
-state, and preserve point-in-time authority.
+**Invariant**: `SettlementSemantics.assert_settlement_value()` gates every DB
+write. `apply_settlement_rounding()` is the shared dispatch for both
+`MarketAnalysis._settle()` and `Day0Signal._settle()`.
 
-## Runtime And Lifecycle Failure Modes
+**Code anchor**: `src/contracts/settlement_semantics.py:round_wmo_half_up_values()`
 
-Recurring class: orchestration code bypasses lifecycle or control authority.
+### 1.2 Oracle truncate applied to wrong city
 
-Examples:
+**Failure**: `oracle_truncate` (floor) is correct for Hong Kong (HKO) where UMA
+voters apply truncation bias ("28.7 → 28"). Applying it to WU cities produces
+systematic -0.5°C bias on half the bins.
 
-- exit intent confused with local close
-- settlement confused with exit
-- arbitrary state strings
-- chain unknown treated as empty
-- RED risk made advisory-only
+**Invariant**: `SettlementSemantics.for_city()` is the single entry point.
+`oracle_truncate` routing is gated by `source_type == "hko"`. Empirically
+verified: 14/14 match on HKO with floor vs 5/14 with wmo_half_up.
 
-Mitigation: lifecycle transitions belong to lifecycle authority; risk outputs
-must alter behavior; chain-truth states must distinguish synced, empty, and
-unknown.
+### 1.3 Shoulder bin treated as finite range
 
-## Data And Replay Failure Modes
+**Failure**: Assuming "58°F or higher" has `width=2` and using it for
+width-normalized Platt calibration. Shoulder bins have `width=None` (unbounded).
+Dividing by `None` crashes; dividing by a wrong finite width produces incorrect
+per-degree density.
 
-Recurring class: data that exists is treated as data that is certified.
+**Invariant**: `normalize_bin_probability_for_calibration()` passes through raw
+probability when `bin_width is None or <= 0`. Width-normalized Platt
+(`_bootstrap_bin`) raises `ValueError` if a bin with `width None or <= 0`
+appears in WND input space.
 
-Examples:
+### 1.4 °C/°F bin family mixing
 
-- calibration rows without provenance/authority gates
-- replay using hindsight or synthetic decision-time facts
-- stale DST aggregates reused after runtime code fixes
-- forecast/observation source mismatch hidden behind clean tables
+**Failure**: Fitting a Platt model on calibration pairs from both °C and °F
+cities produces meaningless parameters. A 2°F range bin and a 1°C point bin
+have completely different probability scales.
 
-Mitigation: preserve provenance, training eligibility, causality status, and
-decision-time truth. Backtest output stays diagnostic until certified.
+**Invariant**: Platt models are bucketed by `cluster:season`. Cities are
+assigned to clusters by geography. HIGH and LOW tracks have separate models.
+`temperature_metric` is stamped on every calibration pair.
 
-## Market And Settlement Failure Modes
+---
 
-Recurring class: market settlement is modeled with continuous or generic
-temperature intuition instead of discrete city/source semantics.
+## 2. Probability Chain Failures
 
-Examples:
+### 2.1 Naive member counting
 
-- Python/banker rounding
-- missing `bin_contract_kind`
-- station/provider source drift
-- shoulder bins treated as finite ranges
-- Celsius/Fahrenheit bin families mixed in calibration
+**Failure**: Computing P_raw by directly testing bin membership per ENS member
+without Monte Carlo. This ignores sensor noise and settlement rounding, producing
+a distribution shape that diverges from the MC-generated P_raw space. Platt
+models trained on MC-generated P_raw would not generalize to naive counts.
 
-Mitigation: use `SettlementSemantics`, explicit bin topology, source provenance,
-and settlement mismatch triage.
+**Invariant**: `p_raw_vector_from_maxes()` is the single code path for both live
+inference and offline calibration rebuilds. Training and inference must use this
+function.
 
-## Agentic Workspace Failure Modes
+### 2.2 Bias correction training/inference mismatch
 
-Recurring class: agents repair confusion by adding prose or moving files without
-machine registration.
+**Failure**: If live signals use ECMWF bias correction but calibration pairs were
+trained without it, Platt maps from a corrected P_raw space to an uncorrected
+outcome space. The calibrator is out-of-domain.
 
-Examples:
+**Invariant**: `EnsembleSignal.__init__()` stores `self.bias_corrected`. Harvester
+passes `bias_corrected` to `add_calibration_pair()`. Cross-module test
+`test_calibration_pairs_use_same_bias_correction_as_live` enforces consistency.
 
-- untracked operations packets treated as durable work
-- completed packets left as live control surfaces
-- runtime-local `.omx` plans not inventoried
-- top-level docs accumulating mixed authority/reference/evidence roles
-- graph output treated as authority instead of derived context
+### 2.3 UNVERIFIED calibration entering edge computation
 
-Mitigation: update `architecture/docs_registry.yaml`, scoped `AGENTS.md`,
-`current_state.md`, receipts, work logs, and topology checks with every
-material docs/workspace move.
+**Failure**: UNVERIFIED calibration rows feeding Platt → alpha → posterior →
+edge → execution. The calibration may be from a buggy rebuild, wrong source,
+or incomplete data.
 
-## Docs Truth Freshness Failure Modes
+**Invariant**: Two gates:
+1. `get_pairs_for_bucket(authority_filter='VERIFIED')` at query time
+2. `compute_alpha(authority_verified=False)` → `AuthorityViolation` at
+   market_fusion boundary
 
-Recurring class: stale factual docs remain in trusted reference locations after
-being bannered or frozen, so future agents still treat old current-tense facts
-as usable context.
+### 2.4 Monitor refresh double-inversion (buy_no)
 
-Examples:
+**Failure**: Historical incident: monitor_refresh converted P(YES) → P(NO)
+for buy_no positions, then exit_triggers inverted again. Double-inversion
+caused 7/8 buy_no positions to false-exit in 30-90 minutes.
 
-- volatile data/source facts stored under `docs/reference/`
-- canonical references pointing back to demoted support docs for current facts
-- current-state pointers left on closed packages
-- dated audit tables treated as durable source truth
+**Invariant**: `refresh_position()` converts once:
+`if direction == "buy_no": p_cal_native = 1.0 - p_cal_yes`. Exit triggers
+operate in native direction space — no further flipping.
 
-Mitigation: keep `docs/reference/` canonical-only, route current facts through
-`docs/operations/current_*.md`, and move dated analytical/support material to
-reports or artifacts.
+---
 
-## Mitigation And Antibody Crosswalk
+## 3. Lifecycle & State Failures
 
-- Authority/projection boundary: `architecture/invariants.yaml`,
-  `architecture/negative_constraints.yaml`, `architecture/history_lore.yaml`
-- Docs classification: `architecture/docs_registry.yaml`
-- Runtime packet truth: `docs/operations/current_state.md`
-- Archive access: `docs/archive_registry.md`
-- Code structure context: `.code-review-graph/graph.db` as derived context only
-- Tests/checks: `tests/test_topology_doctor.py`, `scripts/topology_doctor.py`
+### 3.1 Exit intent confused with economic close
 
-## What This File Is Not
+**Failure**: Treating `pending_exit` as if the position is already closed.
+`pending_exit` means an exit order has been placed — the position is still
+live and the order may be cancelled.
 
-- not an incident report
-- not a bug backlog
-- not an authority document
-- not a complete archive of every pathology
+**Invariant**: `LEGAL_LIFECYCLE_FOLDS` allows `pending_exit → active`
+(cancel and restore). `release_pending_exit_runtime_state()` handles this
+backward transition. Settlement dedup checks `position_current.phase`
+(DB truth), not in-memory state.
+
+### 3.2 Chain unknown treated as chain empty
+
+**Failure**: When the Polymarket API fails, treating the empty response as
+"all positions are gone" and voiding everything. This is the single most
+dangerous failure mode — it can liquidate the entire portfolio on a
+transient API error.
+
+**Invariant**: `classify_chain_state()` returns `CHAIN_UNKNOWN` when API
+fails. Reconciliation Rule 2 (void) only fires when
+`chain_state != CHAIN_UNKNOWN` — unknown skips void entirely. Additional
+stale guard: if any active position was verified within 6 hours, empty
+API response is treated as unknown, not empty.
+
+### 3.3 RED risk made advisory-only
+
+**Failure**: RED risk level logged but not acted upon. INV-05 explicitly
+forbids advisory-only risk.
+
+**Invariant**: `get_current_level()` returns RED on: no risk_state row,
+row older than 5 minutes, or any DB error. RED behavior: cancel all
+pending orders, sweep all active positions. `force_exit_review` flag
+written to risk_state for cycle_runner to read.
+
+### 3.4 Stale in-memory portfolio causing duplicate settlement
+
+**Failure**: In-memory portfolio loaded from JSON cache shows a position as
+`active`, but the DB already settled it. Without dedup, the position gets
+settled twice — double P&L, double calibration pairs.
+
+**Invariant**: Three-layer settlement dedup:
+1. DB-level: `_dual_write_canonical_settlement_if_available()` checks
+   `position_current.phase` — terminal phases are skipped
+2. Iterator-level: `_settle_positions()` queries `position_current` for
+   all positions in the market before any computation
+3. Runtime state: positions in terminal runtime states are skipped
+
+---
+
+## 4. Data Ingestion Failures
+
+### 4.1 Partial harvest (Gamma API pagination)
+
+**Failure**: First page of settled events succeeds, second page fails.
+Returning the first page as "all settlements" misses settlements on page 2+.
+
+**Invariant**: `_fetch_settled_events()` distinguishes first-page error
+(warning + empty return, retries next cycle) from mid-pagination error
+(offset > 0 → `RuntimeError`, refuses partial results).
+
+### 4.2 Sentinel values in observation data
+
+**Failure**: Open-Meteo occasionally returns sentinel values (99999, -9999)
+that pass basic null checks but corrupt temperature records.
+
+**Invariant**: `IngestionGuard.check_unit_consistency()` (Layer 1) applies
+earth records bounds checking. `_validate_hourly_reading()` runs this check
+on every row before INSERT.
+
+### 4.3 DST spring-forward ghost observations
+
+**Failure**: Spring-forward creates a local hour that does not exist (e.g.,
+2:00 AM → 3:00 AM). An observation timestamped at 2:30 AM local is
+physically impossible.
+
+**Invariant**: `IngestionGuard.check_dst_boundary()` (Layer 5) rejects rows
+where `_is_missing_local_hour()` returns True. Coverage tracking at daily
+grain (not hourly) prevents DST spring-forward's 23-hour day from
+false-positive as a coverage hole.
+
+### 4.4 Cross-mode truth file collision
+
+**Failure**: Live mode reading a truth file written by backtest mode, or
+vice versa. The data is valid for the wrong mode.
+
+**Invariant**: `read_mode_truth_json()` validates the file's `mode` tag
+matches the caller's `mode` parameter. Mismatch → `ModeMismatchError`.
+`mode=None` is explicitly rejected (not silently defaulted).
+
+---
+
+## 5. Execution Failures
+
+### 5.1 Kelly oversizing from implied probability
+
+**Failure**: Using `implied_probability` (market price) as Kelly entry cost
+instead of fee-adjusted VWMP. Kelly interprets cost as "what I pay per
+share" — implied probability is an estimate of true value, not a cost.
+This systematically oversizes positions.
+
+**Invariant**: `ExecutionPrice.assert_kelly_safe()` enforces three conditions:
+`price_type ≠ "implied_probability"`, `fee_deducted = True`,
+`currency = "probability_units"`. Any violation → raise.
+
+### 5.2 Double taker fee application
+
+**Failure**: Calling `with_taker_fee()` on an already fee-adjusted price
+deducts fee twice, making positions appear more expensive than they are.
+
+**Invariant**: `with_taker_fee()` checks `self.fee_deducted`. If already
+True → `ExecutionPriceContractError`.
+
+### 5.3 SELL rounding up → selling more shares than held
+
+**Failure**: `math.ceil()` on SELL shares exceeds held position. If held
+100.004 shares, ceiling to 100.01 tries to sell 0.006 unheld shares.
+
+**Invariant**: BUY rounds UP (`math.ceil`), SELL rounds DOWN (`math.floor`)
+with epsilon guards (1e-9). This prevents both under-buying (BUY) and
+over-selling (SELL).
+
+### 5.4 Unknown discovery mode timeout
+
+**Failure**: An unrecognized discovery mode string defaults to some arbitrary
+timeout, potentially holding orders open for hours.
+
+**Invariant**: `create_execution_intent()` has no default case — unknown
+discovery mode raises `ValueError` (fail-closed). Valid modes and their
+timeouts are hard-coded: `opening_hunt=14400s`, `update_reaction=3600s`,
+`day0_capture=900s`.
+
+---
+
+## 6. Invariant Crosswalk
+
+| Code | Where enforced |
+|------|---------------|
+| INV-05 | Risk advisory forbidden — `get_current_level()` defaults to RED |
+| INV-21 | `ExecutionPrice.assert_kelly_safe()` typed boundary |
+| B077/SD-A | `ModeMismatchError` in truth file reads |
+| B081 | Shared `apply_settlement_rounding()` dispatch |
+| K4 | Authority hard gate in `compute_alpha()` |
+| P6 | `_settle_positions()` DB-level dedup anchor |
+
+---
+
+## 7. Cross-References
+
+- Settlement semantics: `src/contracts/settlement_semantics.py`
+- Lifecycle folds: `src/state/lifecycle_manager.py`
+- Chain reconciliation: `src/state/chain_reconciliation.py`
+- Kelly contract: `src/contracts/execution_price.py`
+- Risk level: `src/riskguard/risk_level.py`
+- History lore: `architecture/history_lore.yaml`
+- Negative constraints: `architecture/negative_constraints.yaml`
