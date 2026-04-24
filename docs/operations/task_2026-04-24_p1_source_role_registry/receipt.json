@@ -1,5 +1,5 @@
 {
-  "task": "P1.1 source-role and training-eligibility registry ralplan",
+  "task": "P1.1 source-role and training-eligibility registry implementation",
   "packet": "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
@@ -23,9 +23,9 @@
     "docs/reference/modules/tests.md"
   ],
   "allowed_files": [
-    "docs/operations/AGENTS.md",
+    "src/data/tier_resolver.py",
+    "tests/test_tier_resolver.py",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md",
     "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md",
     "docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json"
   ],
@@ -51,13 +51,17 @@
     "architecture/**"
   ],
   "changed_files": [
-    "docs/operations/AGENTS.md",
+    "src/data/tier_resolver.py",
+    "tests/test_tier_resolver.py",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md",
     "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md",
     "docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json"
   ],
   "tests_evidence": [
+    "tests/test_tier_resolver.py",
+    "tests/test_obs_v2_writer.py",
+    "tests/test_hk_rejects_vhhh_source.py",
+    "tests/test_backfill_scripts_match_live_config.py",
     "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md"
   ]
 }

@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-04-24
 # Authority basis: plan v3 (.omc/plans/observation-instants-migration-iter3.md)
 #                  step2 (docs/operations/task_2026-04-21_gate_f_data_backfill/
 #                         step2_phase0_pilot_plan.md)
@@ -25,6 +25,9 @@ Public API
   for antibody A3 and ``scripts/audit_observation_instants_v2.py``).
 - ``TIER_ALLOWED_SOURCES`` — per-tier whitelist of acceptable ``source``
   column values (antibody A2 whitelist for the v2 writer).
+- ``source_role_assessment_for_city_source`` — P1.1 training-eligibility
+  registry helper that distinguishes primary sources from documented fallback
+  evidence without changing writer allowlists.
 
 Invariants (checked by ``tests/test_tier_resolver.py``, antibody A3)
 -------------------------------------------------------------------
@@ -78,6 +81,40 @@ class UnsupportedTierError(Exception):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.reason
+
+
+SOURCE_ROLE_HISTORICAL_HOURLY = "historical_hourly"
+SOURCE_ROLE_SETTLEMENT_TRUTH = "settlement_truth"
+SOURCE_ROLE_FALLBACK_EVIDENCE = "fallback_evidence"
+SOURCE_ROLE_RUNTIME_MONITORING = "runtime_monitoring"
+SOURCE_ROLE_MODEL_ONLY = "model_only"
+SOURCE_ROLE_UNKNOWN = "unknown"
+
+_MODEL_SOURCE_MARKERS: frozenset[str] = frozenset(
+    {
+        "openmeteo",
+        "model",
+        "grid",
+        "forecast",
+        "tigge",
+        "ecmwf",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SourceRoleAssessment:
+    """Fail-closed P1.1 assessment for a city/source observation row.
+
+    ``allowed_sources_for_city`` answers "may the writer accept this source?"
+    This assessment answers the narrower P1 question: "may this source feed
+    training?" Fallback source tags can remain writer-allowed while staying
+    training-ineligible.
+    """
+
+    source_role: str
+    training_allowed: bool
+    reason: str
 
 
 # Mapping: settlement_source_type -> Tier
@@ -252,6 +289,109 @@ def allowed_sources_for_city(city_name: str) -> frozenset[str]:
             )
         )
     return ALLOWED_SOURCES_BY_CITY[city_name]
+
+
+def _is_model_source_tag(source_tag: str) -> bool:
+    normalized = source_tag.lower()
+    return any(marker in normalized for marker in _MODEL_SOURCE_MARKERS)
+
+
+def source_role_assessment_for_city_source(
+    city_name: str,
+    source_tag: Optional[str],
+    *,
+    has_provenance: bool = False,
+) -> SourceRoleAssessment:
+    """Return the P1.1 source role and training flag for a city/source tag.
+
+    This is intentionally stricter than writer allowlists:
+    - WU primary source tags may be training-eligible with provenance.
+    - WU documented fallback source tags remain writer-allowed but classify as
+      ``fallback_evidence`` and are not training-eligible in P1.1.
+    - Tier 2 primary Ogimet tags may be training-eligible with provenance.
+    - HKO stays ``fallback_evidence`` until a fresh source audit promotes it.
+    """
+    if source_tag is None or not str(source_tag).strip():
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_UNKNOWN,
+            training_allowed=False,
+            reason="missing_source_tag",
+        )
+
+    normalized_source = str(source_tag).strip()
+    if _is_model_source_tag(normalized_source):
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_MODEL_ONLY,
+            training_allowed=False,
+            reason="model_source_tag",
+        )
+
+    try:
+        tier = tier_for_city(city_name)
+        primary_source = expected_source_for_city(city_name)
+        allowed_sources = allowed_sources_for_city(city_name)
+    except UnsupportedTierError:
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_UNKNOWN,
+            training_allowed=False,
+            reason="unknown_city",
+        )
+
+    if normalized_source not in allowed_sources:
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_UNKNOWN,
+            training_allowed=False,
+            reason="unrecognized_source_tag",
+        )
+
+    if tier is Tier.HKO_NATIVE:
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_FALLBACK_EVIDENCE,
+            training_allowed=False,
+            reason="hko_requires_fresh_audit",
+        )
+
+    if normalized_source != primary_source:
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_FALLBACK_EVIDENCE,
+            training_allowed=False,
+            reason="allowed_fallback_source_tag",
+        )
+
+    if not has_provenance:
+        return SourceRoleAssessment(
+            source_role=SOURCE_ROLE_HISTORICAL_HOURLY,
+            training_allowed=False,
+            reason="missing_provenance",
+        )
+
+    return SourceRoleAssessment(
+        source_role=SOURCE_ROLE_HISTORICAL_HOURLY,
+        training_allowed=True,
+        reason="primary_source_with_provenance",
+    )
+
+
+def source_role_for_city_source(city_name: str, source_tag: Optional[str]) -> str:
+    """Return only the source-role string for callers that do not need detail."""
+    return source_role_assessment_for_city_source(
+        city_name,
+        source_tag,
+    ).source_role
+
+
+def training_allowed_for_city_source(
+    city_name: str,
+    source_tag: Optional[str],
+    *,
+    has_provenance: bool = False,
+) -> bool:
+    """Return whether the city/source tag is training-eligible in P1.1."""
+    return source_role_assessment_for_city_source(
+        city_name,
+        source_tag,
+        has_provenance=has_provenance,
+    ).training_allowed
 
 
 def tier_for_city(city_name: str, target_date: Optional[date] = None) -> Tier:

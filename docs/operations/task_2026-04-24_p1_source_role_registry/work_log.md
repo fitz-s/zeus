@@ -4,6 +4,13 @@ Date: 2026-04-24
 Branch: `data-improve`
 Task: P1.1 source-role and training-eligibility registry ralplan
 Changed files:
+- `src/data/tier_resolver.py`
+- `tests/test_tier_resolver.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+
+Planning commit changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
 - `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
@@ -38,6 +45,17 @@ Summary:
   text from `current_state.md`; the live pointer now carries only current
   packet pointers, required evidence, freeze point, companions, routing
   references, and next action.
+- Implemented additive P1.1 source-role registry helpers in
+  `src/data/tier_resolver.py` without changing existing writer/backfill APIs.
+- Added `SourceRoleAssessment` plus stable role strings for
+  `historical_hourly`, `fallback_evidence`, `model_only`, and `unknown`.
+- Locked the primary-vs-fallback split: WU/Tier2 primary source tags can be
+  training-eligible only with provenance; WU fallback tags stay
+  `fallback_evidence`; HKO remains training-ineligible pending fresh audit;
+  unknown/model tags fail closed.
+- Added focused tests in `tests/test_tier_resolver.py` for primary,
+  fallback, HKO, missing/unknown/model tags, missing provenance, and
+  convenience helper parity.
 
 Verification:
 - P0 post-close third-party critic/verifier PASS had already been collected
@@ -67,10 +85,34 @@ Verification:
   `planning-lock`, `work-record`, `change-receipts`,
   `current-state-receipt-bound`, `map-maintenance`, and `git diff --check`;
   all passed for the planning-only changed-file set.
+- `.venv/bin/python -m py_compile src/data/tier_resolver.py` passed.
+- `.venv/bin/python -m pytest tests/test_tier_resolver.py -q` passed:
+  31 passed.
+- `.venv/bin/python -m pytest tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_backfill_scripts_match_live_config.py -q`
+  passed: 50 passed.
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/data/tier_resolver.py tests/test_tier_resolver.py --plan-evidence docs/operations/task_2026-04-24_p1_source_role_registry/plan.md --json`
+  passed.
+- `git diff --check -- src/data/tier_resolver.py tests/test_tier_resolver.py`
+  passed.
+- Final scoped implementation gates passed after the `current_state.md`
+  bookkeeping fix: `planning-lock`, `work-record`, `change-receipts`,
+  `current-state-receipt-bound`, `map-maintenance`, `freshness-metadata`, and
+  `git diff --check`.
+- `python scripts/topology_doctor.py --code-review-graph-status --json`
+  returned `ok=false` on derived graph state:
+  `code_review_graph_ignore_missing` and `code_review_graph_partial_coverage`
+  for an unrelated changed file. Per `AGENTS.md`, Code Review Graph is derived
+  context only; P1.1 closeout relies on targeted topology, receipt, source
+  tests, and downstream compatibility tests rather than graph authority.
+- Implementation critic PASS: no blockers in the scoped P1.1 diff. Residual
+  stale `current_state.md` next-action text was fixed before final closeout.
+- Implementation verifier PASS on scoped tests/gates, then a follow-up verifier
+  flagged the repo-wide graph red state above. This is recorded as a
+  non-authority derived-context fallback, not as a scoped implementation
+  blocker.
 
 Next:
-- Run architect and critic review on this plan.
-- Run verifier review on the planning packet and gate evidence.
-- Apply any plan-review fixes, then commit and push this planning packet.
-- Run post-close third-party critic/verifier before treating P1.1 as frozen
-  for implementation.
+- Complete implementation critic review, apply fixes if any, then commit and
+  push scoped implementation files only.
+- Run post-close third-party critic/verifier before treating P1.1 as closed
+  and freezing the next P1.2 ralplan.

@@ -1,5 +1,6 @@
-# Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Pin tier resolver source routing and P1.1 source-role eligibility semantics.
+# Reuse: Run before changing source-tier, source-role, or training-eligibility rules.
 # Authority basis: plan v3 antibody A3 (.omc/plans/observation-instants-
 #                  migration-iter3.md L121); step2 Phase 0 file #8.
 """Antibody A3: tier resolver must match cities.json at runtime.
@@ -19,6 +20,10 @@ import pytest
 from src.config import cities_by_name
 from src.data.tier_resolver import (
     ALLOWED_SOURCES_BY_CITY,
+    SOURCE_ROLE_FALLBACK_EVIDENCE,
+    SOURCE_ROLE_HISTORICAL_HOURLY,
+    SOURCE_ROLE_MODEL_ONLY,
+    SOURCE_ROLE_UNKNOWN,
     TIER_ALLOWED_SOURCES,
     TIER_SCHEDULE,
     Tier,
@@ -27,7 +32,10 @@ from src.data.tier_resolver import (
     allowed_sources_for_tier,
     cities_in_tier,
     expected_source_for_city,
+    source_role_assessment_for_city_source,
+    source_role_for_city_source,
     tier_for_city,
+    training_allowed_for_city_source,
 )
 
 
@@ -201,3 +209,119 @@ def test_allowed_sources_never_contains_openmeteo():
             assert "openmeteo" not in src.lower(), (
                 f"{city}: fallback source {src!r} must not reference openmeteo"
             )
+
+
+# ----------------------------------------------------------------------
+# P1.1 source-role registry — allowed-to-write != eligible-to-train
+# ----------------------------------------------------------------------
+
+
+def test_registry_wu_primary_source_is_historical_hourly_and_training_eligible():
+    assessment = source_role_assessment_for_city_source(
+        "Chicago",
+        "wu_icao_history",
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_HISTORICAL_HOURLY
+    assert assessment.training_allowed is True
+
+
+@pytest.mark.parametrize("source_tag", ["ogimet_metar_kord", "meteostat_bulk_kord"])
+def test_registry_wu_fallback_sources_are_not_training_eligible(source_tag):
+    assessment = source_role_assessment_for_city_source(
+        "Chicago",
+        source_tag,
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_FALLBACK_EVIDENCE
+    assert assessment.training_allowed is False
+
+
+def test_registry_tier2_expected_source_is_historical_hourly_and_training_eligible():
+    assessment = source_role_assessment_for_city_source(
+        "Moscow",
+        "ogimet_metar_uuww",
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_HISTORICAL_HOURLY
+    assert assessment.training_allowed is True
+
+
+def test_registry_hko_accumulator_is_not_training_eligible_until_reaudit():
+    assessment = source_role_assessment_for_city_source(
+        "Hong Kong",
+        "hko_hourly_accumulator",
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_FALLBACK_EVIDENCE
+    assert assessment.training_allowed is False
+
+
+@pytest.mark.parametrize("source_tag", [None, "", "banana"])
+def test_registry_unknown_or_missing_source_tags_are_not_training_eligible(source_tag):
+    assessment = source_role_assessment_for_city_source(
+        "Chicago",
+        source_tag,
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_UNKNOWN
+    assert assessment.training_allowed is False
+
+
+@pytest.mark.parametrize("source_tag", ["openmeteo_archive_hourly", "model_grid_hourly"])
+def test_registry_model_tags_are_model_only_and_not_training_eligible(source_tag):
+    assessment = source_role_assessment_for_city_source(
+        "Chicago",
+        source_tag,
+        has_provenance=True,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_MODEL_ONLY
+    assert assessment.training_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("city_name", "source_tag"),
+    [
+        ("Chicago", "wu_icao_history"),
+        ("Moscow", "ogimet_metar_uuww"),
+    ],
+)
+def test_registry_primary_sources_require_provenance_for_training_eligibility(
+    city_name,
+    source_tag,
+):
+    assessment = source_role_assessment_for_city_source(
+        city_name,
+        source_tag,
+        has_provenance=False,
+    )
+
+    assert assessment.source_role == SOURCE_ROLE_HISTORICAL_HOURLY
+    assert assessment.training_allowed is False
+
+
+def test_registry_convenience_helpers_match_assessment():
+    assessment = source_role_assessment_for_city_source(
+        "Chicago",
+        "wu_icao_history",
+        has_provenance=True,
+    )
+
+    assert (
+        source_role_for_city_source("Chicago", "wu_icao_history")
+        == assessment.source_role
+    )
+    assert (
+        training_allowed_for_city_source(
+            "Chicago",
+            "wu_icao_history",
+            has_provenance=True,
+        )
+        is assessment.training_allowed
+    )
