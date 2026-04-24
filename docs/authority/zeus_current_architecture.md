@@ -86,6 +86,39 @@ Defines which daily observation source resolves the contract. Settlement truth
 is not inferred from endpoint availability, nearby airport station, or a
 generic weather-data source family.
 
+**Canonical settlement row invariants** (enforced structurally at DB-write
+time, not just by writer discipline):
+
+- **INV-14 identity spine**: every `settlements` row carries the four
+  identity columns `temperature_metric` (high/low), `physical_quantity`
+  (e.g. `daily_maximum_air_temperature`), `observation_field` (e.g.
+  `high_temp`), and `data_version` (e.g. `wu_icao_history_v1`). These
+  four together are the only durable basis for cross-source comparison
+  and cross-session reproducibility. They must not be inferred post-hoc
+  from `settlement_source` or `temp_unit`.
+- **Provenance sidecar**: every row carries `provenance_json` with at
+  minimum `writer`, `source_family`, `obs_source`, `obs_id`,
+  `decision_time_snapshot_id`, `rounding_rule`,
+  `reconstruction_method`, and `audit_ref`. The sidecar is not optional
+  and is not a derived artifact — it is canonical context that makes
+  the row re-auditable from source.
+- **Authority-monotonic trigger**: `settlements_authority_monotonic`
+  blocks `VERIFIED -> UNVERIFIED` transitions and blocks
+  `QUARANTINED -> VERIFIED` unless `provenance_json.reactivated_by` is a
+  non-empty text value (the operator / procedure responsible for the
+  reactivation). Presence-only bypasses (`false`, `0`, `""`, `{}`, `[]`)
+  are rejected by `json_type='text' AND length>0` predicate.
+- **Structural integrity triggers**: `settlements_verified_insert_integrity`
+  and `settlements_verified_update_integrity` reject any row with
+  `authority='VERIFIED'` that has NULL `settlement_value` or empty
+  `winning_bin`. QUARANTINED rows are permissive — quarantine is the
+  legitimate semantic for "unable to determine canonical value".
+
+The `SettlementSemantics.assert_settlement_value()` gate at
+`src/contracts/settlement_semantics.py` remains the required runtime
+invocation at every settlement write boundary; the four triggers above
+are structural backstops, not replacements.
+
 ### 4.3 Day0 Monitoring Truth
 
 Defines what live same-day observation stream approximates settlement risk

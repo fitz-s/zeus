@@ -734,9 +734,40 @@
       ]
     },
     {
+      "slice_id": "S3.1",
+      "name": "data_readiness_tail_zeus_current_architecture_inv14_provenance_refresh",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_doc_only_slice_isolate_and_restore_pattern_critic_dispatch_pending",
+      "planning_lock": "GREEN on 1 file (docs/authority/zeus_current_architecture.md) using midstream plan.md as plan-evidence",
+      "authority_basis": "data-readiness workstream closure-banner architect-P1 flag: zeus_current_architecture.md was intentionally left unchanged during Phase 3 docs tidy to avoid scope creep; this slice closes that flag",
+      "scope": "Added 33-line 'Canonical settlement row invariants' subsection inside §4.2 Settlement Truth covering INV-14 identity spine, provenance_json required-keys, and the four triggers (authority-monotonic v2 + verified-insert-integrity + verified-update-integrity)",
+      "files_changed": [
+        "docs/authority/zeus_current_architecture.md (isolate-and-restore; clean 33-line additive diff)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "isolate_and_restore_pattern": "zeus_current_architecture.md was co-tenant-dirty (16 insertions / 20 deletions net reshape). Used cp-to-tmp + git-checkout-HEAD + Edit-tool + commit + cp-tmp-back pattern. Final diff in commit shows ONLY my 33-line addition; cotenant work returns to working tree unstaged post-commit.",
+      "content_added": {
+        "INV-14_identity_spine": "temperature_metric + physical_quantity + observation_field + data_version — not inferrable from settlement_source/temp_unit",
+        "provenance_json_required_keys": "writer / source_family / obs_source / obs_id / decision_time_snapshot_id / rounding_rule / reconstruction_method / audit_ref",
+        "trigger_authority_monotonic": "v2 with json_type=text AND length>0 gate on reactivated_by (S2.1 hardened)",
+        "trigger_verified_row_integrity": "BEFORE INSERT + BEFORE UPDATE pair (S2.2) — VERIFIED rows cannot have NULL settlement_value or empty winning_bin",
+        "social_gate_note": "SettlementSemantics.assert_settlement_value() remains required at every write boundary; triggers are structural backstops, not replacements"
+      },
+      "category_immunity_fitz_k_lt_n_score": "N/A (doc-only slice — authority refresh does not make any category impossible; it documents already-existing structural gates so zero-context agents inherit the context).",
+      "regression_evidence_L28": {
+        "delta": "doc-only; no test surface touched; delta = N/A"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files docs/authority/zeus_current_architecture.md --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> GREEN",
+        "git diff --stat docs/authority/zeus_current_architecture.md -> '1 file changed, 33 insertions(+)' — clean isolated hunk, no cotenant scope bleed"
+      ]
+    },
+    {
       "slice_id": "S2.2",
       "name": "data_readiness_tail_structural_ap2_prevention_settlements_triggers",
-      "commit": "pending",
+      "commit": "f8f403e",
       "date": "2026-04-23",
       "critic_status": "self_verified_12_of_12_pass_plus_23_of_23_cross_trigger_regression_critic_dispatch_pending",
       "planning_lock": "GREEN on 3 files (src/state/db.py + tests/test_settlements_verified_row_integrity.py + architecture/test_topology.yaml) via midstream plan.md plan-evidence",
