@@ -6,7 +6,9 @@
     "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
     "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md"
   ],
-  "packet_status": "implementation_closeout_pending_commit",
+  "packet_status": "closed",
+  "planning_commit": "da1662f",
+  "implementation_commit": "df9ece5",
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",
@@ -46,6 +48,13 @@
     "graph artifacts"
   ],
   "changed_files": [
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md",
+    "docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json"
+  ],
+  "implementation_changed_files": [
     "scripts/verify_truth_surfaces.py",
     "tests/test_truth_surface_health.py",
     "docs/operations/AGENTS.md",

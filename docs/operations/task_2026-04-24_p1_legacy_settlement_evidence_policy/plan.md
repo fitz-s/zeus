@@ -2,10 +2,10 @@
 
 Date: 2026-04-24
 Branch: `post-audit-remediation-mainline`
-Status: implementation closeout pending commit. The planning packet was pushed
-at `da1662f`; this follow-up implements only the read-only diagnostic/test
-files named below. No schema, DB, current-fact, calibration, replay, live
-consumer, or `settlements_v2` population change is authorized.
+Status: closed. Planning commit `da1662f`; implementation commit `df9ece5`.
+P1.4 implemented only the read-only diagnostic/test files named below. No
+schema, DB, current-fact, calibration, replay, live consumer, or
+`settlements_v2` population change was authorized.
 
 ## Task
 
