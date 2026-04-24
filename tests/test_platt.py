@@ -1,3 +1,6 @@
+# Created: 2026-03-30
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for ExtendedPlattCalibrator.
 
 Covers:
@@ -12,6 +15,7 @@ import pytest
 from src.calibration.platt import (
     ExtendedPlattCalibrator,
     calibrate_and_normalize,
+    logit_safe,
     P_CLAMP_LOW,
     P_CLAMP_HIGH,
     WIDTH_NORMALIZED_SPACE,
@@ -31,6 +35,11 @@ def _synthetic_data(n: int = 200, seed: int = 42):
 
 
 class TestExtendedPlattFit:
+    def test_logit_safe_handles_zero_one(self):
+        assert np.isfinite(logit_safe(0.0))
+        assert np.isfinite(logit_safe(1.0))
+        assert abs(float(logit_safe(0.5))) < 1e-9
+
     def test_fit_produces_params(self):
         p_raw, lead_days, outcomes = _synthetic_data(200)
         cal = ExtendedPlattCalibrator()
@@ -67,6 +76,47 @@ class TestExtendedPlattFit:
         cal = ExtendedPlattCalibrator()
         with pytest.raises(ValueError, match="n=3 < 15"):
             cal.fit(p_raw, lead_days, outcomes)
+
+    def test_group_bootstrap_uses_effective_sample_count(self):
+        p_raw, lead_days, outcomes = _synthetic_data(45)
+        group_ids = np.array([f"group-{i // 3}" for i in range(45)], dtype=object)
+        cal = ExtendedPlattCalibrator()
+        cal.fit(
+            p_raw,
+            lead_days,
+            outcomes,
+            decision_group_ids=group_ids,
+            n_bootstrap=20,
+            rng=np.random.default_rng(123),
+        )
+
+        assert cal.fitted is True
+        assert cal.n_samples == 15
+        assert len(cal.bootstrap_params) > 0
+
+    def test_group_bootstrap_rejects_missing_group_ids(self):
+        p_raw, lead_days, outcomes = _synthetic_data(15)
+        group_ids = np.array([f"group-{i}" for i in range(15)], dtype=object)
+        group_ids[3] = None
+        cal = ExtendedPlattCalibrator()
+        with pytest.raises(ValueError, match="null/empty"):
+            cal.fit(p_raw, lead_days, outcomes, decision_group_ids=group_ids)
+
+    def test_group_bootstrap_rejects_low_n_eff(self):
+        p_raw, lead_days, outcomes = _synthetic_data(30)
+        group_ids = np.array([f"group-{i // 3}" for i in range(30)], dtype=object)
+        cal = ExtendedPlattCalibrator()
+        with pytest.raises(ValueError, match="n_eff=10 < 15"):
+            cal.fit(p_raw, lead_days, outcomes, decision_group_ids=group_ids)
+
+    def test_refit_p_raw_domain_validation_rejects_corruption(self):
+        from scripts.refit_platt import _validate_p_raw_domain
+
+        _validate_p_raw_domain("ok", np.array([0.0, 0.5, 1.0]))
+        with pytest.raises(RuntimeError, match=r"outside \[0, 1\]"):
+            _validate_p_raw_domain("bad", np.array([-0.1, 0.5]))
+        with pytest.raises(RuntimeError, match=r"outside \[0, 1\]"):
+            _validate_p_raw_domain("bad", np.array([0.5, 1.1]))
 
     def test_strong_regularization(self):
         """C=0.1 (strong) should produce more conservative params than C=1.0."""

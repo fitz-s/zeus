@@ -15,6 +15,7 @@ See: docs/zeus_FINAL_spec.md §P9.3 D3
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -48,6 +49,10 @@ class ExecutionPrice:
     currency: Literal["usd", "probability_units"]
 
     def __post_init__(self) -> None:
+        if not math.isfinite(self.value):
+            raise ValueError(
+                f"ExecutionPrice.value must be finite, got {self.value}"
+            )
         if self.value < 0.0:
             raise ValueError(
                 f"ExecutionPrice.value must be >= 0, got {self.value}"
@@ -133,6 +138,12 @@ def polymarket_fee(price: float, fee_rate: float = 0.05) -> float:
 
     P9-D3: Replaces incorrect flat 5% assumption in FeeGuard / §P10.6.
     """
+    if not math.isfinite(price) or not math.isfinite(fee_rate):
+        raise ValueError(
+            f"polymarket_fee requires finite inputs, got price={price}, fee_rate={fee_rate}"
+        )
     if price <= 0.0 or price >= 1.0:
-        return 0.0
+        raise ValueError(
+            f"polymarket_fee requires price in (0, 1), got {price}"
+        )
     return fee_rate * price * (1.0 - price)

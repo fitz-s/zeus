@@ -1,7 +1,7 @@
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
-Written to the mode-qualified truth file for Venus/OpenClaw to read.
+Written to a derived live status file for Venus/OpenClaw to read.
 """
 
 import json
@@ -9,8 +9,10 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from src.config import settings, state_path
+from src.config import get_mode, settings, state_path
 from src.control.control_plane import (
+    get_entries_pause_reason,
+    get_entries_pause_source,
     get_edge_threshold_multiplier,
     is_entries_paused,
     recommended_autosafe_commands_from_status,
@@ -18,9 +20,10 @@ from src.control.control_plane import (
     review_required_commands_from_status,
     strategy_gates,
 )
+from src.control.gate_decision import reason_refuted
 from src.state.decision_chain import query_learning_surface_summary
 from src.state.db import (
-    get_trade_connection_with_shared,
+    get_trade_connection_with_world,
     query_execution_event_summary,
     query_position_current_status_view,
     query_strategy_health_snapshot,
@@ -66,11 +69,38 @@ def _get_risk_details() -> dict:
         return {}
 
 
+_V2_TABLES = (
+    "platt_models_v2",
+    "calibration_pairs_v2",
+    "ensemble_snapshots_v2",
+    "historical_forecasts_v2",
+    "settlements_v2",
+)
+
+
+def _get_v2_row_counts(conn) -> dict[str, int]:
+    """Query row counts for the 5 v2 tables.
+
+    S5 R11 P10B: meta-immune-system sensor. Returns 0 for tables that don't
+    exist yet (Golden Window: v2 tables are empty until data lift). Missing
+    table → 0, not an error, so this never blocks status writes.
+    """
+    counts: dict[str, int] = {}
+    for table in _V2_TABLES:
+        try:
+            row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            counts[table] = int(row[0]) if row else 0
+        except Exception:
+            counts[table] = 0
+    return counts
+
+
 def write_status(cycle_summary: dict = None) -> None:
     """Write 5-section health snapshot."""
     generated_at = datetime.now(timezone.utc).isoformat()
     risk_details = _get_risk_details()
     riskguard_level = _get_risk_level()
+    cycle_summary_from_prior = cycle_summary is None
     if cycle_summary is None and STATUS_PATH.exists():
         try:
             with open(STATUS_PATH) as f:
@@ -84,15 +114,37 @@ def write_status(cycle_summary: dict = None) -> None:
         for strategy, reasons in (risk_details.get("recommended_strategy_gate_reasons", {}) or {}).items()
         if isinstance(reasons, list)
     }
+    current_entries_paused = is_entries_paused()
+    if cycle_summary_from_prior:
+        cycle_summary = dict(cycle_summary or {})
+        if current_entries_paused:
+            cycle_summary["entries_paused"] = True
+            cycle_summary.pop("entries_pause_reason", None)
+            cycle_summary["entries_blocked_reason"] = "entries_paused"
+        else:
+            cycle_summary.pop("entries_paused", None)
+            cycle_summary.pop("entries_pause_reason", None)
+            if cycle_summary.get("entries_blocked_reason") == "entries_paused":
+                cycle_summary.pop("entries_blocked_reason", None)
     current_strategy_gates = strategy_gates()
     recommended_but_not_gated = sorted(
         strategy for strategy in recommended_strategy_gates
-        if current_strategy_gates.get(strategy, True)
+        if not (d := current_strategy_gates.get(strategy)) or d.enabled
     )
     gated_but_not_recommended = sorted(
-        strategy for strategy, enabled in current_strategy_gates.items()
-        if enabled is False and strategy not in recommended_strategy_gates
+        strategy for strategy, decision in current_strategy_gates.items()
+        if not decision.enabled and strategy not in recommended_strategy_gates
     )
+    review_required_gate_recommendations = [
+        {
+            "command": "set_strategy_gate",
+            "strategy": strategy,
+            "enabled": True,
+            "note": f"recommended_by=reason_refuted:{decision.reason_code.value}",
+        }
+        for strategy, decision in current_strategy_gates.items()
+        if not decision.enabled and reason_refuted(decision, current_data={})
+    ]
     recommended_controls = list(risk_details.get("recommended_controls", []))
     recommended_control_reasons = {
         str(control): list(reasons)
@@ -106,7 +158,7 @@ def write_status(cycle_summary: dict = None) -> None:
         recommended_controls_not_applied.append("review_strategy_gates")
     conn = None
     try:
-        conn = get_trade_connection_with_shared()
+        conn = get_trade_connection_with_world()
         position_view = query_position_current_status_view(conn)
         strategy_health = query_strategy_health_snapshot(conn, now=generated_at)
     except Exception:
@@ -127,6 +179,14 @@ def write_status(cycle_summary: dict = None) -> None:
             "by_strategy": {},
             "stale_strategy_keys": [],
         }
+
+    # S5 R11 P10B: v2 row-count sensor
+    v2_row_counts: dict[str, int] = {}
+    try:
+        if conn is not None:
+            v2_row_counts = _get_v2_row_counts(conn)
+    except Exception:
+        pass
 
     strategy_summary: dict[str, dict] = {}
     strategy_open_counts = position_view.get("strategy_open_counts", {})
@@ -160,7 +220,8 @@ def write_status(cycle_summary: dict = None) -> None:
         )
         bucket["open_positions"] = int(open_count)
     for name, bucket in strategy_summary.items():
-        bucket["gated"] = not current_strategy_gates.get(name, True)
+        _gate = current_strategy_gates.get(name)
+        bucket["gated"] = _gate is not None and not _gate.enabled
         bucket["recommended_gate"] = name in recommended_strategy_gates
         bucket["recommended_gate_reasons"] = list(recommended_strategy_gate_reasons.get(name, []))
 
@@ -168,13 +229,15 @@ def write_status(cycle_summary: dict = None) -> None:
         "timestamp": generated_at,
         "process": {
             "pid": os.getpid(),
-            "mode": settings.mode,
+            "mode": get_mode(),
             "version": "zeus_v2",
         },
         "control": {
-            "entries_paused": is_entries_paused(),
+            "entries_paused": current_entries_paused,
+            "entries_pause_source": get_entries_pause_source(),
+            "entries_pause_reason": get_entries_pause_reason(),
             "edge_threshold_multiplier": get_edge_threshold_multiplier(),
-            "strategy_gates": strategy_gates(),
+            "strategy_gates": {k: v.to_dict() for k, v in current_strategy_gates.items()},
             "recommended_controls": recommended_controls,
             "recommended_control_reasons": recommended_control_reasons,
             "recommended_strategy_gates": risk_details.get("recommended_strategy_gates", []),
@@ -182,6 +245,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "recommended_but_not_gated": recommended_but_not_gated,
             "gated_but_not_recommended": gated_but_not_recommended,
             "recommended_controls_not_applied": recommended_controls_not_applied,
+            "review_required_gate_recommendations": review_required_gate_recommendations,
         },
         "risk": {
             "level": riskguard_level,
@@ -207,10 +271,18 @@ def write_status(cycle_summary: dict = None) -> None:
             "day0_positions": int(position_view.get("day0_positions", 0)),
         },
         "strategy": strategy_summary,
-        "execution": {},
+        "execution": {
+            "fdr_family_size": int((cycle_summary or {}).get("fdr_family_size", 0)),
+            "fdr_fallback_fired": bool((cycle_summary or {}).get("fdr_fallback_fired", False)),
+        },
         "learning": {},
         "no_trade": {},
         "cycle": cycle_summary or {},
+        # S5 R11 P10B: v2 row-count observability sensor
+        "v2_row_counts": v2_row_counts,
+        # S5 R11 P10B: dual-track scaffold claim (True since P9C closed the main line)
+        "dual_track_scaffold_claimed": True,
+        "discrepancy_flags": [],
     }
     status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
     status["control"]["review_required_commands"] = review_required_commands_from_status(status)
@@ -232,6 +304,8 @@ def write_status(cycle_summary: dict = None) -> None:
     if total_pnl is None:
         total_pnl = round(float(realized_pnl or 0.0) + float(unrealized_pnl or 0.0), 2)
     initial_bankroll = risk_details.get("initial_bankroll")
+    if initial_bankroll is None:
+        initial_bankroll = (cycle_summary or {}).get("wallet_balance_usd")
     if initial_bankroll is None:
         initial_bankroll = round(float(settings.capital_base_usd), 2)
     if effective_bankroll is None:
@@ -275,6 +349,12 @@ def write_status(cycle_summary: dict = None) -> None:
         if conn is not None:
             conn.close()
 
+    # S5 R11 P10B: discrepancy flag — claim=True AND any v2 table has 0 rows
+    if status.get("dual_track_scaffold_claimed") and v2_row_counts:
+        empty_v2 = [t for t, c in v2_row_counts.items() if c == 0]
+        if empty_v2:
+            status["discrepancy_flags"].append("v2_empty_despite_closure_claim")
+
     consistency_issues: list[str] = []
     cycle_risk_level = str((cycle_summary or {}).get("risk_level") or "")
     if cycle_risk_level and cycle_risk_level != riskguard_level:
@@ -289,6 +369,9 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append("learning_summary_unavailable")
     if status.get("no_trade", {}).get("error"):
         consistency_issues.append("no_trade_summary_unavailable")
+    monitor_chain_missing = int((cycle_summary or {}).get("monitor_chain_missing", 0) or 0)
+    if monitor_chain_missing > 0:
+        consistency_issues.append(f"cycle_monitor_chain_missing:{monitor_chain_missing}")
     if position_view.get("status") != "ok":
         consistency_issues.append(f"position_current_{position_view.get('status')}")
     strategy_health_status = str(strategy_health.get("status") or "")
@@ -300,11 +383,43 @@ def write_status(cycle_summary: dict = None) -> None:
         "issues": consistency_issues,
         "cycle_risk_level": cycle_risk_level or None,
     }
-    if consistency_issues:
-        status["risk"]["level"] = "RED"
+    # K4: infrastructure / data-availability issues are a SEPARATE dimension from
+    # trading risk. Previously any consistency_issue escalated risk.level to RED,
+    # which meant cold-start states like strategy_health_empty or
+    # cycle_risk_level_mismatch produced false-RED alerts indistinguishable from
+    # real trading halts. risk.level now reflects RiskGuard's six trading
+    # dimensions only. infrastructure_level reflects observability/data-health.
+    # Downstream consumers (Venus supervisor, daily review, Discord alerts) must
+    # read both fields and treat them as orthogonal signals.
+    if not consistency_issues:
+        infrastructure_level = "GREEN"
+    else:
+        # Hard infrastructure failures escalate to RED because they mean the
+        # observability layer cannot be trusted; soft cold-start or
+        # availability states stay YELLOW so they do not page as emergencies.
+        _HARD_INFRASTRUCTURE_FAILURE_PREFIXES = (
+            "cycle_failed",
+            "execution_summary_unavailable",
+            "learning_summary_unavailable",
+            "no_trade_summary_unavailable",
+            "cycle_monitor_chain_missing",
+            "position_current_missing_table",
+            "position_current_query_error",
+        )
+        if any(
+            issue.startswith(prefix)
+            for issue in consistency_issues
+            for prefix in _HARD_INFRASTRUCTURE_FAILURE_PREFIXES
+        ):
+            infrastructure_level = "RED"
+        else:
+            infrastructure_level = "YELLOW"
+    status["risk"]["infrastructure_level"] = infrastructure_level
+    status["risk"]["infrastructure_issues"] = list(consistency_issues)
 
     learning_by_strategy = (status.get("learning", {}) or {}).get("by_strategy", {}) or {}
     for name, learning_bucket in learning_by_strategy.items():
+        _lgate = current_strategy_gates.get(name)
         bucket = strategy_summary.setdefault(
             name,
             {
@@ -313,7 +428,7 @@ def write_status(cycle_summary: dict = None) -> None:
                 "realized_pnl": 0.0,
                 "unrealized_pnl": 0.0,
                 "total_pnl": 0.0,
-                "gated": not current_strategy_gates.get(name, True),
+                "gated": _lgate is not None and not _lgate.enabled,
                 "recommended_gate": name in recommended_strategy_gates,
                 "recommended_gate_reasons": list(recommended_strategy_gate_reasons.get(name, [])),
             },
@@ -326,7 +441,7 @@ def write_status(cycle_summary: dict = None) -> None:
         bucket["entry_attempted"] = learning_bucket.get("entry_attempted", 0)
         bucket["entry_filled"] = learning_bucket.get("entry_filled", 0)
         bucket["entry_rejected"] = learning_bucket.get("entry_rejected", 0)
-    status = annotate_truth_payload(status, STATUS_PATH, mode=settings.mode, generated_at=generated_at)
+    status = annotate_truth_payload(status, STATUS_PATH, mode=get_mode(), generated_at=generated_at, authority="VERIFIED")
     status["truth"]["db_primary_inputs"] = {
         "position_current": str(position_view.get("status") or "unknown"),
         "strategy_health": strategy_health_status or "unknown",

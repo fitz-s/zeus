@@ -39,13 +39,6 @@ def _canonical_position_surface_available(conn) -> bool:
     )
 
 
-def _legacy_runtime_position_event_shape_present(conn) -> bool:
-    from src.state.db import LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-    event_columns = _table_columns(conn, "position_events")
-    return bool(event_columns) and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-
-
 def log_event(
     conn,
     event_type: str,
@@ -54,13 +47,13 @@ def log_event(
     env: str = "",
 ) -> None:
     """Append an event to the chronicle. Never updates existing records."""
-    from src.config import settings
+    from src.config import get_mode
     now = datetime.now(timezone.utc).isoformat()
     details_json = json.dumps(details or {})
-    env = env or settings.mode
+    env = env or get_mode()
 
     if not _table_exists(conn, "chronicle"):
-        if _canonical_position_surface_available(conn) and not _legacy_runtime_position_event_shape_present(conn):
+        if _canonical_position_surface_available(conn):
             return
         raise sqlite3.OperationalError("no such table: chronicle")
 

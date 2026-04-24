@@ -1,0 +1,84 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Topology Enforcement Hardening Phase 3"
+  purpose: >
+    Route/change receipts turn high-risk packet closeout into a
+    machine-checkable diff/scope contract with typed route-artifact evidence.
+    They do not prove interactive command history on their own; they prove that
+    the declared diff, route artifact shape, and law surface are coherent.
+
+required_fields:
+  - task
+  - packet
+  - route_source
+  - route_evidence
+  - required_law
+  - allowed_files
+  - forbidden_files
+  - changed_files
+  - tests_evidence
+
+allowed_route_sources:
+  - navigation
+  - digest
+  - packet
+  - ralplan
+  - manual_packet
+  - current_state
+
+route_evidence_globs_by_source:
+  navigation:
+    - .omx/context/**
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/current_state.md
+  digest:
+    - .omx/context/**
+    - docs/operations/task_????-??-??_*/plan.md
+  packet:
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/task_????-??-??_*.md
+  ralplan:
+    - .omx/plans/**
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/current_state.md
+  manual_packet:
+    - docs/operations/task_????-??-??_*/plan.md
+    - docs/operations/task_????-??-??_*.md
+  current_state:
+    - docs/operations/current_state.md
+
+approved_receipt_globs:
+  - docs/operations/task_????-??-??_*/receipt.json
+
+high_risk_required_patterns:
+  - architecture/**
+  - docs/authority/**
+  - src/state/**
+  - src/control/**
+  - src/supervisor_api/**
+  - scripts/**
+  - docs/operations/current_state.md
+
+required_law_by_pattern:
+  - pattern: architecture/**
+    requires_any: [architecture/AGENTS.md]
+  - pattern: docs/authority/**
+    requires_any: [docs/authority/AGENTS.md]
+  - pattern: src/state/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: src/control/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: src/supervisor_api/**
+    requires_any: [docs/authority/zeus_current_architecture.md, architecture/source_rationale.yaml]
+  - pattern: scripts/**
+    requires_any: [architecture/script_manifest.yaml]
+  - pattern: docs/operations/current_state.md
+    requires_any: [docs/operations/AGENTS.md, architecture/topology.yaml]
+
+notes:
+  - Receipts are required for high-risk closeout surfaces, not for every repo change.
+  - Allowed/forbidden file lists may use glob patterns.
+  - Receipt changed_files must match the closeout diff exactly; stale or partial receipts fail.
+  - route_evidence must point to a real plan/current-state/packet artifact that explains the chosen route.
+  - Receipts prove declared packet scope and route-artifact coherence, not that a specific interactive command was executed.

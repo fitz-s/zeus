@@ -41,39 +41,55 @@ class TestVWMP:
 
 class TestComputeAlpha:
     def test_level_1_base(self):
-        a = compute_alpha(1, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0)
+        a = compute_alpha(1, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0, authority_verified=True).value
         assert a == pytest.approx(0.65, abs=0.01)
 
     def test_level_4_base(self):
-        a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0)
+        a = compute_alpha(4, TemperatureDelta(3.0, "F"), "AGREE", 3, 24.0, authority_verified=True).value
         assert a == pytest.approx(0.25, abs=0.01)
 
     def test_conflict_reduces_alpha(self):
         spread = TemperatureDelta(3.0, "F")
-        a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0)
-        a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0)
+        a_agree = compute_alpha(1, spread, "AGREE", 3, 24.0, authority_verified=True).value
+        a_conflict = compute_alpha(1, spread, "CONFLICT", 3, 24.0, authority_verified=True).value
         assert a_conflict < a_agree
 
     def test_fresh_market_increases_alpha(self):
         """hours_since_open < 6 → +0.15 total (0.10 + 0.05)."""
         spread = TemperatureDelta(3.0, "F")
-        a_old = compute_alpha(2, spread, "AGREE", 3, 48.0)
-        a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0)
+        a_old = compute_alpha(2, spread, "AGREE", 3, 48.0, authority_verified=True).value
+        a_fresh = compute_alpha(2, spread, "AGREE", 3, 4.0, authority_verified=True).value
         assert a_fresh > a_old
 
     def test_clamped_floor(self):
         """Alpha should never go below 0.20."""
-        a = compute_alpha(4, TemperatureDelta(8.0, "F"), "CONFLICT", 7, 48.0)
+        a = compute_alpha(4, TemperatureDelta(8.0, "F"), "CONFLICT", 7, 48.0, authority_verified=True).value
         assert a >= 0.20
 
     def test_clamped_ceiling(self):
         """Alpha should never exceed 0.85."""
-        a = compute_alpha(1, TemperatureDelta(1.0, "F"), "AGREE", 1, 2.0)
+        a = compute_alpha(1, TemperatureDelta(1.0, "F"), "AGREE", 1, 2.0, authority_verified=True).value
         assert a <= 0.85
 
     def test_rejects_float_spread(self):
         with pytest.raises(TypeError):
-            compute_alpha(1, 3.0, "AGREE", 3, 24.0)
+            compute_alpha(1, 3.0, "AGREE", 3, 24.0, authority_verified=True)
+
+    @pytest.mark.parametrize(
+        "agreement, expected_alpha",
+        [
+            ("NOT_CHECKED", 0.65),    # no penalty — treated same as AGREE
+            ("AGREE", 0.65),          # no penalty
+            ("SOFT_DISAGREE", 0.55),  # -0.10 penalty
+        ],
+        ids=["not_checked", "agree", "soft_disagree"],
+    )
+    def test_p9_model_agreement_alpha_adjustment(self, agreement, expected_alpha):
+        """P9: model_agreement field drives alpha penalty correctly."""
+        a = compute_alpha(
+            1, TemperatureDelta(3.0, "F"), agreement, 3, 24.0, authority_verified=True
+        ).value
+        assert a == pytest.approx(expected_alpha, abs=0.01)
 
 
 class TestComputePosterior:
@@ -90,6 +106,139 @@ class TestComputePosterior:
         p_market = np.array([0.3, 0.7])
         result = compute_posterior(p_cal, p_market, 1.0)
         np.testing.assert_array_almost_equal(result, p_cal)
+
+    def test_vig_removed_before_blend(self):
+        p_cal = np.array([0.60, 0.30, 0.10])
+        p_market = np.array([0.54, 0.36, 0.18])
+
+        result = compute_posterior(p_cal, p_market, 0.4)
+        expected = 0.4 * p_cal + 0.6 * (p_market / p_market.sum())
+        legacy_post_blend = (0.4 * p_cal + 0.6 * p_market)
+        legacy_post_blend = legacy_post_blend / legacy_post_blend.sum()
+
+        np.testing.assert_allclose(result, expected)
+        assert not np.allclose(result, legacy_post_blend)
+
+    def test_sparse_monitor_market_vector_imputes_missing_sibling_prices(self):
+        """T2.c (closed by T6.3, 2026-04-24): when p_market has zero entries
+        (missing sibling prices from sparse monitor snapshot), compute_posterior
+        imputes those zeros from p_cal as a fallback reference before the
+        alpha blend. The imputation source is recorded on the VigTreatment
+        record (imputation_source='p_cal_fallback').
+
+        The p_cal fixture is intentionally asymmetric (0.20 vs 0.30 at the
+        zero-filled positions) so the test discriminates between genuine
+        p_cal impute and any symmetric sibling-snapshot behavior that would
+        coincidentally produce equal values at positions 0 and 2.
+        """
+        p_cal = np.array([0.20, 0.50, 0.30])  # asymmetric — kills silent-sibling-equivalence ambiguity
+        p_market = np.array([0.00, 0.95, 0.00])
+
+        result = compute_posterior(p_cal, p_market, 0.5)
+        imputed_market = np.array([0.20, 0.95, 0.30])  # zeros replaced by p_cal at same positions
+        raw = 0.5 * p_cal + 0.5 * imputed_market
+        expected = raw / raw.sum()
+        # Pre-T6.3 no-impute path: blend raw sparse [0,0.95,0] directly
+        incorrectly_zero_filled = 0.5 * p_cal + 0.5 * np.array([0.0, 0.95, 0.0])
+        incorrectly_zero_filled = incorrectly_zero_filled / incorrectly_zero_filled.sum()
+
+        np.testing.assert_allclose(result, expected)
+        # Discriminate from pre-T6.3 no-impute behavior
+        assert not np.allclose(result, incorrectly_zero_filled)
+        # Assert asymmetry survives the blend — proves p_cal was the reference
+        # (symmetric sibling_snapshot would have produced result[0] == result[2])
+        assert result[0] != pytest.approx(result[2]), (
+            f"Expected asymmetric posterior (p_cal was asymmetric); got {result}. "
+            "Symmetric result implies impute source was not p_cal."
+        )
+        # Strong discriminator: under p_cal impute at zero-filled positions,
+        # raw[i] = alpha*p_cal[i] + (1-alpha)*p_cal[i] = p_cal[i], so the
+        # ratio result[0]/result[2] == p_cal[0]/p_cal[2] survives normalization
+        # (alpha-independent). A different impute source (e.g. a real sibling
+        # market snapshot) would produce a different ratio even if asymmetric.
+        assert result[0] / result[2] == pytest.approx(p_cal[0] / p_cal[2], abs=0.01), (
+            f"Expected result[0]/result[2] = p_cal[0]/p_cal[2] = "
+            f"{p_cal[0]/p_cal[2]:.4f}; got {result[0]/result[2]:.4f}. "
+            "A different sibling source would produce a different ratio."
+        )
+
+    def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=34, label="33-34°F", unit="F"),
+        ]
+        result = compute_posterior(
+            np.array([1.0, 0.0]),
+            np.array([0.5, 0.5]),
+            0.8,
+            bins=bins,
+        )
+
+        np.testing.assert_array_almost_equal(result, [0.875, 0.125])
+        assert result.sum() == pytest.approx(1.0)
+
+    def test_tail_alpha_uses_de_vigged_market_before_blend(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=34, label="33-34°F", unit="F"),
+        ]
+        p_cal = np.array([1.0, 0.0])
+        p_market = np.array([0.648, 0.432])
+        result = compute_posterior(p_cal, p_market, 0.8, bins=bins)
+
+        alpha_vec = np.array([0.4, 0.8])
+        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * (p_market / p_market.sum())
+        expected = raw / raw.sum()
+
+        np.testing.assert_allclose(result, expected)
+
+    def test_tail_alpha_scale_applies_to_buy_yes_bootstrap_ci(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=39, high=40, label="39-40°F", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([1.0, 0.0]),
+            p_cal=np.array([1.0, 0.0]),
+            p_market=np.array([0.5, 0.5]),
+            alpha=0.8,
+            bins=bins,
+            member_maxes=np.array([30.0, 30.0, 30.0]),
+            unit="F",
+        )
+        ma._sigma = 0.0
+
+        ci_lo, ci_hi, p_value = ma._bootstrap_bin(0, 5)
+
+        # Verify posterior with p_cal[0]=1.0 yields 0.875 (was _posterior_with_bootstrapped_bin)
+        assert compute_posterior(np.array([1.0, 0.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.875)
+        assert ci_lo == pytest.approx(0.375)
+        assert ci_hi == pytest.approx(0.375)
+        assert p_value == 0.0
+
+    def test_tail_alpha_scale_applies_to_buy_no_bootstrap_ci(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=39, high=40, label="39-40°F", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([0.0, 1.0]),
+            p_cal=np.array([0.0, 1.0]),
+            p_market=np.array([0.5, 0.5]),
+            alpha=0.8,
+            bins=bins,
+            member_maxes=np.array([40.0, 40.0, 40.0]),
+            unit="F",
+        )
+        ma._sigma = 0.0
+
+        ci_lo, ci_hi, p_value = ma._bootstrap_bin_no(0, 5)
+
+        # Verify posterior with p_cal[0]=0.0 yields 0.25 (was _posterior_with_bootstrapped_bin)
+        assert compute_posterior(np.array([0.0, 1.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.25)
+        assert ci_lo == pytest.approx(0.25)
+        assert ci_hi == pytest.approx(0.25)
+        assert p_value == 0.0
 
 
 class TestMarketAnalysis:
@@ -160,3 +309,24 @@ class TestMarketAnalysis:
             alpha=0.5, bins=bins, member_maxes=member_maxes,
         )
         assert ma.vig == pytest.approx(1.0, abs=0.01)
+
+    def test_market_analysis_keeps_raw_vig_but_posterior_uses_clean_market(self):
+        bins = self._make_bins()[1:4]
+        p_cal = np.array([0.60, 0.30, 0.10])
+        p_market = np.array([0.54, 0.36, 0.18])
+        member_maxes = np.ones(51) * 40.0
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=p_market,
+            alpha=0.4,
+            bins=bins,
+            member_maxes=member_maxes,
+        )
+
+        assert ma.vig == pytest.approx(1.08)
+        np.testing.assert_allclose(
+            ma.p_posterior,
+            0.4 * p_cal + 0.6 * (p_market / p_market.sum()),
+        )

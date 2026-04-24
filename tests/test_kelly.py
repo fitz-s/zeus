@@ -2,34 +2,47 @@
 
 import pytest
 
+from src.contracts.execution_price import ExecutionPrice
 from src.strategy.kelly import kelly_size, dynamic_kelly_mult
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
+
+
+def _ep(value: float) -> ExecutionPrice:
+    """Build a valid Kelly-safe ExecutionPrice for test use."""
+    return ExecutionPrice(
+        value=value,
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
 
 
 class TestKellySize:
     def test_positive_edge(self):
         """p_posterior > entry → positive size."""
-        size = kelly_size(0.60, 0.40, 100.0, kelly_mult=0.25)
+        size = kelly_size(0.60, _ep(0.40), 100.0, kelly_mult=0.25)
         assert size > 0
 
     def test_no_edge(self):
         """p_posterior <= entry → zero."""
-        assert kelly_size(0.40, 0.50, 100.0) == 0.0
-        assert kelly_size(0.50, 0.50, 100.0) == 0.0
+        assert kelly_size(0.40, _ep(0.50), 100.0) == 0.0
+        assert kelly_size(0.50, _ep(0.50), 100.0) == 0.0
 
     def test_formula_correctness(self):
         """f* = (0.6 - 0.4) / (1 - 0.4) = 0.333. Size = 0.333 × 0.25 × 100 = 8.33"""
-        size = kelly_size(0.60, 0.40, 100.0, kelly_mult=0.25)
+        size = kelly_size(0.60, _ep(0.40), 100.0, kelly_mult=0.25)
         expected = (0.60 - 0.40) / (1.0 - 0.40) * 0.25 * 100.0
         assert size == pytest.approx(expected)
 
     def test_entry_at_one(self):
-        """entry_price = 1.0 → no trade (division by zero guard)."""
-        assert kelly_size(0.99, 1.0, 100.0) == 0.0
+        """entry_price = 1.0 → kelly_size returns 0.0 (price >= 1.0 guard)."""
+        # value=1.0 is valid at construction (boundary of probability_units range)
+        # kelly_size short-circuits to 0.0 when price_value >= 1.0
+        assert kelly_size(0.99, _ep(1.0), 100.0) == 0.0
 
     def test_small_edge_small_size(self):
         """Small edge → small position."""
-        size = kelly_size(0.11, 0.10, 100.0, kelly_mult=0.25)
+        size = kelly_size(0.11, _ep(0.10), 100.0, kelly_mult=0.25)
         assert 0 < size < 5  # Small size for small edge
 
 
@@ -59,22 +72,22 @@ class TestDynamicKellyMult:
         assert m == pytest.approx(0.25 * 0.5)
 
     def test_full_drawdown_floors_at_minimum(self):
-        """INV-05 / §P9.7: full drawdown returns floor 0.001, not 0.0."""
-        m = dynamic_kelly_mult(base=0.25, drawdown_pct=0.20, max_drawdown=0.20)
-        assert m == pytest.approx(0.001)
+        """INV-05 / §P9.7: full drawdown raises ValueError, not silent 0.001."""
+        with pytest.raises(ValueError, match="collapsed to"):
+            dynamic_kelly_mult(base=0.25, drawdown_pct=0.20, max_drawdown=0.20)
 
     def test_nan_input_floors_at_minimum(self):
-        """NaN from upstream must not propagate — floor catches it."""
-        m = dynamic_kelly_mult(base=float("nan"))
-        assert m == pytest.approx(0.001)
+        """NaN from upstream must raise, not produce a floor."""
+        with pytest.raises(ValueError, match="NaN"):
+            dynamic_kelly_mult(base=float("nan"))
 
 
 class TestRiskLimits:
     def test_allowed(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is True
@@ -82,8 +95,8 @@ class TestRiskLimits:
     def test_below_minimum(self):
         ok, reason = check_position_allowed(
             size_usd=0.50, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False
@@ -92,8 +105,8 @@ class TestRiskLimits:
     def test_exceeds_single_position(self):
         ok, reason = check_position_allowed(
             size_usd=15.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False
@@ -102,8 +115,8 @@ class TestRiskLimits:
     def test_exceeds_portfolio_heat(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.0, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.0,
             current_portfolio_heat=0.48, limits=RiskLimits(),
         )
         assert ok is False
@@ -112,8 +125,8 @@ class TestRiskLimits:
     def test_exceeds_city_limit(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
-            city="NYC", cluster="US-Northeast",
-            current_city_exposure=0.18, current_cluster_exposure=0.0,
+            city="NYC",
+            current_city_exposure=0.18,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
         assert ok is False

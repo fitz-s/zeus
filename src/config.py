@@ -4,10 +4,18 @@ Loads config/settings.json and config/cities.json from the project root.
 Missing keys raise KeyError immediately at startup, not at trade time.
 """
 
+# Created: pre-Phase-0 (K1 Phase 1 strict-contract commits 96b70a8 / f6f612e)
+# Last reused/audited: 2026-04-21
+# Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
+
 import json
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -20,26 +28,26 @@ def legacy_state_path(filename: str) -> Path:
 
 
 def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
-    """Mode-qualified path for per-process state files.
+    """State path — Zeus is live-only; mode is first-class routing param (B077 / SD-A).
 
-    This is the single control point for process state isolation.
-    All per-process mutable files (positions, tracker, status, control, risk_state)
-    MUST use this function.
-
-    zeus.db does NOT use this — it holds shared world data (ENS, calibration,
-    settlements) plus env-tagged decision data.
-
-    positions.json → positions-paper.json / positions-live.json
+    The mode parameter is first-class (threaded through read_mode_truth_json)
+    but only "live" (or None) is accepted. Any other value raises ValueError.
     """
-    import os
+    resolved = mode or get_mode()
+    if resolved not in ACTIVE_MODES:
+        raise ValueError(f"mode_state_path called with invalid mode={resolved!r} — Zeus is live-only.")
+    return STATE_DIR / filename
 
-    mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
-    dot = filename.rfind(".")
-    if dot > 0:
-        stem, ext = filename[:dot], filename[dot:]
-    else:
-        stem, ext = filename, ""
-    return STATE_DIR / f"{stem}-{mode}{ext}"
+
+ACTIVE_MODES = ("live",)
+
+
+def get_mode() -> str:
+    """Mode accessor. Reads from ZEUS_MODE env var (validated at startup)."""
+    mode = os.environ.get("ZEUS_MODE", "live")
+    if mode not in ACTIVE_MODES:
+        raise ValueError(f"ZEUS_MODE={mode!r} is not valid — Zeus is currently restricted to {ACTIVE_MODES}.")
+    return mode
 
 
 def state_path(filename: str) -> Path:
@@ -77,7 +85,17 @@ class City:
     meteostat_station: Optional[str] = None
     airport_name: str = ""
     settlement_source: str = ""
+    country_code: str = ""
+    settlement_source_type: str = "wu_icao"  # "wu_icao" | "hko" | "noaa" | "cwa_station"
     diurnal_amplitude: float = 12.0
+    historical_peak_hour: float = 15.0
+    # Optional per-city instrument noise override (in city.settlement_unit).
+    # See src/signal/ensemble_signal.py::sigma_instrument_for_city for the
+    # rationale. Default None means use the unit-keyed ASOS spec from
+    # settings.json. Set tighter values for institutional stations like
+    # HKO and Taiwan CWA where the underlying sensor is materially more
+    # precise than airport AWOS.
+    instrument_noise_override: Optional[float] = None
     noaa_office: Optional[str] = None
     noaa_gridX: Optional[int] = None
     noaa_gridY: Optional[int] = None
@@ -102,21 +120,37 @@ class Settings:
             "exit",
             "riskguard",
             "execution",
+            "bias_correction_enabled",
+            "feature_flags",
         ]
         for key in required:
             if key not in self._data:
                 raise KeyError(f"Missing required config key: {key}")
+        
+        # Enforce single mode authority
+        if self._data.get("mode") and self._data["mode"] != get_mode():
+            raise ValueError(f"Mode conflict: ZEUS_MODE={get_mode()!r} but settings.json mode={self._data['mode']!r}")
 
     def __getitem__(self, key: str):
         return self._data[key]
 
     @property
     def mode(self) -> str:
-        return self._data["mode"]
+        return get_mode()
 
     @property
     def capital_base_usd(self) -> float:
         return float(self._data["capital_base_usd"])
+
+    @property
+    def bias_correction_enabled(self) -> bool:
+        """Whether bias correction is enabled. Strict — missing key = startup KeyError (B001)."""
+        return bool(self._data["bias_correction_enabled"])
+
+    @property
+    def feature_flags(self) -> dict:
+        """Feature flags dict. Strict — missing key = startup KeyError (B001)."""
+        return dict(self._data["feature_flags"])
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
@@ -128,7 +162,10 @@ def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:
         return float(city_row[preferred_key])
     if fallback_key in city_row and city_row[fallback_key] is not None:
         return float(city_row[fallback_key])
-    return 12.0
+    raise ValueError(
+        f"No diurnal amplitude ('{preferred_key}' or '{fallback_key}') "
+        f"in city config for {city_row.get('name', '?')}"
+    )
 
 
 def load_cities(path: Optional[Path] = None) -> list[City]:
@@ -155,15 +192,24 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
             noaa_gx = None
             noaa_gy = None
 
-        unit = c["unit"]
-        amp = _unit_diurnal_amplitude(c, unit)
-
         if "cluster" not in c:
             raise KeyError(
                 f"City {name!r} missing from city metadata cluster field. "
                 "Cluster taxonomy must be explicit and single-sourced."
             )
+        for required_field in ("unit", "timezone", "wu_station", "country_code"):
+            if required_field not in c:
+                raise KeyError(
+                    f"City {name!r} missing required field {required_field!r}"
+                )
+        if lat is None or lon is None:
+            raise KeyError(
+                f"City {name!r} missing lat/lon "
+                "(expected top-level or under noaa.lat/noaa.lon)"
+            )
         cluster = c["cluster"]
+        unit = c["unit"]
+        amp = _unit_diurnal_amplitude(c, unit)
 
         result.append(
             City(
@@ -180,7 +226,15 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
                 meteostat_station=c.get("meteostat_station"),
                 airport_name=c.get("airport_name", ""),
                 settlement_source=c.get("settlement_source", ""),
+                country_code=c["country_code"],
+                settlement_source_type=c.get("settlement_source_type") or "wu_icao",
                 diurnal_amplitude=amp,
+                historical_peak_hour=float(c.get("historical_peak_hour", 15.0)),
+                instrument_noise_override=(
+                    float(c["instrument_noise_override"])
+                    if c.get("instrument_noise_override") is not None
+                    else None
+                ),
                 noaa_office=noaa_office,
                 noaa_gridX=noaa_gx,
                 noaa_gridY=noaa_gy,
@@ -198,7 +252,36 @@ cities_by_name: dict[str, City] = {c.name: c for c in cities}
 cities_by_alias: dict[str, City] = {}
 for c in cities:
     for alias in c.aliases:
-        cities_by_alias[alias.lower()] = c
+        alias_lower = alias.lower()
+        if alias_lower in cities_by_alias:
+            raise ValueError(f"Alias conflict: {alias!r} maps to both {cities_by_alias[alias_lower].name!r} and {c.name!r}")
+        cities_by_alias[alias_lower] = c
+
+
+def validate_cities_config(city_list: list[City] | None = None) -> list[str]:
+    """Validate city configs — returns list of warning strings.
+
+    Checks fields that should be populated for production but are allowed
+    to be empty/default during development. Does not raise — caller decides
+    whether warnings are fatal.
+    """
+    warnings = []
+    for c in (city_list or cities):
+        if not c.settlement_source:
+            warnings.append(f"{c.name}: settlement_source is empty")
+        if c.settlement_source_type == "wu_icao" and not c.wu_station:
+            warnings.append(f"{c.name}: wu_station is empty")
+        if not c.timezone:
+            warnings.append(f"{c.name}: timezone is empty")
+        if c.settlement_source_type not in ("wu_icao", "hko", "noaa", "cwa_station"):
+            warnings.append(
+                f"{c.name}: settlement_source_type={c.settlement_source_type!r} "
+                "is not a known type"
+            )
+    if warnings:
+        for w in warnings:
+            logger.warning("City config validation: %s", w)
+    return warnings
 
 
 def calibration_clusters() -> tuple[str, ...]:
@@ -266,14 +349,18 @@ def ensemble_unimodal_range_epsilon() -> float:
 
 def sizing_defaults() -> dict[str, float]:
     sizing = settings["sizing"]
-    return {
+    result = {
         "max_single_position_pct": float(sizing["max_single_position_pct"]),
         "max_portfolio_heat_pct": float(sizing["max_portfolio_heat_pct"]),
         "max_correlated_pct": float(sizing["max_correlated_pct"]),
         "max_city_pct": float(sizing["max_city_pct"]),
-        "max_region_pct": float(sizing["max_region_pct"]),
         "min_order_usd": float(sizing["min_order_usd"]),
     }
+    # K3 cluster collapse: max_region_pct removed from settings.json and
+    # RiskLimits dataclass. Tolerate its absence for forward compatibility.
+    if "max_region_pct" in sizing:
+        result["max_region_pct"] = float(sizing["max_region_pct"])
+    return result
 
 
 def correlation_default_cross_cluster() -> float:
@@ -299,3 +386,81 @@ def correlation_matrix() -> dict[str, dict[str, float]]:
                 f"correlation.matrix[{cluster!r}] has unknown cluster targets: {sorted(bad_targets)}"
             )
     return matrix
+
+
+def exit_fee_rate() -> float:
+    """T6.4: fee_rate parameter for polymarket_fee() when computing
+    HoldValue fee_cost in exit-decision path. See config/settings.json
+    exit.fee_rate for authority + calibration notes.
+
+    T6.4-hardening (surrogate MEDIUM finding): bounded [0, 0.1] to
+    catch operator misconfiguration (e.g., typo 0.05 → 0.5 or 5.0)
+    which would silently trigger mass exit pressure under flag ON.
+    """
+    rate = float(settings["exit"]["fee_rate"])
+    if not (0.0 <= rate <= 0.1):
+        raise ValueError(
+            f"exit.fee_rate={rate} out of sane range [0.0, 0.1]. "
+            f"Real Polymarket fee rates are typically 0.02-0.05; values "
+            f"above 0.1 would make every trade unprofitable. Check "
+            f"config/settings.json exit.fee_rate."
+        )
+    return rate
+
+
+def exit_daily_hurdle_rate() -> float:
+    """T6.4: daily opportunity-cost rate on locked capital for HoldValue
+    time_cost in exit-decision path. See config/settings.json
+    exit.daily_hurdle_rate for authority + calibration notes.
+
+    T6.4-hardening (surrogate MEDIUM finding): bounded [0, 0.01] (1%/day
+    is already an extreme hurdle ≈ 3650%/year annualized). Catches
+    operator typo (0.0001 → 0.001 or 0.01) which would systematically
+    flag most positions as below-hurdle and trigger mass exits.
+    """
+    rate = float(settings["exit"]["daily_hurdle_rate"])
+    if not (0.0 <= rate <= 0.01):
+        raise ValueError(
+            f"exit.daily_hurdle_rate={rate} out of sane range [0.0, 0.01]. "
+            f"Realistic capital-cost hurdles are ≈0.0001 (0.01%/day = "
+            f"3.65%/year); values above 0.01 imply >36.5%/year hurdle "
+            f"which would force near-immediate exits. Check "
+            f"config/settings.json exit.daily_hurdle_rate."
+        )
+    return rate
+
+
+def exit_correlation_crowding_rate() -> float:
+    """T6.4-phase2 correlation-crowding cost rate.
+
+    Cost model: crowding_cost_usd = rate × exposure_ratio × shares × best_bid
+    where exposure_ratio is the output of
+    src.strategy.correlation.correlated_exposure over OTHER held positions.
+    rate=0.01 means 1% of exit notional per unit of correlated exposure.
+
+    Default 0.0 = no-op (correlation crowding adds zero cost; feature is
+    plumbed but disabled). Operator raises after measuring should_exit
+    sensitivity via T6.3-followup-1 replay harness.
+
+    Bounds [0.0, 0.1] — values above 0.1 imply >10% of exit notional per
+    unit-exposure which would aggressively exit any correlated book.
+    """
+    rate = float(settings["exit"]["correlation_crowding_rate"])
+    if not (0.0 <= rate <= 0.1):
+        raise ValueError(
+            f"exit.correlation_crowding_rate={rate} out of sane range "
+            f"[0.0, 0.1]. Values above 0.1 would force near-immediate exit "
+            f"of any correlated book. Check config/settings.json "
+            f"exit.correlation_crowding_rate."
+        )
+    return rate
+
+
+def hold_value_exit_costs_enabled() -> bool:
+    """T6.4 feature flag: when False (default), _buy_yes_exit /
+    _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4
+    behavior preserved during shadow validation). When True, exit
+    decisions include fee + time opportunity cost via
+    HoldValue.compute_with_exit_costs. See config/settings.json
+    feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""
+    return bool(settings["feature_flags"].get("HOLD_VALUE_EXIT_COSTS", False))

@@ -27,12 +27,73 @@ from src.config import (
     ensemble_unimodal_range_epsilon,
 )
 from src.types import Bin
+from src.types.market import bin_counts_from_array
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 from src.types.temperature import TemperatureDelta, Unit
 
 
 def sigma_instrument(unit: Unit) -> TemperatureDelta:
-    """ASOS sensor precision. °C value independently calibrated, not °F/1.8."""
+    """ASOS sensor precision (unit-default).
+
+    Returns the unit-keyed σ from ``settings.json`` (0.5°F / 0.28°C as of
+    2026-04-14). These are calibrated against ASOS / AWOS automated airport
+    weather stations, which is what 44 of Zeus's 51 cities use as their
+    Polymarket settlement source (WU ICAO history endpoint or NOAA
+    weather.gov METAR re-distribution — both pull from the same
+    ICAO/AWOS stream).
+
+    For the 4 cities whose settlement source is NOT an ASOS-class
+    station, prefer ``sigma_instrument_for_city(city)`` which honours the
+    per-city override.
+    """
     return TemperatureDelta(ensemble_instrument_noise(unit), unit)
+
+
+def sigma_instrument_for_city(city) -> TemperatureDelta:
+    """Per-city sensor precision, honouring optional cities.json override.
+
+    Why this exists (2026-04-14)
+    ----------------------------
+    The default ``sigma_instrument(unit)`` is calibrated to ASOS/AWOS
+    airport weather stations (NWS spec: ±0.5°F / ±0.28°C). 44 of Zeus's
+    51 cities settle off ASOS-class stations and the default σ is
+    correct for them. The 4 exceptions are:
+
+    - **Hong Kong (HKO)**: institutional research-grade station at HKO
+      Headquarters (Tsim Sha Tsui). Published precision is 0.1°C raw,
+      reported as integer °C. The effective post-quantization uncertainty
+      is dominated by the 0.5°C rounding bin width, but the underlying
+      sensor is materially tighter than ASOS.
+
+    - **Istanbul (NOAA LTFM)** + **Moscow (NOAA UUWW)**: foreign aviation
+      AWOS read via NOAA / Ogimet METAR stream. Sensor specs are
+      similar to ASOS (international ICAO standard requires ±0.5°C
+      class precision). σ = ASOS default is correct.
+
+    - **Taipei (CWA station 46692)**: Taiwan Central Weather Administration
+      professional station at Zhongzheng. Published precision is 0.1°C,
+      similar quality to HKO.
+
+    For HKO and Taipei, the override should be **tighter** than ASOS to
+    reflect the underlying sensor accuracy. The chosen value (0.18°F /
+    0.10°C) is roughly half the ASOS default — a conservative first
+    estimate that should be empirically refit against historical residuals
+    once the recalibration pipeline produces enough decision-group rows
+    to support per-city σ optimization.
+
+    For Istanbul and Moscow no override is set: the underlying station
+    class is ASOS-equivalent (international airport AWOS). Reading
+    METARs through NOAA/Ogimet does not change the physical sensor.
+
+    Returns
+    -------
+    TemperatureDelta in the city's settlement_unit. Caller can extract
+    ``.value`` for use in numpy noise sampling.
+    """
+    override = getattr(city, "instrument_noise_override", None)
+    if override is not None:
+        return TemperatureDelta(float(override), city.settlement_unit)
+    return sigma_instrument(city.settlement_unit)
 
 
 # Compatibility aliases for tests and assumption audits.
@@ -63,11 +124,15 @@ def select_hours_for_target_date(
         for idx, ts in enumerate(times)
         if EnsembleSignal._parse_forecast_timestamp(ts).astimezone(tz).date() == target_date
     ]
-    if idxs:
-        return np.array(idxs, dtype=int)
-    raise ValueError(
-        f"No forecast hours map to local target date {target_date} in {tz.key}."
-    )
+    if not idxs:
+        raise ValueError(
+            f"No forecast hours map to local target date {target_date} in {tz.key}."
+        )
+    if len(idxs) < 20:
+        raise ValueError(
+            f"Incomplete hourly slice for local target date {target_date} in {tz.key}: {len(idxs)} hours found."
+        )
+    return np.array(idxs, dtype=int)
 
 
 def member_maxes_for_target_date(
@@ -75,14 +140,90 @@ def member_maxes_for_target_date(
     times: list[str],
     timezone_name: str | ZoneInfo,
     target_date: date,
+    *,
+    temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
 ) -> np.ndarray:
-    """Compute per-member daily maxes using the local target-date slice."""
+    """Compute per-member daily extrema using the local target-date slice.
+
+    For high-temperature markets (default), returns per-member daily maxes.
+    For low-temperature markets, returns per-member daily mins.
+
+    Args:
+        temperature_metric: MetricIdentity instance. Callers holding a bare
+            string must convert via MetricIdentity.from_raw() at their own
+            seam (see evaluator.py _normalize_temperature_metric).
+    """
     tz_hours = select_hours_for_target_date(
         target_date,
         timezone_name,
         times=times,
     )
+    if temperature_metric.is_low():
+        return members_hourly[:, tz_hours].min(axis=1)
     return members_hourly[:, tz_hours].max(axis=1)
+
+
+def p_raw_vector_from_maxes(
+    member_maxes: np.ndarray,
+    city: City,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    *,
+    n_mc: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Monte Carlo P_raw vector from per-member daily maxes.
+
+    Spec §2.1: Simulates the full settlement chain:
+    atmosphere -> NWP member -> sensor noise -> METAR rounding -> WU integer display.
+
+    Extracted from ``EnsembleSignal.p_raw_vector`` so offline calibration
+    rebuilds (which load ``member_maxes`` from ``ensemble_snapshots.members_json``
+    without hourly context) and live inference (which slices maxes from hourly
+    data) share **exactly the same MC + noise + rounding code path**. Training
+    and inference MUST use this function — naive member counting (iterating
+    members and testing bin membership directly without Monte Carlo) is
+    forbidden because it produces a distribution shape that diverges from the
+    live P_raw space, and Platt learned on that shape would not generalize.
+
+    Args:
+        member_maxes: per-member daily max temperatures, shape (n_members,),
+            already in ``city.settlement_unit``.
+        city: city config — used for instrument sigma lookup.
+        settlement_semantics: per-market rounding rules.
+        bins: bin partition to compute probabilities over. Must be a complete
+            partition (cover the real line including shoulders) for the result
+            to sum to 1.0; the caller is responsible for grid completeness.
+        n_mc: Monte Carlo iterations. Defaults to ``ensemble_n_mc()`` (10,000).
+        rng: numpy Generator. Callers should seed externally for reproducible
+            tests; defaults to ``np.random.default_rng()``.
+
+    Returns:
+        np.ndarray shape (n_bins,). If the grid is complete the vector sums to
+        1.0; if not, it is normalized so whatever mass landed sums to 1.0.
+    """
+    if n_mc is None:
+        n_mc = ensemble_n_mc()
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_bins = len(bins)
+    n_members = len(member_maxes)
+    p = np.zeros(n_bins)
+    sig = sigma_instrument_for_city(city)
+
+    for _ in range(n_mc):
+        noised = member_maxes + rng.normal(0, sig.value, n_members)
+        measured = settlement_semantics.round_values(noised)
+
+        p += bin_counts_from_array(measured, bins)
+
+    p = p / (float(n_members) * n_mc)
+
+    total = p.sum()
+    if total > 0:
+        p = p / total
+    return p
 
 
 class EnsembleSignal:
@@ -100,6 +241,7 @@ class EnsembleSignal:
         target_date: date,
         settlement_semantics: SettlementSemantics,
         decision_time: datetime | None = None,
+        temperature_metric: MetricIdentity = HIGH_LOCALDAY_MAX,
     ):
         """
         Args:
@@ -109,7 +251,17 @@ class EnsembleSignal:
             target_date: the settlement date
             settlement_semantics: Exact resolution constraints for this target market
             decision_time: Exact time the orchestrator began the evaluation cycle
+            temperature_metric: MetricIdentity instance. Bare strings are rejected.
+                Callers holding a string must convert at their own seam via
+                MetricIdentity.from_raw() (evaluator.py _normalize_temperature_metric).
         """
+        if isinstance(temperature_metric, str):
+            raise TypeError(
+                f"EnsembleSignal requires a MetricIdentity instance for temperature_metric, "
+                f"got str {temperature_metric!r}. "
+                f"Convert via MetricIdentity.from_raw() at the caller seam."
+            )
+
         if members_hourly.shape[0] < ensemble_member_count():
             raise ValueError(
                 f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "
@@ -121,34 +273,44 @@ class EnsembleSignal:
                 f"{members_hourly.shape[1]}."
             )
 
-        # Daily max per member, respecting city timezone for day boundary
-        self.member_maxes = member_maxes_for_target_date(
+        # Daily extrema per member, respecting city timezone for day boundary.
+        # For low-temperature markets, computes daily mins instead of maxes.
+        self.temperature_metric = temperature_metric
+        self.member_extrema = member_maxes_for_target_date(
             members_hourly,
             times,
             city.timezone,
             target_date,
+            temperature_metric=temperature_metric,
         )
         
         # Bias correction: subtract per-city×season systematic ECMWF bias
         # GATED by config flag. Activation requires simultaneous Platt recompute
         # to avoid out-of-domain inference (see cross-module invariant test).
         self.bias_corrected = False
+        # B059: typed error taxonomy (SD-B). Only the legitimate
+        # "settings symbol missing" path is silent; any other exception
+        # (including RuntimeError from _apply_bias_correction signalling a
+        # DB fault) must propagate so the operator sees a real fault
+        # instead of a ghost degraded signal.
         try:
             from src.config import settings
-            if settings._data.get("bias_correction_enabled", False):
-                self.member_maxes = self._apply_bias_correction(
-                    self.member_maxes, city, target_date
-                )
-                self.bias_corrected = True
-        except Exception:
-            pass  # Config access failure → no correction, safe fallback
+            bias_enabled = settings.bias_correction_enabled
+        except (ImportError, AttributeError):
+            bias_enabled = False  # config surface genuinely unavailable
+        if bias_enabled:
+            corrected, applied = self._apply_bias_correction(
+                self.member_extrema, city, target_date
+            )
+            self.member_extrema = corrected
+            self.bias_corrected = applied
         
         self.city = city
         self.target_date = target_date
         self.settlement_semantics = settlement_semantics
         
         # Simulated settlement values (may have floating decimals if precision < 1)
-        self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_maxes)
+        self.member_maxes_settled: np.ndarray = self._simulate_settlement(self.member_extrema)
 
     def _simulate_settlement(self, values: np.ndarray) -> np.ndarray:
         return self.settlement_semantics.round_values(values)
@@ -163,49 +325,55 @@ class EnsembleSignal:
     @staticmethod
     def _apply_bias_correction(
         maxes: np.ndarray, city: City, target_date: date
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, bool]:
         """Apply per-city×season ECMWF bias correction to member maxes.
 
         model_bias.bias = mean(forecast - actual). Positive = model too warm.
         Subtract bias × discount_factor from member maxes.
 
+        Returns (corrected_maxes, applied) where applied=False if correction failed.
+
         INVARIANT: If this runs for live signals, ALL calibration_pairs must
         also have been computed with bias correction. The cross-module test
         test_calibration_pairs_use_same_bias_correction_as_live enforces this.
         """
+        # B061: wrap the world-DB connection in contextlib.closing so any
+        # inner failure (season_from_date, execute, fetchone) still closes
+        # the handle. Long-running daemons would otherwise exhaust the
+        # SQLite connection pool on repeated bias-correction faults.
+        import contextlib
+        from src.state.db import get_world_connection
+        from src.calibration.manager import season_from_date
+
         try:
-            from src.state.db import get_shared_connection
+            with contextlib.closing(get_world_connection()) as conn:
+                season = season_from_date(target_date.isoformat(), lat=city.lat)
+                row = conn.execute(
+                    "SELECT bias, discount_factor, n_samples FROM model_bias "
+                    "WHERE city = ? AND season = ? AND source = 'ecmwf'",
+                    (city.name, season),
+                ).fetchone()
 
-            from src.calibration.manager import season_from_date
-
-            season = season_from_date(target_date.isoformat(), lat=city.lat)
-
-            conn = get_shared_connection()
-            row = conn.execute(
-                "SELECT bias, discount_factor, n_samples FROM model_bias "
-                "WHERE city = ? AND season = ? AND source = 'ecmwf'",
-                (city.name, season),
-            ).fetchone()
-            conn.close()
-
-            if row and row["n_samples"] >= 20:
-                discount = row["discount_factor"] if row["discount_factor"] else 0.7
-                correction = row["bias"] * discount
-                import logging
-                logging.getLogger(__name__).info(
-                    "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
-                    city.name, season, row["bias"], discount,
-                    correction, row["n_samples"],
-                )
-                return maxes - correction
+                if row and row["n_samples"] >= 20:
+                    discount = row["discount_factor"] if row["discount_factor"] is not None else 0.7
+                    correction = row["bias"] * discount
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
+                        city.name, season, row["bias"], discount,
+                        correction, row["n_samples"],
+                    )
+                    return maxes - correction, True
 
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(
                 "Bias correction failed for %s: %s", city.name, e
             )
+            # Re-raise explicit database infrastructure fault rather than masking it
+            raise RuntimeError(f"Bias correction database fault for {city.name}: {e}") from e
 
-        return maxes
+        return maxes, False
 
     @staticmethod
     def _select_hours_for_date(
@@ -224,58 +392,37 @@ class EnsembleSignal:
         return select_hours_for_target_date(target_date, tz, times=times)
 
     def p_raw_vector(
-        self, bins: list[Bin], n_mc: int | None = None
+        self, bins: list[Bin], n_mc: int | None = None, rng=None
     ) -> np.ndarray:
         """Probability vector over all bins with instrument noise.
 
         Spec §2.1: Monte Carlo with ε ~ N(0, σ_instrument²) per member.
         Simulates full settlement chain according to SettlementSemantics rules.
 
+        Delegates to ``p_raw_vector_from_maxes`` (module-level) so offline
+        calibration rebuilds that do not have hourly context share the exact
+        same code path. The seed=None default preserves legacy behavior;
+        tests that require determinism should patch ``np.random.default_rng``
+        or pass ``rng`` through the module-level function directly.
+
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
-        if n_mc is None:
-            n_mc = ensemble_n_mc()
-
-        n_bins = len(bins)
-        n_members = len(self.member_maxes)
-        p = np.zeros(n_bins)
-
-        rng = np.random.default_rng(seed=None)  # Tests should seed externally
-        # Use city-appropriate instrument noise (°C independently calibrated)
-        sig = sigma_instrument(self.city.settlement_unit)
-
-        for _ in range(n_mc):
-            # Add instrument noise to each member's daily max
-            noised = self.member_maxes + rng.normal(0, sig.value, n_members)
-            measured = self._simulate_settlement(noised)
-
-            for i, b in enumerate(bins):
-                if b.is_open_low:
-                    # Shoulder low: "X or below"
-                    p[i] += np.sum(measured <= b.high)
-                elif b.is_open_high:
-                    # Shoulder high: "X or higher"
-                    p[i] += np.sum(measured >= b.low)
-                else:
-                    p[i] += np.sum(
-                        (measured >= b.low) & (measured <= b.high)
-                    )
-
-        p = p / (float(n_members) * n_mc)
-
-        # Normalize to sum=1.0. If total=0 (impossible but defensive), return as-is.
-        total = p.sum()
-        if total > 0:
-            p = p / total
-        return p
+        return p_raw_vector_from_maxes(
+            self.member_extrema,
+            self.city,
+            self.settlement_semantics,
+            bins,
+            n_mc=n_mc,
+            rng=rng,
+        )
 
     def spread(self) -> TemperatureDelta:
         """Ensemble spread (σ of member daily maxes) as typed TemperatureDelta."""
-        return TemperatureDelta(float(np.std(self.member_maxes)), self.city.settlement_unit)
+        return TemperatureDelta(float(np.std(self.member_extrema)), self.city.settlement_unit)
 
     def spread_float(self) -> float:
         """Spread as bare float (legacy compatibility, used by DB storage)."""
-        return float(np.std(self.member_maxes))
+        return float(np.std(self.member_extrema))
 
     def is_bimodal(self) -> bool:
         """Detect regime split (e.g., cold front timing uncertainty).
@@ -283,11 +430,11 @@ class EnsembleSignal:
         Spec §2.1: Uses KDE peak counting with argrelextrema.
         Fallback: gap heuristic if KDE fails (e.g., all members identical).
         """
-        maxes = self.member_maxes
+        maxes = self.member_extrema
         rng = float(maxes.max() - maxes.min())
 
-        # Unit-aware: if spread < 1 instrument noise, members are in consensus
-        if rng < sigma_instrument(self.city.settlement_unit).value:
+        # Per-city: if spread < 1 instrument noise, members are in consensus
+        if rng < sigma_instrument_for_city(self.city).value:
             return False  # All members agree — definitely unimodal
 
         try:
@@ -296,8 +443,12 @@ class EnsembleSignal:
             density = kde(x)
             peaks = argrelextrema(density, np.greater, order=ensemble_bimodal_kde_order())[0]
             return len(peaks) >= 2
-        except Exception:
-            # Fallback: gap heuristic
+        except (np.linalg.LinAlgError, ValueError):
+            # B062: KDE numerical failures (singular covariance on
+            # degenerate input, bad shape on empty slice) are legitimate
+            # degraded states — fall back to the gap heuristic. Any other
+            # exception (TypeError, AttributeError, ImportError) is a code
+            # bug and must NOT be silently swallowed.
             sorted_maxes = np.sort(maxes)
             gaps = np.diff(sorted_maxes)
             return rng > 0 and float(gaps.max()) / rng > ensemble_bimodal_gap_ratio()
@@ -305,10 +456,17 @@ class EnsembleSignal:
     def boundary_sensitivity(self, boundary: float) -> float:
         """Fraction of 51 members within ±σ_instrument of a bin boundary.
 
-        Window is unit-aware: 0.5°F for US cities, 0.28°C for metric cities.
+        Window is per-city: ASOS 0.5°F / 0.28°C for the 49 airport-station
+        cities, with optional override for HKO and Taiwan CWA stations whose
+        sensors are tighter than ASOS. See ``sigma_instrument_for_city``.
         High sensitivity → probability estimate is fragile at this boundary.
         """
-        window = sigma_instrument(self.city.settlement_unit).value
+        window = sigma_instrument_for_city(self.city).value
         return float(
-            np.sum(np.abs(self.member_maxes - boundary) < window)
-        ) / len(self.member_maxes)
+            np.sum(np.abs(self.member_extrema - boundary) < window)
+        ) / len(self.member_extrema)
+
+    @property
+    def member_maxes(self) -> np.ndarray:
+        """Deprecated alias — use member_extrema. For LOW this is mins (semantic disambiguation deferred to P10E+)."""
+        return self.member_extrema

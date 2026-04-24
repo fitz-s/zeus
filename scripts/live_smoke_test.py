@@ -51,13 +51,13 @@ def main():
     from src.data.polymarket_client import PolymarketClient
 
     # Step 1: Initialize live client
-    clob = step("init_live_client", lambda: PolymarketClient(paper_mode=False) or "initialized")
+    clob = step("init_live_client", lambda: PolymarketClient() or "initialized")
 
     if clob is None:
         logger.error("Cannot initialize live client. Aborting.")
         return dump_results()
 
-    clob = PolymarketClient(paper_mode=False)
+    clob = PolymarketClient()
 
     # Step 2: Fetch balance
     step("get_balance", lambda: f"${clob.get_balance():.6f}")

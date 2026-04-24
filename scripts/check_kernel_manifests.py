@@ -3,12 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from _yaml_bootstrap import import_yaml
+
 yaml = import_yaml()
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 def load_yaml(path: str) -> dict:
     return yaml.safe_load((ROOT / path).read_text())
+
 
 def main() -> int:
     kernel = load_yaml("architecture/kernel_manifest.yaml")
@@ -16,11 +19,11 @@ def main() -> int:
     zones = load_yaml("architecture/zones.yaml")
     negative = load_yaml("architecture/negative_constraints.yaml")
     maturity = load_yaml("architecture/maturity_model.yaml")
-    sql = (ROOT / "migrations/2026_04_02_architecture_kernel.sql").read_text()
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
 
     required_files = [
-        "docs/architecture/zeus_durable_architecture_spec.md",
-        "docs/governance/zeus_change_control_constitution.md",
+        "docs/authority/zeus_current_architecture.md",
+        "docs/authority/zeus_change_control_constitution.md",
         "architecture/kernel_manifest.yaml",
         "architecture/invariants.yaml",
         "architecture/zones.yaml",
@@ -72,6 +75,7 @@ def main() -> int:
 
     print("kernel manifests ok")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,0 +1,54 @@
+{
+  "task": "authority kernel gamechanger package closeout",
+  "packet": "docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md",
+  "route_source": "ralplan",
+  "route_evidence": [
+    ".omx/plans/kernel-gamechanger-ralplan-2026-04-23.md",
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md",
+    "docs/operations/current_state.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "docs/authority/AGENTS.md",
+    "docs/authority/zeus_current_architecture.md",
+    "docs/authority/zeus_current_delivery.md",
+    "architecture/docs_registry.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md",
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json"
+  ],
+  "changed_files": [
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md",
+    "docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    ".code-review-graph/graph.db",
+    "new data/source audit",
+    "runtime/data/source implementation"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --history-lore --json",
+    "python scripts/topology_doctor.py --current-state-receipt-bound --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_authority_kernel_gamechanger/plan.md --work-record-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_kernel_gamechanger/receipt.json --json",
+    "find docs/authority -maxdepth 1 -type f -print | sort",
+    "wc -l docs/operations/current_state.md docs/operations/current_data_state.md docs/operations/current_source_validity.md",
+    "git diff --check -- <closeout files>"
+  ]
+}

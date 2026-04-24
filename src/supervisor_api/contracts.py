@@ -15,6 +15,53 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 
+class SupervisorContractError(ValueError):
+    """Raised when a supervisor API contract field violates its invariant."""
+    pass
+
+
+# B006: valid environment values for every supervisor-facing object.
+# Matches the docstring promise at the top of this module. Update this
+# tuple (and the tests in test_supervisor_contracts.py) if a new env
+# is introduced; do NOT add ad-hoc env strings at call sites.
+#
+# B074 [critic amendment]: "unknown_env" is a provenance-preserving
+# sentinel used by state/portfolio.py when the canonical projection row
+# carries no env field (fallback path). It is a valid contract value
+# but is UNVERIFIED authority-wise; callers should check via
+# `is_unverified_env()` before making any env-scoped authority decision.
+_VALID_ENVS: tuple[str, ...] = ("live", "test", "unknown_env")
+
+_UNVERIFIED_ENVS: tuple[str, ...] = ("unknown_env",)
+
+
+def is_unverified_env(env: str) -> bool:
+    """B074 helper: True when env is a provenance-sentinel that must be
+    treated as UNVERIFIED authority (row did not carry a real env).
+
+    Callers that make env-scoped decisions (mode-routing, dashboard
+    segmentation, live-mode P&L attribution) should refuse or
+    quarantine rows where this returns True, rather than silently
+    bucketing them into the current runtime mode.
+    """
+    return env in _UNVERIFIED_ENVS
+
+
+def _check_env(obj: object) -> None:
+    env = getattr(obj, "env", "")
+    if not env:
+        raise SupervisorContractError(
+            f"{type(obj).__name__}.env must not be empty — "
+            "every supervisor object must declare its environment "
+            "(e.g. 'live', 'test')"
+        )
+    if env not in _VALID_ENVS:
+        raise SupervisorContractError(
+            f"{type(obj).__name__}.env={env!r} is not one of "
+            f"the valid environments {_VALID_ENVS} — B006 contract"
+        )
+
+
 @dataclass
 class Observation:
     """A fact Venus observed about Zeus's runtime state."""
@@ -30,6 +77,9 @@ class Observation:
     source: str = "zeus_runtime"
     provenance_ref: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _check_env(self)
+
 
 @dataclass
 class BeliefMismatch:
@@ -41,6 +91,10 @@ class BeliefMismatch:
     severity: Literal["WARN", "CRITICAL"] = "WARN"
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -54,6 +108,10 @@ class Gap:
     proposed_antibody: Optional[str] = None
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -69,6 +127,10 @@ class Proposal:
     risk_scope: Literal["paper_only", "live_path", "docs_only"] = "paper_only"
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -88,6 +150,33 @@ class SupervisorCommand:
     note: Optional[str] = None
     env: str = ""
     source: str = "venus"
+    timestamp: str = ""
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)
+        if not getattr(self, "source", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.source must not be empty"
+            )
+        if not getattr(self, "reason", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.reason must not be empty"
+            )
+        if not getattr(self, "timestamp", ""):
+            raise SupervisorContractError(
+                "SupervisorCommand.timestamp must not be empty"
+            )
+        if self.command == "set_strategy_gate":
+            if not self.strategy or self.enabled is None:
+                raise SupervisorContractError(
+                    "set_strategy_gate requires strategy and enabled flags"
+                )
+        elif self.command == "acknowledge_quarantine_clear":
+            if not self.token_id:
+                raise SupervisorContractError(
+                    "acknowledge_quarantine_clear requires token_id"
+                )
 
 
 @dataclass
@@ -100,6 +189,10 @@ class ChangeOutcome:
     notes: str = ""
     env: str = ""
     source: str = "venus"
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)
 
 
 @dataclass
@@ -126,3 +219,7 @@ class Antibody:
     recurrence_class: str
     deployed_at: str = ""
     env: str = ""
+    provenance_ref: Optional[str] = None  # B005
+
+    def __post_init__(self) -> None:
+        _check_env(self)

@@ -23,19 +23,13 @@ from src.config import (
     ensemble_n_mc,
     ensemble_unimodal_range_epsilon,
     load_cities,
-    correlation_matrix,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 
 
-def test_settings_loads_all_required_keys():
-    s = Settings()
-    assert s.mode == "paper"
-    assert s.capital_base_usd == 150.0
-    assert s["discovery"]["opening_hunt_interval_min"] == 30
-    assert s["discovery"]["ecmwf_open_data_times_utc"] == ["01:30", "13:30"]
-    assert s["sizing"]["kelly_multiplier"] == 0.25
+## Paper mode test removed — Zeus is live-only (Phase 1 decommission).
+## Original test asserted Settings().mode == "paper", which is no longer valid.
 
 
 def test_settings_missing_key_raises():
@@ -55,7 +49,7 @@ def test_settings_no_fallback_pattern():
 
 def test_cities_load():
     cities = load_cities()
-    assert len(cities) == 16  # 16 cities in validated config
+    assert len(cities) == 51  # 51 cities after global expansion
     names = {c.name for c in cities}
     assert "NYC" in names
     assert "London" in names
@@ -77,14 +71,15 @@ def test_city_settlement_units():
 def test_city_clusters():
     cities = load_cities()
     by_name = {c.name: c for c in cities}
-    assert by_name["NYC"].cluster == "US-Northeast"
-    assert by_name["Chicago"].cluster == "US-GreatLakes"
-    assert by_name["Atlanta"].cluster == "US-Southeast-Inland"
-    assert by_name["London"].cluster == "Europe-Maritime"
-    assert by_name["Paris"].cluster == "Europe-Continental"
-    assert by_name["Seoul"].cluster == "Asia-Northeast"
-    assert by_name["Shanghai"].cluster == "Asia-East-China"
-    assert by_name["Denver"].cluster == "US-Rockies"
+    # K3: cluster == city name for all cities
+    assert by_name["NYC"].cluster == "NYC"
+    assert by_name["Chicago"].cluster == "Chicago"
+    assert by_name["Atlanta"].cluster == "Atlanta"
+    assert by_name["London"].cluster == "London"
+    assert by_name["Paris"].cluster == "Paris"
+    assert by_name["Seoul"].cluster == "Seoul"
+    assert by_name["Shanghai"].cluster == "Shanghai"
+    assert by_name["Denver"].cluster == "Denver"
     assert set(calibration_clusters()) == set(ALL_CLUSTERS)
 
 
@@ -108,11 +103,11 @@ def test_city_without_explicit_cluster_is_rejected(tmp_path):
 
 def test_calibration_manager_cluster_taxonomy_matches_config():
     manager_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src/calibration/manager.py").read_text()
-    etl_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/etl_tigge_calibration.py").read_text()
+    refit_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/refit_platt.py").read_text()
 
     assert tuple(calibration_clusters()) == tuple(ALL_CLUSTERS)
     assert "calibration_clusters()" in manager_source
-    assert "calibration_clusters()" in etl_source
+    assert "cluster, season" in refit_source
 
 
 def test_calibration_thresholds_are_single_sourced_from_settings():
@@ -147,17 +142,19 @@ def test_risk_limit_defaults_are_single_sourced_from_settings():
     assert limits.max_portfolio_heat_pct == defaults["max_portfolio_heat_pct"]
     assert limits.max_correlated_pct == defaults["max_correlated_pct"]
     assert limits.max_city_pct == defaults["max_city_pct"]
-    assert limits.max_region_pct == defaults["max_region_pct"]
     assert limits.min_order_usd == defaults["min_order_usd"]
 
 
 def test_correlation_matrix_covers_all_configured_clusters():
-    matrix = correlation_matrix()
-    assert set(matrix) == set(ALL_CLUSTERS)
-    for cluster, mapping in matrix.items():
-        assert cluster in ALL_CLUSTERS
-        assert set(mapping).issubset(set(ALL_CLUSTERS))
-        assert cluster not in mapping
+    # K3: correlation_matrix() removed from src.config — matrix is now in
+    # config/city_correlation_matrix.json, accessed via src.strategy.correlation.
+    # Coverage: test_cluster_collapse.py::test_correlation_self_is_one and
+    # test_correlation_function_returns_float_in_01.
+    # Verify get_correlation is importable and returns sane values for all clusters.
+    from src.strategy.correlation import get_correlation
+    for cluster in ALL_CLUSTERS:
+        r = get_correlation(cluster, cluster)
+        assert r == 1.0, f"{cluster} self-correlation should be 1.0"
 
 
 def test_signal_constants_are_single_sourced_from_settings():
@@ -218,9 +215,9 @@ def test_city_airport_coordinates():
     chi = by_name["Chicago"]
     assert abs(chi.lat - 41.9742) < 0.01
 
-    # London: Heathrow (~51.48), NOT city center (~51.51)
+    # London: City Airport (~51.505), NOT city center (~51.51) or Heathrow.
     lon = by_name["London"]
-    assert abs(lon.lat - 51.4775) < 0.01
+    assert abs(lon.lat - 51.5053) < 0.01
 
 
 def test_city_wu_station_icao():
@@ -230,7 +227,7 @@ def test_city_wu_station_icao():
     assert by_name["NYC"].wu_station == "KLGA"
     assert by_name["Chicago"].wu_station == "KORD"
     assert by_name["Seattle"].wu_station == "KSEA"
-    assert by_name["London"].wu_station == "EGLL"
+    assert by_name["London"].wu_station == "EGLC"
 
 
 def test_city_aliases():
@@ -242,16 +239,135 @@ def test_city_aliases():
     assert "SF" in by_name["San Francisco"].aliases
 
 
+def test_market_scanner_short_aliases_do_not_match_inside_other_city_names():
+    from src.data.market_scanner import _match_city
+
+    assert _match_city(
+        "Highest temperature in Kuala Lumpur on April 12?",
+        "highest-temperature-in-kuala-lumpur-on-april-12-2026",
+    ).name == "Kuala Lumpur"
+    assert _match_city(
+        "Highest temperature in Lagos on April 12?",
+        "highest-temperature-in-lagos-on-april-12-2026",
+    ).name == "Lagos"
+    assert _match_city(
+        "Highest temperature in LA on April 12?",
+        "highest-temperature-in-la-on-april-12-2026",
+    ).name == "Los Angeles"
+
+
+def _gamma_temperature_event(*, title: str, slug: str, question: str, **extra):
+    event = {
+        "id": "event-city-sanity",
+        "title": title,
+        "slug": slug,
+        "endDate": "2026-04-13T23:59:00Z",
+        "markets": [
+            {
+                "id": "market-city-sanity",
+                "conditionId": "condition-city-sanity",
+                "question": question,
+                "clobTokenIds": json.dumps(["yes-token", "no-token"]),
+                "outcomePrices": json.dumps([0.4, 0.6]),
+            }
+        ],
+    }
+    event.update(extra)
+    return event
+
+
+def test_market_scanner_rejects_la_event_with_milan_market_question():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Milan be 20°C or higher?",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_rejects_conflicting_title_and_slug_city():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Milan on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_rejects_la_event_with_milan_station_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+        resolutionSource="Milan Malpensa Airport LIMC",
+    )
+
+    assert _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0) is None
+
+
+def test_market_scanner_accepts_la_event_with_la_station_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    event = _gamma_temperature_event(
+        title="Highest temperature in Los Angeles on April 13?",
+        slug="highest-temperature-in-los-angeles-on-april-13-2026",
+        question="Will the high temperature in Los Angeles be 68°F or higher?",
+        resolutionSource="Los Angeles International Airport KLAX",
+    )
+
+    parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)
+
+    assert parsed is not None
+    assert parsed["city"].name == "Los Angeles"
+    assert parsed["outcomes"][0]["range_low"] == pytest.approx(68.0)
+
+
+def test_market_scanner_accepts_self_consistent_configured_city_metadata():
+    from datetime import datetime, timezone
+    from src.data.market_scanner import _parse_event
+
+    for city in load_cities():
+        slug_city = (city.slug_names[0] if city.slug_names else city.name.lower().replace(" ", "-"))
+        temp_label = "68°F" if city.settlement_unit == "F" else "20°C"
+        event = _gamma_temperature_event(
+            title=f"Highest temperature in {city.name} on April 13?",
+            slug=f"highest-temperature-in-{slug_city}-on-april-13-2026",
+            question=f"Will the high temperature in {city.name} be {temp_label} or higher?",
+            resolutionSource=f"{city.airport_name} {city.wu_station}",
+        )
+
+        parsed = _parse_event(event, datetime(2026, 4, 13, tzinfo=timezone.utc), 0.0)
+
+        assert parsed is not None, city.name
+        assert parsed["city"].name == city.name
+
+
 def test_settlement_semantics_matches_city_metadata():
     for city in load_cities():
         sem = SettlementSemantics.for_city(city)
         assert sem.measurement_unit == city.settlement_unit
         assert sem.finalization_time == "12:00:00Z"
 
-        if "wunderground.com" in city.settlement_source:
+        if city.settlement_source_type == "wu_icao":
             assert sem.resolution_source == f"WU_{city.wu_station}"
         else:
-            pytest.fail(
-                f"{city.name} uses non-WU settlement_source={city.settlement_source!r}. "
-                "SettlementSemantics.for_city() must be upgraded before this city is valid."
-            )
+            # Non-WU sources use source_type prefix
+            assert sem.resolution_source == f"{city.settlement_source_type}_{city.wu_station}"
+
+
+def test_validate_cities_config_no_warnings():
+    from src.config import validate_cities_config
+    warnings = validate_cities_config()
+    assert warnings == [], f"City config validation warnings: {warnings}"

@@ -3,24 +3,41 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import legacy_state_path, mode_state_path, settings
+from src.config import ACTIVE_MODES, get_mode, legacy_state_path, mode_state_path
+
+logger = logging.getLogger(__name__)
+
+
+class ModeMismatchError(ValueError):
+    """Raised when a truth file's mode tag does not match the caller's requested mode.
+
+    B077 / SD-A: read_mode_truth_json must validate that the file on disk was
+    written for the same mode the caller expects. Cross-mode truth-file
+    collisions produce this error rather than silently serving wrong-mode data.
+    """
 
 
 LEGACY_STATE_FILES = (
     "status_summary.json",
     "positions.json",
     "strategy_tracker.json",
+    "platt_models_low.json",
+    "calibration_pairs_low.json",
+)
+_LOW_LANE_FILES: frozenset[str] = frozenset(
+    f for f in LEGACY_STATE_FILES if "platt_models_low" in f or "calibration_pairs_low" in f
 )
 LEGACY_ARCHIVE_DIR = legacy_state_path("legacy_state_archive")
 
 
 def current_mode(mode: str | None = None) -> str:
-    return mode or os.environ.get("ZEUS_MODE", settings.mode)
+    return mode or get_mode()
 
 
 def build_truth_metadata(
@@ -30,25 +47,38 @@ def build_truth_metadata(
     generated_at: str | None = None,
     deprecated: bool = False,
     archived_to: str | None = None,
+    authority: str = "UNVERIFIED",
+    temperature_metric: str | None = None,
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     mode = current_mode(mode)
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
-    return {
+    # Fail-closed: low-lane files stamped VERIFIED without temperature_metric silently
+    # misidentify the metric. Downgrade to UNVERIFIED to enforce explicit tagging.
+    resolved_authority = authority
+    if authority == "VERIFIED" and temperature_metric is None and Path(path).name in _LOW_LANE_FILES:
+        resolved_authority = "UNVERIFIED"
+    meta: dict[str, Any] = {
         "mode": mode,
         "generated_at": generated_at,
         "source_path": str(path),
         "stale_age_seconds": 0.0,
         "deprecated": deprecated,
         "archived_to": archived_to,
+        "authority": resolved_authority,
     }
+    if temperature_metric is not None:
+        meta["temperature_metric"] = temperature_metric
+    if data_version is not None:
+        meta["data_version"] = data_version
+    return meta
 
 
 def infer_mode_from_path(path: Path) -> str | None:
     stem = path.stem
-    if stem.endswith("-paper"):
-        return "paper"
-    if stem.endswith("-live"):
-        return "live"
+    for mode in ACTIVE_MODES:
+        if stem.endswith(f"-{mode}"):
+            return mode
     return None
 
 
@@ -58,12 +88,18 @@ def annotate_truth_payload(
     *,
     mode: str | None = None,
     generated_at: str | None = None,
+    authority: str = "UNVERIFIED",
+    temperature_metric: str | None = None,
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     enriched = dict(payload)
     enriched["truth"] = build_truth_metadata(
         path,
         mode=mode,
         generated_at=generated_at,
+        authority=authority,
+        temperature_metric=temperature_metric,
+        data_version=data_version,
     )
     return enriched
 
@@ -90,7 +126,21 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
                 0.0,
                 (datetime.now(timezone.utc) - gen_dt).total_seconds(),
             )
-        except Exception:
+        except (ValueError, TypeError, AttributeError, OverflowError) as exc:
+            # B079 [critic amendment]: narrow the silent-None fallback.
+            # fromisoformat raises ValueError on malformed strings;
+            # .replace/str coercion on a non-str value raises
+            # AttributeError/TypeError; timedelta arithmetic with a
+            # pathological datetime can raise OverflowError. These are
+            # all *data* defects and warrant the None-fallback. Any
+            # other exception (NameError, ImportError, etc.) is a code
+            # defect and must propagate per SD-B.
+            logger.warning(
+                "TRUTH_GENERATED_AT_UNPARSEABLE: path=%s generated_at=%r error=%s",
+                path,
+                generated_at,
+                exc,
+            )
             stale_age_seconds = None
     truth = dict(data.get("truth", {})) if isinstance(data.get("truth"), dict) else {}
     truth.setdefault("mode", infer_mode_from_path(path))
@@ -101,7 +151,22 @@ def read_truth_json(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def read_mode_truth_json(filename: str, *, mode: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    return read_truth_json(mode_state_path(filename, current_mode(mode)))
+    if mode is None:
+        raise ModeMismatchError(
+            "mode=None is not allowed — pass an explicit mode string (e.g. mode=get_mode()). "
+            "Implicit None bypasses the ModeMismatchError cross-mode guard (B077 / SD-A)."
+        )
+    path = mode_state_path(filename, mode=mode)
+    data, truth = read_truth_json(path)
+    if mode is not None:
+        file_mode = truth.get("mode")
+        if file_mode is not None and file_mode != mode:
+            raise ModeMismatchError(
+                f"Truth file mode mismatch: caller requested mode={mode!r} but "
+                f"file at {path} is tagged mode={file_mode!r}. "
+                "This indicates a cross-mode routing error (B077 / SD-A)."
+            )
+    return data, truth
 
 
 def legacy_tombstone_payload(
@@ -123,8 +188,8 @@ def legacy_tombstone_payload(
                 archived_to=archived_to,
             ),
             "replacement_paths": {
-                "paper": str(mode_state_path(filename, "paper")),
-                "live": str(mode_state_path(filename, "live")),
+                mode: str(mode_state_path(filename, mode=mode))
+                for mode in ACTIVE_MODES
             },
         },
     }
@@ -158,7 +223,7 @@ def deprecate_legacy_truth_files() -> list[dict[str, Any]]:
 
 
 def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
-    path = mode_state_path(filename, mode)
+    path = mode_state_path(filename)
     if not path.exists():
         return {"path": str(path), "updated": False, "missing": True}
 
@@ -174,7 +239,7 @@ def backfill_mode_truth_metadata(filename: str, *, mode: str) -> dict[str, Any]:
     return {"path": str(path), "updated": True, "missing": False}
 
 
-def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ("paper", "live")) -> list[dict[str, Any]]:
+def backfill_truth_metadata_for_modes(modes: tuple[str, ...] = ACTIVE_MODES) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for mode in modes:
         for filename in LEGACY_STATE_FILES:

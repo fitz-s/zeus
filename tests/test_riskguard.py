@@ -205,12 +205,16 @@ def _insert_control_override(
     effective_until: str | None,
     precedence: int = 100,
 ) -> None:
+    # B070: control_overrides is now a VIEW. Seed the append-only history
+    # directly with operation='upsert' and recorded_at=issued_at so the VIEW
+    # projects this row as the latest.
     conn.execute(
         """
-        INSERT INTO control_overrides (
+        INSERT INTO control_overrides_history (
             override_id, target_type, target_key, action_type, value,
-            issued_by, issued_at, effective_until, reason, precedence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upsert', ?)
         """,
         (
             override_id,
@@ -223,6 +227,7 @@ def _insert_control_override(
             effective_until,
             "test",
             precedence,
+            issued_at,
         ),
     )
 
@@ -440,7 +445,7 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_truth_source"] == "working_state_fallback"
         assert details["portfolio_loader_status"] == "missing_table"
         assert details["portfolio_fallback_active"] is True
-        assert details["portfolio_fallback_reason"] == "missing_table"
+        assert details["portfolio_fallback_reason"] == "canonical snapshot unavailable: missing_table"
         assert details["portfolio_position_count"] == 0
         assert details["portfolio_capital_source"] == "working_state_metadata"
         assert details["initial_bankroll"] == pytest.approx(150.0)
@@ -543,7 +548,7 @@ class TestRiskGuardSettlementSource:
 
         assert details["strategy_settlement_summary"]["center_buy"]["count"] == 2
         assert details["strategy_settlement_summary"]["center_buy"]["pnl"] == pytest.approx(3.0)
-        assert details["strategy_settlement_summary"]["center_buy"]["accuracy"] == pytest.approx(0.5)
+        assert details["strategy_settlement_summary"]["center_buy"]["trade_profitability_rate"] == pytest.approx(0.5)
         assert details["strategy_settlement_summary"]["opening_inertia"]["count"] == 1
 
     def test_tick_records_entry_execution_summary(self, monkeypatch, tmp_path):
@@ -564,35 +569,31 @@ class TestRiskGuardSettlementSource:
         )
 
         conn = get_connection(zeus_db)
-        from src.state.db import init_schema, log_position_event
+        from src.state.db import init_schema
         init_schema(conn)
-        pos = Position(
-            trade_id="exec-1",
-            market_id="m1",
-            city="NYC",
-            cluster="US-Northeast",
-            target_date="2026-04-01",
-            bin_label="39-40°F",
-            direction="buy_yes",
-            strategy="center_buy",
-            edge_source="center_buy",
-            env="paper",
-        )
-        log_position_event(conn, "ORDER_ATTEMPTED", pos, details={"status": "pending"}, source="execution")
-        log_position_event(conn, "ORDER_FILLED", pos, details={"status": "filled"}, source="execution")
-        reject_pos = Position(
-            trade_id="exec-2",
-            market_id="m2",
-            city="NYC",
-            cluster="US-Northeast",
-            target_date="2026-04-01",
-            bin_label="41-42°F",
-            direction="buy_yes",
-            strategy="opening_inertia",
-            edge_source="opening_inertia",
-            env="paper",
-        )
-        log_position_event(conn, "ORDER_REJECTED", reject_pos, details={"status": "rejected"}, source="execution")
+        # Insert canonical position_events directly (P9: log_position_event deleted)
+        import json as _json
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-1:intent:1", "exec-1", 1, 1, "POSITION_OPEN_INTENT",
+               "2026-04-01T10:00:00Z", "center_buy", "test", '{}'))
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-1:filled:2", "exec-1", 1, 2, "ENTRY_ORDER_FILLED",
+               "2026-04-01T10:01:00Z", "center_buy", "test", '{}'))
+        conn.execute("""
+            INSERT INTO position_events
+            (event_id, position_id, event_version, sequence_no, event_type,
+             occurred_at, strategy_key, source_module, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
+               "2026-04-01T10:02:00Z", "opening_inertia", "test", '{}'))
         conn.commit()
         conn.close()
 
@@ -619,10 +620,17 @@ class TestRiskGuardSettlementSource:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        # Post-K1: record_trade / set_accounting_metadata are no-ops; tracker.summary()
+        # reads from position_events via query_authoritative_settlement_rows. Stub
+        # summary() to return fixed data so this test stays focused on riskguard's
+        # serialization of the tracker diagnostics, not on the tracker's own projection.
         tracker = strategy_tracker_module.StrategyTracker()
-        tracker.record_trade({"trade_id": "t1", "strategy": "center_buy", "pnl": 3.0, "entered_at": "2026-04-01T00:00:00Z", "edge": 0.12})
-        tracker.record_trade({"trade_id": "t2", "strategy": "center_buy", "pnl": -1.0, "entered_at": "2026-04-02T00:00:00Z", "edge": 0.08})
-        tracker.set_accounting_metadata(current_regime_started_at="2026-04-01T00:00:00Z")
+        tracker.summary = lambda conn=None: {
+            "center_buy": {"trades": 2, "pnl": 2.0},
+            "shoulder_sell": {"trades": 0, "pnl": 0.0},
+            "opening_inertia": {"trades": 0, "pnl": 0.0},
+            "settlement_capture": {"trades": 0, "pnl": 0.0},
+        }
 
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
@@ -641,7 +649,8 @@ class TestRiskGuardSettlementSource:
 
         assert details["strategy_tracker_summary"]["center_buy"]["trades"] == 2
         assert details["strategy_tracker_summary"]["center_buy"]["pnl"] == pytest.approx(2.0)
-        assert details["strategy_tracker_accounting"]["current_regime_started_at"] == "2026-04-01T00:00:00Z"
+        # Post-K1: set_accounting_metadata is a no-op; current_regime_started_at is always ""
+        assert details["strategy_tracker_accounting"]["current_regime_started_at"] == ""
         assert details["recommended_strategy_gates"] == []
 
 
@@ -772,11 +781,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "insufficient_history"
-        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_status"] == "degraded:insufficient_history"
+        assert details["daily_loss_level"] == RiskLevel.RED.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -811,11 +820,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "inconsistent_history"
-        assert details["daily_loss_level"] == RiskLevel.YELLOW.value
+        assert details["daily_loss_status"] == "degraded:inconsistent_history"
+        assert details["daily_loss_level"] == RiskLevel.RED.value
         assert details["daily_loss_reference"] is None
 
     def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
@@ -842,10 +851,10 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "no_reference_row"
+        assert details["daily_loss_status"] == "degraded:no_reference_row"
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -891,7 +900,7 @@ class TestRiskGuardTrailingLossSemantics:
         details = json.loads(row["details_json"])
 
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "inconsistent_history"
+        assert details["daily_loss_status"] == "degraded:inconsistent_history"
         assert details["daily_loss_reference"] is None
 
     def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
@@ -1095,22 +1104,18 @@ class TestStrategyPolicyResolver:
         )
 
         conn = get_connection(zeus_db)
-        from src.state.db import init_schema, log_position_event
+        from src.state.db import init_schema
         init_schema(conn)
+        # Insert 10 ENTRY_ORDER_REJECTED canonical events (P9: log_position_event deleted)
         for i in range(10):
-            pos = Position(
-                trade_id=f"reject-{i}",
-                market_id="m1",
-                city="NYC",
-                cluster="US-Northeast",
-                target_date="2026-04-01",
-                bin_label="39-40°F",
-                direction="buy_yes",
-                strategy="center_buy",
-                edge_source="center_buy",
-                env="paper",
-            )
-            log_position_event(conn, "ORDER_REJECTED", pos, details={"status": "rejected"}, source="execution")
+            conn.execute("""
+                INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type,
+                 occurred_at, strategy_key, source_module, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (f"reject-{i}:rejected:1", f"reject-{i}", 1, 1,
+                   "ENTRY_ORDER_REJECTED", "2026-04-01T10:00:00Z",
+                   "center_buy", "test", '{}'))
         conn.commit()
         conn.close()
 
@@ -1120,8 +1125,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["execution_quality_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "tighten_risk" in details["recommended_controls"]
@@ -1159,8 +1164,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "review_strategy_gates" in details["recommended_controls"]
@@ -1384,8 +1389,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.YELLOW
-        assert row["level"] == RiskLevel.YELLOW.value
+        assert level == RiskLevel.RED
+        assert row["level"] == RiskLevel.RED.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["strategy_tracker_error"] == "tracker unavailable"
         assert details["recommended_strategy_gates"] == []
@@ -1481,6 +1486,77 @@ class TestStrategyPolicyResolver:
         assert row["level"] == RiskLevel.RED.value
         assert details["settlement_quality_level"] == "RED"
         assert details["settlement_metric_ready_count"] == 0
+
+    # B050 relationship tests — policy resolver must survive duplicate rows.
+    # sqlite3.Row has no .get(); duplicate-detection + bad-row logging both
+    # previously fabricated AttributeError.  The resolver must keep working
+    # (first-in wins) and log the discarded row, never crash the caller.
+    def test_resolve_strategy_policy_survives_duplicate_manual_overrides(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        base = (now - timedelta(minutes=5)).isoformat()
+        expires = (now + timedelta(hours=1)).isoformat()
+        # Two rows with the same action_type → _select_rows must drop one
+        # and log the discarded override_id without raising.
+        _insert_control_override(
+            conn,
+            override_id="ov-dup-a",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="allocation_multiplier",
+            value="0.5",
+            issued_at=base,
+            effective_until=expires,
+        )
+        _insert_control_override(
+            conn,
+            override_id="ov-dup-b",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="allocation_multiplier",
+            value="0.3",
+            issued_at=base,
+            effective_until=expires,
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        # First-in wins (higher precedence then issued_at then override_id DESC).
+        assert policy.allocation_multiplier in (pytest.approx(0.5), pytest.approx(0.3))
+        assert "manual_override:allocation_multiplier" in policy.sources
+        conn.close()
+
+    def test_resolve_strategy_policy_survives_duplicate_risk_actions(self, monkeypatch):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        base = (now - timedelta(minutes=5)).isoformat()
+        expires = (now + timedelta(hours=1)).isoformat()
+        _insert_risk_action(
+            conn,
+            action_id="ra-dup-a",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.5",
+            issued_at=base,
+            effective_until=expires,
+        )
+        _insert_risk_action(
+            conn,
+            action_id="ra-dup-b",
+            strategy_key="center_buy",
+            action_type="threshold_multiplier",
+            value="1.8",
+            issued_at=base,
+            effective_until=expires,
+        )
+
+        policy = policy_module.resolve_strategy_policy(conn, "center_buy", now)
+
+        assert policy.threshold_multiplier in (pytest.approx(1.5), pytest.approx(1.8))
+        assert "risk_action:threshold_multiplier" in policy.sources
+        conn.close()
 
 
 def test_refresh_strategy_health_records_rows_from_lawful_surfaces():

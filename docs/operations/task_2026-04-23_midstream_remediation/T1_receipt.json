@@ -1,0 +1,188 @@
+{
+  "receipt_type": "currency_closure",
+  "family": "T1",
+  "family_intent": "Test-currency guardian panel — ensure every midstream test carries dated provenance + currently-accurate skip reasons + CI-enforced audit so future agents can trust pytest output as evidence of current reality.",
+  "created_at": "2026-04-23",
+  "authority_source": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a-f",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/",
+  "parent_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+  "parent_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+  "t1_slices_closed": [
+    {
+      "slice_id": "T1.a",
+      "commit": "67b5908",
+      "scope": "dated provenance header wave on 15-file midstream guardian panel",
+      "header_format": "# Created: <git log %cs> / # Last reused/audited: 2026-04-23 / # Authority basis: midstream verdict v2 2026-04-23",
+      "regression_delta": "zero (comment-only)",
+      "files_touched": 15
+    },
+    {
+      "slice_id": "T1.b",
+      "commit": "4943d0d",
+      "scope": "stale @pytest.mark.skipif(not REGISTRY_YAML.exists()) removal in test_provenance_enforcement.py",
+      "markers_removed": 4,
+      "markers_kept": "4 skipif(not HAS_YAML) — legitimate environmental guard",
+      "regression_delta": "zero (markers were conditionally-true already; removal only hardens against future regression)"
+    },
+    {
+      "slice_id": "T1.c",
+      "commit": "pending",
+      "scope": "audit 8 @pytest.mark.skip markers in test_live_safety_invariants.py (L214/268/335/589/875/1227/1536/1569); update skip reasons to current-fact; flag T1.c-followup for rewrite work",
+      "un_skip_probe_result": "All 8 un-skipped tests failed under current production reality (verified 2026-04-23 via batch un-skip + pytest). Zero natural-pass removals.",
+      "classification": {
+        "phase2_keep_legitimate": {
+          "count": 1,
+          "line": 589,
+          "test": "test_paper_exit_does_not_use_sell_order",
+          "current_fact": "paper-mode was removed in Phase2 (canonical-only execution); test validates deprecated paper-path behavior; retained as documentation antibody of removed contract"
+        },
+        "p9_canonical_event_shape_changed_pending_rewrite": {
+          "count": 5,
+          "lines": [214, 268, 335, 875, 1227],
+          "tests": [
+            "test_chain_reconciliation_rescues_pending_tracked_fill",
+            "test_chain_reconciliation_rescue_updates_trade_lifecycle_row",
+            "test_chain_reconciliation_rescue_emits_exactly_one_stage_event",
+            "test_day0_transition_emits_durable_lifecycle_event",
+            "test_deferred_fill_logs_last_monitor_best_bid"
+          ],
+          "current_fact": "reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Rescue semantics intact (in-memory pos mutation works) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED/EXIT_ORDER_FILLED (not the legacy POSITION_LIFECYCLE_UPDATED-with-source-field shape the tests expect).",
+          "deferred_to": "T1.c-followup slice (rewrite against canonical event shape)"
+        },
+        "p4_contamination_guard_pending_relocation": {
+          "count": 2,
+          "lines": [1536, 1569],
+          "tests": [
+            "test_contamination_guard_blocks_wrong_env",
+            "test_empty_env_positions_pass_guard"
+          ],
+          "current_fact": "_load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback. Current canonical loader is src/state/portfolio.py::load_portfolio guided by src/state/portfolio_loader_policy.py. Guard relocation deferred — requires audit of whether env-scoping is already implicit via SQL WHERE env=? predicates in the canonical loader, in which case these tests may be OBSOLETE rather than RELOCATE.",
+          "deferred_to": "T1.c-followup slice (P4 guard relocation or OBSOLETE disposition)"
+        }
+      },
+      "plan_acceptance_criterion": "original: --collect-only SKIPPED <= 1",
+      "plan_acceptance_actual": "--collect-only SKIPPED == 8 (1 Phase2 KEEP + 5 P9 pending-rewrite + 2 P4 pending-relocation)",
+      "acceptance_gap_rationale": "Plan text L164-168: 'T1.c rewrites surface latent production defects. Rewriting 7 as its own micro-slice; do not let surprises gate T1.c.' Surprise surfaced: reconcile event shape changed post-T4.1b; the 5 P9 tests were written against legacy POSITION_LIFECYCLE_UPDATED shape and need redesign. Per plan's explicit 'do not let surprises gate' clause, T1.c ships as audit-documented with honest skip reasons; rewrite work becomes T1.c-followup slice.",
+      "regression_delta": "zero (reason-only edits, not behavior)",
+      "t1_c_followup_slice_spec": {
+        "scope": "Rewrite 5 P9 tests against canonical event shape + decide P4 RELOCATE vs OBSOLETE for 2 contamination guard tests",
+        "estimated_size": 4,
+        "dependencies": ["T4.1b (canonical entry event shape) — CLOSED 1d541a3"],
+        "acceptance": "--collect-only SKIPPED <= 1 (Phase2 KEEP only)",
+        "prerequisite_reads": [
+          "src/state/chain_reconciliation.py::reconcile (canonical-aware rescue path at L460-509)",
+          "src/engine/lifecycle_events.py::build_entry_canonical_write (T4.1b write path)",
+          "src/state/db.py::query_position_events (canonical read path; returns details dict with event_type)",
+          "src/state/portfolio.py::load_portfolio + src/state/portfolio_loader_policy.py (P4 canonical loader for contamination-guard relocation audit)"
+        ]
+      }
+    },
+    {
+      "slice_id": "T1.d",
+      "commit": "979eb3b",
+      "scope": "Phase-N skip audit in test_dual_track_law_stubs.py; single skip at L70 (NC-12/INV-16) classified KEEP_LEGITIMATE (enforcement target dataset empty pre-Phase-7)",
+      "markers_found": 1,
+      "markers_audited": 1
+    },
+    {
+      "slice_id": "T1.e",
+      "commit": "692a3af",
+      "scope": "Currency-CI audit script (scripts/test_currency_audit.py) + architecture/test_topology.yaml::categories.midstream_guardian_panel registration + script_manifest.yaml enforcement class entry",
+      "panel_size": 15,
+      "missing_count": 0,
+      "enforcement": "exit 1 if any panel file missing dated-provenance header"
+    },
+    {
+      "slice_id": "T1.f",
+      "commit": "pending",
+      "scope": "This receipt — T1 family currency closure",
+      "notes": "T1 family closure status: 5 closed + 1 skip-audited-with-followup (T1.c) = 5/6 effective + 1 fully-documented deferred. T1.a-b-d-e CLOSED in full; T1.c CLOSED as audit-ship per plan's surprise-tolerance clause with T1.c-followup flagged."
+    },
+    {
+      "slice_id": "T1.c-followup",
+      "commit": "pending",
+      "scope": "Rewrite 5 P9 tests against post-T4.1b canonical event shape + audit 2 P4 tests for RELOCATE-vs-OBSOLETE disposition",
+      "outcome": {
+        "p9_rewritten_and_passing": {
+          "count": 4,
+          "tests": [
+            "test_chain_reconciliation_rescues_pending_tracked_fill (L214 — CHAIN_SYNCED canonical event via _seed_canonical_entry_baseline helper)",
+            "test_chain_reconciliation_rescue_updates_trade_lifecycle_row (L268 — asserts canonical CHAIN_SYNCED event + POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED baseline)",
+            "test_chain_reconciliation_rescue_emits_exactly_one_stage_event (L335 — canonical idempotency via phase check + already-logged guard)",
+            "test_deferred_fill_logs_last_monitor_best_bid (L1227 — EXIT_ORDER_FILLED canonical event after active-phase baseline seed)"
+          ],
+          "pattern": "Shared _seed_canonical_entry_baseline(conn, pos) helper routes through build_entry_canonical_write + append_many_and_project to emit POSITION_OPEN_INTENT + ENTRY_ORDER_POSTED + (optionally) ENTRY_ORDER_FILLED so reconcile/check_pending_exits find the canonical baseline they now gate on."
+        },
+        "p9_obsolete_pending_feature": {
+          "count": 1,
+          "line": 875,
+          "test": "test_day0_transition_emits_durable_lifecycle_event",
+          "current_fact_pre_closure": "No canonical Day0 transition event existed. cycle_runtime monitor_refresh updated position_current.phase + trade_decisions via update_trade_lifecycle but did NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row.",
+          "disposition_original": "OBSOLETE_PENDING_FEATURE — restoring required a new build_day0_window_entered_canonical_write builder in src/engine/lifecycle_events.py. Feature-level architectural slice.",
+          "status": "CLOSED 2026-04-24 via Day0-canonical-event feature slice",
+          "closure_details": "Added build_day0_window_entered_canonical_write() in src/engine/lifecycle_events.py (single-event builder, sequence_no is caller-supplied). Added DAY0_WINDOW_ENTERED to position_events.event_type CHECK constraint in architecture/2026_04_02_architecture_kernel.sql. Added _ensure_day0_window_entered_event_type() legacy-DB migration in src/state/ledger.py that rebuilds the table with the expanded CHECK. Wired _emit_day0_window_entered_canonical_if_available() helper into src/engine/cycle_runtime.py at the day0 transition site (L625+). Rewrote the L875 test to assert the new canonical event type + phase_before/after + day0_entered_at payload. xfail / skip markers removed; test passes end-to-end via fresh-DB init_schema."
+        },
+        "p4_obsolete_by_architecture": {
+          "count": 2,
+          "lines": [1536, 1569],
+          "tests": [
+            "test_contamination_guard_blocks_wrong_env",
+            "test_empty_env_positions_pass_guard"
+          ],
+          "current_fact": "src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB); env is carried on each row (portfolio.py:155 'env: str = \"live\"' axiom). JSON fallback + _load_portfolio_from_json_data contamination guard are deleted. The 'run loader in paper mode, expect RuntimeError on live position' scenario no longer exists in the DB-first canonical path.",
+          "disposition": "OBSOLETE_BY_ARCHITECTURE — no RELOCATE target because env-filtering happens at the query layer per-row rather than at a single guard choke-point. Keep OBSOLETE with marker until operator decides delete-or-document-as-antibody-inventory."
+        }
+      },
+      "skip_count_reduction": "8 -> 4 (50% reduction)",
+      "remaining_skips_disposition": [
+        "L589 Phase2 KEEP_LEGITIMATE (paper-mode removed; documentation antibody retained)",
+        "L875 OBSOLETE_PENDING_FEATURE (no canonical Day0 event)",
+        "L1536 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)",
+        "L1569 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)"
+      ],
+      "plan_acceptance_criterion_progress": {
+        "target": "--collect-only SKIPPED <= 1",
+        "achieved": "--collect-only SKIPPED == 4",
+        "gap_rationale": "Remaining 3 skips cannot be cleared within T1.c-followup scope: 1 requires NEW feature (Day0 canonical event builder); 2 are OBSOLETE_BY_ARCHITECTURE (validate dead JSON path). Operator decision needed on whether to OBSOLETE_DELETE (physically remove the 3 tests) vs keep as documentation antibodies."
+      },
+      "regression_delta": {
+        "narrow_file_post_T1_c_followup": "4 failed / 51 passed / 4 skipped",
+        "narrow_file_pre_T1_c_followup_baseline": "4 failed / 47 passed / 8 skipped",
+        "delta": "+4 passes (4 P9 rewrites) / -4 skips (4 rescued); 4 pre-existing failures unchanged (out-of-scope)"
+      },
+      "helpers_added": [
+        "_seed_canonical_entry_baseline(conn, position) — shared helper to route pending_tracked positions through build_entry_canonical_write + append_many_and_project so reconcile/check_pending_exits find the canonical baseline they gate on."
+      ],
+      "dependencies_closed": ["T4.1b (canonical entry event shape) 1d541a3"],
+      "planning_lock": "GREEN (tests/* only)"
+    }
+  ],
+  "t1_family_effective_status": {
+    "ship_count": 7,
+    "full_rewrite_count": 4,
+    "doc_only_close_count": 2,
+    "audit_plus_followup_count": 1,
+    "followup_mostly_closed_count": 1,
+    "unresolved_deferrals": 2,
+    "deferral_detail": [
+      "Day0-canonical-event feature slice: add build_day0_window_entered_canonical_write builder; re-enable L875 test",
+      "T1.d residual NC-12 L70 skip: KEEP until Phase-7 v2 substrate rebuild populates ensemble_snapshots_v2 + calibration_pairs_v2 + platt_models_v2",
+      "Operator decision required: OBSOLETE_DELETE (physically remove) vs KEEP (documentation antibody) for L875 + L1536 + L1569"
+    ]
+  },
+  "t1_family_guardian_panel": {
+    "source_of_truth": "architecture/test_topology.yaml::categories.midstream_guardian_panel",
+    "ci_audit_script": "scripts/test_currency_audit.py",
+    "panel_size": 15,
+    "all_files_carry_dated_provenance_header": true,
+    "verified_at": "2026-04-23"
+  },
+  "cross_references": {
+    "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "packet_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "midstream_fix_plan_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md (T1 family rows L49-59)",
+    "midstream_trust_verdict": "docs/to-do-list/zeus_midstream_trust_upgrade_checklist_2026-04-23.md",
+    "t1_a_header_format_authority": "/Users/leofitz/CLAUDE.md file-header provenance rule"
+  }
+}

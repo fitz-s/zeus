@@ -6,6 +6,7 @@ All numeric fields from API are STRINGS — always float() before use.
 
 import json
 import logging
+import os
 import subprocess
 from typing import Optional
 
@@ -24,10 +25,12 @@ def _resolve_credentials() -> dict:
     Returns dict with 'private_key' and 'funder_address'.
     """
     try:
+        # Resolve OpenClaw root: OPENCLAW_HOME → ~/.openclaw
+        openclaw_root = os.environ.get("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
         # Read credentials via OpenClaw keychain resolver protocol
         result = subprocess.run(
             ["python3", "-c",
-             "import json, sys; sys.path.insert(0, '/Users/leofitz/.openclaw'); "
+             f"import json, sys; sys.path.insert(0, {openclaw_root!r}); "
              "from bin.keychain_resolver import read_keychain; "
              "pk = read_keychain('openclaw-metamask-private-key'); "
              "fa = read_keychain('openclaw-polymarket-funder-address'); "
@@ -47,15 +50,13 @@ def _resolve_credentials() -> dict:
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
-    def __init__(self, paper_mode: bool = True):
-        self.paper_mode = paper_mode
+    def __init__(self):
         self._clob_client = None
 
-        if not paper_mode:
-            self._init_live_client()
-
-    def _init_live_client(self):
-        """Initialize py-clob-client with keychain credentials."""
+    def _ensure_client(self):
+        """Lazy init: connect to CLOB only on first real I/O."""
+        if self._clob_client is not None:
+            return
         from py_clob_client.client import ClobClient
 
         creds = _resolve_credentials()
@@ -112,6 +113,21 @@ class PolymarketClient:
 
         return best_bid, best_ask, bid_size, ask_size
 
+    def get_fee_rate(self, token_id: str) -> float:
+        """Fetch the token-specific Polymarket taker fee rate."""
+        resp = httpx.get(f"{CLOB_BASE}/fee-rate", params={"token_id": token_id}, timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+        schedule = data.get("feeSchedule") if isinstance(data, dict) else None
+        if not isinstance(schedule, dict):
+            schedule = data if isinstance(data, dict) else {}
+        if schedule.get("feesEnabled") is False:
+            return 0.0
+        for key in ("feeRate", "fee_rate", "takerFeeRate", "taker_fee_rate"):
+            if key in schedule and schedule[key] is not None:
+                return float(schedule[key])
+        raise RuntimeError(f"Fee-rate response missing feeSchedule.feeRate for {token_id}")
+
     def place_limit_order(
         self,
         token_id: str,
@@ -129,17 +145,18 @@ class PolymarketClient:
 
         Returns: order result dict or None on failure
         """
-        if self.paper_mode:
-            raise RuntimeError("Live API 'place_limit_order' cannot be called in paper mode")
-
         from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
 
-        side_const = BUY if side == "BUY" else SELL
+        _SIDE_MAP = {"BUY": BUY, "SELL": SELL}
+        if side not in _SIDE_MAP:
+            raise ValueError(f"place_limit_order requires side='BUY' or 'SELL', got {side!r}")
+        side_const = _SIDE_MAP[side]
         order_args = OrderArgs(
             price=price, size=size, side=side_const, token_id=token_id
         )
 
+        self._ensure_client()
         signed = self._clob_client.create_order(order_args)
         result = self._clob_client.post_order(signed)
 
@@ -149,17 +166,14 @@ class PolymarketClient:
 
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
-        if self.paper_mode:
-            raise RuntimeError("Live API 'cancel_order' cannot be called in paper mode")
+        self._ensure_client()
         result = self._clob_client.cancel(order_id)
         logger.info("Order cancelled: %s → %s", order_id, result.get("status"))
         return result
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
-        if self.paper_mode:
-            raise RuntimeError("Live API 'get_order_status' cannot be called in paper mode")
-
+        self._ensure_client()
         try:
             if hasattr(self._clob_client, "get_order"):
                 result = self._clob_client.get_order(order_id)
@@ -168,91 +182,89 @@ class PolymarketClient:
                 result = next((o for o in orders if o.get("id") == order_id), None)
             else:
                 logger.warning("Live client has no order-status method")
-                return None
+                return {"status": "MISSING_METHOD"}
+                
+            if result is None:
+                return {"status": "NOT_FOUND"}
+                
             logger.info("Order status: %s → %s", order_id, result.get("status") if result else "missing")
             return result
         except Exception as exc:
             logger.warning("Order status fetch failed for %s: %s", order_id, exc)
-            return None
+            return {"status": "FETCH_ERROR", "reason": str(exc)}
 
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
-        if self.paper_mode:
-            raise RuntimeError("Live API 'get_open_orders' cannot be called in paper mode")
-
+        self._ensure_client()
         try:
-            try:
-                from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client.clob_types import OpenOrderParams
 
-                result = self._clob_client.get_orders(OpenOrderParams()) or []
-            except (ImportError, TypeError):
-                result = self._clob_client.get_orders() or []
+            result = self._clob_client.get_orders(OpenOrderParams()) or []
+        except (ImportError, TypeError):
+            result = self._clob_client.get_orders() or []
 
-            if isinstance(result, dict):
-                result = result.get("data", []) or []
-            return list(result)
-        except Exception as exc:
-            logger.warning("Open-order fetch failed: %s", exc)
-            return []
+        if isinstance(result, dict):
+            result = result.get("data", []) or []
+        return list(result)
 
     def get_positions_from_api(self) -> Optional[list[dict]]:
         """Fetch authoritative live positions from Polymarket's data API."""
-        if self.paper_mode:
-            raise RuntimeError("Live API 'get_positions_from_api' cannot be called in paper mode")
+        creds = _resolve_credentials()
+        address = creds.get("funder_address", "")
+        if not address:
+            raise RuntimeError("Missing funder_address for position fetch")
 
-        try:
-            creds = _resolve_credentials()
-            address = creds.get("funder_address", "")
-            if not address:
-                raise RuntimeError("Missing funder_address for position fetch")
+        resp = httpx.get(
+            f"{DATA_API_BASE}/positions",
+            params={"user": address, "sizeThreshold": "0.01"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        if isinstance(raw, dict):
+            raw = raw.get("data", []) or []
 
-            resp = httpx.get(
-                f"{DATA_API_BASE}/positions",
-                params={"user": address, "sizeThreshold": "0.01"},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            raw = resp.json()
-            if isinstance(raw, dict):
-                raw = raw.get("data", []) or []
+        positions: list[dict] = []
+        for item in raw:
+            token_id = item.get("asset", "") or item.get("token_id", "")
+            if not token_id:
+                continue
+            try:
+                size = float(item.get("size", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if size < 0.01:
+                continue
 
-            positions: list[dict] = []
-            for item in raw:
-                token_id = item.get("asset", "") or item.get("token_id", "")
-                if not token_id:
-                    continue
-                try:
-                    size = float(item.get("size", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                if size < 0.01:
-                    continue
-
+            try:
                 avg_price = float(item.get("avgPrice", 0) or item.get("avg_price", 0) or 0)
                 initial_value = float(item.get("initialValue", 0) or 0)
-                positions.append({
-                    "token_id": token_id,
-                    "condition_id": item.get("conditionId", "") or item.get("condition_id", ""),
-                    "size": round(size, 4),
-                    "avg_price": round(avg_price, 6),
-                    "cost": round(initial_value, 4) if initial_value > 0 else round(size * avg_price, 4),
-                    "side": item.get("outcome", "") or item.get("side", ""),
-                    "current_value": round(float(item.get("currentValue", 0) or 0), 4),
-                    "cash_pnl": round(float(item.get("cashPnl", 0) or 0), 4),
-                    "cur_price": round(float(item.get("curPrice", 0) or 0), 6),
-                    "redeemable": bool(item.get("redeemable", False)),
-                    "title": item.get("title", ""),
-                    "end_date": item.get("endDate", ""),
-                })
-            return positions
-        except Exception as exc:
-            logger.warning("Live position fetch failed: %s", exc)
-            return None
+                current_value = float(item.get("currentValue", 0) or 0)
+                cash_pnl = float(item.get("cashPnl", 0) or 0)
+                cur_price = float(item.get("curPrice", 0) or 0)
+            except (TypeError, ValueError) as e:
+                logger.warning("Quarantining token %s due to malformed metrics: %s", token_id, e)
+                continue
+
+            positions.append({
+                "token_id": token_id,
+                "condition_id": item.get("conditionId", "") or item.get("condition_id", ""),
+                "size": round(size, 4),
+                "avg_price": round(avg_price, 6),
+                "cost": round(initial_value, 4) if initial_value > 0 else round(size * avg_price, 4),
+                "side": item.get("outcome", "") or item.get("side", ""),
+                "current_value": round(current_value, 4),
+                "cash_pnl": round(cash_pnl, 4),
+                "cur_price": round(cur_price, 6),
+                "redeemable": bool(item.get("redeemable", False)),
+                "title": item.get("title", ""),
+                "end_date": item.get("endDate", ""),
+            })
+        return positions
 
     def get_balance(self) -> float:
         """Get USDC balance."""
-        if self.paper_mode:
-            raise RuntimeError("Live API 'get_balance' cannot be called in paper mode")
+        self._ensure_client()
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
         resp = self._clob_client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
@@ -265,8 +277,7 @@ class PolymarketClient:
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
         """
-        if self.paper_mode:
-            raise RuntimeError("Live API 'redeem' cannot be called in paper mode")
+        self._ensure_client()
         try:
             result = self._clob_client.redeem(condition_id)
             logger.info("Redeemed condition %s → %s", condition_id, result)

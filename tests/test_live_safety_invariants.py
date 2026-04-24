@@ -1,3 +1,6 @@
+# Created: 2026-03-31
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -74,6 +77,26 @@ def _make_portfolio(*positions) -> PortfolioState:
     return PortfolioState(positions=list(positions))
 
 
+def _seed_canonical_entry_baseline(conn, position) -> None:
+    """T1.c-followup (2026-04-23): post-T4.1b, chain_reconciliation.reconcile
+    gates rescue strictly on the existence of a canonical baseline
+    (``position_current`` row in ``pending_entry`` phase). This helper
+    seeds that baseline by routing the ``pending_tracked`` position through
+    ``build_entry_canonical_write`` + ``append_many_and_project`` so rescue
+    probes find the POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED events plus
+    the ``pending_entry`` ``position_current`` row they need to flip.
+    """
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.ledger import append_many_and_project
+
+    events, projection = build_entry_canonical_write(
+        position,
+        decision_id=getattr(position, "decision_snapshot_id", None) or "dec-t1c-followup",
+        source_module="src.test.t1c_followup_baseline",
+    )
+    append_many_and_project(conn, events, projection)
+
+
 def _make_clob(
     order_status="OPEN",
     balance=100.0,
@@ -81,7 +104,6 @@ def _make_clob(
 ):
     """Create mock CLOB client."""
     clob = MagicMock()
-    clob.paper_mode = False
     clob.get_order_status.return_value = sell_result or {"status": order_status}
     clob.get_balance.return_value = balance
     clob.cancel_order.return_value = {"status": "CANCELLED"}
@@ -110,7 +132,6 @@ def test_live_exit_never_closes_without_fill():
                 current_market_price=0.45,
                 best_bid=0.45,
             ),
-            paper_mode=False,
             clob=clob,
         )
 
@@ -210,25 +231,43 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert tracker.entries == ["test_001"]
 
 
-def test_chain_reconciliation_rescues_pending_tracked_fill():
-    """Chain truth must rescue pending_tracked when order-status path is unavailable."""
+def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
+    """Chain truth must rescue pending_tracked when order-status path is
+    unavailable. T1.c-followup rewrite 2026-04-23: rescue is now gated on
+    canonical baseline existence (post-T4.1b); test seeds baseline via
+    build_entry_canonical_write + passes conn to reconcile."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "rescue_pending.db")
+    init_schema(conn)
 
     pos = _make_position(
+        trade_id="rescue-1",
         state="pending_tracked",
         direction="buy_yes",
         token_id="tok_yes_001",
         no_token_id="tok_no_001",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        decision_snapshot_id="snap-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
 
     stats = reconcile(
         portfolio,
         [ChainPosition(token_id="tok_yes_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")],
+        conn=conn,
     )
+    conn.close()
 
     assert stats["rescued_pending"] == 1
     assert pos.state == "entered"
@@ -264,10 +303,17 @@ def test_lifecycle_kernel_enters_chain_quarantined_runtime_state():
 
 
 def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
+    """T1.c-followup rewrite 2026-04-23: post-T4.1b, the rescue audit trail
+    flows through canonical position_events (CHAIN_SYNCED event_type +
+    source_module='src.state.chain_reconciliation') rather than the
+    legacy POSITION_LIFECYCLE_UPDATED-with-source-field shape. Test
+    asserts the new canonical shape carries the rescue metadata that
+    downstream audit consumers need (entry_order_id, chain_state,
+    historical_entry_method, shares, cost_basis_usd, condition_id)."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
-    from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+    from src.state.db import get_connection, init_schema, query_position_events
 
-    conn = get_connection(tmp_path / "test.db")
+    conn = get_connection(tmp_path / "rescue_db.db")
     init_schema(conn)
 
     pos = _make_position(
@@ -276,13 +322,21 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
         direction="buy_yes",
         token_id="tok_yes_db_001",
         no_token_id="tok_no_db_001",
-        order_id="",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="snap-db-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
-    log_trade_entry(conn, pos)
 
     stats = reconcile(
         portfolio,
@@ -290,50 +344,43 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
         conn=conn,
     )
     conn.commit()
-
-    row = conn.execute(
-        """
-        SELECT status, order_id, order_status_text, chain_state, entered_at_ts, filled_at
-        FROM trade_decisions
-        WHERE runtime_trade_id = ?
-        ORDER BY trade_id DESC
-        LIMIT 1
-        """,
-        ("rescue-db-1",),
-    ).fetchone()
     events = query_position_events(conn, "rescue-db-1")
     conn.close()
 
     assert stats["rescued_pending"] == 1
-    assert row["status"] == "entered"
-    assert row["order_id"] == "buy_123"
-    assert row["order_status_text"] == "filled"
-    assert row["chain_state"] == "synced"
-    assert row["entered_at_ts"] != ""
-    assert row["filled_at"] != ""
+    # Canonical entry trail from _seed_canonical_entry_baseline
+    entry_event_types = [e["event_type"] for e in events]
+    assert "POSITION_OPEN_INTENT" in entry_event_types
+    assert "ENTRY_ORDER_POSTED" in entry_event_types
 
-    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
-    trade_events = [event for event in lifecycle_events if event["source"] == "trade_decisions"]
-    rescue_events = [event for event in lifecycle_events if event["source"] == "chain_reconciliation"]
-
-    assert len(trade_events) == 1
-    assert trade_events[0]["order_id"] == "buy_123"
-    assert trade_events[0]["details"]["entry_order_id"] == "buy_123"
-    assert trade_events[0]["details"]["entry_fill_verified"] is True
-    assert trade_events[0]["details"]["chain_state"] == "synced"
-
+    # Rescue emission: post-T4.1b the canonical event_type is CHAIN_SYNCED
+    # with source_module='src.state.chain_reconciliation' and
+    # payload_json carrying the rescue metadata.
+    rescue_events = [e for e in events if e["event_type"] == "CHAIN_SYNCED"]
     assert len(rescue_events) == 1
-    assert rescue_events[0]["order_id"] == "buy_123"
-    assert rescue_events[0]["details"]["entry_order_id"] == "buy_123"
-    assert rescue_events[0]["details"]["entry_fill_verified"] is True
-    assert rescue_events[0]["details"]["chain_state"] == "synced"
+    rescue = rescue_events[0]
+    assert rescue["source"] == "src.state.chain_reconciliation"
+    assert rescue["order_id"] == "buy_123"
+    details = rescue["details"]
+    assert details["source"] == "chain_reconciliation"
+    assert details["reason"] == "pending_fill_rescued"
+    assert details["from_state"] == "pending_tracked"
+    assert details["to_state"] == "entered"
+    assert details["entry_order_id"] == "buy_123"
+    assert details["entry_fill_verified"] is True
+    assert details["chain_state"] == "synced"
+    assert details["condition_id"] == "cond-1"
 
 
 def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
+    """T1.c-followup rewrite 2026-04-23: post-T4.1b, rescue emits exactly
+    one CHAIN_SYNCED canonical event on first rescue; repeat reconcile
+    calls on the same trade_id do not double-emit (idempotency guard
+    via position_current phase check + already-logged check)."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, query_position_events
 
-    conn = get_connection(tmp_path / "test.db")
+    conn = get_connection(tmp_path / "rescue_rt.db")
     init_schema(conn)
 
     pos = _make_position(
@@ -342,14 +389,20 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
         direction="buy_yes",
         token_id="tok_yes_001",
         no_token_id="tok_no_001",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
         entry_method="ens_member_counting",
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="snap-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
     chain_row = ChainPosition(token_id="tok_yes_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")
 
@@ -361,23 +414,24 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
 
     assert stats_first["rescued_pending"] == 1
     assert stats_second["rescued_pending"] == 0
-    lifecycle_events = [
-        event for event in events
-        if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"
-        and event["source"] == "chain_reconciliation"
-        and event["details"].get("reason") == "pending_fill_rescued"
+    # Exactly ONE canonical rescue event (idempotency).
+    rescue_events = [
+        e for e in events
+        if e["event_type"] == "CHAIN_SYNCED"
+        and e["source"] == "src.state.chain_reconciliation"
     ]
-    assert len(lifecycle_events) == 1
-    event = lifecycle_events[0]
-    assert event["position_state"] == "entered"
-    assert event["details"]["from_state"] == "pending_tracked"
-    assert event["details"]["to_state"] == "entered"
-    assert event["details"]["source"] == "chain_reconciliation"
-    assert event["details"]["historical_entry_method"] == "ens_member_counting"
-    assert event["details"]["historical_selected_method"] == "ens_member_counting"
-    assert event["details"]["shares"] == 25.0
-    assert event["details"]["cost_basis_usd"] == 11.0
-    assert event["details"]["condition_id"] == "cond-1"
+    assert len(rescue_events) == 1
+    event = rescue_events[0]
+    details = event["details"]
+    assert details["from_state"] == "pending_tracked"
+    assert details["to_state"] == "entered"
+    assert details["source"] == "chain_reconciliation"
+    assert details["reason"] == "pending_fill_rescued"
+    assert details["historical_entry_method"] == "ens_member_counting"
+    assert details["historical_selected_method"] == "ens_member_counting"
+    assert details["shares"] == 25.0
+    assert details["cost_basis_usd"] == 11.0
+    assert details["condition_id"] == "cond-1"
 
 
 @pytest.mark.parametrize("exit_state", ["exit_intent", "sell_placed", "sell_pending", "retry_pending"])
@@ -582,6 +636,7 @@ def test_backoff_exhausted_holds_to_settlement():
 
 # ---- Test 6: Paper exit does not use sell order ----
 
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: KEEP_LEGITIMATE — paper-mode was removed in Phase2 (canonical-only execution). This test validates deprecated paper-path behavior; retained as documentation antibody of the removed contract. Un-skip verified failure as expected (cannot exercise removed code path). Do not un-skip; promote to OBSOLETE_DELETE if plan ever decides retire the documentation antibody.")
 def test_paper_exit_does_not_use_sell_order():
     """Paper mode: direct close_position, no CLOB interaction."""
     pos = _make_position(state="holding")
@@ -597,7 +652,6 @@ def test_paper_exit_does_not_use_sell_order():
                 current_market_price=0.45,
                 best_bid=0.45,
             ),
-            paper_mode=True,
             clob=clob,
         )
 
@@ -860,7 +914,7 @@ def test_lifecycle_kernel_enters_day0_window_from_active_states():
 def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
     from src.state.lifecycle_manager import enter_day0_window_runtime_state
 
-    with pytest.raises(ValueError, match="day0 transition requires active runtime phase"):
+    with pytest.raises(ValueError, match="day0 transition requires active/pending_entry/day0_window runtime phase"):
         enter_day0_window_runtime_state(
             "pending_exit",
             exit_state="sell_pending",
@@ -869,9 +923,20 @@ def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
 
 
 def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
+    """T1.c-followup L875 closure via Day0-canonical-event feature slice
+    (2026-04-24): after the transition, a canonical DAY0_WINDOW_ENTERED
+    position_events row exists with phase_before=active, phase_after=
+    day0_window, and payload carrying day0_entered_at. Pre-slice, this
+    test was skipped OBSOLETE_PENDING_FEATURE because cycle_runtime did
+    not emit a canonical event — only updated position_current.phase.
+    Post-slice: canonical emission is wired via
+    _emit_day0_window_entered_canonical_if_available in cycle_runtime.
+    """
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
     from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project
 
     conn = get_connection(tmp_path / "day0.db")
     init_schema(conn)
@@ -886,8 +951,19 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
         entry_fill_verified=True,
         entered_at="2026-04-01T04:00:00Z",
         order_status="filled",
+        strategy_key="center_buy",
+        bin_label="50-51°F",
     )
     log_trade_entry(conn, pos)
+    # Seed canonical entry baseline so the Day0 canonical emission is not
+    # the first canonical event for this trade_id (matches production
+    # reality — entries always precede day0 transitions).
+    events, projection = build_entry_canonical_write(
+        pos,
+        decision_id="decision-day0-seed",
+        source_module="tests/test_day0_transition_emits_durable",
+    )
+    append_many_and_project(conn, events, projection)
     portfolio = _make_portfolio(pos)
 
     class PaperClob:
@@ -929,7 +1005,9 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
             "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
             "logger": logging.getLogger("test_day0_transition_db"),
             "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
-            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            # _utcnow set to within day0 window (≤6h before Chicago target
+            # date close at 2026-04-02 05:00 UTC) so the day0 gate fires.
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 2, 2, 0, tzinfo=timezone.utc)),
         },
     )
     artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: None})()
@@ -947,12 +1025,22 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
 
     events = query_position_events(conn, "day0-db-1")
     conn.close()
-    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
-    assert any(event["position_state"] == "day0_window" for event in lifecycle_events)
-    day0_event = next(event for event in lifecycle_events if event["position_state"] == "day0_window")
-    assert day0_event["details"]["status"] == "day0_window"
-    assert day0_event["details"]["day0_entered_at"] == "2026-04-01T05:30:00+00:00"
-    assert day0_event["timestamp"] == "2026-04-01T05:30:00+00:00"
+    # Day0-canonical-event slice assertion: a canonical DAY0_WINDOW_ENTERED
+    # row was emitted by _emit_day0_window_entered_canonical_if_available.
+    day0_events = [e for e in events if e["event_type"] == "DAY0_WINDOW_ENTERED"]
+    assert day0_events, (
+        f"Expected DAY0_WINDOW_ENTERED canonical event after day0 "
+        f"transition; got event_types={[e['event_type'] for e in events]}"
+    )
+    day0_event = day0_events[0]
+    # query_position_events returns the payload under `details` (decoded
+    # from payload_json); phase_before/after live in the payload because
+    # query_position_events doesn't surface the DB columns separately.
+    details = day0_event.get("details") or {}
+    assert details.get("phase_before") == "active"
+    assert details.get("phase_after") == "day0_window"
+    assert details.get("day0_entered_at") == "2026-04-02T02:00:00+00:00"
+    assert day0_event["timestamp"] == "2026-04-02T02:00:00+00:00"
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
@@ -1210,7 +1298,6 @@ def test_live_exit_collateral_blocked_goes_to_retry():
             current_market_price=0.45,
             best_bid=None,
         ),
-        paper_mode=False,
         clob=clob,
     )
 
@@ -1221,21 +1308,43 @@ def test_live_exit_collateral_blocked_goes_to_retry():
 
 
 def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
-    """Deferred fill telemetry must preserve sell-side realizable bid, not mark price."""
+    """Deferred fill telemetry must preserve sell-side realizable bid, not
+    mark price. T1.c-followup rewrite 2026-04-23: post-T4.1b, exit fill
+    emission flows through build_economic_close_canonical_write; test
+    seeds active-phase canonical baseline so EXIT_ORDER_FILLED lands
+    cleanly."""
     from src.state.db import get_connection, init_schema, query_position_events
 
     pos = _make_position(
         trade_id="deferred-fill-1",
         state="holding",
-        exit_state="sell_pending",
+        exit_state="",
+        chain_state="synced",
         last_exit_order_id="sell-order-1",
         exit_reason="DEFERRED_SELL_FILL",
         last_monitor_market_price=0.44,
         last_monitor_best_bid=0.39,
+        order_id="buy-order-1",
+        entry_order_id="buy-order-1",
+        entry_fill_verified=True,
+        entered_at="2026-04-03T00:05:00Z",
+        order_status="filled",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="snap-def-1",
     )
     portfolio = _make_portfolio(pos)
     conn = get_connection(tmp_path / "deferred-fill.db")
     init_schema(conn)
+    # Seed canonical baseline in active phase (exit_state="") so
+    # build_entry_canonical_write accepts; then transition pos to
+    # pending_exit state via exit_state mutation for the test scenario.
+    _seed_canonical_entry_baseline(conn, pos)
+    pos.exit_state = "sell_pending"
     clob = _make_clob(sell_result={"status": "FILLED", "avgPrice": 0.39})
 
     stats = check_pending_exits(portfolio, clob, conn=conn)
@@ -1354,7 +1463,8 @@ def test_day0_buy_no_uses_single_confirmation_observation_reversal():
     assert "day0_observation_gate" in decision.applied_validations
 
 
-def test_day0_observation_can_hold_through_near_settlement_and_panic_signals():
+def test_day0_observation_exits_when_settlement_imminent():
+    """Day0 positions must still exit when settlement is imminent (fallthrough fix)."""
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -1372,9 +1482,10 @@ def test_day0_observation_can_hold_through_near_settlement_and_panic_signals():
         )
     )
 
-    assert decision.should_exit is False
+    assert decision.should_exit is True
+    assert decision.trigger == "SETTLEMENT_IMMINENT"
     assert "day0_observation_authority" in decision.applied_validations
-    assert "near_settlement_gate" not in decision.applied_validations
+    assert "near_settlement_gate" in decision.applied_validations
 
 
 def test_live_execute_exit_blocks_incomplete_context():
@@ -1387,7 +1498,6 @@ def test_live_execute_exit_blocks_incomplete_context():
         portfolio=portfolio,
         position=pos,
         exit_context=ExitContext(exit_reason="EDGE_REVERSAL", current_market_price=None),
-        paper_mode=False,
         clob=clob,
     )
 
@@ -1527,9 +1637,10 @@ def test_position_carries_env():
     assert pos_live.env == "live"
 
 
+@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
 def test_contamination_guard_blocks_wrong_env():
     """Loading a live position into paper portfolio (or vice versa) must fail."""
-    from src.state.portfolio import PortfolioModeError, load_portfolio, save_portfolio
+    from src.state.portfolio import load_portfolio, save_portfolio
     import tempfile
     from pathlib import Path
 
@@ -1544,19 +1655,22 @@ def test_contamination_guard_blocks_wrong_env():
 
         # Loading in paper mode (settings.mode == "paper") should raise
         # because the position has env="live"
-        with pytest.raises(PortfolioModeError, match="live position"):
+        with pytest.raises(RuntimeError, match="live position"):  # PortfolioModeError deleted (Phase 1)
             load_portfolio(tmp)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def test_state_path_includes_mode():
-    """state_path must produce mode-qualified filenames."""
-    from src.config import state_path, settings
+def test_state_path_resolves_directly():
+    """Phase 2: state_path returns STATE_DIR/filename directly (mode prefix eliminated)."""
+    from src.config import state_path, STATE_DIR
     path = state_path("positions.json")
-    assert f"-{settings.mode}" in path.name
+    assert path == STATE_DIR / "positions.json"
+    assert "-live" not in path.name
+    assert "-paper" not in path.name
 
 
+@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
 def test_empty_env_positions_pass_guard():
     """Positions with empty env (legacy) should pass the contamination guard."""
     pos = _make_position(env="")
@@ -1574,3 +1688,118 @@ def test_empty_env_positions_pass_guard():
         assert len(loaded.positions) == 1
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# B041 relationship tests: fill_tracker typed error taxonomy (SD-B)
+# ---------------------------------------------------------------------------
+
+class TestB041FillTrackerBoundaryErrors:
+    """_check_entry_fill must distinguish transient IO failures
+    (legitimate ``still_pending``) from code defects (must propagate)."""
+
+    def test_b041_ioerror_maps_to_still_pending(self):
+        """A legitimate transient network-style error (ConnectionError)
+        keeps the order pending — the exchange state is genuinely
+        unknown this cycle.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = ConnectionError("simulated timeout")
+        clob.cancel_order.return_value = {"status": "CANCELLED"}
+
+        stats = check_pending_entries(portfolio, clob)
+        # still_pending, no fill, no void — pos stays as-is
+        assert stats["voided"] == 0
+        assert stats["entered"] == 0
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].state == "pending_tracked"
+
+    def test_b041_attributeerror_propagates(self):
+        """An AttributeError from a wrong-shape clob mock is a code
+        defect, NOT a legitimate transient state — must propagate
+        rather than silently becoming ``still_pending`` forever.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = AttributeError(
+            "clob has no attribute 'get_order_status'"
+        )
+        with pytest.raises(AttributeError, match="get_order_status"):
+            check_pending_entries(portfolio, clob)
+
+    def test_b041_typeerror_propagates(self):
+        """A TypeError (e.g. wrong arg count from a regression) is a
+        code defect and must propagate."""
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = TypeError(
+            "got unexpected keyword argument"
+        )
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            check_pending_entries(portfolio, clob)
+
+
+    def test_b041_keyerror_propagates(self):
+        """Amendment (critic-alice review): KeyError from a malformed
+        CLOB payload shape was omitted from the first-pass re-raise
+        set. ``_normalize_status(payload)`` does ``payload["status"]``;
+        a missing-key payload would have been silently caught as
+        ``still_pending`` before this amendment. KeyError is a code
+        defect and must now propagate.
+        """
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = KeyError("status")
+        with pytest.raises(KeyError, match="status"):
+            check_pending_entries(portfolio, clob)
+
+    def test_b041_indexerror_propagates(self):
+        """Amendment (critic-alice review): IndexError from
+        malformed list access (e.g. ``payload[0]`` on an empty
+        sequence) is a code defect and must propagate."""
+        from src.execution.fill_tracker import check_pending_entries
+
+        pos = _make_position(
+            state="pending_tracked",
+            entry_order_id="buy_123",
+            entry_fill_verified=False,
+        )
+        portfolio = _make_portfolio(pos)
+
+        clob = MagicMock()
+        clob.get_order_status.side_effect = IndexError("list index out of range")
+        with pytest.raises(IndexError, match="out of range"):
+            check_pending_entries(portfolio, clob)

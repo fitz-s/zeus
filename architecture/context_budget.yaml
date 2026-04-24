@@ -1,0 +1,230 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "S0 Context Budget Gate"
+  purpose: >
+    Keep the topology map, root instructions, and lore system useful as routing
+    surfaces instead of allowing them to become default-read encyclopedias.
+  enforcement_phase: advisory
+  rationale: >
+    S0 measures context bloat first. These numbers are provisional starting
+    assumptions, not hard read-count limits. They should warn agents that a
+    starting packet may be insufficient; they must not suppress necessary
+    authority reads.
+  blocking_promotion_rule: >
+    A budget entry may use enforcement=blocking only when it carries explicit
+    governance promotion metadata such as promotion_packet or
+    blocking_authority.
+
+budget_classes:
+  authority_kernel:
+    role: first-read law and router surfaces
+    default_posture: keep thin and durable
+  module_boot_router:
+    role: medium-density launchers into dense module books
+    default_posture: route to one module and its hazards quickly
+  module_book:
+    role: dense module cognition layer
+    default_posture: dense by design, but bounded to one module and its proof surfaces
+  current_fact:
+    role: time-bound operational facts
+    default_posture: compact, receipt-bound, and expiry-aware
+  graph_appendix:
+    role: derived structural appendices
+    default_posture: optional and derived-only
+
+maintenance_cadence:
+  run_after_completed_packets: 5
+  trigger_if:
+    agents_md_added_lines: 20
+    workspace_map_added_lines: 15
+    history_lore_added_cards: 10
+    new_reference_doc_lines: 250
+    digest_lore_cards_returned: 6
+
+file_budgets:
+  - path: AGENTS.md
+    role: boot_context_and_contract
+    max_lines: 340
+    enforcement: advisory
+    diet_target: >
+      Keep root AGENTS as a first-read Zeus mental model plus boot contract.
+      Move detailed examples, historical timelines, and specialized workflows
+      into digest-routed lore or scoped references.
+  - path: workspace_map.md
+    role: directory_router_only
+    max_lines: 140
+    enforcement: advisory
+    diet_target: >
+      Keep the workspace map as directory-level routing. Avoid duplicating
+      machine manifests such as source_rationale, test_topology, and
+      script_manifest.
+  - path: architecture/history_lore.yaml
+    role: lore_registry_not_default_context
+    max_lines: 1600
+    enforcement: advisory
+    diet_target: >
+      Lore may grow, but digest routing must stay selective. If this registry
+      keeps growing, split cards by domain only after routing stays precise.
+  - path: docs/reference/zeus_math_spec.md
+    role: conditional_fact_spec
+    max_lines: 800
+    enforcement: advisory
+    diet_target: >
+      Keep as high-confidence fact spec, not top-level authority. Facts should
+      be reflected in executable contracts and lore cards.
+  - path: docs/reference/zeus_architecture_reference.md
+    role: compact_canonical_architecture_reference
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      Keep as compact orientation. Do not turn it back into a deep-map
+      snapshot; route detailed evidence to reports/artifacts.
+  - path: docs/reference/zeus_market_settlement_reference.md
+    role: compact_canonical_market_settlement_reference
+    max_lines: 320
+    enforcement: advisory
+    diet_target: >
+      Keep as durable market/settlement concepts. Current city/source facts
+      belong in operations current-fact surfaces, not reference support docs.
+  - path: docs/reference/zeus_data_and_replay_reference.md
+    role: compact_canonical_data_replay_reference
+    max_lines: 320
+    enforcement: advisory
+    diet_target: >
+      Keep as durable data/replay concepts. Current row counts and source state
+      belong in operations current-fact surfaces.
+  - path: docs/reference/zeus_failure_modes_reference.md
+    role: compact_canonical_failure_modes_reference
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      Keep as compact durable failure taxonomy. Detailed pathology reports stay
+      as evidence only.
+  - path: docs/archive_registry.md
+    role: visible_history_interface
+    max_lines: 180
+    enforcement: advisory
+    diet_target: >
+      Keep as a compact archive access protocol and promotion guardrail. Do
+      not turn it into an archive catalog or narrative history.
+  - path: docs/operations/current_state.md
+    role: live_control_pointer
+    max_lines: 90
+    enforcement: advisory
+    diet_target: >
+      Keep as the live current packet pointer and evidence list. Move runtime
+      diaries, packet histories, and historical detail into packets, lore, or
+      archive registry surfaces.
+  - path: docs/operations/current_data_state.md
+    role: volatile_current_fact_surface
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as compact audited data posture. Do not turn it into a data inventory
+      dump or authority law.
+  - path: docs/operations/current_source_validity.md
+    role: volatile_current_fact_surface
+    max_lines: 140
+    enforcement: advisory
+    diet_target: >
+      Keep as compact audited source-validity posture. Detailed dated audits
+      belong in reports/artifacts.
+  - path: architecture/module_manifest.yaml
+    role: module_manifest_registry
+    max_lines: 320
+    enforcement: advisory
+    diet_target: >
+      Keep this as a machine registry and dependency index, not a prose
+      replacement for module books or source_rationale.
+  - path: docs/reference/modules/AGENTS.md
+    role: module_boot_router
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as a dense router into one concrete module book; do not let it turn
+      into a second reference index or packet diary.
+  - path: docs/runbooks/tigge_cloud_download.md
+    role: durable_operator_runbook
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as generic TIGGE cloud supervision and Zeus handoff guidance. Dated
+      VM/project/session details belong in evidence artifacts.
+  - path: tests/AGENTS.md
+    role: manifest_backed_scoped_registry
+    max_lines: 80
+    enforcement: advisory
+    diet_target: >
+      Keep as test-zone route and rules. Do not duplicate the full active test
+      catalog from architecture/test_topology.yaml.
+  - path: scripts/AGENTS.md
+    role: manifest_backed_scoped_registry
+    max_lines: 80
+    enforcement: advisory
+    diet_target: >
+      Keep as script-zone route and rules. Do not duplicate the full active
+      script catalog from architecture/script_manifest.yaml.
+
+digest_budgets:
+  history_lore:
+    max_cards_per_digest: 6
+    max_zero_context_digest_chars: 240
+    enforcement: advisory
+    sample_tasks:
+      - "fix settlement rounding in replay"
+      - "certify data rebuild for live math"
+      - "fix DST diurnal rebuild"
+      - "retune alpha tail treatment for buy_no EV"
+      - "fix daily_loss in risk_state reporting"
+      - "reference artifact claim extraction"
+      - "zeus_math_spec fact spec"
+
+default_read_path:
+  max_pre_code_reads: 6
+  route_budgets:
+    script_edit:
+      soft_limit: 6
+      expected_reads: [AGENTS.md, workspace_map.md, scripts/AGENTS.md, architecture/script_manifest.yaml, target_script, targeted_test_or_topology_doctor_scripts]
+    source_edit:
+      soft_limit: 6
+      expected_reads: [AGENTS.md, workspace_map.md, scoped_src_AGENTS.md, architecture/zones.yaml_or_source_rationale.yaml, target_file, targeted_test]
+    architecture_or_governance:
+      soft_limit: 8
+      expected_reads: [AGENTS.md, workspace_map.md, architecture/AGENTS.md, relevant_manifest, docs_authority_entrypoint, digest, targeted_test, reviewer_evidence]
+    broad_discovery:
+      soft_limit: 8
+      expected_reads: [AGENTS.md, workspace_map.md, digest, relevant_scoped_AGENTS, relevant_manifest, sampled_code, targeted_tests, notes]
+  required_order:
+    - AGENTS.md
+    - workspace_map.md
+    - scoped AGENTS.md for touched directory
+    - relevant machine manifest, such as zones.yaml/script_manifest.yaml/test_topology.yaml
+    - topology_doctor digest for task
+  rule: >
+    These budgets are provisional starting assumptions for the pre-code
+    navigation set, not a ban on necessary authority reads. If a task needs more
+    than the relevant ceiling, expand context and keep the reason tied to the
+    task boundary, truth owner, downstream behavior, or verification scope.
+
+evidence_surface_budgets:
+  rule: >
+    These are telemetry baselines for evidence/report surfaces, not hard
+    blocking limits. They exist to show growth and extension drift before those
+    surfaces turn into shadow planners or hidden authority branches.
+  surfaces:
+    - path: docs/reports
+      role: active_generated_reports
+      enforcement: advisory
+      expected_extensions: [".md", ".json", ".csv"]
+      budget_basis: current_repo_snapshot_plus_human_review
+    - path: docs/artifacts
+      role: active_evidence_artifacts
+      enforcement: advisory
+      expected_extensions: [".md", ".xlsx", ".csv", ".json"]
+      budget_basis: current_repo_snapshot_plus_human_review
+    - path: docs/to-do-list
+      role: active_checklists
+      enforcement: advisory
+      expected_extensions: [".xlsx", ".csv", ".json"]
+      budget_basis: current_repo_snapshot_plus_human_review

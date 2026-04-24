@@ -10,31 +10,64 @@ Dynamic multiplier reduces sizing when:
 - Recent win rate is poor
 - Portfolio is concentrated
 - In drawdown
+
+DT#5 / INV-21 (Phase 10E strict enforcement):
+  `entry_price` MUST be a typed `ExecutionPrice`. Bare float callers are
+  forbidden at this boundary — `kelly_size` calls `assert_kelly_safe()`
+  unconditionally. See `docs/authority/zeus_current_architecture.md §20`
+  for the law.
 """
+
+import logging
 
 import numpy as np
 
+from src.contracts.execution_price import ExecutionPrice
 from src.contracts.provenance_registry import require_provenance
+
+logger = logging.getLogger(__name__)
 
 
 def kelly_size(
     p_posterior: float,
-    entry_price: float,
+    entry_price: ExecutionPrice,
     bankroll: float,
     kelly_mult: float = 0.25,
+    safety_cap_usd: float | None = None,
 ) -> float:
     """Compute position size using fractional Kelly criterion. Spec §5.1.
 
     Returns: size in USD. Returns 0.0 if no positive edge.
-    entry_price: cost per share in [0.01, 0.99].
+    entry_price: MUST be a typed ExecutionPrice (DT#5 / INV-21 strict —
+        assert_kelly_safe() is called unconditionally, raising
+        ExecutionPriceContractError if the price is not suitable for Kelly
+        sizing). Bare floats are forbidden at this boundary (P10E).
+    safety_cap_usd: optional hard ceiling in USD. When provided, clips output
+        and emits a structured log record with the original pre-clip size.
     """
-    if p_posterior <= entry_price:
+    # DT#5 P10E: strict — assert_kelly_safe() runs unconditionally.
+    entry_price.assert_kelly_safe()
+    price_value = entry_price.value
+
+    if price_value <= 0.0 or price_value >= 1.0:
         return 0.0
-    if entry_price >= 1.0:
+    if bankroll <= 0.0:
+        return 0.0
+    if not (0.0 <= p_posterior <= 1.0):
+        return 0.0
+    if p_posterior <= price_value:
         return 0.0
 
-    f_star = (p_posterior - entry_price) / (1.0 - entry_price)
-    return f_star * kelly_mult * bankroll
+    f_star = (p_posterior - price_value) / (1.0 - price_value)
+    raw_proposal = f_star * kelly_mult * bankroll
+
+    if safety_cap_usd is not None and raw_proposal > safety_cap_usd:
+        logger.info(
+            "kelly_sized",
+            extra={"capped_by_safety_cap": True, "raw_proposal": raw_proposal},
+        )
+        return safety_cap_usd
+    return raw_proposal
 
 
 def dynamic_kelly_mult(
@@ -51,8 +84,8 @@ def dynamic_kelly_mult(
     Reduces base multiplier based on uncertainty and risk state.
     All adjustments are multiplicative (cumulative).
     """
-    # C1/INV-13: provenance check — default no-op until registry validation complete
-    require_provenance("kelly_mult", requires_provenance=False)
+    # C1/INV-13: provenance check — kelly_mult is registered in provenance_registry.yaml
+    require_provenance("kelly_mult")
 
     m = base
 
@@ -84,5 +117,14 @@ def dynamic_kelly_mult(
 
     # INV-05 / §P9.7: cascade floor — multiplier must never reach zero or NaN
     if not (m == m):  # NaN check: NaN != NaN
-        return 0.001
-    return max(0.001, m)
+        raise ValueError(
+            f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "
+            f"lead_days={lead_days}, rolling_win_rate_20={rolling_win_rate_20}, "
+            f"portfolio_heat={portfolio_heat}, drawdown_pct={drawdown_pct})"
+        )
+    if m <= 0.0:
+        raise ValueError(
+            f"dynamic_kelly_mult collapsed to {m} — all sizing gates triggered, "
+            f"refusing to fabricate a floor value"
+        )
+    return m

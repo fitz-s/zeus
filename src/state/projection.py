@@ -28,9 +28,13 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "edge_source",
     "discovery_mode",
     "chain_state",
+    "token_id",
+    "no_token_id",
+    "condition_id",
     "order_id",
     "order_status",
     "updated_at",
+    "temperature_metric",
 )
 
 
@@ -109,9 +113,13 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
             edge_source=excluded.edge_source,
             discovery_mode=excluded.discovery_mode,
             chain_state=excluded.chain_state,
+            token_id=excluded.token_id,
+            no_token_id=excluded.no_token_id,
+            condition_id=excluded.condition_id,
             order_id=excluded.order_id,
             order_status=excluded.order_status,
-            updated_at=excluded.updated_at
+            updated_at=excluded.updated_at,
+            temperature_metric=excluded.temperature_metric
         """,
         ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
     )

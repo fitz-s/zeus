@@ -24,9 +24,9 @@ if str(ROOT) not in sys.path:
 from src.config import STATE_DIR
 
 DEFAULT_DB = STATE_DIR / "zeus.db"
-RISK_DB = STATE_DIR / "risk_state-paper.db"
-POSITIONS_JSON = STATE_DIR / "positions-paper.json"
-STATUS_JSON = STATE_DIR / "status_summary-paper.json"
+RISK_DB = STATE_DIR / "risk_state-live.db"
+POSITIONS_JSON = STATE_DIR / "positions.json"
+STATUS_JSON = STATE_DIR / "status_summary.json"
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -90,7 +90,7 @@ def check_canonical_freshness(cur) -> dict:
 
 
 def check_position_count_match(cur) -> dict:
-    """Check 2: position_current count vs positions-paper.json active count."""
+    """Check 2: position_current count vs positions.json active count."""
     pc_count = _scalar(cur, "SELECT COUNT(*) FROM position_current") or 0
 
     if not POSITIONS_JSON.exists():
@@ -137,7 +137,7 @@ def check_settlement_harvester(cur) -> dict:
     """Check 4: latest settlement activity vs now. FAIL if >48h since last settlement.
 
     Checks decision_log (settlement artifacts) and calibration_pairs (harvester output)
-    rather than the legacy settlements table which is a static Rainstorm import.
+    rather than the legacy settlements table which is a static legacy-predecessor import.
     """
     # Primary: decision_log settlement artifacts have the actual settled_at timestamp
     max_settled = _scalar(
@@ -166,7 +166,7 @@ def check_settlement_harvester(cur) -> dict:
 
 
 def check_portfolio_truth_source() -> dict:
-    """Check 5: risk_state-paper.db latest row portfolio_truth_source."""
+    """Check 5: risk_state-live.db latest row portfolio_truth_source."""
     if not RISK_DB.exists():
         return {"status": FAIL, "evidence": f"{RISK_DB} not found", "detail": ""}
 
@@ -191,7 +191,7 @@ def check_portfolio_truth_source() -> dict:
 
 
 def check_status_summary_completeness() -> dict:
-    """Check 6: status_summary-paper.json risk.details is not empty."""
+    """Check 6: status_summary.json risk.details is not empty."""
     if not STATUS_JSON.exists():
         return {"status": FAIL, "evidence": f"{STATUS_JSON} not found", "detail": ""}
 

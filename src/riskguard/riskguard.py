@@ -13,7 +13,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.config import settings, STATE_DIR
+from src.config import get_mode, settings, STATE_DIR
+from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,
     directional_accuracy,
@@ -23,13 +24,14 @@ from src.riskguard.risk_level import RiskLevel, overall_level
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
-    get_trade_connection_with_shared,
+    get_trade_connection_with_world,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
 from src.state.portfolio import PortfolioState, Position, load_portfolio
+from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ TRAILING_LOSS_SOURCE_OK = "risk_state_history"
 TRAILING_LOSS_SOURCE_DEGRADED = "no_trustworthy_reference_row"
 TRAILING_LOSS_STATUSES = {
     "ok",
+    "stale_reference",
     "insufficient_history",
     "inconsistent_history",
     "no_reference_row",
@@ -48,29 +51,35 @@ TRAILING_LOSS_STATUSES = {
 def _get_runtime_trade_connection() -> sqlite3.Connection:
     if get_connection.__module__ != "src.state.db":
         return get_connection()
-    return get_trade_connection_with_shared()
+    return get_trade_connection_with_world()
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
     try:
         return load_portfolio(), "working_state_metadata"
     except Exception:
-        logger.warning("RiskGuard capital metadata fallback to settings.capital_base_usd", exc_info=True)
-        return PortfolioState(bankroll=float(settings.capital_base_usd)), "settings_capital_base_fallback"
+        logger.error("RiskGuard capital metadata load FAILED — refusing to fall back to settings", exc_info=True)
+        raise
 
 
 def _portfolio_position_from_loader_row(row: dict) -> Position:
+    # B052: Enforce strict canonical fields rather than filling defaults
+    required = ["trade_id", "market_id", "city", "target_date", "direction", "unit", "env", "size_usd"]
+    for req in required:
+        if row.get(req) is None or str(row.get(req)) == "":
+            raise ValueError(f"Canonical loader row missing critical field {req!r}")
+
     return Position(
-        trade_id=str(row.get("trade_id") or ""),
-        market_id=str(row.get("market_id") or ""),
-        city=str(row.get("city") or ""),
+        trade_id=str(row["trade_id"]),
+        market_id=str(row["market_id"]),
+        city=str(row["city"]),
         cluster=str(row.get("cluster") or ""),
-        target_date=str(row.get("target_date") or ""),
+        target_date=str(row["target_date"]),
         bin_label=str(row.get("bin_label") or ""),
-        direction=str(row.get("direction") or "unknown"),
-        unit=str(row.get("unit") or "F"),
-        env=str(row.get("env") or settings.mode),
-        size_usd=float(row.get("size_usd") or 0.0),
+        direction=str(row["direction"]),
+        unit=str(row["unit"]),
+        env=str(row["env"]),
+        size_usd=float(row["size_usd"]),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
         entry_price=float(row.get("entry_price") or 0.0),
@@ -98,40 +107,57 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
     loader_view = query_portfolio_loader_view(zeus_conn)
-    if loader_view.get("status") == "ok":
-        metadata_state, capital_source = _load_riskguard_capital_metadata()
-        positions = [
-            _portfolio_position_from_loader_row(row)
-            for row in loader_view.get("positions", [])
-        ]
-        bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
-        portfolio = PortfolioState(
-            positions=positions,
-            bankroll=bankroll,
-            updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
-            audit_logging_enabled=True,
-            daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
-            weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
-            recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
-            ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
+    policy = choose_portfolio_truth_source(loader_view.get("status"))
+    if policy.source != "canonical_db":
+        raise RuntimeError(
+            f"riskguard requires canonical truth source, got {policy.source!r}: {policy.reason}"
         )
-        return portfolio, {
-            "source": "position_current",
-            "loader_status": str(loader_view.get("status") or "unknown"),
-            "fallback_active": False,
-            "fallback_reason": "",
-            "position_count": len(positions),
-            "capital_source": capital_source,
-        }
+    metadata_state, capital_source = _load_riskguard_capital_metadata()
+    positions = []
+    for row in loader_view.get("positions", []):
+        try:
+            positions.append(_portfolio_position_from_loader_row(row))
+        except ValueError as exc:
+            # B052: Quarantine broken rows and escalate to avoid silent masking
+            logger.error("Quarantining invalid canonical portfolio row: %s", exc)
+            raise RuntimeError(f"RiskGuard DB loader fault: {exc}")
 
-    portfolio, capital_source = _load_riskguard_capital_metadata()
+    # B053 [YELLOW / flag for SD-A authority-separation reviewer]:
+    # Dual-source consistency locking. A position-count mismatch between
+    # canonical_db (the authoritative source) and capital metadata (the
+    # blending input) indicates stale or drifted state. Elevate to ERROR
+    # log level and expose both counts on the returned dict so downstream
+    # callers can fail-close on `consistency_lock == 'mismatched'` rather
+    # than silently blend inconsistent authority sources.
+    metadata_positions = getattr(metadata_state, "positions", [])
+    if len(positions) != len(metadata_positions):
+        logger.error(
+            "B053 Consistency Mismatch: canonical_db has %d positions vs %d in capital metadata. RiskGuard blending MUST NOT proceed on the blended view without caller-side consistency_lock check.",
+            len(positions), len(metadata_positions)
+        )
+
+    bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
+    portfolio = PortfolioState(
+        positions=positions,
+        bankroll=bankroll,
+        updated_at=str(getattr(metadata_state, "updated_at", "") or ""),
+        audit_logging_enabled=True,
+        daily_baseline_total=float(getattr(metadata_state, "daily_baseline_total", bankroll) or bankroll),
+        weekly_baseline_total=float(getattr(metadata_state, "weekly_baseline_total", bankroll) or bankroll),
+        recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
+        ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
+    )
     return portfolio, {
-        "source": "working_state_fallback",
+        "source": "position_current",
         "loader_status": str(loader_view.get("status") or "unknown"),
-        "fallback_active": True,
-        "fallback_reason": str(loader_view.get("status") or "unknown"),
-        "position_count": len(portfolio.positions),
-        "capital_source": capital_source,
+        "fallback_active": False,
+        "fallback_reason": "",
+        "position_count": len(positions),
+        "capital_source": "dual_source_blended",
+        "consistency_lock": "pass" if len(positions) == len(metadata_positions) else "mismatched",
+        # B053: expose both source counts so callers can diff explicitly
+        # rather than rely on a single boolean lock.
+        "metadata_position_count": len(metadata_positions),
     }
 
 
@@ -177,7 +203,6 @@ def _trailing_loss_reference(
 ) -> dict:
     cutoff_dt = datetime.fromisoformat(now.replace("Z", "+00:00")) - lookback
     cutoff = cutoff_dt.isoformat()
-    window_start = (cutoff_dt - TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE).isoformat()
     total_rows = int(
         risk_conn.execute("SELECT COUNT(*) FROM risk_state").fetchone()[0] or 0
     )
@@ -193,10 +218,10 @@ def _trailing_loss_reference(
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
-          AND checked_at >= ?
         ORDER BY checked_at DESC, id DESC
+        LIMIT 100
         """,
-        (cutoff, window_start),
+        (cutoff,),
     ).fetchall()
     if not candidate_rows:
         return {
@@ -207,8 +232,15 @@ def _trailing_loss_reference(
 
     for row in candidate_rows:
         if reference := _risk_state_reference_from_row(row):
+            ref_dt = datetime.fromisoformat(reference["checked_at"].replace("Z", "+00:00"))
+            staleness = cutoff_dt - ref_dt
+            if staleness > TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE:
+                status = "stale_reference"
+            else:
+                status = "ok"
+            
             return {
-                "status": "ok",
+                "status": status,
                 "source": TRAILING_LOSS_SOURCE_OK,
                 "reference": reference,
             }
@@ -234,24 +266,34 @@ def _trailing_loss_snapshot(
     if status not in TRAILING_LOSS_STATUSES:
         raise RuntimeError(f"unexpected trailing loss status: {status}")
     reference = reference_info.get("reference")
-    if status != "ok" or reference is None:
+    if status not in ("ok", "stale_reference") or reference is None:
         return {
             "loss": 0.0,
-            "level": RiskLevel.YELLOW,
-            "status": status,
+            "level": RiskLevel.DATA_DEGRADED,
+            "degraded": True,
+            "status": f"degraded:{status}",
             "source": str(reference_info["source"]),
             "reference": None,
         }
     reference_equity = float(reference["effective_bankroll"])
     loss = round(max(0.0, reference_equity - current_equity), 2)
-    level = (
+    level_from_loss = (
         RiskLevel.RED
         if loss > float(initial_bankroll) * float(threshold_pct)
         else RiskLevel.GREEN
     )
+    
+    # Staleness degrades GREEN to DATA_DEGRADED, but preserves RED.
+    if status == "stale_reference":
+        level = RiskLevel.RED if level_from_loss == RiskLevel.RED else RiskLevel.DATA_DEGRADED
+        is_degraded = True
+    else:
+        level = level_from_loss
+        is_degraded = False
     return {
         "loss": loss,
         "level": level,
+        "degraded": is_degraded,
         "status": status,
         "source": str(reference_info["source"]),
         "reference": reference,
@@ -286,9 +328,11 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
-def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str]:
+def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str, bool]:
+    """Returns (exits, source_name, degraded)."""
     if conn is None:
-        return [], "none"
+        return [], "none", False
+    outcome_fact_available = True
     try:
         rows = conn.execute(
             """
@@ -299,6 +343,7 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
             """
         ).fetchall()
     except sqlite3.OperationalError:
+        outcome_fact_available = False
         rows = []
     if rows:
         return (
@@ -318,8 +363,14 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
                 for row in rows
             ],
             "outcome_fact",
+            False,
         )
+    if outcome_fact_available:
+        # Table exists but is empty — valid empty result, not degradation
+        return [], "outcome_fact", False
 
+    # Degradation: outcome_fact unavailable, falling back to chronicle
+    logger.warning("outcome_fact unavailable — degrading realized exits to chronicle")
     try:
         rows = conn.execute(
             """
@@ -366,14 +417,48 @@ def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple
                 if row["pnl"] is not None
             ],
             "chronicle_dedup",
+            True,
         )
 
-    return [], "none"
+    return [], "none", False
 
 
 def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
+    """Aggregate settlement rows into per-strategy counts and PnL.
+
+    K1 invariant (bug #1/#2): this aggregation MUST be deduped by
+    trade_id. Settlement rows can come from multiple upstream sources
+    (canonical position_events, legacy position_events_legacy, legacy
+    decision_log artifacts) and the same underlying trade may appear in
+    more than one source or in multiple batches of the same source. Prior
+    to dedup, opening_inertia would show 19 settlements on
+    2026-04-11 while the canonical truth was 6 unique positions, because
+    two decision_log settlement batches (19:43 and 20:43) each recorded
+    the same 6 positions. The two bugs are now fixed at the writer layer
+    but historical decision_log rows from before the fix still contain
+    duplicates, so the reader must dedup defensively.
+
+    Dedup policy: for each trade_id, keep the FIRST row encountered in
+    iteration order. Callers should pass rows ordered by occurred_at ASC
+    if they want the earliest settlement record; the current caller
+    passes most-recent-first order from query_settlement_events, which
+    means the last recorded settlement wins. That is fine as long as
+    settlement is idempotent at the writer layer (bug #9 fix).
+    """
     summary: dict[str, dict] = {}
+    seen_trade_ids: set[str] = set()
     for row in rows:
+        trade_id = str(row.get("trade_id") or row.get("runtime_trade_id") or "")
+        if not trade_id:
+            # Rows without a trade_id cannot be deduped; fall back to
+            # including them so we do not silently drop data. This should
+            # be rare after the settlement writer fixes land.
+            pass
+        elif trade_id in seen_trade_ids:
+            continue
+        else:
+            seen_trade_ids.add(trade_id)
+
         strategy = str(row.get("strategy") or "unclassified")
         bucket = summary.setdefault(
             strategy,
@@ -381,7 +466,11 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
                 "count": 0,
                 "pnl": 0.0,
                 "wins": 0,
-                "accuracy": None,
+                # K2 rename (bug #3): this is trade profitability (wins/count),
+                # distinct from probability_directional_accuracy at the
+                # risk.details top level. The old shared 'accuracy' key name
+                # caused LLM reporters to conflate the two metrics.
+                "trade_profitability_rate": None,
             },
         )
         bucket["count"] += 1
@@ -395,46 +484,47 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     for strategy, bucket in summary.items():
         count = bucket["count"]
         bucket["pnl"] = round(bucket["pnl"], 2)
-        bucket["accuracy"] = round(bucket["wins"] / count, 4) if count else None
+        bucket["trade_profitability_rate"] = (
+            round(bucket["wins"] / count, 4) if count else None
+        )
     return summary
 
 
 def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int = 200) -> dict:
+    """Entry execution summary from canonical position_events."""
     try:
-        from src.state.db import _legacy_position_events_table
-        table = _legacy_position_events_table(conn) or "position_events"
         rows = conn.execute(
-            f"""
-            SELECT event_type, strategy
-            FROM {table}
-            WHERE env = ?
-              AND event_type IN ('ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED')
-            ORDER BY id DESC
+            """
+            SELECT event_type, strategy_key
+            FROM position_events
+            WHERE event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_FILLED', 'ENTRY_ORDER_REJECTED')
+            ORDER BY occurred_at DESC
             LIMIT ?
             """,
-            (env, limit),
+            (limit,),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
 
     overall = {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None}
     by_strategy: dict[str, dict] = {}
+    mapping = {
+        "POSITION_OPEN_INTENT": "attempted",
+        "ENTRY_ORDER_FILLED": "filled",
+        "ENTRY_ORDER_REJECTED": "rejected",
+    }
     for row in rows:
         event_type = str(row["event_type"])
-        strategy = str(row["strategy"] or "unclassified")
+        counter_key = mapping.get(event_type)
+        if counter_key is None:
+            continue
+        strategy = str(row["strategy_key"] or "unclassified")
         bucket = by_strategy.setdefault(
             strategy,
             {"attempted": 0, "filled": 0, "rejected": 0, "fill_rate": None},
         )
-        if event_type == "ORDER_ATTEMPTED":
-            overall["attempted"] += 1
-            bucket["attempted"] += 1
-        elif event_type == "ORDER_FILLED":
-            overall["filled"] += 1
-            bucket["filled"] += 1
-        elif event_type == "ORDER_REJECTED":
-            overall["rejected"] += 1
-            bucket["rejected"] += 1
+        overall[counter_key] += 1
+        bucket[counter_key] += 1
 
     def _finalize(bucket: dict) -> None:
         denom = bucket["filled"] + bucket["rejected"]
@@ -566,9 +656,14 @@ def tick() -> RiskLevel:
     risk_conn = get_connection(RISK_DB_PATH)
     init_risk_db(risk_conn)
 
+    previous_row = risk_conn.execute(
+        "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+    ).fetchone()
+    previous_level = RiskLevel(previous_row["level"]) if previous_row else None
+
     thresholds = settings["riskguard"]
     portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
-    current_env = settings.mode
+    current_env = get_mode()
 
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
     settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -594,7 +689,7 @@ def tick() -> RiskLevel:
         if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
             metric_ready_rows.append(row)
 
-    realized_exits, realized_truth_source = _current_mode_realized_exits(zeus_conn, env=current_env)
+    realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(zeus_conn, env=current_env)
     if realized_exits:
         portfolio = replace(portfolio, recent_exits=realized_exits)
     else:
@@ -602,6 +697,7 @@ def tick() -> RiskLevel:
         if canonical_recent_exits:
             portfolio = replace(portfolio, recent_exits=canonical_recent_exits)
             realized_truth_source = "authoritative_settlement_rows"
+            realized_degraded = False
 
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
@@ -763,6 +859,7 @@ def tick() -> RiskLevel:
             "portfolio_position_count": portfolio_truth["position_count"],
             "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
             "realized_truth_source": realized_truth_source,
+            "realized_degraded": realized_degraded,
             "settlement_sample_size": len(p_forecasts),
             "settlement_storage_source": settlement_storage_source,
             "settlement_row_storage_sources": settlement_row_storage_sources,
@@ -771,7 +868,14 @@ def tick() -> RiskLevel:
             "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
             "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
             "settlement_metric_ready_count": len(metric_ready_rows),
-            "accuracy": round(d_accuracy, 4),
+            # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
+            # hit rate computed from brier forecasts (did p>0.5 match the
+            # outcome?). It is NOT the same as trade profitability rate, which
+            # lives inside strategy_settlement_summary as per-strategy
+            # 'trade_profitability_rate'. The previous bare 'accuracy' key
+            # collided in name with the per-strategy rate and caused LLM
+            # reporters to copy 0.8947 as 'win rate'.
+            "probability_directional_accuracy": round(d_accuracy, 4),
             "strategy_settlement_summary": strategy_settlement_summary,
             "entry_execution_summary": entry_execution_summary,
             "strategy_tracker_summary": tracker_summary,
@@ -808,10 +912,131 @@ def tick() -> RiskLevel:
     zeus_conn.close()
     risk_conn.close()
 
+    try:
+        if level == RiskLevel.RED:
+            failed_rules = []
+            if brier_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "brier",
+                    "value": round(b_score, 4),
+                    "threshold": thresholds["brier_red"],
+                    "detail": f"accuracy={d_accuracy:.4f}",
+                })
+            if settlement_quality_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "settlement_quality",
+                    "value": 0,
+                    "threshold": 1,
+                    "detail": f"storage_source={settlement_storage_source}",
+                })
+            if daily_loss_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "daily_loss_pct",
+                    "value": round(float(daily_loss or 0.0), 4),
+                    "threshold": thresholds["max_daily_loss_pct"],
+                    "detail": f"effective_bankroll={current_total_value:.2f}",
+                })
+            if weekly_loss_level == RiskLevel.RED:
+                failed_rules.append({
+                    "name": "weekly_loss_pct",
+                    "value": round(float(weekly_loss or 0.0), 4),
+                    "threshold": thresholds["max_weekly_loss_pct"],
+                    "detail": f"effective_bankroll={current_total_value:.2f}",
+                })
+            alert_halt(failed_rules or [{
+                "name": "riskguard",
+                "value": 1,
+                "threshold": 0,
+                "detail": f"level={level.value}",
+            }])
+        elif previous_level == RiskLevel.RED and level == RiskLevel.GREEN:
+            alert_resume("rules cleared")
+        elif level == RiskLevel.YELLOW:
+            if brier_level == RiskLevel.YELLOW:
+                alert_warning("Brier score", round(b_score, 4), thresholds["brier_yellow"], detail=f"accuracy={d_accuracy:.4f}")
+            if execution_quality_level == RiskLevel.YELLOW:
+                alert_warning(
+                    "Execution fill rate",
+                    round(execution_overall.get("fill_rate", 0.0), 4) if execution_overall.get("fill_rate") is not None else 0.0,
+                    0.3,
+                    detail=f"observed={execution_observed}",
+                )
+            if settlement_quality_level == RiskLevel.YELLOW:
+                alert_warning("Settlement quality", float(degraded_rows), 1.0, detail=f"storage_source={settlement_storage_source}")
+            if strategy_signal_level == RiskLevel.YELLOW:
+                alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
+        elif level == RiskLevel.DATA_DEGRADED:
+            if daily_loss_level == RiskLevel.DATA_DEGRADED:
+                alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+            if weekly_loss_level == RiskLevel.DATA_DEGRADED:
+                alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+    except Exception as exc:
+        logger.warning("Discord alert emission failed: %s", exc)
+
     if level != RiskLevel.GREEN:
         logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
                        level.value, settlement_storage_source, b_score, d_accuracy * 100)
 
+    return level
+
+
+def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
+    """DT#6 graceful-degradation entry: run one tick with a pre-loaded PortfolioState.
+
+    Callers that have already checked portfolio.authority can pass the degraded
+    state here. If authority != 'canonical_db', new-entry paths are suppressed
+    but monitor / exit / reconciliation lanes run read-only.
+    """
+    risk_conn = get_connection(RISK_DB_PATH)
+    init_risk_db(risk_conn)
+
+    zeus_conn = _get_runtime_trade_connection()
+    current_env = get_mode()
+    now = datetime.now(timezone.utc).isoformat()
+
+    if portfolio.authority != "canonical_db":
+        logger.warning(
+            "tick_with_portfolio: portfolio authority=%r (degraded) — new-entry paths suppressed",
+            portfolio.authority,
+        )
+
+    thresholds = settings["riskguard"]
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
+
+    current_equity = float(portfolio.bankroll)
+    initial_bankroll = float(portfolio.initial_bankroll)
+
+    daily_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(hours=24),
+        current_equity=current_equity,
+        initial_bankroll=initial_bankroll,
+        threshold_pct=float(thresholds["max_daily_loss_pct"]),
+    )
+    weekly_loss_snapshot = _trailing_loss_snapshot(
+        risk_conn,
+        now=now,
+        lookback=timedelta(days=7),
+        current_equity=current_equity,
+        initial_bankroll=initial_bankroll,
+        threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+    )
+
+    daily_loss_level = daily_loss_snapshot["level"]
+    weekly_loss_level = weekly_loss_snapshot["level"]
+
+    level = overall_level(
+        RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        RiskLevel.GREEN,
+        daily_loss_level,
+        weekly_loss_level,
+    )
+
+    zeus_conn.close()
+    risk_conn.close()
     return level
 
 

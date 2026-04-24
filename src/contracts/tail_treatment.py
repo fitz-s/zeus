@@ -44,6 +44,11 @@ class TailTreatment:
             raise ValueError(
                 f"TailTreatment.scale_factor must be in (0, 1], got {self.scale_factor}"
             )
+        if self.serves not in {"calibration_accuracy", "profit"}:
+            raise ValueError(
+                "TailTreatment.serves must be 'calibration_accuracy' or 'profit', "
+                f"got {self.serves!r}"
+            )
         if not self.validated_against:
             raise ValueError("TailTreatment.validated_against must not be empty")
 

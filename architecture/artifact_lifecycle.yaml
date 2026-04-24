@@ -1,0 +1,208 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Topology Context Efficiency"
+  purpose: >
+    Classify agent-created files by lifecycle and require a small work record
+    for repo-changing work. This is a routing contract, not a new authority
+    source.
+
+required_artifact_class_fields:
+  - id
+  - purpose
+  - active_paths
+  - archive_paths
+  - record_required
+
+required_liminal_artifact_fields:
+  - path
+  - artifact_role
+  - route_class
+  - authority_behavior
+  - canonical_owner
+  - guardrail
+
+allowed_liminal_artifact_roles:
+  - archive_interface
+  - reference_fact_spec
+  - history_lore
+  - proof_claim_registry
+  - reference_claim_registry
+  - operations_evidence
+
+allowed_route_classes:
+  - conditional_reference
+  - digest_routing
+  - generated_view_claim_source
+  - operations_evidence
+  - manifest_registry
+
+record_contract:
+  applies_to: repo_changes
+  preferred_record: docs/operations/task_YYYY-MM-DD_slug/work_log.md
+  minimum_fields:
+    - Date
+    - Branch
+    - Task
+    - Changed files
+    - Summary
+    - Verification
+    - Next
+  approved_record_globs:
+    - docs/operations/task_????-??-??_*/work_log.md
+    - docs/operations/task_????-??-??_*.md
+    - docs/operations/runtime_artifact_inventory.md
+    - .omx/context/**/*.md
+  exempt_path_globs:
+    - docs/archives/**
+    - .omx/**
+    - state/*.log
+    - state/*.pid
+    - state/*.tmp
+  rule: >
+    Any non-trivial repo-changing agent task needs a short record before
+    closeout. The record is evidence of what happened; it does not authorize the
+    change and does not replace tests or map maintenance.
+
+artifact_classes:
+  - id: active_work_record
+    purpose: Short factual record of what an agent changed, verified, and left next.
+    active_paths:
+      - docs/operations/task_YYYY-MM-DD_slug/work_log.md
+      - docs/operations/task_YYYY-MM-DD_slug.md
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
+      - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
+    record_required: false
+  - id: active_solution_package
+    purpose: Multi-file solution package kept as an atomic active unit.
+    active_paths:
+      - docs/operations/task_YYYY-MM-DD_slug/
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
+      - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
+    record_required: true
+  - id: generated_evidence
+    purpose: Test output, investigation notes, or diagnostic evidence that supports a task.
+    active_paths:
+      - docs/artifacts/
+      - docs/to-do-list/
+      - docs/operations/task_YYYY-MM-DD_slug/evidence/
+      - raw/oracle_shadow_snapshots/
+      - .omx/context/
+    archive_paths:
+      - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/evidence/
+    record_required: true
+  - id: scratch_runtime_artifact
+    purpose: Runtime scratch output that should be ignored or explicitly classified before use as evidence.
+    active_paths:
+      - state/
+      - .omx/
+      - .omc/
+      - .code-review-graph/*
+    archive_paths:
+      - not_archived
+    record_required: false
+  - id: tracked_online_context_artifact
+    purpose: Derived artifact tracked so online review/pro models can inspect repo structure without local disk access.
+    active_paths:
+      - .code-review-graph/graph.db
+    archive_paths:
+      - not_archived
+    record_required: true
+
+classification_rules:
+  - id: active_operations_packet
+    path_globs:
+      - docs/operations/task_????-??-??_*.md
+      - docs/operations/task_????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: active
+    destination_rule: Keep only active packet/control work here.
+  - id: active_docs_artifacts
+    path_globs:
+      - docs/artifacts/*
+      - docs/to-do-list/*
+    artifact_class: generated_evidence
+    lifecycle: active
+    destination_rule: Keep binary/non-md evidence and checklist workbooks explicit and non-authoritative.
+  - id: active_docs_reports
+    path_globs:
+      - docs/reports/*
+    artifact_class: generated_evidence
+    lifecycle: active
+    destination_rule: Keep active generated reports explicit and non-authoritative; archive historical reports under docs/archives/reports/.
+  - id: raw_oracle_shadow_snapshots
+    path_globs:
+      - raw/oracle_shadow_snapshots/*/*.json
+    artifact_class: generated_evidence
+    lifecycle: active
+    destination_rule: Keep raw oracle snapshots as evidence inputs; promote only through declared oracle calibration/config paths.
+  - id: active_work_log
+    path_globs:
+      - docs/operations/task_????-??-??_*/work_log.md
+    artifact_class: active_work_record
+    lifecycle: active
+    destination_rule: Append concise entries; archive with the package.
+  - id: archived_branch_work_packet
+    path_globs:
+      - docs/archives/work_packets/branches/*/*/????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: archived
+    destination_rule: Archive under the branch where the work happened.
+  - id: archived_tree_work_packet
+    path_globs:
+      - docs/archives/work_packets/trees/*/*/????-??-??_*/
+    artifact_class: active_solution_package
+    lifecycle: archived
+    destination_rule: Use only for persistent git worktree-bound packages.
+
+liminal_artifacts:
+  - path: docs/archive_registry.md
+    artifact_role: archive_interface
+    route_class: conditional_reference
+    authority_behavior: "Archive registry is a visible history access protocol, not archive-body authority."
+    canonical_owner: architecture/topology.yaml
+    guardrail: "Archive-derived claims must be labeled [Archive evidence] and rewritten into active form before promotion."
+  - path: docs/reference/zeus_math_spec.md
+    artifact_role: reference_fact_spec
+    route_class: conditional_reference
+    authority_behavior: "Reference facts must be reflected into executable contracts, tests, manifests, or authority docs before they become binding."
+    canonical_owner: architecture/reference_replacement.yaml
+    guardrail: "Never treat the full reference doc as top-level authority; cite replaced claim IDs or executable proof targets."
+  - path: architecture/history_lore.yaml
+    artifact_role: history_lore
+    route_class: digest_routing
+    authority_behavior: "Lore routes failure lessons and antibodies; it does not override code, tests, invariants, or authority docs."
+    canonical_owner: architecture/history_lore.yaml
+    guardrail: "Digest cards can trigger reads, but durable law must point to an antibody or canonical owner."
+  - path: architecture/core_claims.yaml
+    artifact_role: proof_claim_registry
+    route_class: generated_view_claim_source
+    authority_behavior: "Generated topology views may emit replaced claims as verified facts; the claim registry itself is not a new authority source."
+    canonical_owner: architecture/core_claims.yaml
+    guardrail: "Every emitted claim needs executable, test, manifest, authority, or lore proof targets."
+  - path: architecture/reference_replacement.yaml
+    artifact_role: reference_claim_registry
+    route_class: manifest_registry
+    authority_behavior: "Records replacement/deletion eligibility and claim proofs for reference docs; it does not delete or promote docs by itself."
+    canonical_owner: architecture/reference_replacement.yaml
+    guardrail: "Deletion or demotion requires replacement status, proof targets, and safe allowed_action."
+  - path: docs/artifacts/zeus_architecture_deep_map_2026-04-16.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Demoted legacy architecture deep-map snapshot; evidence only and not a default read."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/reference/zeus_architecture_reference.md for compact orientation and docs/authority/** plus manifests for law."
+  - path: docs/artifacts/tigge_cloud_wiring_snapshot_2026-04-19.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Dated local/cloud TIGGE wiring snapshot; evidence only and not a durable runbook."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance; do not route VM/project-specific details as default procedure."
+  - path: docs/artifacts/tigge_data_training_handoff_2026-04-23.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Dated TIGGE data/training handoff; evidence only and not a durable runbook or authority surface."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance and docs/authority/** for binding data/runtime law."

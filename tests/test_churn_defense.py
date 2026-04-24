@@ -1,6 +1,6 @@
 """Tests for 8-layer churn defense.
 
-Each test targets one specific churn vector from Rainstorm forensic audit.
+Each test targets one specific churn vector from the legacy-predecessor forensic audit.
 """
 
 import pytest

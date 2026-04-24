@@ -8,8 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "state" / "zeus.db"
 DEFAULT_LEGACY_EXPORTS = (
-    ROOT / "state" / "positions-paper.json",
-    ROOT / "state" / "positions-live.json",
+    ROOT / "state" / "positions.json",
 )
 CANONICAL_OPEN_PHASES = {
     "pending_entry",

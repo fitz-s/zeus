@@ -8,6 +8,7 @@ import src.engine.evaluator as evaluator_module
 from src.config import City
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import MarketCandidate
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.state.portfolio import PortfolioState
 from src.types import BinEdge
 
@@ -23,9 +24,33 @@ NYC = City(
 )
 
 
+def _stub_full_family_scan(monkeypatch):
+    def _scan(analysis, *args, **kwargs):
+        return [
+            FullFamilyHypothesis(
+                index=i,
+                range_label=edge.bin.label,
+                direction=edge.direction,
+                edge=edge.edge,
+                ci_lower=edge.ci_lower,
+                ci_upper=edge.ci_upper,
+                p_value=edge.p_value,
+                p_model=edge.p_model,
+                p_market=edge.p_market,
+                p_posterior=edge.p_posterior,
+                entry_price=edge.entry_price,
+                is_shoulder=bool(getattr(edge.bin, "is_shoulder", False)),
+                passed_prefilter=True,
+            )
+            for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0)))
+        ]
+
+    monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", _scan)
+
+
 def _patch_evaluator(monkeypatch, *, entry_price: float):
     class DummyEnsembleSignal:
-        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None):
+        def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
 
         def p_raw_vector(self, bins, n_mc=5000):
@@ -73,6 +98,9 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
         def get_best_bid_ask(self, token_id):
             return (entry_price, entry_price + 0.01, 20.0, 20.0)
 
+        def get_fee_rate(self, token_id):
+            return 0.05
+
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
@@ -90,6 +118,7 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)

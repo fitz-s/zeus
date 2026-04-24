@@ -1,8 +1,6 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Handles both paper and live modes.
-Paper mode: simulates fills at VWMP.
-Live mode: places limit orders via Polymarket CLOB API.
+Live mode only: places limit orders via Polymarket CLOB API.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -19,7 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import settings
+from src.config import get_mode, settings
+from src.riskguard.discord_alerts import alert_trade
 from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
@@ -27,6 +26,10 @@ from src.contracts import (
     ExecutionIntent,
     EdgeContext,
     Direction,
+)
+from src.contracts.execution_price import (
+    ExecutionPrice,
+    ExecutionPriceContractError,
 )
 from src.types import BinEdge
 
@@ -58,6 +61,7 @@ class OrderResult:
     external_order_id: Optional[str] = None
     venue_status: Optional[str] = None
     idempotency_key: Optional[str] = None
+    decision_edge: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -105,8 +109,16 @@ def create_execution_intent(
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
                            
-    order_token = token_id if edge.direction == "buy_yes" else no_token_id
-    timeout = MODE_TIMEOUTS.get(mode, 3600)
+    if edge.direction.value == "buy_yes":
+        order_token = token_id
+    elif edge.direction.value == "buy_no":
+        order_token = no_token_id
+    else:
+        raise ValueError(f"Strict token routing failed: unsupported token direction '{edge.direction}'")
+
+    if mode not in MODE_TIMEOUTS:
+        raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
+    timeout = MODE_TIMEOUTS[mode]
     
     return ExecutionIntent(
         direction=Direction(edge.direction),
@@ -114,30 +126,31 @@ def create_execution_intent(
         limit_price=limit_price,
         toxicity_budget=0.05,
         max_slippage=0.02,
-        is_sandbox=(settings.mode == "paper"),
+        is_sandbox=False,
         market_id=market_id,
         token_id=order_token,
         timeout_seconds=timeout,
         slice_policy="iceberg" if size_usd > 100 else "single_shot",
         reprice_policy="dynamic_peg" if mode == "day0_capture" else "static",
         liquidity_guard=True,
+        decision_edge=edge.edge,
     )
 
 def execute_intent(
     intent: ExecutionIntent,
-    edge_vwmp: float, # VWMP needed for paper fill simulation
-    label: str, # Label used for logging
+    edge_vwmp: float,  # Phase 2: remove this parameter (dead after _paper_fill deletion)
+    label: str,
 ) -> OrderResult:
-    """Execute the instantiated domain intent (paper or live)."""
-    
+    """Execute the instantiated live domain intent."""
+
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
 
     # Phase 3: Adversarial Execution Evolutions
-    if intent.liquidity_guard and not intent.is_sandbox:
+    if intent.liquidity_guard:
         logger.info(f"Liquidity guard active. Monitoring toxic sweep parameters against {intent.target_size_usd}")
-        
+
     if intent.slice_policy == "iceberg":
         logger.info(f"Iceberg slice policy active: Will break {intent.target_size_usd} into micro-orders")
 
@@ -145,18 +158,15 @@ def execute_intent(
     shares = intent.target_size_usd / limit_price if limit_price > 0 else 0
     shares = math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
 
-    if intent.is_sandbox:
-        return _paper_fill(trade_id, intent, edge_vwmp, label)
-    else:
-        if not intent.token_id:
-            return OrderResult(
-                trade_id=trade_id, status="rejected",
-                reason=f"No token_id provided for intent",
-            )
-
-        return _live_order(
-            trade_id, intent, shares
+    if not intent.token_id:
+        return OrderResult(
+            trade_id=trade_id, status="rejected",
+            reason=f"No token_id provided for intent",
         )
+
+    return _live_order(
+        trade_id, intent, shares
+    )
 
 
 def create_exit_order_intent(
@@ -180,35 +190,6 @@ def create_exit_order_intent(
     )
 
 
-def _paper_fill(
-    trade_id: str,
-    intent: ExecutionIntent,
-    edge_vwmp: float,
-    label: str,
-) -> OrderResult:
-    """Paper mode: simulate fill at VWMP. Spec §6.4.
-
-    BinEdge.vwmp is ALREADY in native space for the direction:
-    - buy_yes: vwmp = YES-side price
-    - buy_no: vwmp = NO-side price
-    DO NOT flip it again — that's the churn bug root cause.
-    """
-    fill_price = edge_vwmp  # Already native space. NEVER flip here.
-    now = datetime.now(timezone.utc).isoformat()
-
-    logger.info(
-        "PAPER FILL: %s %s @ %.3f (limit=%.3f, size=$%.2f)",
-        intent.direction.value, label, fill_price, intent.limit_price, intent.target_size_usd,
-    )
-
-    return OrderResult(
-        trade_id=trade_id,
-        status="filled",
-        fill_price=fill_price,
-        filled_at=now,
-        submitted_price=intent.limit_price,
-        shares=(intent.target_size_usd / fill_price) if fill_price > 0 else 0.0,
-    )
 
 
 def place_sell_order(
@@ -247,7 +228,14 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
 
     current_price = intent.current_price
     best_bid = intent.best_bid
-    base_price = current_price - 0.01
+    # T5.b 2026-04-23: replace bare 0.01 magic with TickSize typed
+    # contract. TickSize.for_market resolves per-token tick size (all
+    # Polymarket weather markets currently share $0.01, but the
+    # classmethod is the single truth surface for future per-market
+    # differentiation).
+    from src.contracts.tick_size import TickSize
+    tick = TickSize.for_market(token_id=intent.token_id)
+    base_price = current_price - tick.value
     limit_price = base_price
 
     if best_bid is not None and best_bid < base_price:
@@ -255,7 +243,22 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
         if current_price > 0 and slippage / current_price <= 0.03:
             limit_price = best_bid
 
-    limit_price = max(0.01, min(0.99, limit_price))
+    # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
+    # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`
+    # clamp let NaN propagate into CLOB contact. Reject explicitly
+    # here so non-finite prices never reach place_limit_order. Use
+    # the same `malformed_limit_price` rejection reason convention as
+    # T5.a's entry-path ExecutionPrice boundary guard for symmetry.
+    if not math.isfinite(limit_price):
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=f"malformed_limit_price: non-finite value {limit_price!r}",
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
+    limit_price = tick.clamp_to_valid_range(limit_price)
 
     shares = math.floor(intent.shares * 100 + 1e-9) / 100.0
     if shares <= 0:
@@ -284,7 +287,7 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
     )
 
     try:
-        client = PolymarketClient(paper_mode=False)
+        client = PolymarketClient()
         result = client.place_limit_order(
             token_id=intent.token_id,
             price=limit_price,
@@ -306,9 +309,20 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             result.get("orderID")
             or result.get("orderId")
             or result.get("id")
-            or intent.trade_id
         )
-        return OrderResult(
+        if not order_id:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason="missing_order_id",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+                venue_status=str(result.get("status") or ""),
+            )
+        result_obj = OrderResult(
             trade_id=intent.trade_id,
             status="pending",
             reason="sell order posted",
@@ -321,6 +335,19 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=intent.idempotency_key,
         )
+        try:
+            alert_trade(
+                direction="SELL",
+                market=intent.token_id,
+                price=limit_price,
+                size_usd=float(shares * limit_price),
+                strategy="exit_order",
+                edge=float(current_price - limit_price),
+                mode=get_mode(),
+            )
+        except Exception as exc:
+            logger.warning("Discord trade alert failed for exit order: %s", exc)
+        return result_obj
     except Exception as e:
         logger.error("Live exit order failed: %s", e)
         return OrderResult(
@@ -345,6 +372,44 @@ def _live_order(
 
     timeout = intent.timeout_seconds
 
+    # T5.a typed-boundary assertion (D3 defense-in-depth): construct
+    # ExecutionPrice from the pre-computed limit_price at the executor
+    # seam. ExecutionPrice.__post_init__ refuses non-finite or
+    # out-of-range values; with currency="probability_units" it also
+    # refuses values > 1.0. This is a NARROW STRUCTURAL GUARD only —
+    # not a Kelly-safety guarantee. The fee-deducted/Kelly-safe
+    # semantics are upstream evaluator's responsibility, so we use
+    # price_type="ask", fee_deducted=False here to avoid a semantic
+    # white lie at the executor seam (see T5.a critic review
+    # 2026-04-23: the guards fire identically for finite/nonneg/≤1
+    # regardless of price_type or fee_deducted). This only catches
+    # "malformed limit_price reached executor" regressions (NaN,
+    # negative, >1.0 prob), not fee-accounting bugs. Rejection reason
+    # is named "malformed_limit_price" to avoid implying Kelly-semantic
+    # violation.
+    try:
+        ExecutionPrice(
+            value=intent.limit_price,
+            price_type="ask",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+    except (ValueError, ExecutionPriceContractError) as exc:
+        logger.error(
+            "LIVE ORDER boundary check failed: limit_price=%r rejected by "
+            "ExecutionPrice contract: %s",
+            intent.limit_price,
+            exc,
+        )
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"malformed_limit_price: {exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+        )
+
     logger.info(
         "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
         intent.direction.value,
@@ -353,7 +418,7 @@ def _live_order(
     )
 
     try:
-        client = PolymarketClient(paper_mode=False)
+        client = PolymarketClient()
         result = client.place_limit_order(
             token_id=intent.token_id,
             price=intent.limit_price,
@@ -367,7 +432,7 @@ def _live_order(
                 reason="CLOB API returned None",
             )
 
-        return OrderResult(
+        result_obj = OrderResult(
             trade_id=trade_id,
             status="pending",
             reason=f"Order posted, timeout={timeout}s",
@@ -375,12 +440,25 @@ def _live_order(
                 result.get("orderID")
                 or result.get("orderId")
                 or result.get("id")
-                or trade_id
+                or None
             ),
             timeout_seconds=timeout,
             submitted_price=intent.limit_price,
             shares=shares,
         )
+        try:
+            alert_trade(
+                direction="BUY",
+                market=intent.market_id,
+                price=intent.limit_price,
+                size_usd=float(shares * intent.limit_price),
+                strategy="live_order",
+                edge=float(intent.decision_edge),
+                mode=get_mode(),
+            )
+        except Exception as exc:
+            logger.warning("Discord trade alert failed for live order: %s", exc)
+        return result_obj
 
     except Exception as e:
         logger.error("Live order failed: %s", e)

@@ -1,0 +1,52 @@
+{
+  "task": "docs reclassification post-closeout review",
+  "packet": "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/plan.md",
+  "route_source": "current_state",
+  "route_evidence": [
+    "docs/operations/current_state.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/change_receipt_schema.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md",
+    "docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    "raw/**",
+    ".code-review-graph/graph.db",
+    "docs/archives/**",
+    "docs/archives.zip",
+    "docs/authority/**"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --agents-coherence --json",
+    "python scripts/topology_doctor.py --self-check-coherence --json",
+    "python scripts/topology_doctor.py --runtime-modes --json",
+    "python scripts/topology_doctor.py --code-review-graph-status --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files AGENTS.md workspace_map.md --json",
+    "python scripts/topology_doctor.py closeout --changed-files AGENTS.md workspace_map.md --plan-evidence docs/operations/current_state.md --work-record-path docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/work_log.md --json",
+    "git diff --check -- AGENTS.md workspace_map.md",
+    "git diff -- docs/authority"
+  ]
+}

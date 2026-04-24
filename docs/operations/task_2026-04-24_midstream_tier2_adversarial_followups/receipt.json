@@ -1,0 +1,177 @@
+{
+  "task": "T2 Midstream Adversarial Followups — M1 + C5 + C6 + H3 + M3",
+  "packet": "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/AGENTS.md",
+    "architecture/source_rationale.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "architecture/invariants.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml"
+  ],
+  "allowed_files": [
+    "scripts/ingest_grib_to_snapshots.py",
+    "src/execution/harvester.py",
+    "src/engine/monitor_refresh.py",
+    "scripts/etl_historical_forecasts.py",
+    "scripts/validate_dynamic_alpha.py",
+    "scripts/etl_forecast_skill_from_forecasts.py",
+    "scripts/semantic_linter.py",
+    "src/contracts/ensemble_snapshot_provenance.py",
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_high_calibration_v2_route.py",
+    "tests/test_semantic_linter.py",
+    "tests/test_fdr.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_phase7a_metric_cutover.py",
+    "tests/test_phase10c_dt_seam_followup.py",
+    "tests/test_lifecycle.py",
+    "tests/test_calibration_manager.py",
+    "architecture/test_topology.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/source_rationale.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json"
+  ],
+  "forbidden_files": [
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "architecture/zones.yaml",
+    "architecture/topology.yaml",
+    "architecture/kernel_manifest.yaml",
+    "architecture/module_manifest.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
+    "architecture/code_review_graph_protocol.yaml",
+    "architecture/history_lore.yaml",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/change_receipt_schema.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/city_truth_contract.yaml",
+    "architecture/runtime_modes.yaml",
+    "architecture/reference_replacement.yaml",
+    "architecture/self_check/**",
+    "architecture/2026_04_02_architecture_kernel.sql",
+    "docs/authority/**",
+    "src/state/**",
+    "src/control/**",
+    "src/supervisor_api/**",
+    ".github/workflows/**",
+    ".code-review-graph/graph.db",
+    "state/**",
+    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/**",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/**"
+  ],
+  "changed_files": [
+    "scripts/ingest_grib_to_snapshots.py",
+    "src/execution/harvester.py",
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_high_calibration_v2_route.py",
+    "tests/test_lifecycle.py",
+    "tests/test_calibration_manager.py",
+    "tests/test_phase10c_dt_seam_followup.py",
+    "architecture/test_topology.yaml",
+    "src/engine/monitor_refresh.py",
+    "scripts/etl_historical_forecasts.py",
+    "scripts/validate_dynamic_alpha.py",
+    "scripts/etl_forecast_skill_from_forecasts.py",
+    "scripts/semantic_linter.py",
+    "tests/test_semantic_linter.py",
+    "src/contracts/ensemble_snapshot_provenance.py",
+    "tests/test_canonical_data_versions_namespace.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_fdr.py",
+    "tests/test_phase7a_metric_cutover.py",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json"
+  ],
+  "followups_owed": {
+    "T2-S1-followup-A": {
+      "description": "Extend Law 5 antibody to cover causality=None / {} / string / {status:None}; consider contract hardening at src/contracts/snapshot_ingest_contract.py:56-59 to require isinstance(dict)+non-empty-string status.",
+      "effort_hours_estimate": 2,
+      "scope": "tests/ + possible src/contracts/",
+      "owner": "next slice",
+      "origin": "con-nyx T2-S1 finding 4"
+    },
+    "T2-S1-followup-B": {
+      "description": "Audit src/state/db.py::init_schema for settlements-column parity with live DB (pm_bin_lo/pm_bin_hi/unit/settlement_source_type missing from fresh CREATE); decide canonicalize vs document-as-legacy.",
+      "effort_hours_estimate": 3,
+      "scope": "src/state/** — planning-lock required",
+      "owner": "dedicated slice",
+      "origin": "con-nyx T2-S1 finding 3"
+    },
+    "T2-S1-followup-M": {
+      "description": "Two-part historical-data migration. (a) Backfill 1,561 legacy settlement rows with canonical physical_quantity ('mx2t6_local_calendar_day_max') OR document mixed-rows state as permanent + add canonical-only WHERE-clause convention. (b) HKO HIGH retroactive settlement_value audit — query legacy HKO HIGH rows for rounding-flip candidates (raw temperature in [x.5, x+1) range where WMO half-up rounds UP and oracle_truncate rounds DOWN), compute delta under both rules, flag any winning_bin impact, enumerate affected positions/calibration_pairs. Pre-C5 harvester HIGH branch used round_wmo_half_up_value regardless of city; post-C5 uses SettlementSemantics.for_city(city_obj).round_values which applies HKO oracle_truncate. Part (b) added 2026-04-24 per con-nyx T2-S2 finding 2.",
+      "effort_hours_estimate": 8,
+      "scope": "src/state/** + data migration packet + potentially retroactive calibration_pairs scrub",
+      "owner": "dedicated slice",
+      "origin": "con-nyx T2-S1 finding 2 + T2-S2 finding 2"
+    },
+    "T2-S3-followup-SCRIPTS": {
+      "description": "Audit training-path scripts in scripts/ for H3 compliance before live-readiness B3 flag flip. con-nyx T2-S3 review identified 4 name-suspicious canonical-path scripts (from 27 bare-JOIN files in scripts/) that must be audited first: (1) scripts/bridge_oracle_to_calibration.py:52 — named calibration bridge, P0 concern; (2) scripts/backfill_observations_from_settlements.py:34 — obs feeds training, P0 concern; (3) scripts/backfill_ens.py:43 — ensemble backfill; (4) scripts/backfill_wu_daily_all.py:331 — WU daily backfill. For each: confirm whether the call path is canonical training or audit/one-off; if canonical, patch the SQL with temperature_metric predicate AND promote the script into H3 rule allowlist; then fail-closed the H3 rule on the promoted scripts. VERIFIED ZERO bare JOIN in refit_platt_v2.py + rebuild_calibration_pairs_v2.py (they read calibration_pairs_v2, not settlements directly).",
+      "effort_hours_estimate": 4,
+      "scope": "scripts/ training-path audit + semantic_linter.py allowlist extension + tests/test_semantic_linter.py",
+      "owner": "pre-live-readiness-B3-flip checklist",
+      "deadline": "before ZEUS_HARVESTER_LIVE_ENABLED flag-ON under DR-33-C",
+      "priority_queue": [
+        "scripts/bridge_oracle_to_calibration.py:52",
+        "scripts/backfill_observations_from_settlements.py:34",
+        "scripts/backfill_ens.py:43",
+        "scripts/backfill_wu_daily_all.py:331"
+      ],
+      "origin": "T2-S3 scope decision + con-nyx T2-S3 finding 1"
+    },
+    "T2-S3-followup-INDIRECT-SQL": {
+      "description": "H3 rule currently scopes to SQL literal args of .execute*/.read_sql* calls. If a future codepath builds SQL via string variables then passes to execute, the H3 rule will miss the violation. Extend _sql_call_literal_args coverage OR add a secondary file-level SQL-string scan. No observed instances today; track-only unless a violation is found.",
+      "effort_hours_estimate": 2,
+      "scope": "scripts/semantic_linter.py",
+      "owner": "opportunistic",
+      "origin": "T2-S3 residual risk 3"
+    },
+    "T2-S4-followup-ALIAS-DROP": {
+      "description": "Drop the deprecation alias CANONICAL_DATA_VERSIONS = CANONICAL_ENSEMBLE_DATA_VERSIONS in src/contracts/ensemble_snapshot_provenance.py once external callers (if any) have migrated. All 4 internal test callsites updated in T2-S4 commit; no production caller uses the alias. Safe to drop at any time; scheduled as a cleanup slice to avoid mid-session refactor churn.",
+      "effort_hours_estimate": 0.5,
+      "scope": "src/contracts/ensemble_snapshot_provenance.py",
+      "owner": "cleanup slice",
+      "origin": "T2-S4 scope decision — deprecation alias"
+    },
+    "T2-S4-followup-OBSERVATION-WIRING": {
+      "description": "Wire CANONICAL_OBSERVATION_DATA_VERSIONS into src/data/observation_instants_v2_writer.py as a pre-INSERT assertion (pattern analogous to assert_data_version_allowed for ensemble snapshots). This closes the M3 namespace disambiguation from constant-only scaffolding to enforced contract on the observation writer. Owner should verify against live DB that all 1.8M pre-existing observation_instants_v2 rows carry v1.wu-native (confirmed via SELECT DISTINCT 2026-04-24) OR extend allowlist.",
+      "effort_hours_estimate": 2,
+      "scope": "src/data/observation_instants_v2_writer.py + new tests/test_observation_data_version_contract.py",
+      "owner": "dedicated slice",
+      "origin": "T2-S4 scope decision — observation allowlist scaffolding"
+    },
+    "T2-S4-followup-SETTLEMENT-WIRING": {
+      "description": "Wire CANONICAL_SETTLEMENT_DATA_VERSIONS into src/execution/harvester.py write path as pre-INSERT assertion. Current harvester uses _HARVESTER_LIVE_DATA_VERSION dispatch dict — the new allowlist gives a single citable constant for the harvester + any future non-harvester settlement writer (P-E reconstruction, backfill paths) to share.",
+      "effort_hours_estimate": 2,
+      "scope": "src/execution/harvester.py + new tests/test_settlement_data_version_contract.py",
+      "owner": "dedicated slice",
+      "origin": "T2-S4 scope decision — settlement allowlist scaffolding"
+    }
+  },
+  "tests_evidence": [
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_high_calibration_v2_route.py",
+    "tests/test_semantic_linter.py",
+    "tests/test_fdr.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_phase7a_metric_cutover.py"
+  ]
+}

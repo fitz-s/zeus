@@ -1,0 +1,47 @@
+{
+  "task": "orphan artifact cleanup",
+  "packet": "docs/operations/task_2026-04-22_orphan_artifact_cleanup/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-22_orphan_artifact_cleanup/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/topology.yaml",
+    "docs/artifacts/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/to-do-list/AGENTS.md"
+  ],
+  "allowed_files": [
+    "docs/artifacts/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "docs/operations/task_2026-04-22_orphan_artifact_cleanup/**",
+    "docs/to-do-list/AGENTS.md"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    "architecture/**",
+    "docs/authority/**",
+    ".code-review-graph/**"
+  ],
+  "changed_files": [
+    "docs/artifacts/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "docs/operations/task_2026-04-22_orphan_artifact_cleanup/plan.md",
+    "docs/operations/task_2026-04-22_orphan_artifact_cleanup/receipt.json",
+    "docs/operations/task_2026-04-22_orphan_artifact_cleanup/work_log.md",
+    "docs/to-do-list/AGENTS.md"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --summary-only",
+    "python scripts/topology_doctor.py --artifact-lifecycle --summary-only",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files ... --summary-only",
+    "python scripts/topology_doctor.py closeout --changed-files ... --plan-evidence docs/operations/task_2026-04-22_orphan_artifact_cleanup/plan.md --work-record-path docs/operations/task_2026-04-22_orphan_artifact_cleanup/work_log.md --receipt-path docs/operations/task_2026-04-22_orphan_artifact_cleanup/receipt.json --summary-only"
+  ]
+}

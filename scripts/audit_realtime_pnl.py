@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import settings, state_path
+from src.config import get_mode, state_path
 from src.state.portfolio import load_portfolio
 
 STATUS_PATH = state_path("status_summary.json")
@@ -71,7 +71,7 @@ def run_audit() -> dict:
     }
 
     return {
-        "mode": settings.mode,
+        "mode": get_mode(),
         "source": source,
         "status_portfolio": status,
         "risk_details": risk,

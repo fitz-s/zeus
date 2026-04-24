@@ -10,6 +10,7 @@ from src.execution.executor import (
 )
 from src.contracts import EdgeContext, EntryMethod
 import numpy as np
+from src.config import settings
 from src.state.portfolio import (
     Position, PortfolioState, load_portfolio, save_portfolio,
     add_position, remove_position,
@@ -44,6 +45,8 @@ class TestPortfolio:
         assert remove_position(state, "nonexistent") is None
 
     def test_save_load_roundtrip(self, tmp_path):
+        from src.state.db import get_connection, init_schema
+
         path = tmp_path / "positions.json"
         state = PortfolioState(bankroll=200.0)
         add_position(state, Position(
@@ -55,15 +58,36 @@ class TestPortfolio:
         ))
 
         save_portfolio(state, path)
+
+        # P4: load_portfolio reads from canonical DB first.
+        # Seed zeus.db (fallback path) with the same position so roundtrip works.
+        db = get_connection(tmp_path / "zeus.db")
+        init_schema(db)
+        db.execute(
+            """
+            INSERT INTO position_current
+            (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+             entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+             order_id, order_status, updated_at)
+            VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-01-15','39-40',
+                    'buy_yes','F',15.0,0.0,0.0,0.40,0.60,'ens_member_counting','center_buy',
+                    'center_buy','opening_hunt','unknown','','filled','2026-01-12T00:00:00Z')
+            """
+        )
+        db.commit()
+        db.close()
+
         loaded = load_portfolio(path)
 
-        assert loaded.bankroll == 200.0
+        assert loaded.bankroll == pytest.approx(settings.capital_base_usd)
         assert len(loaded.positions) == 1
         assert loaded.positions[0].trade_id == "t1"
         assert loaded.positions[0].city == "NYC"
 
 
 class TestExecutor:
+    @pytest.mark.skip(reason="Phase2: paper mode removed")
     def test_paper_fill(self):
         edge = BinEdge(
             bin=Bin(low=39, high=40, label="39-40", unit="F"),
@@ -122,8 +146,8 @@ class TestExecutor:
         captured = {}
 
         class DummyClient:
-            def __init__(self, paper_mode):
-                assert paper_mode is False
+            def __init__(self):
+                pass
 
             def place_limit_order(self, *, token_id, price, size, side):
                 captured.update(
@@ -155,6 +179,31 @@ class TestExecutor:
             "size": pytest.approx(12.34),
             "side": "SELL",
         }
+
+    def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
+        class DummyClient:
+            def __init__(self):
+                pass
+
+            def place_limit_order(self, *, token_id, price, size, side):
+                return {"status": "OPEN"}
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-1",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+            )
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "missing_order_id"
+        assert result.order_id in (None, "")
+        assert result.order_id != "trade-1"
 
     def test_execute_exit_order_rejects_missing_token(self):
         result = execute_exit_order(

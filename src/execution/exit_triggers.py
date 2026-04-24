@@ -1,6 +1,6 @@
 """Exit trigger evaluation with 8-layer churn defense. Spec §6.3.
 
-Rainstorm lesson: false EDGE_REVERSAL from direction-formula double-inversion caused
+Legacy-predecessor lesson: false EDGE_REVERSAL from direction-formula double-inversion caused
 7/8 buy_no positions to force-exit within 30-90min. 8 layers prevent this.
 
 INVARIANT: All probabilities passed to exit triggers are in the NATIVE space of the
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.contracts import EdgeContext
+from src.contracts.hold_value import HoldValue
 from src.state.portfolio import (
     Position,
     buy_no_ceiling,
@@ -26,6 +27,14 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _declared_zero_cost_hold_value(shares: float, current_p_posterior: float) -> HoldValue:
+    return HoldValue.compute(
+        gross_value=float(shares) * float(current_p_posterior),
+        fee_cost=0.0,
+        time_cost=0.0,
+    )
 
 
 @dataclass
@@ -153,7 +162,7 @@ def _evaluate_buy_yes_exit(
     if best_bid is not None:
         shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0
         net_sell = shares * best_bid
-        net_hold = shares * position.p_posterior  # Expected value at settlement
+        net_hold = _declared_zero_cost_hold_value(shares, position.p_posterior).net_value
         if net_sell <= net_hold:
             logger.info("EV gate: sell $%.2f <= hold EV $%.2f — HOLD despite reversal",
                         net_sell, net_hold)
@@ -214,7 +223,7 @@ def _evaluate_buy_no_exit(
             shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0.0
             current_market = float(current_edge_context.p_market[0])
             net_sell = shares * current_market
-            net_hold = shares * current_edge_context.p_posterior
+            net_hold = _declared_zero_cost_hold_value(shares, current_edge_context.p_posterior).net_value
             if net_sell <= net_hold:
                 logger.info(
                     "EV gate (buy_no): sell $%.2f <= hold EV $%.2f — HOLD despite reversal",

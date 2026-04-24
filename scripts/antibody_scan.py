@@ -16,7 +16,7 @@ Exit code 0 = healthy, 1 = critical finding.
 
 Usage:
     cd zeus
-    source ../rainstorm/.venv/bin/activate
+    source ../.venv/bin/activate
 
     python scripts/antibody_scan.py              # full scan, human output
     python scripts/antibody_scan.py --json        # JSON for Discord/cron
@@ -85,9 +85,9 @@ def check_pipeline_health(result: ScanResult):
     Pipelines: WU settlements, ENS ensemble, WU observations, Gamma market_events.
     A pipeline is "dead" if zero rows arrived in its expected freshness window.
     """
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     today = date.today()
     result.checks_run += 1
 
@@ -169,14 +169,14 @@ def check_data_integrity(result: ScanResult):
     Checks: settlement precision (integer), SH season mapping, city config completeness.
     One finding per broken invariant category — not per individual row.
     """
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
     result.checks_run += 1
     problems = []
 
     # Settlement integer precision
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         r = conn.execute("""
             SELECT COUNT(*) FROM settlements
             WHERE settlement_value IS NOT NULL
@@ -232,9 +232,9 @@ def check_model_health(result: ScanResult):
     Checks: model existence, staleness, training data volume, outcome balance.
     One consolidated finding.
     """
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     result.checks_run += 1
     problems = []
 

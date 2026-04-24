@@ -17,8 +17,7 @@ def test_tracker_no_phantoms():
     conn.row_factory = sqlite3.Row
     
     trackers = [
-        PROJECT_ROOT / "state" / "strategy_tracker-paper.json",
-        PROJECT_ROOT / "state" / "strategy_tracker-live.json"
+        PROJECT_ROOT / "state" / "strategy_tracker.json",
     ]
     
     phantom_count = 0

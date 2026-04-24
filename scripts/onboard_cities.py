@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-02; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Operator city-onboarding workflow that scaffolds config, data, and
+# market/settlement rows.
+# Reuse: Inspect architecture/script_manifest.yaml plus
+# docs/operations/current_data_state.md before running against live DB.
 """One-click city onboarding pipeline for Zeus.
 
 Adds new cities to config and runs all backfill ETLs in dependency order,
-achieving data parity with the original 8 cities.
+bringing them to the same archive window as the configured city universe.
 
 Usage:
     cd zeus
-    source ../rainstorm/.venv/bin/activate
 
     # Auto-discover a new city (looks up ICAO, coords, timezone from name)
     python scripts/onboard_cities.py --discover "Auckland"
@@ -30,12 +34,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -215,7 +221,7 @@ PIPELINE_STEPS = [
         "name": "Backfill WU daily observations + settlements",
         "script": "backfill_wu_daily_all.py",
         "city_flag": "--cities",
-        "extra_args": ["--days", "90"],
+        "extra_args": ["--days", "900", "--chunk-days", "31", "--sleep", "0.2"],
         "rate_limited": True,
     },
     {
@@ -223,7 +229,7 @@ PIPELINE_STEPS = [
         "name": "Backfill hourly observations (OpenMeteo)",
         "script": "backfill_hourly_openmeteo.py",
         "city_flag": "--cities",
-        "extra_args": ["--days", "440"],
+        "extra_args": ["--days", "900", "--chunk-days", "90", "--sleep", "0.2"],
     },
     {
         "id": "solar_daily",
@@ -241,8 +247,31 @@ PIPELINE_STEPS = [
         "script": "etl_diurnal_curves.py",
     },
     {
+        "id": "openmeteo_previous_runs",
+        "name": "Backfill historical forecast source rows (Open-Meteo Previous Runs)",
+        "script": "backfill_openmeteo_previous_runs.py",
+        "city_flag": "--cities",
+        "extra_args": [
+            "--days",
+            "900",
+            "--leads",
+            "1,2,3,4,5,6,7",
+            "--models",
+            "best_match,gfs_global,ecmwf_ifs025,icon_global,ukmo_global_deterministic_10km",
+            "--chunk-days",
+            "90",
+            "--sleep",
+            "0.2",
+        ],
+    },
+    {
+        "id": "forecast_skill",
+        "name": "Materialize forecast skill and model bias",
+        "script": "etl_forecast_skill_from_forecasts.py",
+    },
+    {
         "id": "historical_forecasts",
-        "name": "Backfill historical forecast skill",
+        "name": "Materialize historical forecast model skill",
         "script": "etl_historical_forecasts.py",
     },
     {
@@ -258,8 +287,10 @@ PIPELINE_STEPS = [
     },
     {
         "id": "calibration_pairs",
-        "name": "Generate calibration pairs from ENS + settlements",
-        "script": "generate_calibration_pairs.py",
+        "name": "Canonical calibration-pair rebuild from verified ENS + observations",
+        "script": "rebuild_calibration_pairs_canonical.py",
+        "extra_args": ["--dry-run"],
+        "optional": True,
     },
 ]
 
@@ -317,50 +348,26 @@ def add_cities_to_config(cities: list[NewCity], dry_run: bool = False) -> list[s
         tmp.replace(config_path)
         logger.info("  Config updated: %d → %d cities", len(existing_names), len(config["cities"]))
 
-    # Also update rainstorm config if it exists
-    rs_config_path = PROJECT_ROOT.parent / "rainstorm" / "config" / "cities.json"
-    if rs_config_path.exists() and not dry_run and added:
-        rs_config = json.loads(rs_config_path.read_text())
-        rs_existing = {c["name"] for c in rs_config.get("cities", [])}
-        for city in cities:
-            if city.name not in rs_existing and city.name in added:
-                rs_config.setdefault("cities", []).append(_city_to_config_dict(city))
-        tmp = rs_config_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rs_config, indent=2, ensure_ascii=False) + "\n")
-        tmp.replace(rs_config_path)
-        logger.info("  Rainstorm config also updated")
-
     return added
 
 
 def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = False):
-    """Create empty settlement rows for new cities (target_date scaffolds)."""
-    if dry_run:
-        logger.info("  [DRY RUN] Would scaffold %d days × %d cities", days, len(city_names))
-        return
+    """Deprecated no-op: settlements require full market/source provenance.
 
-    from src.state.db import get_shared_connection, init_schema
-    from datetime import date, timedelta
-
-    conn = get_shared_connection()
-    init_schema(conn)
-
-    today = date.today()
-    count = 0
-    for city_name in city_names:
-        for d in range(days):
-            target = today - timedelta(days=d)
-            try:
-                conn.execute("""
-                    INSERT OR IGNORE INTO settlements (city, target_date)
-                    VALUES (?, ?)
-                """, (city_name, target.isoformat()))
-                count += 1
-            except Exception:
-                pass
-    conn.commit()
-    conn.close()
-    logger.info("  Scaffolded %d settlement rows for %d cities", count, len(city_names))
+    Empty city/date scaffolds were useful before INV-14 and REOPEN-2, but
+    they now create semantically incomplete rows. Settlement truth must be
+    written by the harvester or a packet-approved reconstruction path that can
+    populate metric identity, market identity, source, rounding, and
+    provenance together.
+    """
+    verb = "[DRY RUN] Would skip" if dry_run else "SKIP"
+    logger.info(
+        "  %s settlement scaffolding for %d days × %d cities; "
+        "settlements require harvester/reconstruction provenance",
+        verb,
+        days,
+        len(city_names),
+    )
 
 
 def discover_market_events(city_names: list[str], dry_run: bool = False):
@@ -374,9 +381,9 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         return
 
     from src.data.market_scanner import find_weather_markets
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     city_set = set(city_names)
 
     try:
@@ -429,8 +436,46 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         logger.info("  (These cities will skip calibration until markets are created)")
 
 
+def _noaa_sunrise_sunset_utc(target: date, lat: float, lon: float) -> tuple[datetime, datetime]:
+    """Approximate sunrise/sunset UTC using the NOAA solar equations."""
+    day_of_year = target.timetuple().tm_yday
+    gamma = 2.0 * math.pi / 365.0 * (day_of_year - 1)
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2 * gamma)
+        - 0.040849 * math.sin(2 * gamma)
+    )
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2 * gamma)
+        + 0.000907 * math.sin(2 * gamma)
+        - 0.002697 * math.cos(3 * gamma)
+        + 0.00148 * math.sin(3 * gamma)
+    )
+    lat_rad = math.radians(lat)
+    zenith = math.radians(90.833)
+    cos_hour_angle = (
+        math.cos(zenith) / (math.cos(lat_rad) * math.cos(decl))
+        - math.tan(lat_rad) * math.tan(decl)
+    )
+    cos_hour_angle = max(-1.0, min(1.0, cos_hour_angle))
+    hour_angle = math.degrees(math.acos(cos_hour_angle))
+    solar_noon_utc_minutes = 720.0 - 4.0 * lon - eqtime
+    sunrise_minutes = solar_noon_utc_minutes - 4.0 * hour_angle
+    sunset_minutes = solar_noon_utc_minutes + 4.0 * hour_angle
+    midnight = datetime(target.year, target.month, target.day, tzinfo=timezone.utc)
+    return (
+        midnight + timedelta(minutes=sunrise_minutes),
+        midnight + timedelta(minutes=sunset_minutes),
+    )
+
+
 def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = False):
-    """Compute sunrise/sunset times using the astral library.
+    """Compute sunrise/sunset times using astral or a built-in NOAA fallback.
 
     Generates solar_daily entries for each city × date from coordinates alone.
     No external JSONL file needed.
@@ -439,34 +484,43 @@ def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = 
         logger.info("  [DRY RUN] Would compute solar times for %d cities × %d days", len(cities), days)
         return
 
+    use_astral = True
     try:
         from astral import Observer
         from astral.sun import sun
     except ImportError:
-        logger.warning("  astral not installed — skipping solar_daily")
-        logger.warning("  Install with: pip install astral")
-        return
+        use_astral = False
+        logger.info("  astral not installed — using NOAA solar fallback")
 
-    from datetime import date, timedelta, timezone as tz
-    from zoneinfo import ZoneInfo
-    from src.state.db import get_shared_connection
+    from src.state.db import get_world_connection
 
-    conn = get_shared_connection()
+    conn = get_world_connection()
     today = date.today()
     inserted = 0
 
     for city in cities:
-        observer = Observer(latitude=city.lat, longitude=city.lon, elevation=0)
+        observer = Observer(latitude=city.lat, longitude=city.lon, elevation=0) if use_astral else None
         local_tz = ZoneInfo(city.timezone)
 
         for d in range(days):
             target = today - timedelta(days=d)
             try:
-                s = sun(observer, date=target, tzinfo=local_tz)
-                sunrise_local = s["sunrise"].strftime("%Y-%m-%dT%H:%M:%S%z")
-                sunset_local = s["sunset"].strftime("%Y-%m-%dT%H:%M:%S%z")
-                sunrise_utc = s["sunrise"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                sunset_utc = s["sunset"].astimezone(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if use_astral:
+                    s = sun(observer, date=target, tzinfo=local_tz)
+                    sunrise_dt = s["sunrise"]
+                    sunset_dt = s["sunset"]
+                else:
+                    sunrise_dt, sunset_dt = _noaa_sunrise_sunset_utc(
+                        target,
+                        city.lat,
+                        city.lon,
+                    )
+                    sunrise_dt = sunrise_dt.astimezone(local_tz)
+                    sunset_dt = sunset_dt.astimezone(local_tz)
+                sunrise_local = sunrise_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunset_local = sunset_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+                sunrise_utc = sunrise_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                sunset_utc = sunset_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 # DST detection
                 target_dt = datetime(target.year, target.month, target.day, 12, tzinfo=local_tz)
@@ -590,7 +644,7 @@ def run_pipeline(
             continue
 
         if step_id == "settlements_scaffold":
-            scaffold_settlements(city_names, days=90, dry_run=dry_run)
+            scaffold_settlements(city_names, days=900, dry_run=dry_run)
             continue
 
         if step_id == "market_events":
@@ -598,7 +652,7 @@ def run_pipeline(
             continue
 
         if step_id == "solar_daily":
-            compute_solar_daily(cities, days=440, dry_run=dry_run)
+            compute_solar_daily(cities, days=900, dry_run=dry_run)
             continue
 
         # Script-based steps
@@ -628,20 +682,12 @@ def run_pipeline(
 def _print_verification(city_names: list[str]):
     """Print data coverage summary for newly onboarded cities."""
     try:
-        from src.state.db import get_shared_connection
-        conn = get_shared_connection()
-
-        tables = [
-            "settlements", "observations", "observation_instants",
-            "market_events", "solar_daily", "temp_persistence",
-            "diurnal_curves", "ensemble_snapshots",
-            "calibration_pairs", "historical_forecasts",
-            "asos_wu_offsets",
-        ]
+        from src.state.db import get_world_connection
+        conn = get_world_connection()
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)
-        for table in tables:
+        for table in _verification_tables():
             try:
                 placeholders = ",".join("?" * len(city_names))
                 row = conn.execute(
@@ -657,6 +703,26 @@ def _print_verification(city_names: list[str]):
         conn.close()
     except Exception as e:
         logger.warning("Verification skipped: %s", e)
+
+
+def _verification_tables() -> list[str]:
+    return [
+        "settlements",
+        "observations",
+        "observation_instants",
+        "market_events",
+        "solar_daily",
+        "temp_persistence",
+        "diurnal_curves",
+        "forecasts",
+        "forecast_skill",
+        "model_bias",
+        "ensemble_snapshots",
+        "calibration_pairs",
+        "historical_forecasts",
+        "model_skill",
+        "asos_wu_offsets",
+    ]
 
 
 CLUSTER_RULES = [

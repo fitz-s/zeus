@@ -108,6 +108,15 @@ def test_entire_repo_passes_linter():
     result = run_linter(src_dir)
     assert result == 0, "Structural Governance Linter found active semantic violations in the repo."
 
+
+def test_linter_check_accepts_single_file_target():
+    from scripts.semantic_linter import run_linter_targets
+    target = Path(__file__).parent.parent / "src" / "calibration" / "platt.py"
+
+    result = run_linter_targets([target])
+
+    assert result == 0
+
 def test_all_repo_bin_calls_use_explicit_unit():
     repo = Path(__file__).parent.parent
     violations = []

@@ -1,0 +1,51 @@
+{
+  "task": "official graph refresh verification and usage integration",
+  "packet": "docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/code_review_graph_protocol.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/code_review_graph_protocol.yaml",
+    "docs/reference/modules/code_review_graph.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    ".code-review-graph/graph.db staged changes",
+    "custom refresh scripts",
+    "upstream skill edits"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/code_review_graph_protocol.yaml",
+    "docs/reference/modules/code_review_graph.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md",
+    "docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md --json",
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_graph_refresh_official_integration/plan.md --work-record-path docs/operations/task_2026-04-23_graph_refresh_official_integration/work_log.md --receipt-path docs/operations/task_2026-04-23_graph_refresh_official_integration/receipt.json --json",
+    "git diff --check -- <packet files>"
+  ]
+}

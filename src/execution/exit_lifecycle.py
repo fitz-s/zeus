@@ -58,7 +58,6 @@ class ExitIntent:
     shares: float
     current_market_price: float
     best_bid: float | None
-    paper_mode: bool
 
 
 def place_sell_order(
@@ -162,33 +161,65 @@ def _dual_write_canonical_economic_close_if_available(
     if conn is None:
         return False
 
-    from src.engine.lifecycle_events import build_economic_close_canonical_write
+    import copy
+
+    from src.engine.lifecycle_events import build_economic_close_canonical_write, build_entry_canonical_write
     from src.state.db import append_many_and_project
 
-    if not _has_canonical_position_history(conn, getattr(position, "trade_id", "")):
-        logger.debug(
-            "Canonical economic-close dual-write skipped for %s: no prior canonical position history",
-            getattr(position, "trade_id", ""),
-        )
-        return False
+    trade_id = getattr(position, "trade_id", "")
+    has_history = _has_canonical_position_history(conn, trade_id)
+
+    if not has_history:
+        # Backfill canonical entry events for positions that only exist in
+        # the legacy table.  Create an entry-phase snapshot so
+        # build_entry_canonical_write produces the standard three-event
+        # sequence (OPEN_INTENT / ORDER_POSTED / ORDER_FILLED → active).
+        #
+        # T4.1b 2026-04-23 (D4 Option E): these legacy positions have no
+        # captured `DecisionEvidence` (the decision frame predates the
+        # T4.1b accept-path wiring). Emit the `decision_evidence_reason`
+        # sentinel "backfill_legacy_position" into the ENTRY_ORDER_POSTED
+        # payload so T4.2-Phase1 exit-side audit can distinguish
+        # missing-because-legacy from missing-because-bug. Without this
+        # sentinel, audit_log_false_positive_rate would flag every legacy
+        # position's exit as an asymmetry violation during Phase1 rollout.
+        entry_snapshot = copy.copy(position)
+        entry_snapshot.state = "entered"
+        entry_snapshot.exit_state = ""
+        try:
+            entry_events, _ = build_entry_canonical_write(
+                entry_snapshot,
+                source_module="src.execution.exit_lifecycle:backfill",
+                decision_evidence_reason="backfill_legacy_position",
+            )
+        except Exception as exc:
+            logger.debug(
+                "Canonical entry backfill failed for %s: %s", trade_id, exc,
+            )
+            return False
+        exit_seq = len(entry_events) + 1
+    else:
+        entry_events = []
+        exit_seq = _next_canonical_sequence_no(conn, trade_id)
 
     try:
-        events, projection = build_economic_close_canonical_write(
+        exit_events, projection = build_economic_close_canonical_write(
             position,
-            sequence_no=_next_canonical_sequence_no(conn, getattr(position, "trade_id", "")),
+            sequence_no=exit_seq,
             phase_before=phase_before,
             source_module="src.execution.exit_lifecycle",
         )
-        append_many_and_project(conn, events, projection)
+        all_events = entry_events + exit_events
+        append_many_and_project(conn, all_events, projection)
     except Exception as exc:
         raise RuntimeError(
-            f"canonical economic-close dual-write failed for {getattr(position, 'trade_id', '')}: {exc}"
+            f"canonical economic-close dual-write failed for {trade_id}: {exc}"
         ) from exc
 
     return True
 
 
-def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mode: bool) -> ExitIntent:
+def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitIntent:
     """Build the explicit exit-intent contract before any execution behavior happens."""
     token_id = position.token_id if position.direction == "buy_yes" else position.no_token_id
     return ExitIntent(
@@ -198,11 +229,10 @@ def build_exit_intent(position: Position, exit_context: ExitContext, *, paper_mo
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
-        paper_mode=paper_mode,
     )
 
 
-def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_intent: ExitIntent, *, paper_mode: bool) -> None:
+def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_intent: ExitIntent) -> None:
     if exit_intent.trade_id != position.trade_id:
         raise ValueError("exit_intent trade_id mismatch")
     expected_token = position.token_id if position.direction == "buy_yes" else position.no_token_id
@@ -212,8 +242,6 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent shares mismatch")
     if exit_context.current_market_price is not None and abs(exit_intent.current_market_price - float(exit_context.current_market_price)) > 1e-9:
         raise ValueError("exit_intent current_market_price mismatch")
-    if exit_intent.paper_mode is not paper_mode:
-        raise ValueError("exit_intent paper_mode mismatch")
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -246,48 +274,24 @@ def execute_exit(
     portfolio: PortfolioState,
     position: Position,
     exit_context: ExitContext,
-    paper_mode: bool,
     clob=None,
     conn: sqlite3.Connection | None = None,
     exit_intent: ExitIntent | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
-    Paper mode: close immediately at market price.
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
     if exit_context.current_market_price is None:
-        if not paper_mode:
-            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
-            _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
-            return "exit_blocked: incomplete_context"
-        return "paper_exit_failed: incomplete_context"
+        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
+        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price")
+        return "exit_blocked: incomplete_context"
 
-    exit_intent = exit_intent or build_exit_intent(position, exit_context, paper_mode=paper_mode)
-    _validate_exit_intent(position, exit_context, exit_intent, paper_mode=paper_mode)
+    exit_intent = exit_intent or build_exit_intent(position, exit_context)
+    _validate_exit_intent(position, exit_context, exit_intent)
 
-    if paper_mode:
-        _mark_pending_exit(position)
-        position.exit_state = "exit_intent"
-        phase_before = _canonical_phase_before_for_economic_close(position)
-        closed = compute_economic_close(
-            portfolio,
-            position.trade_id,
-            exit_intent.current_market_price,
-            exit_intent.reason,
-        )
-        if closed is not None:
-            closed.exit_state = "sell_filled"
-            _dual_write_canonical_economic_close_if_available(
-                conn,
-                closed,
-                phase_before=phase_before,
-            )
-            return f"paper_exit: {exit_intent.reason}"
-        return "paper_exit_failed: position_not_found"
-
-    # Live mode: sell order lifecycle
+    # Live path: sell order lifecycle
     return _execute_live_exit(
         portfolio,
         position,
@@ -683,8 +687,14 @@ def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> Order
             sell_result.get("orderID")
             or sell_result.get("orderId")
             or sell_result.get("id")
-            or trade_id
         )
+        if not order_id:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="missing_order_id",
+                order_role="exit",
+            )
         return OrderResult(
             trade_id=trade_id,
             status="pending",

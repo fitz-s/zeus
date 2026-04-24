@@ -1,35 +1,197 @@
-state/zeus.db
-state/risk_state.db
-state/baseline_results.json
-state/ensemble-log/
-state/positions.json
-state/*-paper.json
-state/*-paper.db
-state/*.db-shm
-state/*.db-wal
-state/legacy_state_archive/
+# Zeus ignore policy
+# Source, tests, manifests, durable docs, and scrubbed examples may be tracked.
+# Runtime state, local agent state, credentials, raw data, DBs, logs, and
+# derived caches must not be tracked.
+
+# ----------------------------------------------------------------------
+# Local secrets / credentials
+# ----------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.p8
+*.crt
+*.token
+*.secret
+secrets/
+private/
+credentials/
+*credentials*.json
+*secret*.json
+*private_key*
+*api_key*
+
+# ----------------------------------------------------------------------
+# Python / environment / build cache
+# ----------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+.ipynb_checkpoints/
+
+# ----------------------------------------------------------------------
+# OS / editor noise
+# ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ----------------------------------------------------------------------
+# Logs / temp / root scratch artifacts
+# ----------------------------------------------------------------------
 logs/*.log
 logs/*.err
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.patch
+*.diff
+nohup.out
+.git-commit-msg.tmp
+/k_bugs.json
+/patch_schema.py
+/equity_curve.png
+
+# ----------------------------------------------------------------------
+# Databases and database sidecars
+# ----------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.db-journal
+*.db.aborted-*
+*.db.pre-rebuild-*
+*.db.pre-migration-*
+
+# Orphan SQLite sidecars at repo root (should never exist).
+/zeus-world.db-shm
+/zeus-world.db-wal
+
+# ----------------------------------------------------------------------
+# Runtime-local Zeus state
+# Keep assumptions.json (config seed), README, .gitkeep, and audit
+# hash sidecars. Everything else is live runtime / telemetry.
+# ----------------------------------------------------------------------
+/state/*
+!/state/.gitkeep
+!/state/README.md
+!/state/assumptions.json
+!/state/*.sha256
+!/state/*.md5
+
+# Backfill / rebuild scratch logs.
+state/rebuild-*.log
+state/rebuild-*.out
+state/fillback-*.log
+state/fillback-*.out
+state/hko-catchup-*.log
+state/ogimet-*.log
+state/wu-*.log
+
+# Packet rollback snapshots (binary, >1 GB).
+# Hash sidecars are kept (above exceptions) for audit trail.
+state/zeus-world.db.pre-p*-*
+!state/zeus-world.db.pre-p*-*.md5
+!state/zeus-world.db.pre-p*-*.sha256
+
+# ----------------------------------------------------------------------
+# Raw / bulky / vendor / shadow data
+# Keep routing docs only; raw captures belong outside git.
+# ----------------------------------------------------------------------
+/raw/*
+!/raw/AGENTS.md
+!/raw/README.md
+raw/**/*.jsonl
+raw/**/*.csv
+raw/**/*.tsv
+raw/**/*.parquet
+raw/**/*.zip
+raw/**/*.gz
+raw/**/*.bz2
+raw/**/*.xz
+raw/**/*.grib
+raw/**/*.grb
+raw/**/*.nc
+raw/**/*.h5
+
+# ----------------------------------------------------------------------
+# Local generated data / research-edge data
+# Full settlement corpus tracked for now (professor review).
+# Uncomment to remove from public surface; replace with scrubbed samples.
+# ----------------------------------------------------------------------
+/data/*.local.*
+/data/*private*
+/data/*scratch*
+/data/*snapshot*
+/data/*shadow*
+!/data/README.md
+!/data/*.example.json
+
+# Optional: remove full corpus from public surface.
+# /data/oracle_error_rates.json
+# /data/pm_settlement_truth.json
+# /data/pm_settlements_full.json
+
+# ----------------------------------------------------------------------
+# Agent / local tool state
+# ----------------------------------------------------------------------
 .omx/
 .omc/
-equity_curve.png
-.DS_Store
-__pycache__/
-*.pyc
-.venv/
+.claude/baton_state.json
+.claude/settings.local.json
+.claude/**/logs/
+.claude/**/transcripts/
+.claude/scheduled_tasks.lock
 
-# Docs sync exclusions requested
-docs/architecture/zeus_blueprint_v2.md
-docs/specs/
-docs/plans/
-docs/reviews/
-docs/progress/
-docs/rollout/
-docs/reports/
+.code-review-graph/*
+!.code-review-graph/.gitignore
+!.code-review-graph/README.md
 
-# Reference bundle now moved under KEY_REFERENCE
-docs/KEY_REFERENCE/*
-!docs/KEY_REFERENCE/quantitative_research.md
-!docs/KEY_REFERENCE/market_microstructure.md
-!docs/KEY_REFERENCE/statistical_methodology.md
-state/*.db
+# ----------------------------------------------------------------------
+# Local config overlays
+# ----------------------------------------------------------------------
+config/*.local.json
+config/*.private.json
+config/*secret*.json
+config/*credentials*.json
+config/reality_contracts/*.local.*
+config/reality_contracts/*.private.*
+
+# When runtime supports example + local overlay:
+# config/settings.json
+# !config/settings.example.json
+
+# ----------------------------------------------------------------------
+# Generated office/docs artifacts
+# ----------------------------------------------------------------------
+docs/**/*.xlsx
+docs/**/~$*
+docs/archives/
+docs/reports/generated/
+docs/artifacts/generated/

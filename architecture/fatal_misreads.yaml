@@ -1,0 +1,153 @@
+schema_version: 1
+metadata:
+  created: "2026-04-23"
+  owner_packet: "Guidance Kernel Semantic Boot"
+  purpose: >
+    Machine-readable antibodies for the semantic equivalences that most often
+    cause Zeus agents to make locally plausible but systemically wrong changes.
+  authority_status: semantic_antibody_manifest
+
+required_misread_fields:
+  - id
+  - severity
+  - false_equivalence
+  - correction
+  - proof_files
+  - invalidation_condition
+  - tests
+  - task_classes
+
+allowed_severities:
+  - critical
+  - high
+  - medium
+
+misreads:
+  - id: api_returns_data_not_settlement_correct_source
+    severity: critical
+    false_equivalence: "api_returns_data == settlement_correct_source"
+    correction: >
+      A successful API response proves endpoint availability only. Settlement
+      source correctness must be proven from current source-validity evidence
+      and the market/city/date contract.
+    proof_files:
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - config/cities.json
+    invalidation_condition: >
+      Only a fresh source-audit packet may alter current settlement routing or
+      relax source evidence requirements.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [source_routing]
+
+  - id: airport_station_not_city_settlement_station
+    severity: critical
+    false_equivalence: "airport_station == city_settlement_station"
+    correction: >
+      ICAO/airport identity is not settlement identity. City settlement station
+      must come from the current market/source evidence, not from a convenient
+      airport code or nearby observation feed.
+    proof_files:
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - config/cities.json
+    invalidation_condition: >
+      Only audited market-description evidence may promote an airport station
+      to settlement authority for a city/date.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [source_routing, settlement_semantics]
+
+  - id: daily_day0_hourly_forecast_sources_are_not_interchangeable
+    severity: critical
+    false_equivalence: "daily_settlement_source == day0_live_source == historical_hourly_source == forecast_skill_source"
+    correction: >
+      Settlement, Day0 monitoring, historical hourly ingest, and forecast skill
+      may use different sources, time geometry, freshness contracts, and proof
+      surfaces. Each task must prove the specific source role it consumes.
+    proof_files:
+      - docs/reference/zeus_domain_model.md
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+      - architecture/city_truth_contract.yaml
+      - architecture/source_rationale.yaml
+    invalidation_condition: >
+      Only a source-contract packet with city/date evidence may collapse two
+      source roles for a bounded scope.
+    tests:
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [settlement_semantics, hourly_observation_ingest, day0_monitoring, calibration]
+
+  - id: wu_website_daily_summary_not_wu_api_hourly_max
+    severity: high
+    false_equivalence: "WU website daily summary == WU API hourly max"
+    correction: >
+      WU daily web pages and WU hourly API responses can describe different
+      station products or aggregation rules. Settlement proof must identify the
+      product Polymarket resolves against.
+    proof_files:
+      - docs/operations/known_gaps.md
+      - docs/operations/current_source_validity.md
+    invalidation_condition: >
+      A dated audit may prove equivalence for a specific city/date range; absent
+      that audit, keep the products separate.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [source_routing, hourly_observation_ingest, calibration]
+
+  - id: hourly_downsample_preserves_extrema
+    severity: critical
+    false_equivalence: "hourly_downsample can use first/last/average without affecting settlement extrema"
+    correction: >
+      Hourly and sub-hourly aggregation must preserve max/min extrema required
+      by the target metric. Downsampling that drops extrema corrupts Day0,
+      historical hourly, and calibration surfaces.
+    proof_files:
+      - architecture/source_rationale.yaml
+      - docs/operations/current_data_state.md
+      - docs/operations/known_gaps.md
+    invalidation_condition: >
+      Only a metric-specific ingest contract may replace extrema preservation,
+      and it must name the target physical quantity.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [hourly_observation_ingest, day0_monitoring]
+
+  - id: hong_kong_hko_explicit_caution_path
+    severity: critical
+    false_equivalence: "Hong Kong current truth can be inferred from generic WU/airport/HKO assumptions"
+    correction: >
+      Hong Kong is an explicit current caution path. Current truth must route
+      through fresh audit evidence and HKO-specific proof before changing
+      source, settlement, hourly, or monitoring behavior.
+    proof_files:
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - config/cities.json
+    invalidation_condition: >
+      Only a fresh Hong Kong audit receipt may change this caution status or
+      route around HKO-specific evidence.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [source_routing, settlement_semantics, hourly_observation_ingest]
+
+  - id: code_review_graph_answers_where_not_what_settles
+    severity: high
+    false_equivalence: "Code Review Graph impact context == semantic/source authority"
+    correction: >
+      Code Review Graph is derived structural context. It can answer where to
+      inspect and what blast radius exists, but it cannot decide settlement
+      truth, source validity, current facts, or authority rank.
+    proof_files:
+      - AGENTS.md
+      - workspace_map.md
+      - architecture/task_boot_profiles.yaml
+    invalidation_condition: >
+      This can change only if graph output becomes backed by the same
+      source/date/current-fact proofs as semantic boot manifests.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --code-review-graph-status --json
+    task_classes: [source_routing, docs_authority, graph_review]

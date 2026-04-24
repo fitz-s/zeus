@@ -9,10 +9,11 @@ import logging
 from datetime import datetime, timezone
 
 from src.config import state_path
+from src.control.gate_decision import GateDecision, ReasonCode
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
-    get_shared_connection,
+    get_world_connection,
     query_control_override_state,
     upsert_control_override,
 )
@@ -40,7 +41,11 @@ def _load_control_payload() -> dict:
         with open(CONTROL_PATH) as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as e:
+        logger.error("control_plane.json corrupted (JSONDecodeError)")
+        _set_state("control_plane_fault", True)
+        raise ValueError("Corrupted control_plane.json encountered, treating as fatal fault") from e
+    except OSError:
         return {}
 
 
@@ -66,20 +71,92 @@ def is_entries_paused() -> bool:
     return _control_state.get("entries_paused", False)
 
 
+def get_entries_pause_source() -> str | None:
+    return _control_state.get("entries_pause_source")
+
+
+def get_entries_pause_reason() -> str | None:
+    return _control_state.get("entries_pause_reason")
+
+
+
+def alert_auto_pause(reason_code: str) -> None:
+    """Emit a structured log warning when entries are auto-paused by exception."""
+    logger.warning(
+        "auto_pause_entries",
+        extra={"reason_code": reason_code},
+    )
+
+
+
+def pause_entries(reason_code: str) -> None:
+    """Auto-pause entries after an unhandled exception in the entry path.
+
+    Sets entries_paused and records the machine-readable reason_code in
+    _control_state, then emits an alert. Also persists to DB so the pause
+    survives a daemon restart. Operator must explicitly resume to re-enable.
+    """
+    _control_state["entries_paused"] = True
+    _control_state["entries_pause_source"] = "auto_exception"
+    _control_state["entries_pause_reason"] = reason_code
+    alert_auto_pause(reason_code)
+    # Persist so a daemon restart does not silently lose the pause.
+    try:
+        conn = get_world_connection()
+        upsert_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by="system_auto_pause",
+            issued_at=datetime.now(timezone.utc).isoformat(),
+            reason=reason_code,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.error("Failed to persist auto-pause to DB: %s", exc)
+        _control_state["control_db_fault"] = True
+        try:
+            with open(state_path("auto_pause_failclosed.tombstone"), "w") as f:
+                f.write(reason_code)
+        except OSError:
+            pass
+        try:
+            alert_auto_pause(f"{reason_code}_db_fault")
+        except Exception:
+            pass
+
+
 
 def get_edge_threshold_multiplier() -> float:
     return _control_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
 
 
-def strategy_gates() -> dict[str, bool]:
-    return dict(_control_state.get("strategy_gates", {}))
+def strategy_gates() -> dict[str, GateDecision]:
+    raw = _control_state.get("strategy_gates", {})
+    result = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            result[k] = GateDecision.from_dict(v)
+        else:
+            raise ValueError(
+                f"Legacy bool strategy gate found for {k!r}. "
+                "Must be migrated to a structured GateDecision dict."
+            )
+    return result
 
 
 def is_strategy_enabled(strategy: str) -> bool:
-    gates = _control_state.get("strategy_gates", {})
     if not strategy:
         return True
-    return gates.get(strategy, True)
+    decision = strategy_gates().get(strategy)
+    if decision is None:
+        return True
+    return decision.enabled
 
 
 
@@ -107,19 +184,31 @@ def refresh_control_state() -> None:
     durable_state = {"status": "skipped_no_connection"}
     conn = None
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
         durable_state = query_control_override_state(conn)
     except Exception:
-        durable_state = {"status": "query_error"}
+        durable_state = {
+            "status": "query_error",
+            "entries_paused": True,
+            "edge_threshold_multiplier": float(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER)
+        }
     finally:
         if conn is not None:
             conn.close()
-    if durable_state.get("status") == "ok":
+    if durable_state.get("status") in {"ok", "query_error"}:
         entries_paused = bool(durable_state.get("entries_paused", False))
         edge_threshold_multiplier = float(
             durable_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
         )
         gates = dict(durable_state.get("strategy_gates", {}))
+        
+    try:
+        import os
+        if os.path.exists(state_path("auto_pause_failclosed.tombstone")):
+            entries_paused = True
+    except OSError:
+        pass
+
     for ack in data.get("acks", []):
         if ack.get("status") != "executed":
             continue
@@ -130,6 +219,8 @@ def refresh_control_state() -> None:
                 acknowledged_tokens.add(token_id)
             continue
     _control_state["entries_paused"] = entries_paused
+    _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
+    _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
     _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
@@ -188,7 +279,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
     effective_until = cmd.get("effective_until")
     precedence = int(cmd.get("precedence") or DEFAULT_CONTROL_OVERRIDE_PRECEDENCE)
     try:
-        conn = get_shared_connection()
+        conn = get_world_connection()
     except Exception:
         conn = None
     try:
@@ -200,7 +291,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 target_key="entries",
                 action_type="gate",
                 value="true",
-                issued_by=issued_by,
+                issued_by="control_plane",
                 issued_at=issued_at,
                 reason=note or "control_plane:pause_entries",
                 effective_until=effective_until,
@@ -245,6 +336,16 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 return False, "missing_strategy"
             if not isinstance(enabled, bool):
                 return False, "missing_enabled_bool"
+            decision = GateDecision(
+                enabled=enabled,
+                reason_code=ReasonCode(cmd.get("reason_code", "unspecified")),
+                reason_snapshot=cmd.get("reason_snapshot", {}),
+                gated_at=issued_at,
+                gated_by=issued_by,
+            )
+            gates = dict(_control_state.get("strategy_gates", {}))
+            gates[strategy] = decision.to_dict()
+            _control_state["strategy_gates"] = gates
             result = upsert_control_override(
                 conn,
                 override_id=f"control_plane:strategy:{strategy}:gate",
@@ -277,6 +378,10 @@ def process_commands() -> list[str]:
     acks = data.get("acks", [])
     if not commands:
         refresh_control_state()
+        return []
+
+    if _control_state.get("control_plane_fault"):
+        logger.error("Control plane fault detected. Halting command processing.")
         return []
 
     processed = []
@@ -336,7 +441,28 @@ def recommended_autosafe_commands_from_status(status: dict) -> list[dict]:
 
 
 def review_required_commands_from_status(status: dict) -> list[dict]:
-    """Build commands that remain operator-review-required even if recommended."""
+    """Build commands that remain operator-review-required even if recommended.
+
+    K3 fix (bug #5): the previous version auto-generated un-gate commands for
+    every strategy in `gated_but_not_recommended`, using the note
+    "recommended_by=gate_drift_resolved". This made the resolver treat absence
+    from today's recommendation list as a refutation of the original gating
+    reason — which is invalid, because `recommended_strategy_gates` is only
+    built from edge_compression + execution_decay signals, not from strategy
+    health or settlement accuracy. A strategy gated manually for losing 8/8
+    settlements would never generate an edge_compression alert (no new trades
+    means no new edge signal), and therefore always showed up as "drift"
+    → auto un-gate recommendation.
+
+    Until full K3 (GateDecision with reason_code + reason_snapshot + explicit
+    reason_refuted() check) lands, we SUPPRESS auto un-gate entirely. Operators
+    who want to re-enable a gated strategy must do so via an explicit command,
+    not via drift-resolution. This prevents the LLM reporter and daily review
+    from suggesting re-enablement based on a broken heuristic.
+
+    recommended_but_not_gated still generates gate-ON commands (those are new
+    recommendations from RiskGuard, which IS the correct signal direction).
+    """
     control = (status or {}).get("control", {}) or {}
     gate_reasons = control.get("recommended_strategy_gate_reasons", {}) or {}
     commands: list[dict] = []
@@ -350,15 +476,9 @@ def review_required_commands_from_status(status: dict) -> list[dict]:
         if reasons:
             command["note"] = "recommended_by=" + ",".join(str(reason) for reason in reasons)
         commands.append(command)
-    for strategy in control.get("gated_but_not_recommended", []) or []:
-        commands.append(
-            {
-                "command": "set_strategy_gate",
-                "strategy": strategy,
-                "enabled": True,
-                "note": "recommended_by=gate_drift_resolved",
-            }
-        )
+    # K3: gated_but_not_recommended → auto un-gate loop removed.
+    # Do NOT re-add without implementing reason_refuted() on top of
+    # reason_code-bearing GateDecision objects.
     return commands
 
 

@@ -1,0 +1,72 @@
+# docs/reference AGENTS
+
+Canonical reference material for Zeus. Reference docs explain durable concepts
+and orientation; they are not authority. Authority lives in `docs/authority/**`,
+machine manifests, tests, and executable source.
+
+## Default vs conditional read path
+
+**Default reads** (when a digest requests reference context):
+- `zeus_domain_model.md`
+
+**Conditional reads** (load only when the task directly requires them):
+- `zeus_architecture_reference.md` for architecture orientation
+- `zeus_execution_lifecycle_reference.md` for execution, lifecycle, chain
+  reconciliation, exit triggers, and settlement harvest
+- `zeus_risk_strategy_reference.md` for risk levels, strategy taxonomy,
+  Kelly sizing dynamics, and edge decay monitoring
+- `zeus_market_settlement_reference.md` for settlement/market concepts
+- `zeus_data_and_replay_reference.md` for data/replay concepts
+- `zeus_failure_modes_reference.md` for failure-class reviews
+- `zeus_math_spec.md` when math fact/spec context matters
+- `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
+  book route
+- `modules/state.md`, `modules/engine.md`, and `modules/data.md` for the first
+  landed high-risk module books
+
+Current data/source facts live under operations current-fact surfaces, not in
+this directory. Dated analytical/support snapshots live under the reports
+subroot.
+
+Replacement/deletion eligibility is now governed by
+`architecture/docs_registry.yaml` and packet evidence; do not recreate the old
+support-reference layer.
+
+Dense module books live under `docs/reference/modules/`. They are reference
+surfaces that explain module behavior, hazards, and tests deeply enough for
+zero-context work. They do not outrank authority docs, machine manifests,
+current-fact surfaces, tests, or executable source.
+
+The first-wave books (`state`, `engine`, `data`) and the remaining module books
+now route through `modules/AGENTS.md`; use that router instead of guessing
+which module reference matters.
+
+## File registry
+
+| File | Purpose |
+|------|---------|
+| `zeus_domain_model.md` | Short domain model and first conceptual reference |
+| `zeus_architecture_reference.md` | Durable descriptive architecture reference |
+| `zeus_execution_lifecycle_reference.md` | Lifecycle state machine (10 phases, fold table), chain reconciliation (3-state classifier, 3 rules), order execution (share quantization, mode timeouts), exit triggers (8-layer evaluation), monitor refresh (2 signal paths), settlement harvest (3-layer dedup, P&L, redemption) |
+| `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), 6 risk inputs to tick(), trailing loss computation, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
+| `zeus_market_settlement_reference.md` | Market structure (event/market/bin hierarchy, token swap guard, VWMP), bin topology (3 types, width normalization), settlement semantics (rounding rules, for_city routing), sensor physics (ASOS σ, per-city overrides), Monte Carlo P_raw, probability chain (Platt, alpha, bootstrap CI) |
+| `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay diagnostic status |
+| `zeus_failure_modes_reference.md` | Code-grounded failure modes with invariant anchors: settlement/rounding, probability chain, lifecycle/state, data ingestion, execution — each with exact failure mechanism, preventing contract, and code anchor |
+| `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
+| `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
+| `modules/state.md` | Dense state truth / lifecycle / projection module book |
+| `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
+| `modules/data.md` | Dense source-routing / ingest / data-versioning module book |
+
+## Rules
+
+- Do not add stale support, dated audit, packet-evidence, workbook, or current
+  operational fact files here.
+- Do not route canonical references to demoted legacy-reference reports for
+  present-tense facts.
+- Use `docs/operations/current_data_state.md` and
+  `docs/operations/current_source_validity.md` for current audited facts.
+- Do not treat module books as authority or current-fact surfaces; use them as
+  dense orientation after the scoped router or `architecture/module_manifest.yaml`
+  tells you which module matters.
+- Do not recreate a frozen support layer.

@@ -12,8 +12,9 @@ from typing import Optional
 
 import numpy as np
 
-from src.calibration.platt import ExtendedPlattCalibrator, P_CLAMP_LOW, P_CLAMP_HIGH
+from src.calibration.platt import ExtendedPlattCalibrator, logit_safe
 from src.config import edge_n_bootstrap
+from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,
@@ -22,6 +23,7 @@ from src.signal.forecast_uncertainty import (
 )
 from src.strategy.market_fusion import compute_posterior
 from src.types import Bin, BinEdge
+from src.types.market import bin_probability_from_values
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +46,14 @@ class MarketAnalysis:
         lead_days: float = 3.0,
         unit: str = "F",  # P0-9 baseline bootstrap sigma still depends on settlement unit
         precision: float = 1.0,  # Settlement precision: 1.0=integer, 0.1=one decimal
+        round_fn: callable = None,  # Settlement rounding (oracle_truncate for HKO)
         city_name: str = "",
         season: str = "",
         forecast_source: str = "",
         bias_corrected: bool | None = None,
         bias_reference: dict | None = None,
+        rng_seed: int | None = None,
+        market_complete: bool = True,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -56,6 +61,7 @@ class MarketAnalysis:
         self.p_raw = p_raw
         self.p_cal = p_cal
         self.p_market = p_market
+        self.market_complete = market_complete
         self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
         self.vig = float(p_market.sum())
         self._member_maxes = analysis_member_maxes(
@@ -80,6 +86,7 @@ class MarketAnalysis:
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
+        self._round_fn = round_fn
         ensemble_spread = float(np.std(self._member_maxes)) if len(self._member_maxes) else None
         self._sigma_context = analysis_sigma_context(
             unit=unit,
@@ -94,6 +101,8 @@ class MarketAnalysis:
             lead_days=lead_days,
             ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
+        self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
+        self._rng = np.random.default_rng(rng_seed)
 
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
@@ -105,6 +114,7 @@ class MarketAnalysis:
         return {
             "uncertainty": self.sigma_context(),
             "location": self.mean_context(),
+            "market_complete": self.market_complete,
         }
 
     def find_edges(
@@ -145,41 +155,46 @@ class MarketAnalysis:
                     ))
 
             # Buy NO direction: edge on the NO side
-            p_model_no = 1.0 - float(self.p_cal[i])
-            p_market_no = 1.0 - float(self.p_market[i])
-            p_post_no = 1.0 - float(self.p_posterior[i])
-            edge_no = p_post_no - p_market_no
+            # Restricted to binary markets since local `1-p` math on multi-bin
+            # families generates synthetic edges decoupled from native NO-token VWMP
+            if len(self.bins) <= 2:
+                p_model_no = 1.0 - float(self.p_cal[i])
+                p_market_no = 1.0 - float(self.p_market[i])
+                p_post_no = 1.0 - float(self.p_posterior[i])
+                edge_no = p_post_no - p_market_no
 
-            if edge_no > 0:
-                ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
-                if ci_lo > 0:
-                    edges.append(BinEdge(
-                        bin=b,
-                        direction="buy_no",
-                        edge=edge_no,
-                        ci_lower=ci_lo,
-                        ci_upper=ci_hi,
-                        p_model=p_model_no,
-                        p_market=p_market_no,
-                        p_posterior=p_post_no,
-                        entry_price=p_market_no,
-                        p_value=p_val,
-                        vwmp=p_market_no,
-                        forward_edge=edge_no,
-                    ))
+                if edge_no > 0:
+                    ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
+                    if ci_lo > 0:
+                        edges.append(BinEdge(
+                            bin=b,
+                            direction="buy_no",
+                            edge=edge_no,
+                            ci_lower=ci_lo,
+                            ci_upper=ci_hi,
+                            p_model=p_model_no,
+                            p_market=p_market_no,
+                            p_posterior=p_post_no,
+                            entry_price=p_market_no,
+                            p_value=p_val,
+                            vwmp=p_market_no,
+                            forward_edge=edge_no,
+                        ))
 
         return edges
 
     def _settle(self, values: np.ndarray) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
 
-        Mirrors EnsembleSignal._simulate_settlement() logic.
-        precision=1.0 → integer rounding; precision=0.1 → one decimal place.
-        Uses numpy's default round_half_to_even (banker's rounding).
+        Uses injected round_fn if provided (e.g., oracle_truncate for HKO),
+        otherwise falls back to WMO asymmetric half-up: floor(x + 0.5).
         Result is float, not int — callers use >= / <= comparisons on Bin bounds.
+
+        B081 [YELLOW / flag for call-site unification review]: delegates to
+        shared helper `apply_settlement_rounding` in settlement_semantics to
+        consolidate with Day0Signal._settle. No behavior change.
         """
-        inv = 1.0 / self._precision if self._precision > 0 else 1.0
-        return np.round(values * inv) / inv
+        return apply_settlement_rounding(values, self._round_fn, self._precision)
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int
@@ -194,6 +209,9 @@ class MarketAnalysis:
         Returns: (ci_lower, ci_upper, p_value)
         p_value = np.mean(edges <= 0) — exact, NOT approximated.
         """
+        cache_key = ("yes", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -201,12 +219,15 @@ class MarketAnalysis:
         has_platt = (
             self._calibrator is not None
             and self._calibrator.fitted
-            and len(self._calibrator.bootstrap_params) > 1
+            and len(self._calibrator.bootstrap_params) >= 1
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
-        rng = np.random.default_rng()
+        rng = self._rng
         bootstrap_edges = np.zeros(n)
+
+        input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
+        is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
             # Layer 1: resample ENS members + instrument noise
@@ -214,37 +235,44 @@ class MarketAnalysis:
             noised = sample + rng.normal(0, self._sigma, n_members)
             measured = self._settle(noised)
 
-            # Compute p_raw for this bin from resampled members
-            p_raw_boot = self._bin_probability(measured, b)
+            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
+            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
-            # Layer 2: sample Platt parameterization
-            if platt_params:
+            # Layer 2: sample Platt parameterization for ALL bins
+            if has_platt:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_input = p_raw_boot
-                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
-                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
-                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
-                logit = np.log(p_clamped / (1.0 - p_clamped))
-                z = A * logit + B * self._lead_days + C
-                p_cal_boot = 1.0 / (1.0 + np.exp(-z))
+                p_cal_boot_all = np.empty(len(self.bins))
+                for j, bb in enumerate(self.bins):
+                    p_input = p_raw_all[j]
+                    if is_wnd:
+                        if bb.width is None or bb.width <= 0:
+                            raise ValueError(f"Bin width must be defined and >0 for width-normalized density. Bin: {bb}")
+                        p_input = p_raw_all[j] / bb.width
+                    z = A * logit_safe(p_input) + B * self._lead_days + C
+                    p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
-                p_cal_boot = p_raw_boot
+                p_cal_boot_all = p_raw_all
 
-            p_post = self._alpha * p_cal_boot + (1.0 - self._alpha) * self.p_market[bin_idx]
-            bootstrap_edges[i] = p_post - self.p_market[bin_idx]
+            p_post = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)
+            bootstrap_edges[i] = p_post[bin_idx] - self.p_market[bin_idx]
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("yes", bin_idx, n)] = result
+        return result
 
     def _bootstrap_bin_no(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
         """Double bootstrap CI for buy_no direction. Same procedure, inverted."""
+        cache_key = ("no", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
         b = self.bins[bin_idx]
         members = self._member_maxes
         n_members = len(members)
@@ -252,50 +280,55 @@ class MarketAnalysis:
         has_platt = (
             self._calibrator is not None
             and self._calibrator.fitted
-            and len(self._calibrator.bootstrap_params) > 1
+            and len(self._calibrator.bootstrap_params) >= 1
         )
         platt_params = self._calibrator.bootstrap_params if has_platt else []
 
-        rng = np.random.default_rng()
+        rng = self._rng
         bootstrap_edges = np.zeros(n)
+
+        input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
+        is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
             sample = rng.choice(members, size=n_members, replace=True)
             noised = sample + rng.normal(0, self._sigma, n_members)
             measured = self._settle(noised)
 
-            p_raw_boot = self._bin_probability(measured, b)
+            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
+            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
-            if platt_params:
+            if has_platt:
                 params = platt_params[rng.integers(len(platt_params))]
                 A, B, C = params[0], params[1], params[2]
-                p_input = p_raw_boot
-                if getattr(self._calibrator, "input_space", "raw_probability") == "width_normalized_density":
-                    p_input = p_raw_boot / b.width if b.width is not None and b.width > 0 else p_raw_boot
-                p_clamped = np.clip(p_input, P_CLAMP_LOW, P_CLAMP_HIGH)
-                logit = np.log(p_clamped / (1.0 - p_clamped))
-                z = A * logit + B * self._lead_days + C
-                p_cal_boot = 1.0 / (1.0 + np.exp(-z))
+                p_cal_boot_all = np.empty(len(self.bins))
+                for j, bb in enumerate(self.bins):
+                    p_input = p_raw_all[j]
+                    if is_wnd:
+                        if bb.width is None or bb.width <= 0:
+                            raise ValueError(
+                                f"Bin width must be defined and >0 for width-normalized density. "
+                                f"Open/shoulder bins must not use WND input space. Bin: {bb}"
+                            )
+                        p_input = p_raw_all[j] / bb.width
+                    z = A * logit_safe(p_input) + B * self._lead_days + C
+                    p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
-                p_cal_boot = p_raw_boot
+                p_cal_boot_all = p_raw_all
 
-            p_post_no = 1.0 - (self._alpha * p_cal_boot +
-                                (1.0 - self._alpha) * self.p_market[bin_idx])
+            p_post_yes = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)[bin_idx]
             p_market_no = 1.0 - self.p_market[bin_idx]
-            bootstrap_edges[i] = p_post_no - p_market_no
+            bootstrap_edges[i] = (1.0 - p_post_yes) - p_market_no
 
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
-        return ci_lo, ci_hi, p_value
+        result = (ci_lo, ci_hi, p_value)
+        self._bootstrap_cache[("no", bin_idx, n)] = result
+        return result
 
     @staticmethod
     def _bin_probability(measured: np.ndarray, b: Bin) -> float:
         """Compute fraction of measured values falling in bin."""
-        if b.is_open_low:
-            return float(np.mean(measured <= b.high))
-        elif b.is_open_high:
-            return float(np.mean(measured >= b.low))
-        else:
-            return float(np.mean((measured >= b.low) & (measured <= b.high)))
+        return bin_probability_from_values(measured, b)

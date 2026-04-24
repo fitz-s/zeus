@@ -12,9 +12,18 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from src.config import STATE_DIR, settings, state_path
+from src.config import (
+    STATE_DIR,
+    exit_correlation_crowding_rate,
+    exit_daily_hurdle_rate,
+    exit_fee_rate,
+    get_mode,
+    hold_value_exit_costs_enabled,
+    settings,
+    state_path,
+)
 from src.contracts import (
     HeldSideProbability, 
     NativeSidePrice, 
@@ -22,12 +31,16 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.contracts.hold_value import HoldValue
+from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
+    enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
     enter_settled_runtime_state,
     enter_voided_runtime_state,
 )
+from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.truth_files import annotate_truth_payload
 
 logger = logging.getLogger(__name__)
@@ -40,6 +53,12 @@ CANONICAL_STRATEGY_KEYS = {
 }
 
 POSITIONS_PATH = state_path("positions.json")
+
+_TRUTH_AUTHORITY_MAP: dict[str, str] = {
+    "canonical_db": "VERIFIED",
+    "degraded": "VERIFIED",
+    "unverified": "UNVERIFIED",
+}
 
 
 @dataclass
@@ -80,6 +99,15 @@ class ExitContext:
     divergence_score: float = 0.0
     market_velocity_1h: float = 0.0
 
+    # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
+    # cost computation in HoldValue.compute_with_exit_costs. Threaded by
+    # cycle_runtime._build_exit_context from PortfolioState at monitor tick.
+    # Each element is (cluster, size_usd, trade_id) for OTHER held positions
+    # (self excluded). Empty tuple = no co-held positions / not threaded.
+    # bankroll: current bankroll used as the denominator for exposure %.
+    portfolio_positions: tuple = ()
+    bankroll: Optional[float] = None
+
     @staticmethod
     def _is_finite(value: Optional[float]) -> bool:
         if value is None:
@@ -93,7 +121,9 @@ class ExitContext:
         missing: list[str] = []
         if not self._is_finite(self.fresh_prob):
             missing.append("fresh_prob")
-        elif not self.fresh_prob_is_fresh:
+        elif not self.fresh_prob_is_fresh and not self.day0_active:
+            # Day0 positions waive fresh_prob_is_fresh requirement
+            missing.append("fresh_prob_is_fresh")
             missing.append("fresh_prob_is_fresh")
         if not self._is_finite(self.current_market_price):
             missing.append("current_market_price")
@@ -106,12 +136,66 @@ class ExitContext:
         return missing
 
 
+def _compute_exit_correlation_crowding(
+    *,
+    this_cluster: str,
+    portfolio_positions: tuple,
+    bankroll: Optional[float],
+    shares: float,
+    best_bid: float,
+    crowding_rate: float,
+) -> float:
+    """T6.4-phase2: compute the dollar-denominated correlation-crowding cost
+    for an exit decision.
+
+    Formula:
+        exposure_ratio = Σ over OTHER held positions of
+            (other.size_usd / bankroll) × get_correlation(this_cluster, other.cluster)
+        cost_usd = crowding_rate × exposure_ratio × shares × best_bid
+
+    Returns 0.0 safely when:
+        - portfolio_positions is empty (no co-held positions)
+        - bankroll is None or <= 0 (authority gap)
+        - crowding_rate is 0.0 (feature off by default)
+
+    Self-exclusion is already applied at the _build_exit_context layer
+    (trade_id filter). This function sums correlation × exposure across
+    whatever tuple it receives.
+    """
+    if crowding_rate <= 0.0:
+        return 0.0
+    if not portfolio_positions:
+        return 0.0
+    if bankroll is None or bankroll <= 0.0:
+        return 0.0
+
+    exposure_ratio = 0.0
+    for entry in portfolio_positions:
+        # entry is (cluster, size_usd, trade_id) tuple per _build_exit_context
+        try:
+            other_cluster, other_size_usd, _trade_id = entry
+        except (TypeError, ValueError):
+            continue
+        try:
+            size_pct = float(other_size_usd) / float(bankroll)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        corr = get_correlation(str(this_cluster), str(other_cluster))
+        exposure_ratio += size_pct * corr
+
+    return float(crowding_rate) * exposure_ratio * float(shares) * float(best_bid)
+
+
 # Administrative exit reasons — excluded from P&L calculations
 ADMIN_EXITS = frozenset({
     "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
     "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
     "SETTLED_UNKNOWN_DIRECTION", "EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
 })
+
+# K1/#49: Sentinel for quarantine placeholder fields — downstream code must
+# check `pos.is_quarantine_placeholder` instead of comparing city == "UNKNOWN".
+QUARANTINE_SENTINEL = "QUARANTINE_UNRESOLVED"
 
 
 @dataclass
@@ -134,9 +218,10 @@ class Position:
     direction: DirectionAlias  # Forces use of Direction(Enum)
 
     unit: str = "F"  # Blueprint v2: carried, never inferred
+    temperature_metric: Literal["high", "low"] = "high"  # carried from market at entry
 
     # Provenance: which environment created this position (set once, never changed)
-    env: str = "paper"  # "paper" | "live" | "backtest"
+    env: str = "live"  # live-only (Phase 1 axiom)
 
     # Probability (always in held-side space — flipped exactly once at creation)
     size_usd: float = 0.0
@@ -145,7 +230,7 @@ class Position:
     edge: float = 0.0
     shares: float = 0.0  # size_usd / entry_price
     cost_basis_usd: float = 0.0  # = size_usd
-    bankroll_at_entry: float = 150.0
+    bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
     day0_entered_at: str = ""
     entry_ci_width: float = 0.0
@@ -157,6 +242,7 @@ class Position:
     decision_snapshot_id: str = ""  # FK to ensemble_snapshots at decision time
     selected_method: str = ""
     applied_validations: list[str] = field(default_factory=list)
+    entry_model_agreement: str = "NOT_CHECKED"  # P9 fix: GFS crosscheck result at entry time
 
     # Strategy + attribution
     strategy_key: str = ""
@@ -173,6 +259,7 @@ class Position:
     order_status: str = ""
     order_posted_at: str = ""
     order_timeout_at: str = ""
+    nested_fills: list = field(default_factory=list)
 
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = ChainState.UNKNOWN.value
@@ -233,6 +320,10 @@ class Position:
 
     def __post_init__(self):
         """CRITICAL: Enforce Enum strictness via coercion."""
+        # S3 R5 P10B: runtime enforcement of Literal["high", "low"] at entry point
+        assert self.temperature_metric in ("high", "low"), (
+            f"Invalid temperature_metric: {self.temperature_metric!r}"
+        )
         if not isinstance(self.direction, Direction):
             self.direction = Direction(self.direction)
         if not isinstance(self.state, LifecycleState):
@@ -264,13 +355,52 @@ class Position:
             return 0.0
         return self.effective_shares * self.last_monitor_market_price - self.effective_cost_basis_usd
 
+    @property
+    def is_quarantine_placeholder(self) -> bool:
+        """K1/#49: True when this position is a chain-only quarantine stub with
+        unresolved market metadata.  Downstream code must NOT participate these
+        in lifecycle, risk, or monitor logic."""
+        return self.city == QUARANTINE_SENTINEL
+
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
         All probabilities remain in held/native space. Missing authority fields
         fail closed with an explicit incomplete verdict.
+
+        Phase 9B ITERATE resolution (DT#2 R-BY): when `self.exit_reason` is
+        set to "red_force_exit" (by cycle_runner's `_execute_force_exit_sweep`
+        during a RED daily-loss cycle), short-circuit normal edge evaluation
+        and return `ExitDecision(should_exit=True, trigger="RED_FORCE_EXIT")`.
+        This wires the Phase 9B sweep marker to the existing exit actuator
+        path (monitor_refresh → evaluate_exit → execute_exit), closing the
+        critic-carol cycle-3 CRITICAL-1 "inert marker" gap. Day0 positions
+        skip this path — they have their own risk-containment via
+        nowcast/causality; DT#2 RED is orthogonal to Day0 evaluator logic.
         """
         applied = list(self.applied_validations)
+
+        # DT#2 RED force-exit sweep short-circuit (Phase 9B ITERATE, R-BY).
+        # Must run BEFORE the missing-authority fail-closed check: when the
+        # risk layer declares RED, we exit regardless of whether we have full
+        # ExitContext authority. The sell order posts at whatever the
+        # orderbook offers; RED containment takes precedence over normal
+        # price-quality gating.
+        if (
+            self.exit_reason == "red_force_exit"
+            and not exit_context.day0_active
+        ):
+            applied.append("dt2_red_force_exit_sweep_actuated")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True,
+                "RED_FORCE_EXIT",
+                urgency="immediate",
+                trigger="RED_FORCE_EXIT",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+            )
+
         missing = exit_context.missing_authority_fields()
         if missing:
             applied.append("exit_context_incomplete")
@@ -305,6 +435,11 @@ class Position:
 
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
+            # Day0 stale prob waiver: when fresh_prob_is_fresh=False, log the
+            # authority waiver and note the substitution for auditability
+            if not exit_context.fresh_prob_is_fresh:
+                applied.append("day0_stale_prob_authority_waived")
+                applied.append("stale_prob_substitution")
             if self.direction == "buy_no":
                 day0_decision = self._buy_no_exit(
                     forward_edge,
@@ -313,6 +448,8 @@ class Position:
                     hours_to_settlement=exit_context.hours_to_settlement,
                     day0_active=True,
                     applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
                 )
             else:
                 day0_decision = self._buy_yes_exit(
@@ -320,16 +457,18 @@ class Position:
                     current_p_posterior=float(exit_context.fresh_prob),
                     best_bid=exit_context.best_bid,
                     day0_active=True,
+                    hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
                 )
             if day0_decision.should_exit:
                 return day0_decision
-            self.applied_validations = _dedupe_validations(day0_decision.applied_validations)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
+            # Don't return False here — fall through to SETTLEMENT_IMMINENT
+            # and other force-exit checks (whale toxicity, edge reversal).
+            # Without this fallthrough, positions with expired target_dates
+            # loop forever in day0_window.
+            applied = list(day0_decision.applied_validations or applied)
 
         # Settlement imminent
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
@@ -429,14 +568,24 @@ class Position:
                 hours_to_settlement=exit_context.hours_to_settlement,
                 day0_active=bool(exit_context.day0_active),
                 applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
             )
         else:
+            best_bid = exit_context.best_bid
+            if exit_context.day0_active and best_bid is None:
+                applied.append("best_bid_proxy_from_current_market_price")
+                applied.append("best_bid_proxy_tick_discount")
+                best_bid = max(0.0, float(exit_context.current_market_price) * 0.95)
             return self._buy_yes_exit(
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=exit_context.best_bid,
+                best_bid=best_bid,
                 day0_active=bool(exit_context.day0_active),
+                hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
             )
 
     def _buy_yes_exit(
@@ -445,9 +594,26 @@ class Position:
         current_p_posterior: float,
         best_bid: Optional[float] = None,
         day0_active: bool = False,
+        hours_to_settlement: Optional[float] = None,
         applied: Optional[list[str]] = None,
+        portfolio_positions: tuple = (),
+        bankroll: Optional[float] = None,
     ) -> ExitDecision:
-        """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
+        """Standard 2-consecutive EDGE_REVERSAL with EV gate.
+
+        T6.4: when feature_flags.HOLD_VALUE_EXIT_COSTS is enabled, the EV
+        gate uses HoldValue.compute_with_exit_costs (fee + time opportunity
+        cost) instead of the legacy zero-cost HoldValue.compute. hours_to_
+        settlement feeds the time_cost component; when None, time_cost
+        collapses to 0.0 as a soft conservative default.
+
+        T6.4-phase2: portfolio_positions + bankroll thread the correlation-
+        crowding substrate through to HoldValue.compute_with_exit_costs.
+        Each element of portfolio_positions is (cluster, size_usd, trade_id)
+        for OTHER co-held positions (self-excluded at _build_exit_context
+        layer). Crowding cost defaults to 0.0 via the helper when
+        exit_correlation_crowding_rate() is 0.0 (current default).
+        """
         applied = list(applied or [])
         if best_bid is None:
             applied.append("exit_context_incomplete")
@@ -465,7 +631,40 @@ class Position:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
-            if shares * best_bid <= shares * current_p_posterior:
+            if hold_value_exit_costs_enabled():
+                applied.append("hold_value_exit_costs_enabled")
+                if hours_to_settlement is None or hours_to_settlement < 0.0:
+                    # T6.4-hardening (con-nyx finding c): authority gap —
+                    # time_cost collapses to 0.0, silently degrading D6
+                    # protection at this call site. Surface via breadcrumb
+                    # so monitor summaries can count these occurrences.
+                    applied.append("hold_value_hours_unknown_time_cost_zero")
+                _crowding = _compute_exit_correlation_crowding(
+                    this_cluster=self.cluster,
+                    portfolio_positions=portfolio_positions,
+                    bankroll=bankroll,
+                    shares=shares,
+                    best_bid=best_bid,
+                    crowding_rate=exit_correlation_crowding_rate(),
+                )
+                if _crowding > 0.0:
+                    applied.append("hold_value_correlation_crowding_applied")
+                hold_value = HoldValue.compute_with_exit_costs(
+                    shares=shares,
+                    current_p_posterior=current_p_posterior,
+                    best_bid=best_bid,
+                    hours_to_settlement=hours_to_settlement,
+                    fee_rate=exit_fee_rate(),
+                    daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    correlation_crowding=_crowding,
+                )
+            else:
+                hold_value = HoldValue.compute(
+                    gross_value=shares * current_p_posterior,
+                    fee_cost=0.0,
+                    time_cost=0.0,
+                )
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -505,7 +704,36 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            if shares * best_bid <= shares * current_p_posterior:
+            if hold_value_exit_costs_enabled():
+                applied.append("hold_value_exit_costs_enabled")
+                if hours_to_settlement is None or hours_to_settlement < 0.0:
+                    applied.append("hold_value_hours_unknown_time_cost_zero")
+                _crowding = _compute_exit_correlation_crowding(
+                    this_cluster=self.cluster,
+                    portfolio_positions=portfolio_positions,
+                    bankroll=bankroll,
+                    shares=shares,
+                    best_bid=best_bid,
+                    crowding_rate=exit_correlation_crowding_rate(),
+                )
+                if _crowding > 0.0:
+                    applied.append("hold_value_correlation_crowding_applied")
+                hold_value = HoldValue.compute_with_exit_costs(
+                    shares=shares,
+                    current_p_posterior=current_p_posterior,
+                    best_bid=best_bid,
+                    hours_to_settlement=hours_to_settlement,
+                    fee_rate=exit_fee_rate(),
+                    daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    correlation_crowding=_crowding,
+                )
+            else:
+                hold_value = HoldValue.compute(
+                    gross_value=shares * current_p_posterior,
+                    fee_cost=0.0,
+                    time_cost=0.0,
+                )
+            if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -530,8 +758,22 @@ class Position:
         hours_to_settlement: Optional[float] = None,
         day0_active: bool = False,
         applied: Optional[list[str]] = None,
+        portfolio_positions: tuple = (),
+        bankroll: Optional[float] = None,
     ) -> ExitDecision:
-        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
+        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
+
+        T6.4: routes the EV gate through HoldValue contract (previously
+        bypassed). When feature_flags.HOLD_VALUE_EXIT_COSTS is enabled,
+        exit decisions include fee + time opportunity cost. Sell price
+        for buy_no is current_market_price (native NO-space probability
+        from the orderbook); polymarket_fee formula p*(1-p) is symmetric
+        so passing current_market_price as best_bid is semantically OK.
+
+        T6.4-phase2: portfolio_positions + bankroll thread correlation-
+        crowding substrate; defaults preserve pre-phase2 behavior (cost 0.0)
+        until exit_correlation_crowding_rate() > 0.0.
+        """
         applied = list(applied or [])
         evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
@@ -543,7 +785,37 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                if hold_value_exit_costs_enabled():
+                    applied.append("hold_value_exit_costs_enabled")
+                    if hours_to_settlement is None or hours_to_settlement < 0.0:
+                        applied.append("hold_value_hours_unknown_time_cost_zero")
+                    _crowding = _compute_exit_correlation_crowding(
+                        this_cluster=self.cluster,
+                        portfolio_positions=portfolio_positions,
+                        bankroll=bankroll,
+                        shares=shares,
+                        best_bid=current_market_price,
+                        crowding_rate=exit_correlation_crowding_rate(),
+                    )
+                    if _crowding > 0.0:
+                        applied.append("hold_value_correlation_crowding_applied")
+                    hold_value = HoldValue.compute_with_exit_costs(
+                        shares=shares,
+                        current_p_posterior=current_p_posterior,
+                        best_bid=current_market_price,
+                        hours_to_settlement=hours_to_settlement,
+                        fee_rate=exit_fee_rate(),
+                        daily_hurdle_rate=exit_daily_hurdle_rate(),
+                        correlation_crowding=_crowding,
+                    )
+                else:
+                    hold_value = HoldValue.compute(
+                        gross_value=shares * current_p_posterior,
+                        fee_cost=0.0,
+                        time_cost=0.0,
+                    )
+                sell_value = shares * current_market_price
+                if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -589,7 +861,37 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                if hold_value_exit_costs_enabled():
+                    applied.append("hold_value_exit_costs_enabled")
+                    if hours_to_settlement is None or hours_to_settlement < 0.0:
+                        applied.append("hold_value_hours_unknown_time_cost_zero")
+                    _crowding = _compute_exit_correlation_crowding(
+                        this_cluster=self.cluster,
+                        portfolio_positions=portfolio_positions,
+                        bankroll=bankroll,
+                        shares=shares,
+                        best_bid=current_market_price,
+                        crowding_rate=exit_correlation_crowding_rate(),
+                    )
+                    if _crowding > 0.0:
+                        applied.append("hold_value_correlation_crowding_applied")
+                    hold_value = HoldValue.compute_with_exit_costs(
+                        shares=shares,
+                        current_p_posterior=current_p_posterior,
+                        best_bid=current_market_price,
+                        hours_to_settlement=hours_to_settlement,
+                        fee_rate=exit_fee_rate(),
+                        daily_hurdle_rate=exit_daily_hurdle_rate(),
+                        correlation_crowding=_crowding,
+                    )
+                else:
+                    hold_value = HoldValue.compute(
+                        gross_value=shares * current_p_posterior,
+                        fee_cost=0.0,
+                        time_cost=0.0,
+                    )
+                sell_value = shares * current_market_price
+                if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -630,6 +932,14 @@ class PortfolioState:
     recent_exits: list[dict] = field(default_factory=list)
     # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
     ignored_tokens: list[str] = field(default_factory=list)
+    # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
+    # Cycle runner must suppress new entries when this flag is set.
+    portfolio_loader_degraded: bool = False
+    # Phase 5A (B069/B073): truth authority of this state snapshot.
+    # "canonical_db"=loaded from authoritative DB projection.
+    # "degraded"=DB reachable but projection non-canonical.
+    # "unverified"=DB connection failed; callers must not trust this as authority.
+    authority: str = "unverified"
 
     @property
     def initial_bankroll(self) -> float:
@@ -638,14 +948,23 @@ class PortfolioState:
 
 
 
-class PortfolioModeError(RuntimeError):
-    """Paper data in live state, or vice versa. Daemon refuses to boot."""
-    pass
-
-
 class DeprecatedStateFileError(RuntimeError):
     """Raised when a deprecated unsuffixed truth file is accessed."""
     pass
+
+
+# Bug #7 fix: terminal lifecycle states must never enter the active-positions
+# runtime view. save_portfolio and the JSON-fallback load path both filter
+# these out. This is defence-in-depth on top of the K1 structural direction
+# (derived surfaces should not write at all) — if any code path accidentally
+# leaves a settled row in state.positions, the write-side filter strips it;
+# if a stale JSON file lingers on disk, the read-side filter strips it.
+_TERMINAL_POSITION_STATES = frozenset({
+    "settled",
+    "voided",
+    "admin_closed",
+    "quarantined",
+})
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:
@@ -661,13 +980,39 @@ def _load_portfolio_json_payload(path: Path) -> dict:
     return data
 
 
+def _guard_deprecated_portfolio_json(path: Path) -> None:
+    try:
+        _load_portfolio_json_payload(path)
+    except DeprecatedStateFileError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Ignoring unreadable derived portfolio JSON sidecar while DB authority is unavailable: %s",
+            exc,
+        )
+
+
 def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> PortfolioState:
     position_fields = {f.name for f in fields(Position)}
     positions = []
+    skipped_terminal: list[str] = []
     for p in data.get("positions", []):
+        # Bug #7 read-side filter: terminal-state rows must never reach
+        # runtime portfolio state from a JSON fallback. If position_current
+        # is healthy, the canonical DB-first path is used and this loader
+        # is never called. If it IS called (partial_stale, missing_table,
+        # DB error), the JSON on disk could still contain settled rows
+        # from a prior save_portfolio write that predates the write-side
+        # filter. Strip them here and log which were skipped.
+        raw_state = str(p.get("state", "") or "").strip().lower()
+        if raw_state in _TERMINAL_POSITION_STATES:
+            skipped_terminal.append(
+                f"{p.get('trade_id', '?')}({raw_state})"
+            )
+            continue
         filtered = {k: v for k, v in p.items() if k in position_fields}
         if "env" not in p:
-            filtered["env"] = current_mode
+            filtered["env"] = "unknown_env"
         pos = Position(**filtered)
         if not pos.strategy_key and pos.strategy in CANONICAL_STRATEGY_KEYS:
             pos.strategy_key = pos.strategy
@@ -678,24 +1023,24 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             )
         positions.append(pos)
 
-    for pos in positions:
-        if pos.env and pos.env != current_mode:
-            raise PortfolioModeError(
-                f"{current_mode} portfolio contains {pos.env} position "
-                f"{pos.trade_id} — refusing to load. Resolve manually: "
-                f"settle or void all {pos.env} positions before switching modes."
-            )
+    if skipped_terminal:
+        logger.warning(
+            "_load_portfolio_from_json_data skipped %d terminal-state rows "
+            "from JSON fallback (bug #7 defense): %s",
+            len(skipped_terminal),
+            ", ".join(skipped_terminal[:10]) + ("..." if len(skipped_terminal) > 10 else ""),
+        )
 
-    bankroll = data.get("bankroll", 150.0)
+    bankroll = float(settings.capital_base_usd)
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
-        updated_at=data.get("updated_at", ""),
+        updated_at="",
         audit_logging_enabled=True,
-        daily_baseline_total=data.get("daily_baseline_total", bankroll),
-        weekly_baseline_total=data.get("weekly_baseline_total", bankroll),
-        recent_exits=data.get("recent_exits", []),
-        ignored_tokens=data.get("ignored_tokens", []),
+        daily_baseline_total=bankroll,
+        weekly_baseline_total=bankroll,
+        recent_exits=[],
+        ignored_tokens=[],
     )
 
 
@@ -727,7 +1072,13 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         bin_label=str(row.get("bin_label") or ""),
         direction=str(row.get("direction") or "unknown"),
         unit=str(row.get("unit") or "F"),
-        env=current_mode,
+        # B074 [YELLOW / flag for §7c architect sign-off]: the canonical
+        # projection row may not carry env. Previously we stamped the
+        # current runtime mode, which destroyed the provenance of which
+        # env originally created the position. Preserve the row's env when
+        # present; fall back to the 'unknown_env' sentinel otherwise and
+        # let downstream authority consumers mark the row UNVERIFIED.
+        env=str(row.get("env") or "unknown_env"),
         size_usd=float(row.get("size_usd") or 0.0),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
@@ -738,7 +1089,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
         entry_method=str(row.get("entry_method") or ""),
         strategy_key=str(row.get("strategy_key") or ""),
-        strategy=str(row.get("strategy_key") or ""),
+        strategy=str(row.get("strategy") or row.get("strategy_key") or ""),
         edge_source=str(row.get("edge_source") or ""),
         discovery_mode=str(row.get("discovery_mode") or ""),
         state=state,
@@ -784,57 +1135,111 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
+def _chain_only_quarantine_position_from_row(row: dict) -> Position:
+    token_id = str(row.get("token_id") or "")
+    evidence = {}
+    try:
+        evidence = json.loads(str(row.get("evidence_json") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        evidence = {}
+    shares = float(evidence.get("size") or evidence.get("chain_shares") or 0.0)
+    avg_price = float(evidence.get("avg_price") or 0.0)
+    cost = float(evidence.get("cost") or (shares * avg_price))
+    first_seen = str(
+        evidence.get("first_seen_at")
+        or row.get("created_at")
+        or row.get("updated_at")
+        or ""
+    )
+    condition_id = str(row.get("condition_id") or evidence.get("condition_id") or "")
+    return Position(
+        trade_id=f"quarantine_{token_id[:8]}",
+        market_id=condition_id,
+        city=QUARANTINE_SENTINEL,
+        cluster="Other",
+        target_date=QUARANTINE_SENTINEL,
+        bin_label=QUARANTINE_SENTINEL,
+        direction="unknown",
+        size_usd=cost,
+        entry_price=avg_price,
+        p_posterior=avg_price,
+        edge=0.0,
+        entered_at=first_seen,
+        token_id=token_id,
+        state=enter_chain_quarantined_runtime_state(),
+        strategy="",
+        edge_source="",
+        cost_basis_usd=cost,
+        shares=shares,
+        chain_state="quarantined",
+        chain_shares=shares,
+        chain_verified_at=str(row.get("updated_at") or first_seen),
+        condition_id=condition_id,
+        quarantined_at=first_seen,
+    )
+
+
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
     path = path or POSITIONS_PATH
 
-    import os
-    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
-    json_data = _load_portfolio_json_payload(path)
+    current_mode = get_mode()
+    bankroll = float(settings.capital_base_usd)
 
     from src.state.db import (
         get_connection,
-        get_trade_connection_with_shared,
+        get_trade_connection_with_world,
+        query_chain_only_quarantine_rows,
         query_authoritative_settlement_rows,
         query_portfolio_loader_view,
+        query_token_suppression_tokens,
     )
 
     mode_override = None
     stem = path.stem
     if stem.startswith("positions-"):
         candidate_mode = stem.split("positions-", 1)[1]
-        if candidate_mode in {"paper", "live", "test"}:
+        if candidate_mode in {"live", "test"}:  # only live and test are valid modes
             mode_override = candidate_mode
     elif path == POSITIONS_PATH:
         mode_override = current_mode
 
     try:
-        if mode_override is not None:
-            sibling_mode_db = path.parent / f"zeus-{mode_override}.db"
-            if sibling_mode_db.exists():
-                conn = get_connection(sibling_mode_db)
-            else:
-                conn = get_trade_connection_with_shared(mode_override)
+        trade_db = path.parent / "zeus_trades.db"
+        if trade_db.exists():
+            conn = get_connection(trade_db)
+        elif mode_override is not None:
+            conn = get_trade_connection_with_world()
         else:
-            sibling_mode_db = path.parent / f"zeus-{current_mode}.db"
-            if sibling_mode_db.exists():
-                conn = get_connection(sibling_mode_db)
-            else:
-                conn = get_connection(path.parent / "zeus.db")
+            conn = get_connection(path.parent / "zeus.db")
     except Exception:
-        logger.warning("load_portfolio DB-first probe unavailable; falling back to JSON", exc_info=True)
-        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+        logger.error(
+            "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
+            exc_info=True,
+        )
+        _guard_deprecated_portfolio_json(path)
+        return PortfolioState(
+            positions=[],
+            bankroll=bankroll,
+            daily_baseline_total=bankroll,
+            weekly_baseline_total=bankroll,
+            portfolio_loader_degraded=True,
+            authority="unverified",
+        )
 
     settlement_rows: list[dict] = []
+    ignored_tokens: list[str] = []
+    chain_only_quarantines: list[dict] = []
     try:
         snapshot = query_portfolio_loader_view(conn)
-        if snapshot.get("status") == "ok":
-            query_env = mode_override or current_mode
+        ignored_tokens = query_token_suppression_tokens(conn)
+        chain_only_quarantines = query_chain_only_quarantine_rows(conn)
+        if snapshot.get("status") in ("ok", "partial_stale", "empty"):
             try:
                 settlement_rows = query_authoritative_settlement_rows(
                     conn,
                     limit=None,
-                    env=query_env,
+                    env="live",
                 )
             except Exception:
                 logger.warning(
@@ -845,90 +1250,100 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     finally:
         conn.close()
 
-    if snapshot.get("status") != "ok":
-        logger.warning(
-            "load_portfolio falling back to JSON because canonical projection is unavailable: %s",
+    policy = choose_portfolio_truth_source(snapshot.get("status"))
+    if policy.source != "canonical_db":
+        logger.error(
+            "load_portfolio DB projection not authoritative: %s (%s); returning empty portfolio (entries suppressed)",
             snapshot.get("status"),
+            policy.reason,
         )
-        return _load_portfolio_from_json_data(json_data, current_mode=current_mode)
+        _guard_deprecated_portfolio_json(path)
+        degraded_positions = [
+            _chain_only_quarantine_position_from_row(row)
+            for row in chain_only_quarantines
+        ]
+        return PortfolioState(
+            positions=degraded_positions,
+            bankroll=bankroll,
+            daily_baseline_total=bankroll,
+            weekly_baseline_total=bankroll,
+            ignored_tokens=ignored_tokens,
+            portfolio_loader_degraded=True,
+            authority="degraded",
+        )
 
-    bankroll = json_data.get("bankroll", 150.0)
-    compatibility_by_trade_id: dict[str, dict] = {}
-    for payload in json_data.get("positions", []):
-        trade_id = str(payload.get("trade_id") or "")
-        if trade_id:
-            compatibility_by_trade_id[trade_id] = payload
-    position_fields = {f.name for f in fields(Position)}
-    authoritative_fields = {
-        "trade_id",
-        "market_id",
-        "city",
-        "cluster",
-        "target_date",
-        "bin_label",
-        "direction",
-        "unit",
-        "size_usd",
-        "shares",
-        "cost_basis_usd",
-        "entry_price",
-        "p_posterior",
-        "last_monitor_prob",
-        "last_monitor_edge",
-        "last_monitor_market_price",
-        "decision_snapshot_id",
-        "entry_method",
-        "strategy_key",
-        "strategy",
-        "edge_source",
-        "discovery_mode",
-        "chain_state",
-        "order_id",
-        "order_status",
-        "state",
-        "env",
-        "entered_at",
-        "day0_entered_at",
-        "exit_state",
-        "admin_exit_reason",
-        "entry_fill_verified",
-    }
     positions = [
         _position_from_projection_row(
-            {
-                **row,
-                **{
-                    key: compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key)
-                    for key in position_fields
-                    if key not in authoritative_fields
-                    and row.get(key) in (None, "", [], 0, 0.0)
-                    and compatibility_by_trade_id.get(str(row.get("trade_id") or ""), {}).get(key) not in (None, "", [], 0, 0.0)
-                },
-            },
+            row,
             current_mode=current_mode,
         )
         for row in snapshot.get("positions", [])
     ]
+    represented_tokens = {
+        token
+        for pos in positions
+        for token in (getattr(pos, "token_id", ""), getattr(pos, "no_token_id", ""))
+        if token
+    }
+    positions.extend(
+        _chain_only_quarantine_position_from_row(row)
+        for row in chain_only_quarantines
+        if str(row.get("token_id") or "") not in represented_tokens
+    )
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
-        updated_at=json_data.get("updated_at", ""),
+        updated_at="",
         audit_logging_enabled=True,
-        daily_baseline_total=json_data.get("daily_baseline_total", bankroll),
-        weekly_baseline_total=json_data.get("weekly_baseline_total", bankroll),
+        daily_baseline_total=bankroll,
+        weekly_baseline_total=bankroll,
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
-        ignored_tokens=json_data.get("ignored_tokens", []),
+        ignored_tokens=ignored_tokens,
+        authority="canonical_db",
     )
 
 
-def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
-    """Atomic write: write to tmp, then os.replace(). Spec: atomic write pattern."""
+def save_portfolio(
+    state: PortfolioState,
+    path: Optional[Path] = None,
+    *,
+    last_committed_artifact_id: Optional[int] = None,
+    source: str = "internal",
+) -> None:
+    """Atomic write: write to tmp, then os.replace(). Spec: atomic write pattern.
+
+    last_committed_artifact_id: when provided, written into the JSON payload
+    as "last_committed_artifact_id" for DT#1 / INV-17 stale-detection (D5).
+
+    source: Phase 9C B3 observability hook (DT#6 §B Interpretation B). Tags
+    the persistence event with the caller's origin so the JSON audit
+    trail shows what drove the write. Convention:
+      - "internal" (default): normal cycle housekeeping
+      - "reconciliation": chain/CLOB reconciliation write
+      - "fill_event": order-fill / exit-fill event
+      - "settlement": settlement terminalization
+      - "admin": operator-manual intervention
+    NO runtime enforcement of the DT#6 §B "external-authority origin"
+    rule — this is caller-side discipline logged to the JSON for audit.
+    Future phase may add a `source: Literal[...]` contract + runtime check.
+    """
     path = path or POSITIONS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
     state.updated_at = datetime.now(timezone.utc).isoformat()
+    # Bug #7 write-side filter: positions-{mode}.json is an "active positions
+    # view" file — terminal-state rows must not appear. If a terminal row
+    # somehow remains in state.positions (e.g. an event path appended to
+    # the list without popping), strip it here. This is defence-in-depth
+    # on top of the explicit pop() calls in compute_settlement_close,
+    # mark_admin_closed, and void_position. Settled rows belong in
+    # position_events / position_current, not in this cache file.
+    active_positions = [
+        p for p in state.positions
+        if str(getattr(p, "state", "") or "").strip().lower() not in _TERMINAL_POSITION_STATES
+    ]
     data = {
-        "positions": [asdict(p) for p in state.positions],
+        "positions": [asdict(p) for p in active_positions],
         "bankroll": state.bankroll,
         "updated_at": state.updated_at,
         "daily_baseline_total": state.daily_baseline_total,
@@ -936,7 +1351,18 @@ def save_portfolio(state: PortfolioState, path: Optional[Path] = None) -> None:
         "recent_exits": state.recent_exits,
         "ignored_tokens": state.ignored_tokens,
     }
-    data = annotate_truth_payload(data, path, mode=settings.mode, generated_at=state.updated_at)
+    if last_committed_artifact_id is not None:
+        data["last_committed_artifact_id"] = last_committed_artifact_id
+    # Phase 9C B3: record save source for audit trail (observability only;
+    # no runtime enforcement of DT#6 §B "external-authority origin" rule).
+    data["save_source"] = str(source)
+    data = annotate_truth_payload(
+        data,
+        path,
+        mode=get_mode(),
+        generated_at=state.updated_at,
+        authority=_TRUTH_AUTHORITY_MAP.get(state.authority, "UNVERIFIED"),
+    )
 
     # Atomic write pattern per OpenClaw conventions
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -959,7 +1385,8 @@ def add_position(state: PortfolioState, pos: Position) -> None:
     for existing in state.positions:
         if pos.order_id and existing.order_id and pos.order_id == existing.order_id:
             for field_name, value in asdict(pos).items():
-                setattr(existing, field_name, value)
+                if value not in (None, "", 0, 0.0) or getattr(existing, field_name) in (None, "", 0, 0.0):
+                    setattr(existing, field_name, value)
             return
 
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -968,12 +1395,15 @@ def add_position(state: PortfolioState, pos: Position) -> None:
             continue
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
-            # Merge: accumulate shares and cost
-            logger.warning("DEDUP: merging duplicate %s %s into existing %s",
-                           pos.direction, pos.bin_label, existing.trade_id)
+            # Append-only virtual ledger projection
+            logger.info("DEDUP/LEDGER: appending duplicate %s %s fill into existing %s %s",
+                           pos.direction, pos.bin_label, existing.trade_id, existing.state)
+            existing.nested_fills.append(pos)
             existing.size_usd += pos.size_usd
             existing.shares += pos.effective_shares
             existing.cost_basis_usd += pos.effective_cost_basis_usd
+            if existing.effective_shares > 0:
+                existing.entry_price = existing.effective_cost_basis_usd / existing.effective_shares
             return
     state.positions.append(pos)
 
@@ -1183,6 +1613,10 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
             from src.state.db import get_connection, log_trade_exit
             conn = get_connection()
             log_trade_exit(conn, pos)
+            # INFO(DT#1): This commit is exempt from the commit_then_export
+            # choke point. The exit audit row is itself the authoritative
+            # record of the exit event, not a derived export. Durability
+            # must survive a subsequent cycle crash or JSON write failure.
             conn.commit()
             conn.close()
         except Exception as e:
@@ -1193,8 +1627,8 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
 def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
     """T2-E: Chain-journal merge for live position queries.
 
-    Paper mode or no chain_view: return local positions only.
-    Live mode with chain_view: merge chain truth (shares/price) with
+    No chain_view or stale chain_view: return local positions only.
+    With valid chain_view: merge chain truth (shares/price) with
     local metadata (city, range, direction, decision context).
     """
     if chain_view is None or getattr(chain_view, "is_stale", True):

@@ -1,87 +1,29 @@
-# Zeus authority index
+# Authority Index
 
-This is the first durable routing file for humans and coding agents.
+Role: zero-context authority read index.
 
-## 1. Read order
+Entry overlay: `architecture/self_check/zero_context_entry.md` explains when to
+use this order and how to refuse unsafe starts. The index below is the direct
+authority spine for high-risk zero-context work.
 
-### Root authority guide
-1. `ZEUS_AUTHORITY.md`
+## Canonical Order
 
-### Principal present-tense architecture authority
-2. `docs/architecture/zeus_durable_architecture_spec.md`
+1. `AGENTS.md`
+2. `workspace_map.md`
+3. `architecture/kernel_manifest.yaml`
+4. `architecture/invariants.yaml`
+5. `architecture/zones.yaml`
+6. `architecture/negative_constraints.yaml`
+7. `docs/authority/zeus_current_architecture.md`
+8. `docs/authority/zeus_current_delivery.md`
+9. `docs/authority/zeus_change_control_constitution.md` when deep governance applies
 
-### Terminal target-state / endgame authority
-3. `docs/zeus_FINAL_spec.md`
+## Rule
 
-### Change-control authority
-4. `docs/governance/zeus_change_control_constitution.md`
-5. `docs/governance/zeus_autonomous_delivery_constitution.md`
+Reference docs and reports explain domain, rationale, and history. They do not
+override the authority order above unless a packet explicitly promotes a rule
+into machine-checkable law.
 
-### Machine-checkable semantic authority
-6. `architecture/kernel_manifest.yaml`
-7. `architecture/invariants.yaml`
-8. `architecture/zones.yaml`
-9. `architecture/negative_constraints.yaml`
-10. `architecture/maturity_model.yaml`
+## Current Topology Tool
 
-### Repo operating brief
-11. `AGENTS.md`
-
-### Active control / execution surfaces
-12. `architects_state_index.md`
-13. `architects_task.md`
-14. `architects_progress.md`
-15. `root_progress.md`
-16. `root_task.md`
-17. `docs/known_gaps.md`
-
-### Historical rationale / archives (non-authoritative)
-18. `docs/architecture/zeus_blueprint_v2.md`
-19. `docs/KEY_REFERENCE/zeus_first_principles_rethink.md`
-20. `docs/archives/**`
-21. `WORKSPACE_MAP.md`
-
-## 2. Precedence
-
-If two sources disagree:
-
-1. machine-checkable semantic authority (when explicit)
-2. principal present-tense architecture authority
-3. terminal target-state / endgame authority
-4. change-control authority
-5. repo operating brief
-6. active control / execution surfaces
-7. historical rationale / archives
-8. code comments
-9. generated code / LLM explanations
-
-## 3. What each source is for
-
-- principal present-tense architecture: current system shape, migration order, architecture priorities, and present-tense routing
-- root authority guide: one-file compression of the system foundation, live invariants, negative constraints, and boundary rules
-- terminal target-state / endgame: finality framing, target-state intent, and endgame clause
-- change-control authority: how changes are allowed to happen
-- manifests: exact semantic atoms, zones, negative permissions, maturity stage
-- repo operating brief: repo-native execution rules and reading discipline
-- active control surfaces: current packet state, packet queue, and live program/backlog context
-- historical docs / archives: reasoning context only
-
-## 4. Never do this
-
-- Never treat `docs/archives/**` or `WORKSPACE_MAP.md` as principal authority.
-- Never let `ZEUS_AUTHORITY.md` compete with the exact precedence or machine-checkable authority files it summarizes.
-- Never treat `status_summary.json` or `positions.json` as canonical truth.
-- Never let a coding agent infer authority order from retrieval similarity.
-- Never treat `zeus_mature_project_foundation/` as the active law location after the mirrored authority files have been installed.
-
-## 5. Source-package note
-
-`zeus_mature_project_foundation/` is preserved in-repo as the imported source package that supplied the current authority install.
-
-- It is for provenance, diffing, and future reconciliation.
-- It is not the active authority path for normal repo work.
-- Normal repo work should read and edit the mirrored active files in:
-  - `architecture/`
-  - `docs/architecture/`
-  - `docs/governance/`
-  - `docs/rollout/`
+Use `python3 scripts/topology_doctor.py digest --task "<task>" --files <paths>` for bounded task context. Use `python3 scripts/topology_doctor.py --docs` for Packet 3 docs-mesh checks.

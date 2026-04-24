@@ -1,6 +1,6 @@
 File: .github/workflows/AGENTS.md
 Disposition: NEW
-Authority basis: docs/governance/zeus_autonomous_delivery_constitution.md; architecture/maturity_model.yaml; architecture/negative_constraints.yaml; scripts/check_*.py; tests/test_architecture_contracts.py.
+Authority basis: docs/authority/zeus_change_control_constitution.md; architecture/maturity_model.yaml; architecture/negative_constraints.yaml; scripts/check_*.py; tests/test_architecture_contracts.py.
 Supersedes / harmonizes: implicit CI policy.
 Why this file exists now: CI is a law-enforcement surface and must not drift into either theater or excessive friction.
 Current-phase or long-lived: Long-lived.
@@ -17,3 +17,9 @@ Workflow files control gate severity and maintenance cost.
 ## Do not
 - hard-block on missing external workspace artifacts
 - add noisy hooks or redundant gates without net-protection value
+
+## File Registry
+
+| File | Purpose |
+|------|---------|
+| `architecture_advisory_gates.yml` | Architecture/topology CI lanes: blocking stable gates plus advisory staged checks |

@@ -1,15 +1,139 @@
 {
-  "error": "status_summary.json is deprecated and must not be used as current truth. Use the mode-suffixed state files instead.",
+  "timestamp": "2026-04-16T13:23:22.019606+00:00",
+  "process": {
+    "pid": 79490,
+    "mode": "live",
+    "version": "zeus_v2"
+  },
+  "control": {
+    "entries_paused": true,
+    "entries_pause_source": "auto_exception",
+    "entries_pause_reason": "auto_pause:ValueError",
+    "edge_threshold_multiplier": 1.0,
+    "strategy_gates": {},
+    "recommended_controls": [],
+    "recommended_control_reasons": {},
+    "recommended_strategy_gates": [],
+    "recommended_strategy_gate_reasons": {},
+    "recommended_but_not_gated": [],
+    "gated_but_not_recommended": [],
+    "recommended_controls_not_applied": [],
+    "review_required_gate_recommendations": [],
+    "recommended_auto_commands": [],
+    "review_required_commands": [],
+    "recommended_commands": []
+  },
+  "risk": {
+    "level": "RED",
+    "riskguard_level": "RED",
+    "details": {},
+    "consistency_check": {
+      "ok": false,
+      "issues": [
+        "cycle_risk_level_mismatch:GREEN->RED",
+        "strategy_health_empty"
+      ],
+      "cycle_risk_level": "GREEN"
+    },
+    "infrastructure_level": "YELLOW",
+    "infrastructure_issues": [
+      "cycle_risk_level_mismatch:GREEN->RED",
+      "strategy_health_empty"
+    ]
+  },
+  "portfolio": {
+    "open_positions": 0,
+    "total_exposure_usd": 0.0,
+    "heat_pct": 0.0,
+    "initial_bankroll": 150.0,
+    "realized_pnl": 0.0,
+    "unrealized_pnl": 0.0,
+    "total_pnl": 0.0,
+    "effective_bankroll": 150.0,
+    "bankroll": 150.0,
+    "positions": []
+  },
+  "runtime": {
+    "chain_state_counts": {},
+    "exit_state_counts": {},
+    "unverified_entries": 0,
+    "day0_positions": 0
+  },
+  "strategy": {},
+  "execution": {
+    "event_sample_size": 0,
+    "overall": {
+      "entry_attempted": 0,
+      "entry_filled": 0,
+      "entry_rejected": 0,
+      "exit_attempted": 0,
+      "exit_filled": 0,
+      "exit_retry_scheduled": 0,
+      "exit_backoff_exhausted": 0,
+      "exit_fill_check_failed": 0,
+      "exit_fill_checked": 0,
+      "exit_fill_confirmed": 0,
+      "exit_retry_released": 0
+    },
+    "by_strategy": {}
+  },
+  "learning": {
+    "settlement_sample_size": 0,
+    "settlement_degraded_count": 0,
+    "no_trade_stage_counts": {},
+    "availability_status_counts": {},
+    "execution": {
+      "event_sample_size": 0,
+      "overall": {
+        "entry_attempted": 0,
+        "entry_filled": 0,
+        "entry_rejected": 0,
+        "exit_attempted": 0,
+        "exit_filled": 0,
+        "exit_retry_scheduled": 0,
+        "exit_backoff_exhausted": 0,
+        "exit_fill_check_failed": 0,
+        "exit_fill_checked": 0,
+        "exit_fill_confirmed": 0,
+        "exit_retry_released": 0
+      },
+      "by_strategy": {}
+    },
+    "by_strategy": {}
+  },
+  "no_trade": {
+    "recent_stage_counts": {}
+  },
+  "cycle": {
+    "mode": "opening_hunt",
+    "started_at": "2026-04-16T13:21:17.690649+00:00",
+    "monitors": 0,
+    "exits": 0,
+    "candidates": 0,
+    "trades": 0,
+    "no_trades": 0,
+    "risk_level": "GREEN",
+    "pending_voids": 0,
+    "portfolio_heat_pct": 0.0,
+    "smoke_test_open_cost_basis_usd": 0,
+    "smoke_test_portfolio_cap_usd": 5.0,
+    "entries_paused": true,
+    "entries_pause_reason": "auto_pause:ValueError",
+    "completed_at": "2026-04-16T13:23:22.019555+00:00"
+  },
   "truth": {
-    "mode": "deprecated",
-    "generated_at": "2026-04-01T10:56:05.111684+00:00",
+    "mode": "live",
+    "generated_at": "2026-04-16T13:23:22.019606+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
     "stale_age_seconds": 0.0,
-    "deprecated": true,
-    "archived_to": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/legacy_state_archive/status_summary.json.20260401T105605Z",
-    "replacement_paths": {
-      "paper": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-paper.json",
-      "live": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary-live.json"
+    "deprecated": false,
+    "archived_to": null,
+    "db_primary_inputs": {
+      "position_current": "ok",
+      "strategy_health": "empty"
+    },
+    "compatibility_inputs": {
+      "bankroll_fallback_source": "settings.capital_base_usd"
     }
   }
 }

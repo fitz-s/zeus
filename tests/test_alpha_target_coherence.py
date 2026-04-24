@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for alpha optimization target coherence. §P9.7, D1 & D2."""
 import pytest
 from pathlib import Path
@@ -35,19 +38,14 @@ class TestAlphaDecisionConstruction:
         )
         assert ad.optimization_target == "ev"
 
-    def test_invalid_target_not_runtime_enforced(self):
-        """Literal["brier_score","ev","risk_cap"] is a static type hint only.
-
-        Runtime enforcement lives in assert_target_compatible(), not construction.
-        """
-        # Construction does not raise — Literal is a static annotation
-        ad = AlphaDecision(
-            value=0.65,
-            optimization_target="profit",  # type: ignore[arg-type]
-            evidence_basis="some basis",
-            ci_bound=0.10,
-        )
-        assert ad.optimization_target == "profit"
+    def test_invalid_target_raises(self):
+        with pytest.raises(ValueError, match="optimization_target"):
+            AlphaDecision(
+                value=0.65,
+                optimization_target="profit",  # type: ignore[arg-type]
+                evidence_basis="some basis",
+                ci_bound=0.10,
+            )
 
     def test_value_out_of_range_raises(self):
         with pytest.raises(ValueError):
@@ -149,6 +147,25 @@ class TestBrierAlphaIntoEvSizingRaises:
         )
         ad.assert_target_compatible("ev")  # Must not raise
 
+    def test_value_for_consumer_checks_target_then_returns_value(self):
+        ad = AlphaDecision(
+            value=0.30,
+            optimization_target="risk_cap",
+            evidence_basis="Conservative cap",
+            ci_bound=0.05,
+        )
+        assert ad.value_for_consumer("ev") == pytest.approx(0.30)
+
+    def test_invalid_consumer_target_raises(self):
+        ad = AlphaDecision(
+            value=0.30,
+            optimization_target="risk_cap",
+            evidence_basis="Conservative cap",
+            ci_bound=0.05,
+        )
+        with pytest.raises(ValueError, match="consumer_target"):
+            ad.value_for_consumer("profit")  # type: ignore[arg-type]
+
 
 # ---------------------------------------------------------------------------
 # compute_alpha still returns float (P9 seam not yet wired)
@@ -165,6 +182,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         assert isinstance(result, AlphaDecision), (
             f"compute_alpha returned {type(result).__name__}, expected AlphaDecision."
@@ -183,6 +201,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         assert result.optimization_target == "risk_cap", (
             f"Expected risk_cap, got {result.optimization_target}. "
@@ -197,6 +216,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement="AGREE",
             lead_days=3.0,
             hours_since_open=24.0,
+            authority_verified=True,
         )
         # risk_cap → ev is allowed (conservative, not misleading)
         result.assert_target_compatible("ev")  # Must not raise
@@ -225,6 +245,7 @@ class TestComputeAlphaReturnsAlphaDecision:
             model_agreement=model_agreement,
             lead_days=lead_days,
             hours_since_open=48.0,
+            authority_verified=True,
         )
         assert isinstance(result, AlphaDecision)
         assert 0.20 <= result.value <= 0.85, (
@@ -280,6 +301,14 @@ class TestTailTreatmentDeclaresTarget:
                 validated_against="",
             )
 
+    def test_invalid_serves_raises(self):
+        with pytest.raises(ValueError, match="serves"):
+            TailTreatment(
+                scale_factor=0.5,
+                serves="both",  # type: ignore[arg-type]
+                validated_against="some sweep",
+            )
+
     def test_profit_with_brier_validation_warns(self):
         """TailTreatment(serves='profit') with Brier-reference emits warning."""
         import warnings
@@ -308,12 +337,11 @@ class TestTailTreatmentDeclaresTarget:
         assert len(w) == 0
 
     def test_tail_alpha_scale_matches_tail_treatment_default(self):
-        """TAIL_ALPHA_SCALE in market_fusion.py is 0.5 — matches TailTreatment scale."""
-        source = (ZEUS_ROOT / "src" / "strategy" / "market_fusion.py").read_text()
-        assert "TAIL_ALPHA_SCALE" in source, "TAIL_ALPHA_SCALE not found in market_fusion.py"
-        tt = TailTreatment(
-            scale_factor=0.5,
-            serves="calibration_accuracy",
-            validated_against="D3 sweep 2026-03-31",
-        )
-        assert tt.scale_factor == pytest.approx(0.5)
+        """Default tail alpha treatment declares calibration target explicitly."""
+        from src.strategy.market_fusion import DEFAULT_TAIL_TREATMENT, TAIL_ALPHA_SCALE, alpha_for_bin
+        from src.types import Bin
+
+        assert isinstance(DEFAULT_TAIL_TREATMENT, TailTreatment)
+        assert DEFAULT_TAIL_TREATMENT.serves == "calibration_accuracy"
+        assert DEFAULT_TAIL_TREATMENT.scale_factor == pytest.approx(TAIL_ALPHA_SCALE)
+        assert alpha_for_bin(0.8, Bin(low=None, high=32, label="32°F or below", unit="F")) == pytest.approx(0.4)

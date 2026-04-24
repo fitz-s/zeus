@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for Kelly multiplicative cascade bounds. §P9.7.
 
 Verifies that worst-case products of ALL adjustments in dynamic_kelly_mult
@@ -109,16 +112,13 @@ class TestKellyCascadeMinimumNotZero:
         )
 
     def test_zero_drawdown_ratio_has_floor(self):
-        """drawdown_pct == max_drawdown → spec §P9.7 floor of 0.001 applied."""
-        m = dynamic_kelly_mult(
-            base=BASE,
-            drawdown_pct=0.20,
-            max_drawdown=0.20,
-        )
-        # Spec §P9.7: cascade product bounded in [0.001, 1.0] — floor prevents zero
-        assert m == pytest.approx(0.001), (
-            "Full drawdown must return floor 0.001 per spec §P9.7, not 0.0."
-        )
+        """drawdown_pct == max_drawdown → spec §P9.7 raises ValueError (fail-close)."""
+        with pytest.raises(ValueError, match="collapsed to"):
+            dynamic_kelly_mult(
+                base=BASE,
+                drawdown_pct=0.20,
+                max_drawdown=0.20,
+            )
 
     def test_near_full_drawdown_has_floor(self):
         """98% drawdown retains nonzero multiplier (cascade floor)."""
@@ -173,9 +173,14 @@ class TestKellyFullCascadeWithSize:
             drawdown_pct=0.15,
             max_drawdown=0.20,
         )
+        from src.contracts.execution_price import ExecutionPrice
+        ep = ExecutionPrice(
+            value=0.40, price_type="fee_adjusted", fee_deducted=True,
+            currency="probability_units",
+        )
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,
+            entry_price=ep,
             bankroll=bankroll,
             kelly_mult=mult,
         )

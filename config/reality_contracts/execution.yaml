@@ -22,7 +22,7 @@
     Do not assume 0.01 globally; read per-market value at order construction time.
   last_verified: "2026-04-06T00:00:00+00:00"
   ttl_seconds: 604800  # 7 days — tick size rarely changes; per-market value read at order time from get-book
-  criticality: degraded  # Downgraded from blocking: tick_size is validated per-order by py-clob-client
+  criticality: blocking
   on_change_handlers:
     - update_tick_size
     - audit_order_rounding

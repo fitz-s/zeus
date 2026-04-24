@@ -146,7 +146,7 @@ def test_init_schema_creates_all_tables():
     expected = {
         "settlements", "observations", "market_events", "token_price_log",
         "ensemble_snapshots", "calibration_pairs", "platt_models",
-        "trade_decisions", "shadow_signals", "chronicle", "position_events", "solar_daily",
+        "trade_decisions", "shadow_signals", "probability_trace_fact", "chronicle", "position_events", "solar_daily",
         "observation_instants", "diurnal_peak_prob"
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
@@ -262,8 +262,367 @@ def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'opportunity_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "opportunity_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "opportunity_fact"}
+    assert rows["n"] == 1
+
+
+def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-1",
+        slug="nyc-apr-1",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+            {"title": "41-42°F", "range_low": 41, "range_high": 42},
+        ],
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_yes",
+        p_posterior=0.62,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-1",
+        decision_snapshot_id="snap-pt-1",
+        edge=edge,
+        p_raw=[0.2, 0.8],
+        p_cal=[0.25, 0.75],
+        p_market=[0.3, 0.7],
+        alpha=0.55,
+        agreement="AGREE",
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+        n_edges_found=2,
+        n_edges_after_fdr=1,
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        """
+        SELECT decision_id, candidate_id, trace_status, p_raw_json, p_cal_json,
+               p_market_json, p_posterior_json, p_posterior, bin_labels_json
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-1'
+        """
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert result == {
+        "status": "written",
+        "table": "probability_trace_fact",
+        "trace_status": "complete",
+    }
+    assert row["candidate_id"] == "evt-pt-1"
+    assert row["trace_status"] == "complete"
+    assert json.loads(row["p_raw_json"]) == [0.2, 0.8]
+    assert json.loads(row["p_cal_json"]) == [0.25, 0.75]
+    assert json.loads(row["p_market_json"]) == [0.3, 0.7]
+    assert row["p_posterior_json"] is None
+    assert row["p_posterior"] == pytest.approx(0.62)
+    assert json.loads(row["bin_labels_json"]) == ["39-40°F", "41-42°F"]
+    assert completeness["trace_rows"] == 1
+    assert completeness["complete_rows"] == 1
+    assert completeness["with_p_raw_json"] == 1
+    assert completeness["with_p_cal_json"] == 1
+    assert completeness["with_p_market_json"] == 1
+
+
+def test_log_probability_trace_fact_marks_pre_vector_unavailable(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-2",
+        discovery_mode="day0_capture",
+        outcomes=[],
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-2",
+        decision_snapshot_id="",
+        edge=None,
+        selected_method="day0_observation",
+        strategy_key="",
+        rejection_stage="SIGNAL_QUALITY",
+        availability_status="DATA_UNAVAILABLE",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="day0_capture",
+    )
+    row = conn.execute(
+        """
+        SELECT trace_status, missing_reason_json, p_raw_json, p_cal_json, p_market_json
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-2'
+        """
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    missing = json.loads(row["missing_reason_json"])
+    assert result["trace_status"] == "pre_vector_unavailable"
+    assert row["trace_status"] == "pre_vector_unavailable"
+    assert missing["missing_vectors"] == ["p_raw_json", "p_cal_json", "p_market_json"]
+    assert missing["rejection_stage"] == "SIGNAL_QUALITY"
+    assert missing["availability_status"] == "DATA_UNAVAILABLE"
+    assert row["p_raw_json"] is None
+    assert row["p_cal_json"] is None
+    assert row["p_market_json"] is None
+    assert completeness["pre_vector_rows"] == 1
+
+
+def test_probability_trace_completeness_does_not_count_empty_vectors(tmp_path):
+    from src.state.db import query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO probability_trace_fact (
+            trace_id, decision_id, trace_status, missing_reason_json,
+            p_raw_json, p_cal_json, p_market_json, recorded_at
+        )
+        VALUES (
+            'trace-empty', 'dec-empty', 'degraded_missing_vectors', '[]',
+            '[]', '[]', '[]', '2026-04-03T00:00:00Z'
+        )
+        """
+    )
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert completeness["trace_rows"] == 1
+    assert completeness["with_p_raw_json"] == 0
+    assert completeness["with_p_cal_json"] == 0
+    assert completeness["with_p_market_json"] == 0
+
+
+def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path):
+    from src.state.db import log_probability_trace_fact
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-3",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="39-40°F"),
+        direction="buy_yes",
+        p_model=0.61,
+        p_market=0.42,
+        p_posterior=0.58,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-3",
+        decision_snapshot_id="snap-pt-3",
+        edge=edge,
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        """
+        SELECT trace_status, p_raw_json, p_cal_json, p_market_json, p_posterior
+        FROM probability_trace_fact
+        WHERE decision_id = 'pt-dec-3'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result["trace_status"] == "pre_vector_unavailable"
+    assert row["trace_status"] == "pre_vector_unavailable"
+    assert row["p_raw_json"] is None
+    assert row["p_cal_json"] is None
+    assert row["p_market_json"] is None
+    assert row["p_posterior"] == pytest.approx(0.58)
+
+
+def test_log_probability_trace_fact_degrades_unavailable_decision_context(tmp_path):
+    from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="NYC"),
+        target_date="2026-04-01",
+        event_id="evt-pt-4",
+        discovery_mode="opening_hunt",
+        outcomes=[
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    )
+    decision = types.SimpleNamespace(
+        decision_id="pt-dec-4",
+        decision_snapshot_id="snap-pt-4",
+        edge=types.SimpleNamespace(
+            bin=types.SimpleNamespace(label="39-40°F"),
+            direction="buy_yes",
+            p_posterior=0.58,
+        ),
+        p_raw=[0.2],
+        p_cal=[0.25],
+        p_market=[0.3],
+        selected_method="ens_member_counting",
+        strategy_key="center_buy",
+        rejection_stage="MARKET_LIQUIDITY",
+        availability_status="DATA_UNAVAILABLE",
+    )
+
+    result = log_probability_trace_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    row = conn.execute(
+        "SELECT trace_status FROM probability_trace_fact WHERE decision_id = 'pt-dec-4'"
+    ).fetchone()
+    completeness = query_probability_trace_completeness(conn)
+    conn.close()
+
+    assert result["trace_status"] == "degraded_decision_context"
+    assert row["trace_status"] == "degraded_decision_context"
+    assert completeness["complete_rows"] == 0
+    assert completeness["degraded_rows"] == 1
+
+
+def test_log_probability_trace_fact_skips_missing_table_explicitly(tmp_path):
+    from src.state.db import log_probability_trace_fact
+
+    conn = get_connection(tmp_path / "raw.db")
+    result = log_probability_trace_fact(
+        conn,
+        candidate=types.SimpleNamespace(city=types.SimpleNamespace(name="NYC"), target_date="2026-04-01"),
+        decision=types.SimpleNamespace(decision_id="pt-dec-3"),
+        recorded_at="2026-04-03T00:00:00Z",
+        mode="opening_hunt",
+    )
+    conn.close()
+
+    assert result == {"status": "skipped_missing_table", "table": "probability_trace_fact"}
+
+
+def test_selection_family_and_hypothesis_facts_write_idempotently(tmp_path):
+    from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
+
+    conn = get_connection(tmp_path / "selection_family.db")
+    init_schema(conn)
+
+    family_result = log_selection_family_fact(
+        conn,
+        family_id="fam-1",
+        cycle_mode="opening_hunt",
+        decision_snapshot_id="snap-1",
+        city="NYC",
+        target_date="2026-04-01",
+        strategy_key="center_buy",
+        discovery_mode="opening_hunt",
+        created_at="2026-04-01T00:00:00Z",
+        meta={"tested_hypotheses": 2},
+    )
+    hypothesis_result = log_selection_hypothesis_fact(
+        conn,
+        hypothesis_id="hyp-1",
+        family_id="fam-1",
+        decision_id="decision-1",
+        candidate_id="candidate-1",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="39-40°F",
+        direction="buy_yes",
+        p_value=0.01,
+        q_value=0.02,
+        ci_lower=0.01,
+        ci_upper=0.10,
+        edge=0.05,
+        tested=True,
+        passed_prefilter=True,
+        selected_post_fdr=True,
+        recorded_at="2026-04-01T00:00:01Z",
+        meta={"source": "test"},
+    )
+    hypothesis_result_2 = log_selection_hypothesis_fact(
+        conn,
+        hypothesis_id="hyp-1",
+        family_id="fam-1",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="39-40°F",
+        direction="unknown",
+        selected_post_fdr=False,
+        recorded_at="2026-04-01T00:00:02Z",
+        meta={},
+    )
+    rows = {
+        "families": conn.execute("SELECT COUNT(*) FROM selection_family_fact").fetchone()[0],
+        "hypotheses": conn.execute("SELECT COUNT(*) FROM selection_hypothesis_fact").fetchone()[0],
+    }
+    hypothesis = conn.execute(
+        "SELECT direction, selected_post_fdr, recorded_at FROM selection_hypothesis_fact"
+    ).fetchone()
+    conn.close()
+
+    assert family_result == {"status": "written", "table": "selection_family_fact"}
+    assert hypothesis_result == {"status": "written", "table": "selection_hypothesis_fact"}
+    assert hypothesis_result_2 == {"status": "written", "table": "selection_hypothesis_fact"}
+    assert rows == {"families": 1, "hypotheses": 1}
+    assert hypothesis["direction"] == "unknown"
+    assert hypothesis["selected_post_fdr"] == 0
+    assert hypothesis["recorded_at"] == "2026-04-01T00:00:02Z"
+
+
+def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
+    from src.state.db import query_data_improvement_inventory
+
+    conn = get_connection(tmp_path / "inventory.db")
+    init_schema(conn)
+    inventory = query_data_improvement_inventory(conn)
+    conn.close()
+
+    assert inventory["status"] == "ok"
+    assert inventory["missing_tables"] == []
+    for table in (
+        "probability_trace_fact",
+        "calibration_decision_group",
+        "selection_family_fact",
+        "selection_hypothesis_fact",
+    ):
+        assert inventory["tables"][table] == {"exists": True, "rows": 0}
 
 
 def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
@@ -286,8 +645,8 @@ def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'availability_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "availability_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "availability_fact"}
+    assert rows["n"] == 1
 
 
 def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
@@ -306,8 +665,8 @@ def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'execution_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "execution_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "execution_fact"}
+    assert rows["n"] == 1
 
 
 def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
@@ -324,8 +683,8 @@ def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'outcome_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "skipped_missing_table", "table": "outcome_fact"}
-    assert rows["n"] == 0
+    assert result == {"status": "written", "table": "outcome_fact"}
+    assert rows["n"] == 1
 
 
 def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
@@ -485,12 +844,7 @@ def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path)
     summary = query_p4_fact_smoke_summary(conn)
     conn.close()
 
-    assert summary["missing_tables"] == [
-        "opportunity_fact",
-        "availability_fact",
-        "execution_fact",
-        "outcome_fact",
-    ]
+    assert summary["missing_tables"] == []
     assert summary["opportunity"]["total"] == 0
     assert summary["availability"]["total"] == 0
     assert summary["execution"]["total"] == 0
@@ -578,11 +932,32 @@ def test_manual_portfolio_state_does_not_write_real_exit_audit(monkeypatch):
 
 def test_load_portfolio_enables_audit_logging(tmp_path):
     from src.state.portfolio import load_portfolio
+    from src.state.db import get_connection, init_schema
+
+    # P4: load_portfolio now requires a healthy canonical DB to enable audit logging.
+    # Set up zeus.db (fallback path) with one active position.
+    db = get_connection(tmp_path / "zeus.db")
+    init_schema(db)
+    db.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+         direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+         entry_method, strategy_key, edge_source, discovery_mode, chain_state,
+         order_id, order_status, updated_at)
+        VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-04-01','39-40\u00b0F',
+                'buy_yes','F',8.0,20.0,8.0,0.4,0.6,'ens_member_counting','center_buy',
+                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z')
+        """
+    )
+    db.commit()
+    db.close()
 
     state = load_portfolio(tmp_path / "missing.json")
     assert state.audit_logging_enabled is True
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, monkeypatch):
     from src.state.portfolio import load_portfolio
 
@@ -746,6 +1121,7 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.2}'
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_entry_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events
     from src.state.portfolio import Position
@@ -794,6 +1170,7 @@ def test_log_trade_entry_emits_position_event(tmp_path):
 
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     from src.state.db import log_trade_exit, query_position_events
     from src.state.portfolio import Position
@@ -880,6 +1257,7 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
     assert row["edge_context_json"] == '{"forward_edge":0.12}'
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_update_trade_lifecycle_emits_position_event(tmp_path):
     from src.state.db import log_trade_entry, query_position_events, update_trade_lifecycle
     from src.state.portfolio import Position
@@ -932,6 +1310,7 @@ def test_update_trade_lifecycle_emits_position_event(tmp_path):
     assert lifecycle_events[0]["details"]["chain_state"] == "synced"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_fill_telemetry(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -1000,6 +1379,7 @@ def test_log_execution_report_emits_fill_telemetry(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     from src.execution.executor import OrderResult
     from src.state.db import log_execution_report, query_position_events
@@ -1056,6 +1436,7 @@ def test_log_execution_report_emits_rejected_entry_event(tmp_path):
     assert fact["terminal_exec_status"] == "rejected"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_settlement_event_emits_durable_record(tmp_path):
     from src.state.db import log_settlement_event, query_position_events
     from src.state.portfolio import Position
@@ -1181,6 +1562,7 @@ def test_log_settlement_event_preserves_prior_exit_time_in_outcome_fact(tmp_path
     assert row["hold_duration_hours"] == pytest.approx(18.0)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     from src.state.db import log_settlement_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -1260,6 +1642,7 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
             )
         ],
     )
+    conn.commit()  # Fix B: store_settlement_records no longer commits internally.
 
     rows = query_authoritative_settlement_rows(conn, limit=10)
     conn.close()
@@ -1281,6 +1664,7 @@ def test_query_authoritative_settlement_rows_falls_back_to_decision_log(tmp_path
     assert rows[0]["pnl"] == pytest.approx(12.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_path):
     from src.state.db import (
         log_position_event,
@@ -1367,6 +1751,7 @@ def test_query_authoritative_settlement_rows_marks_malformed_position_event(tmp_
     assert "p_posterior" in rows[0]["required_missing_fields"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_filters_by_env(tmp_path):
     from src.state.db import log_settlement_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -1484,6 +1869,7 @@ def test_query_legacy_settlement_records_filters_by_env(tmp_path):
     assert [row["trade_id"] for row in live_rows] == ["live-legacy"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -1559,6 +1945,7 @@ def test_query_settlement_events_latest_wins_by_runtime_trade_id(tmp_path):
     assert rows[0]["details"]["pnl"] == pytest.approx(-2.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_duplicates(tmp_path):
     from src.state.db import log_position_event, query_settlement_events
     from src.state.portfolio import Position
@@ -1655,6 +2042,7 @@ def test_query_settlement_events_preserves_distinct_trade_ids_when_deduping_dupl
     assert latest_dup["details"]["pnl"] == pytest.approx(-2.5)
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_id(tmp_path):
     from src.state.db import log_position_event, query_authoritative_settlement_rows
     from src.state.portfolio import Position
@@ -1715,6 +2103,7 @@ def test_query_authoritative_settlement_rows_dedupes_legacy_stage_rows_by_trade_
     assert rows[0]["settled_at"] == "2026-04-02T00:00:00Z"
     assert rows[0]["source"] == "position_events"
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_execution_event_summary_groups_entry_and_exit_events(tmp_path):
     from src.state.db import log_position_event, query_execution_event_summary
     from src.state.portfolio import Position
@@ -1803,6 +2192,7 @@ def test_query_no_trade_cases_filters_by_env(tmp_path):
     assert [case["decision_id"] for case in live_cases] == ["live-1"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_combines_settlement_no_trade_and_execution(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -1947,6 +2337,7 @@ def test_query_no_trade_cases_filters_recent_rows_by_real_timestamp(monkeypatch,
     assert [case["decision_id"] for case in cases] == ["newer"]
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -2064,6 +2455,7 @@ def test_query_learning_surface_summary_respects_current_regime_start(tmp_path):
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 1
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_path):
     from src.state.db import log_position_event, log_settlement_event
     from src.state.decision_chain import query_learning_surface_summary
@@ -2156,6 +2548,7 @@ def test_query_learning_surface_summary_does_not_cap_regime_scoped_samples(tmp_p
     assert summary["by_strategy"]["center_buy"]["entry_rejected"] == 205
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     from src.state.db import (
         log_exit_attempt_event,
@@ -2261,6 +2654,7 @@ def test_exit_lifecycle_event_helpers_emit_sell_side_events(tmp_path):
     assert fact["terminal_exec_status"] == "filled"
 
 
+@pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
 def test_log_exit_retry_event_uses_backoff_exhausted_type(tmp_path):
     from src.state.db import log_exit_retry_event, query_position_events
     from src.state.portfolio import Position

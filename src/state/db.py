@@ -12,27 +12,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from src.config import STATE_DIR, state_path, settings
+from src.config import STATE_DIR, get_mode, state_path
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
     apply_architecture_kernel_schema,
-    append_event_and_project,
     append_many_and_project,
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
-ZEUS_SHARED_DB_PATH = STATE_DIR / "zeus-shared.db"  # Shared world data (settlements, calibration, ENS)
-RISK_DB_PATH = state_path("risk_state.db")  # Per-process: paper vs live isolation
+ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
+ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
+RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
 
-def _zeus_trade_db_path(mode: str | None = None) -> Path:
-    """Physical path for mode-specific trade database.
-    Paper and live trade data live in different files.
-    Cross-mode reads are unconstructable — different files."""
-    mode = mode or os.environ.get("ZEUS_MODE", settings.mode)
-    return STATE_DIR / f"zeus-{mode}.db"
+def _zeus_trade_db_path() -> Path:
+    """Physical path for the trade database."""
+    return STATE_DIR / "zeus_trades.db"
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -45,20 +42,32 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def get_trade_connection(mode: str | None = None) -> sqlite3.Connection:
-    """Mode-isolated trade DB. Paper gets zeus-paper.db, live gets zeus-live.db."""
-    return _connect(_zeus_trade_db_path(mode))
+def get_trade_connection() -> sqlite3.Connection:
+    """Trade DB connection (zeus_trades.db)."""
+    return _connect(_zeus_trade_db_path())
 
 
-def get_shared_connection() -> sqlite3.Connection:
+def get_world_connection() -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
-    return _connect(ZEUS_SHARED_DB_PATH)
+    return _connect(ZEUS_WORLD_DB_PATH)
 
 
-def get_trade_connection_with_shared(mode: str | None = None) -> sqlite3.Connection:
+def get_backtest_connection() -> sqlite3.Connection:
+    """Derived backtest DB connection.
+
+    This DB is a reporting/audit surface only. Live runtime execution must not
+    read it as authority or write trade/world truth through it.
+    """
+    return _connect(ZEUS_BACKTEST_DB_PATH)
+
+
+def get_trade_connection_with_world() -> sqlite3.Connection:
     """Trade connection with shared DB ATTACHed for cross-DB joins."""
-    conn = get_trade_connection(mode)
-    conn.execute("ATTACH DATABASE ? AS shared", (str(ZEUS_SHARED_DB_PATH),))
+    conn = get_trade_connection()
+    # Guard: skip ATTACH if 'world' schema already present (connection reuse)
+    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" not in attached:
+        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     return conn
 
 
@@ -91,6 +100,7 @@ OPEN_EXPOSURE_PHASES = (
     "active",
     "day0_window",
     "pending_exit",
+    "unknown",
 )
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
@@ -112,7 +122,18 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "quarantined": "quarantined",
     "admin_closed": "admin_closed",
 }
+
+
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
+TOKEN_SUPPRESSION_REASONS = frozenset({
+    "operator_quarantine_clear",
+    "chain_only_quarantined",
+    "settled_position",
+})
+RESOLVED_TOKEN_SUPPRESSION_REASONS = (
+    "operator_quarantine_clear",
+    "settled_position",
+)
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -132,7 +153,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         conn = get_connection()
 
     conn.executescript("""
-        -- Inherited from Rainstorm: settlement outcomes
+        -- Inherited from legacy predecessor: settlement outcomes
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
@@ -142,7 +163,22 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_value REAL,
             settlement_source TEXT,
             settled_at TEXT,
-            UNIQUE(city, target_date)
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            -- REOPEN-2 inline: INV-14 identity spine is part of the fresh-DB
+            -- schema so UNIQUE(city, target_date, temperature_metric) can
+            -- reference temperature_metric without a second migration pass.
+            -- Legacy DBs that predate these columns get them via the ALTER
+            -- loop below, and their UNIQUE constraint is upgraded via the
+            -- REOPEN-2 table-rebuild migration that runs between the ALTERs
+            -- and the trigger reinstall.
+            temperature_metric TEXT
+                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT
+                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+            data_version TEXT,
+            provenance_json TEXT,
+            UNIQUE(city, target_date, temperature_metric)
         );
 
         -- Inherited: IEM ASOS, NOAA GHCND, Meteostat, WU PWS
@@ -156,6 +192,39 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             unit TEXT NOT NULL,
             station_id TEXT,
             fetched_at TEXT,
+            -- K1 additions: raw value/unit contract
+            high_raw_value REAL,
+            high_raw_unit TEXT CHECK (high_raw_unit IN ('F', 'C', 'K')),
+            high_target_unit TEXT CHECK (high_target_unit IN ('F', 'C')),
+            low_raw_value REAL,
+            low_raw_unit TEXT CHECK (low_raw_unit IN ('F', 'C', 'K')),
+            low_target_unit TEXT CHECK (low_target_unit IN ('F', 'C')),
+            -- K1 additions: temporal provenance
+            high_fetch_utc TEXT,
+            high_local_time TEXT,
+            high_collection_window_start_utc TEXT,
+            high_collection_window_end_utc TEXT,
+            low_fetch_utc TEXT,
+            low_local_time TEXT,
+            low_collection_window_start_utc TEXT,
+            low_collection_window_end_utc TEXT,
+            -- K1 additions: DST context
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER CHECK (dst_active IN (0, 1)),
+            is_ambiguous_local_hour INTEGER CHECK (is_ambiguous_local_hour IN (0, 1)),
+            is_missing_local_hour INTEGER CHECK (is_missing_local_hour IN (0, 1)),
+            -- K1 additions: geographic/seasonal
+            hemisphere TEXT CHECK (hemisphere IN ('N', 'S')),
+            season TEXT CHECK (season IN ('DJF', 'MAM', 'JJA', 'SON')),
+            month INTEGER CHECK (month BETWEEN 1 AND 12),
+            -- K1 additions: run provenance
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            -- K1 additions: authority + extensibility
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            high_provenance_metadata TEXT,  -- JSON
+            low_provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
         );
 
@@ -176,7 +245,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
 
         -- Inherited: historical prices for baseline backtesting
-        -- city/target_date/range_label carried over from Rainstorm for bin mapping
+        -- city/target_date/range_label carried over from legacy predecessor for bin mapping
         CREATE TABLE IF NOT EXISTS token_price_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token_id TEXT NOT NULL,
@@ -198,8 +267,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
-            issue_time TEXT NOT NULL,
-            valid_time TEXT NOT NULL,
+            issue_time TEXT,
+            valid_time TEXT,
             available_at TEXT NOT NULL,
             fetch_time TEXT NOT NULL,
             lead_hours REAL NOT NULL,
@@ -209,6 +278,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
             data_version TEXT NOT NULL DEFAULT 'v1',
+            authority TEXT NOT NULL DEFAULT 'VERIFIED',
+            temperature_metric TEXT NOT NULL DEFAULT 'high',
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -224,8 +295,33 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             season TEXT NOT NULL,
             cluster TEXT NOT NULL,
             forecast_available_at TEXT NOT NULL,
-            settlement_value REAL
+            settlement_value REAL,
+            decision_group_id TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            bin_source TEXT NOT NULL DEFAULT 'legacy'
         );
+
+        -- Independent forecast-event units derived from calibration_pairs.
+        -- Behavior-neutral substrate: active Platt routing still uses existing
+        -- pair APIs until a later cutover packet explicitly switches maturity.
+        CREATE TABLE IF NOT EXISTS calibration_decision_group (
+            group_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            forecast_available_at TEXT NOT NULL,
+            cluster TEXT NOT NULL,
+            season TEXT NOT NULL,
+            lead_days REAL NOT NULL,
+            settlement_value REAL,
+            winning_range_label TEXT,
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+            n_pair_rows INTEGER NOT NULL,
+            n_positive_rows INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
+            ON calibration_decision_group(cluster, season, lead_days);
 
         -- Platt model parameters per bucket
         CREATE TABLE IF NOT EXISTS platt_models (
@@ -239,7 +335,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             brier_insample REAL,
             fitted_at TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability'
+            input_space TEXT NOT NULL DEFAULT 'raw_probability',
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
         );
 
         -- Trade decisions with full audit trail
@@ -310,7 +407,100 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             lead_hours REAL NOT NULL
         );
 
+        -- Durable per-decision probability lineage.
+        -- This is not portfolio/lifecycle authority; it records decision-time
+        -- probability vectors and explicit completeness status for replay/audit.
+        CREATE TABLE IF NOT EXISTS probability_trace_fact (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL UNIQUE,
+            decision_snapshot_id TEXT,
+            candidate_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            mode TEXT,
+            strategy_key TEXT CHECK (strategy_key IN (
+                'settlement_capture',
+                'shoulder_sell',
+                'center_buy',
+                'opening_inertia'
+            )),
+            discovery_mode TEXT,
+            entry_method TEXT,
+            selected_method TEXT,
+            trace_status TEXT NOT NULL CHECK (trace_status IN (
+                'complete',
+                'degraded_decision_context',
+                'degraded_missing_vectors',
+                'pre_vector_unavailable'
+            )),
+            missing_reason_json TEXT NOT NULL DEFAULT '[]',
+            bin_labels_json TEXT,
+            p_raw_json TEXT,
+            p_cal_json TEXT,
+            p_market_json TEXT,
+            p_posterior_json TEXT,
+            p_posterior REAL,
+            alpha REAL,
+            agreement TEXT,
+            n_edges_found INTEGER,
+            n_edges_after_fdr INTEGER,
+            rejection_stage TEXT,
+            availability_status TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
+            ON probability_trace_fact(city, target_date, recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
+            ON probability_trace_fact(decision_snapshot_id);
+
+        -- Selection-family facts for active candidate-family FDR accounting.
+        CREATE TABLE IF NOT EXISTS selection_family_fact (
+            family_id TEXT PRIMARY KEY,
+            cycle_mode TEXT NOT NULL,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            strategy_key TEXT,
+            discovery_mode TEXT,
+            created_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL,
+            decision_time_status TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS selection_hypothesis_fact (
+            hypothesis_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            decision_id TEXT,
+            candidate_id TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            range_label TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
+            p_value REAL,
+            q_value REAL,
+            ci_lower REAL,
+            ci_upper REAL,
+            edge REAL,
+            tested INTEGER NOT NULL DEFAULT 1 CHECK (tested IN (0, 1)),
+            passed_prefilter INTEGER NOT NULL DEFAULT 0 CHECK (passed_prefilter IN (0, 1)),
+            selected_post_fdr INTEGER NOT NULL DEFAULT 0 CHECK (selected_post_fdr IN (0, 1)),
+            rejection_stage TEXT,
+            recorded_at TEXT NOT NULL,
+            meta_json TEXT NOT NULL,
+            FOREIGN KEY(family_id) REFERENCES selection_family_fact(family_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_selection_hypothesis_family
+            ON selection_hypothesis_fact(family_id, selected_post_fdr, p_value);
+
+        -- Model evaluation and promotion substrate. Behavior-neutral until a
+        -- future packet wires active model selection through promotion state.
+
+
+
         -- Append-only trade chronicle
+        -- env column: added via ALTER TABLE in init_schema lines ~854-859 — see chronicler.py:76
         CREATE TABLE IF NOT EXISTS chronicle (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -322,26 +512,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_chronicle_dedup
           ON chronicle(trade_id, event_type);
 
-        -- Durable stage-level runtime spine for position lifecycle events
-        CREATE TABLE IF NOT EXISTS position_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            runtime_trade_id TEXT NOT NULL,
-            position_state TEXT,
-            order_id TEXT,
-            decision_snapshot_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            market_id TEXT,
-            bin_label TEXT,
-            direction TEXT,
-            strategy TEXT,
-            edge_source TEXT,
-            source TEXT NOT NULL DEFAULT 'runtime',
-            details_json TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            env TEXT NOT NULL DEFAULT 'paper'
-        );
+        -- position_events is canonical-only (see apply_architecture_kernel_schema)
 
         -- Derived health view for PnL and edge compression
         CREATE TABLE IF NOT EXISTS strategy_health (
@@ -377,7 +548,7 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp);
 
-        -- ETL tables: Rainstorm data validated and imported
+        -- ETL tables: legacy-predecessor data validated and imported
 
         -- Ladder backfill: 5 models × 7 leads per settlement
         CREATE TABLE IF NOT EXISTS forecast_skill (
@@ -395,6 +566,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, target_date, source, lead_days)
         );
 
+        -- Forecast error distribution substrate for future uncertainty correction.
+
         -- Per-model bias correction
         CREATE TABLE IF NOT EXISTS model_bias (
             city TEXT NOT NULL,
@@ -407,17 +580,6 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, season, source)
         );
 
-        -- Token price history with market timing
-        CREATE TABLE IF NOT EXISTS market_price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_slug TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            price REAL NOT NULL,
-            recorded_at TEXT NOT NULL,
-            hours_since_open REAL,
-            hours_to_resolution REAL,
-            UNIQUE(token_id, recorded_at)
-        );
 
         -- DST-safe hourly observation timeline
         CREATE TABLE IF NOT EXISTS observation_instants (
@@ -496,29 +658,33 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, month, hour)
         );
 
-        -- Historical forecast values (5 NWP models)
-        CREATE TABLE IF NOT EXISTS historical_forecasts (
+        -- Day0 residual learning substrate.
+        -- Behavior-neutral: current Day0Signal hard-floor runtime remains active.
+
+        -- Raw forecast source rows. New-city onboarding writes here first;
+        -- skill/bias/profile tables are derived from this table plus settlements.
+        CREATE TABLE IF NOT EXISTS forecasts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             source TEXT NOT NULL,
-            forecast_high REAL NOT NULL,
-            temp_unit TEXT NOT NULL,
+            forecast_basis_date TEXT,
+            forecast_issue_time TEXT,
             lead_days INTEGER,
-            available_at TEXT,
-            UNIQUE(city, target_date, source, lead_days)
+            lead_time_hours REAL,
+            forecast_high REAL,
+            forecast_low REAL,
+            temp_unit TEXT DEFAULT 'F',
+            retrieved_at TEXT,
+            imported_at TEXT,
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            UNIQUE(city, target_date, source, forecast_basis_date)
         );
+        CREATE INDEX IF NOT EXISTS idx_forecasts_city_date
+            ON forecasts(city, target_date);
 
-        -- Model skill summary per city×season
-        CREATE TABLE IF NOT EXISTS model_skill (
-            city TEXT NOT NULL,
-            season TEXT NOT NULL,
-            source TEXT NOT NULL,
-            mae REAL NOT NULL,
-            bias REAL NOT NULL,
-            n_samples INTEGER NOT NULL,
-            UNIQUE(city, season, source)
-        );
+
 
         -- Day-over-day temperature persistence
         CREATE TABLE IF NOT EXISTS temp_persistence (
@@ -549,31 +715,48 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
 
-        -- Replay engine results
-        CREATE TABLE IF NOT EXISTS replay_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            replay_run_id TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            city TEXT NOT NULL,
+        -- K2 data-coverage index — the immune system's memory for live data ingestion.
+        -- One row per expected (data_table × city × data_source × target_date × sub_key);
+        -- live appenders flip rows to WRITTEN, scanners write MISSING for unrecorded
+        -- expected rows, and known exceptions (HKO incomplete-flag days, UKMO pre-start,
+        -- new-city onboard lag) are pinned as LEGITIMATE_GAP so the scanner won't
+        -- keep re-attempting them. Distinct from `availability_fact` which logs
+        -- runtime cycle/order outages — this table is specifically a data-ingestion
+        -- coverage ledger.
+        CREATE TABLE IF NOT EXISTS data_coverage (
+            data_table  TEXT NOT NULL
+                CHECK (data_table IN ('observations','observation_instants','solar_daily','forecasts')),
+            city        TEXT NOT NULL,
+            data_source TEXT NOT NULL,
             target_date TEXT NOT NULL,
-            settlement_value REAL,
-            winning_bin TEXT,
-            replay_direction TEXT,
-            replay_edge REAL,
-            replay_p_posterior REAL,
-            replay_size_usd REAL,
-            replay_should_trade INTEGER,
-            replay_rejection_stage TEXT,
-            actual_direction TEXT,
-            actual_edge REAL,
-            actual_should_trade INTEGER,
-            replay_pnl REAL,
-            actual_pnl REAL,
-            overrides_json TEXT,
-            timestamp TEXT NOT NULL
+            sub_key     TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL
+                CHECK (status IN ('WRITTEN','LEGITIMATE_GAP','FAILED','MISSING')),
+            reason      TEXT,
+            fetched_at  TEXT NOT NULL,
+            expected_at TEXT,
+            retry_after TEXT,
+            PRIMARY KEY (data_table, city, data_source, target_date, sub_key)
         );
-        CREATE INDEX IF NOT EXISTS idx_replay_run
-            ON replay_results(replay_run_id);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_status
+            ON data_coverage(status, data_table);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_scan
+            ON data_coverage(data_table, city, data_source, target_date);
+        CREATE INDEX IF NOT EXISTS idx_data_coverage_retry
+            ON data_coverage(status, retry_after) WHERE status = 'FAILED';
+
+        -- Availability/outage fact log (observability — kernel §availability_fact)
+        CREATE TABLE IF NOT EXISTS availability_fact (
+            availability_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL CHECK (scope_type IN ('cycle', 'candidate', 'city_target', 'order', 'chain')),
+            scope_key TEXT NOT NULL,
+            failure_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            impact TEXT NOT NULL CHECK (impact IN ('skip', 'degrade', 'retry', 'block')),
+            details_json TEXT NOT NULL
+);
+
     """)
     
     # Safe Schema evolution for phase 3 attribution
@@ -583,17 +766,30 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # REOPEN-1 (2026-04-23): forecasts writer at src/data/forecasts_append.py:256-262
+    # inserts rebuild_run_id + data_source_version; legacy DBs predate the CREATE
+    # TABLE declaration of these two columns, so CREATE TABLE IF NOT EXISTS no-ops
+    # and the writer fails at runtime with "table forecasts has no column named
+    # rebuild_run_id" (observed: k2_forecasts_daily FAILED every 30 min per
+    # state/scheduler_jobs_health.json). ALTER path catches legacy DBs without
+    # disturbing fresh DBs (OperationalError on duplicate-column is swallowed).
+    for col in ["rebuild_run_id", "data_source_version"]:
+        try:
+            conn.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
     try:
         conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")
     except sqlite3.OperationalError:
         pass
 
     # Provenance: env column on trade-facing tables (Decision 2)
-    # Existing rows default to 'paper' — all historical data is from paper trading.
+    # Existing rows default to 'live' — Zeus is designed only for live.
     _env_tables = ["trade_decisions", "chronicle", "decision_log", "position_events"]
     for table in _env_tables:
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'paper';")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
         except sqlite3.OperationalError:
             pass  # Column already exists
             
@@ -638,52 +834,522 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
 
+    for ddl in [
+        "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
+        "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
+        # 2026-04-14 refactor: bin_source discriminator separates canonical-grid
+        # training pairs from legacy market-derived pairs so the destructive
+        # DELETE path in rebuild_calibration_pairs_canonical.py can target
+        # WHERE bin_source='canonical_v1' without LIKE blast radius.
+        "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
+    ]:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    # P-B (2026-04-23): INV-14 identity spine + provenance vehicle on settlements.
+    # Plan: docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md
+    # All columns are nullable (pre-P-E rows may carry NULL); NOT-NULL enforcement is
+    # deferred to P-E DELETE+INSERT reconstruction writers.
+    for ddl in [
+        "ALTER TABLE settlements ADD COLUMN temperature_metric TEXT "
+        "CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low'));",
+        "ALTER TABLE settlements ADD COLUMN physical_quantity TEXT;",
+        "ALTER TABLE settlements ADD COLUMN observation_field TEXT "
+        "CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp'));",
+        "ALTER TABLE settlements ADD COLUMN data_version TEXT;",
+        "ALTER TABLE settlements ADD COLUMN provenance_json TEXT;",
+    ]:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    # REOPEN-2 (2026-04-24, data-readiness-tail): settlements UNIQUE migration.
+    # Pre-REOPEN-2 schema: UNIQUE(city, target_date) — structurally blocks
+    # dual-track (a HIGH row for city+date makes a LOW row for the same
+    # city+date UNIQUE-collide). Per critic-opus P0.2 forensic-triage C3+C4,
+    # this is a pre-flip BLOCKER for DR-33-C — first low-market settlement
+    # attempt on flag-flip would silently drop the row and break the learning
+    # chain for the LOW track.
+    #
+    # SQLite cannot ALTER a UNIQUE constraint; the only path is table
+    # recreation. Idempotent: detect whether current table already has the
+    # new UNIQUE(city, target_date, temperature_metric) via sqlite_master
+    # SQL inspection; skip if yes.
+    #
+    # Safety: scratch-DB dry-run verified (2026-04-24) that the rebuild is
+    # lossless on 1,561 rows + preserves authority groups (1469 VERIFIED + 92
+    # QUARANTINED) + unlocks dual-track. Migration runs BEFORE trigger DROP+
+    # CREATE blocks below so triggers install against the rebuilt table.
+    try:
+        settlements_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
+        ).fetchone()
+        settlements_sql = settlements_sql_row[0] if settlements_sql_row else ""
+        needs_migration = (
+            settlements_sql
+            and "UNIQUE(city, target_date, temperature_metric)" not in settlements_sql
+            and "UNIQUE (city, target_date, temperature_metric)" not in settlements_sql
+        )
+        if needs_migration:
+            # Dynamic column-list copy (preserves schema even if future ALTERs
+            # add more columns beyond the current set).
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(settlements)")]
+            col_list = ", ".join(cols)
+            pre_count = conn.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
+            conn.execute(
+                """
+                CREATE TABLE settlements_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    city TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    market_slug TEXT,
+                    winning_bin TEXT,
+                    settlement_value REAL,
+                    settlement_source TEXT,
+                    settled_at TEXT,
+                    authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
+                    pm_bin_lo REAL,
+                    pm_bin_hi REAL,
+                    unit TEXT,
+                    settlement_source_type TEXT,
+                    temperature_metric TEXT
+                        CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+                    physical_quantity TEXT,
+                    observation_field TEXT
+                        CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+                    data_version TEXT,
+                    provenance_json TEXT,
+                    UNIQUE(city, target_date, temperature_metric)
+                )
+                """
+            )
+            conn.execute(
+                f"INSERT INTO settlements_migrated ({col_list}) SELECT {col_list} FROM settlements"
+            )
+            post_count = conn.execute(
+                "SELECT COUNT(*) FROM settlements_migrated"
+            ).fetchone()[0]
+            if post_count != pre_count:
+                raise RuntimeError(
+                    f"REOPEN-2 row-count drift: pre={pre_count} post={post_count} — "
+                    "ABORT migration to prevent data loss"
+                )
+            conn.execute("DROP TABLE settlements")
+            conn.execute("ALTER TABLE settlements_migrated RENAME TO settlements")
+    except sqlite3.OperationalError:
+        # Fresh DBs where settlements doesn't exist yet fall through to
+        # CREATE TABLE IF NOT EXISTS above (which now declares new UNIQUE).
+        # No action needed.
+        pass
+
+    # P-B authority-monotonic trigger (INV-FP-5 enforcement).
+    # Reactivation contract: QUARANTINED->VERIFIED requires a top-level JSON key
+    # `reactivated_by` that is a non-empty text value in provenance_json.
+    # Substring LIKE is intentionally avoided to prevent false-positive matches
+    # on keys like "not_reactivated_by". DROP + CREATE (not CREATE IF NOT EXISTS)
+    # because S2.1 (2026-04-23 data-readiness-tail) extended the WHEN clause to
+    # reject presence-only bypasses (reactivated_by=false / 0 / "" / {} / [])
+    # — IF NOT EXISTS would silently retain the weaker v1 predicate on any DB
+    # that had it. Idempotency preserved via DROP IF EXISTS.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_authority_monotonic")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_authority_monotonic
+            BEFORE UPDATE OF authority ON settlements
+            WHEN (OLD.authority = 'VERIFIED' AND NEW.authority = 'UNVERIFIED')
+              OR (OLD.authority = 'QUARANTINED' AND NEW.authority = 'VERIFIED'
+                  AND (NEW.provenance_json IS NULL
+                       OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL
+                       OR json_type(NEW.provenance_json, '$.reactivated_by') != 'text'
+                       OR length(json_extract(NEW.provenance_json, '$.reactivated_by')) = 0))
+            BEGIN
+                SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED requires provenance_json.reactivated_by to be a non-empty text value');
+            END;
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # POST-AUDIT FIX #1 (2026-04-24, adversarial-audit follow-up):
+    # Close the NULL-NULL UNIQUE hole on settlements.
+    #
+    # REOPEN-2 (earlier today) installed UNIQUE(city, target_date,
+    # temperature_metric). CHECK constraint at
+    # `temperature_metric TEXT CHECK (temperature_metric IS NULL OR
+    # temperature_metric IN ('high','low'))` intentionally tolerates NULL
+    # so legacy-schema ALTER-added rows could pre-exist; SQLite UNIQUE
+    # treats NULL as DISTINCT, so the new UNIQUE does NOT prevent
+    # duplicate (city, target_date, NULL) rows. Subagent-4 adversarial
+    # audit (2026-04-24) DEMONSTRATED this on the live DB: two
+    # INSERTs with (TESTCITY, '2099-01-01', NULL, 'UNVERIFIED') both
+    # succeeded. `scripts/onboard_cities.py:383` is the writer that
+    # currently emits NULL-metric scaffold rows.
+    #
+    # Structural fix: a BEFORE INSERT trigger that rejects NULL metric
+    # on ALL rows (not just VERIFIED — the NULL-metric scaffold path
+    # bypasses the verified-integrity trigger by inserting as
+    # UNVERIFIED). DROP + CREATE for v2 propagation. Live DB has 0 NULL
+    # metric rows as of the audit — no existing row rejected.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_non_null_metric")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_non_null_metric
+            BEFORE INSERT ON settlements
+            WHEN NEW.temperature_metric IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'settlements.temperature_metric must be non-null (high or low); REOPEN-2 post-audit fix closes the NULL-NULL UNIQUE hole');
+            END;
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # S2.2 (2026-04-23, data-readiness-tail): Structural AP-2 prevention.
+    # SettlementSemantics.assert_settlement_value() is a SOCIAL gate (runtime
+    # only — any writer that bypasses the function bypasses the check). These
+    # two triggers enforce the minimum VERIFIED-row invariants structurally at
+    # DB-write time: a row with authority='VERIFIED' must carry non-null
+    # settlement_value AND non-empty winning_bin. QUARANTINED rows may have
+    # NULL settlement_value (that is the quarantine semantic — row is excluded
+    # from the authoritative set until reactivation).
+    #
+    # Pre-apply probe against live DB (1,469 VERIFIED + 92 QUARANTINED rows):
+    #   VERIFIED: 0 with null settlement_value / 0 with null winning_bin → none rejected
+    #   QUARANTINED: 49 with null settlement_value / 92 with null winning_bin → trigger does not fire (WHEN gates on authority='VERIFIED')
+    # So no legitimate historical rows are rejected by this trigger.
+    #
+    # DROP + CREATE (not CREATE IF NOT EXISTS) so a future refactor that
+    # tightens the predicate propagates to all legacy DBs on next init_schema.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_verified_insert_integrity")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_verified_insert_integrity
+            BEFORE INSERT ON settlements
+            WHEN NEW.authority = 'VERIFIED'
+              AND (NEW.settlement_value IS NULL
+                   OR NEW.winning_bin IS NULL
+                   OR NEW.winning_bin = '')
+            BEGIN
+                SELECT RAISE(ABORT, 'VERIFIED settlement INSERT requires non-null settlement_value + non-empty winning_bin');
+            END;
+            """
+        )
+        conn.execute("DROP TRIGGER IF EXISTS settlements_verified_update_integrity")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_verified_update_integrity
+            BEFORE UPDATE OF authority, settlement_value, winning_bin ON settlements
+            WHEN NEW.authority = 'VERIFIED'
+              AND (NEW.settlement_value IS NULL
+                   OR NEW.winning_bin IS NULL
+                   OR NEW.winning_bin = '')
+            BEGIN
+                SELECT RAISE(ABORT, 'VERIFIED settlement UPDATE requires non-null settlement_value + non-empty winning_bin');
+            END;
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_decision_group ON calibration_pairs(decision_group_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup "
+        "ON calibration_pairs(city, target_date, forecast_available_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup_lead "
+        "ON calibration_pairs(city, target_date, forecast_available_at, lead_days)"
+    )
+    _ensure_calibration_decision_group_lead_key(conn)
+
     _ensure_runtime_bootstrap_support_tables(conn)
+
+    # Phase 5A (B069 / SD-1): add temperature_metric to position_current so the
+    # portfolio_loader_view can emit per-row metric identity.
+    # Zero-Data Golden Window precondition: this ALTER must only run on an empty table.
+    try:
+        row_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        logger.info(
+            "phase5a_alter_position_current: row_count=%d before ADD COLUMN temperature_metric",
+            row_count,
+        )
+        assert row_count == 0, (
+            f"Phase 5A ALTER expects empty position_current (Zero-Data Golden Window); "
+            f"found {row_count} rows"
+        )
+        conn.execute(
+            "ALTER TABLE position_current ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high' "
+            "CHECK (temperature_metric IN ('high', 'low'));"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
+    # B091 lower half: add decision_time_status column to selection_family_fact.
+    # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
+    try:
+        conn.execute(
+            "ALTER TABLE selection_family_fact ADD COLUMN decision_time_status TEXT;"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
+    # P10D S3 (eve C2 inversion): add temperature_metric to legacy ensemble_snapshots.
+    # ensemble_snapshots_v2 has zero runtime writers; skipping legacy writes for LOW
+    # would destroy snapshot persistence (harvester joins on snapshot_id from legacy
+    # table). Add temperature_metric column here so LOW rows are distinguishable.
+    # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
+    try:
+        conn.execute(
+            "ALTER TABLE ensemble_snapshots ADD COLUMN temperature_metric TEXT NOT NULL DEFAULT 'high';"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists — idempotent re-run
+
+    # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
+    from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
+    _apply_v2_schema(conn)
 
     if own_conn:
         conn.commit()
         conn.close()
 
 
+_CALIBRATION_DECISION_GROUP_DDL = """
+CREATE TABLE calibration_decision_group (
+    group_id TEXT PRIMARY KEY,
+    city TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    forecast_available_at TEXT NOT NULL,
+    cluster TEXT NOT NULL,
+    season TEXT NOT NULL,
+    lead_days REAL NOT NULL,
+    settlement_value REAL,
+    winning_range_label TEXT,
+    bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
+    n_pair_rows INTEGER NOT NULL,
+    n_positive_rows INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL
+)
+"""
+
+_CALIBRATION_DECISION_GROUP_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
+ON calibration_decision_group(cluster, season, lead_days)
+"""
+
+
+def _ensure_calibration_decision_group_lead_key(conn: sqlite3.Connection) -> None:
+    """Migrate calibration groups if the legacy unique key lacks lead_days."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'calibration_decision_group'"
+    ).fetchone()
+    if row is None:
+        return
+
+    needs_migration = False
+    for idx in conn.execute("PRAGMA index_list(calibration_decision_group)").fetchall():
+        is_unique = bool(idx[2])
+        if not is_unique:
+            continue
+        idx_name = idx[1]
+        cols = [
+            col[2]
+            for col in conn.execute(f"PRAGMA index_info({idx_name})").fetchall()
+        ]
+        if cols in (
+            ["city", "target_date", "forecast_available_at"],
+            ["city", "target_date", "forecast_available_at", "lead_days"],
+        ):
+            needs_migration = True
+    if not needs_migration:
+        return
+
+    required_columns = {
+        "group_id",
+        "city",
+        "target_date",
+        "forecast_available_at",
+        "cluster",
+        "season",
+        "lead_days",
+        "settlement_value",
+        "winning_range_label",
+        "bias_corrected",
+        "n_pair_rows",
+        "n_positive_rows",
+        "recorded_at",
+    }
+    existing_columns = {
+        col[1] for col in conn.execute("PRAGMA table_info(calibration_decision_group)")
+    }
+    missing = sorted(required_columns - existing_columns)
+    n_existing = conn.execute(
+        "SELECT COUNT(*) FROM calibration_decision_group"
+    ).fetchone()[0]
+    if missing and n_existing:
+        raise sqlite3.OperationalError(
+            "Cannot migrate calibration_decision_group lead_days key: "
+            f"non-empty legacy table is missing required columns {missing}"
+        )
+    if missing:
+        backup_name = "calibration_decision_group__missing_cols_backup"
+        logger.warning(
+            f"Migrating empty calibration_decision_group schema to add {missing}. "
+            f"Backing up existing schema to {backup_name} before rebuilding."
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {backup_name}")
+        conn.execute(f"ALTER TABLE calibration_decision_group RENAME TO {backup_name}")
+        conn.execute(_CALIBRATION_DECISION_GROUP_DDL)
+        conn.execute(_CALIBRATION_DECISION_GROUP_INDEX_DDL)
+        return
+
+    legacy_name = "calibration_decision_group__legacy_lead_key"
+    conn.execute("SAVEPOINT calibration_decision_group_lead_key_migration")
+    try:
+        legacy_count = n_existing
+        conn.execute(f"DROP TABLE IF EXISTS {legacy_name}")
+        conn.execute(f"ALTER TABLE calibration_decision_group RENAME TO {legacy_name}")
+        conn.execute(_CALIBRATION_DECISION_GROUP_DDL)
+        conn.execute(
+            f"""
+            INSERT INTO calibration_decision_group (
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            )
+            SELECT
+                group_id,
+                city,
+                target_date,
+                forecast_available_at,
+                cluster,
+                season,
+                lead_days,
+                settlement_value,
+                winning_range_label,
+                bias_corrected,
+                n_pair_rows,
+                n_positive_rows,
+                recorded_at
+            FROM {legacy_name}
+            """
+        )
+        conn.execute(_CALIBRATION_DECISION_GROUP_INDEX_DDL)
+        new_count = conn.execute(
+            "SELECT COUNT(*) FROM calibration_decision_group"
+        ).fetchone()[0]
+        if new_count != legacy_count:
+            raise sqlite3.IntegrityError(
+                "calibration_decision_group migration row-count mismatch: "
+                f"{legacy_count} legacy rows, {new_count} copied rows"
+            )
+        conn.execute(f"DROP TABLE {legacy_name}")
+        conn.execute("RELEASE SAVEPOINT calibration_decision_group_lead_key_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT calibration_decision_group_lead_key_migration")
+        conn.execute("RELEASE SAVEPOINT calibration_decision_group_lead_key_migration")
+        raise
+
+
 def _ensure_runtime_bootstrap_support_tables(conn: sqlite3.Connection) -> None:
-    """Ensure legacy runtime bootstrap can coexist with canonical support tables."""
-    event_columns = _table_columns(conn, "position_events")
-    legacy_present = bool(event_columns) and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-    canonical_present = bool(event_columns) and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-
-    if legacy_present and not canonical_present:
-        if not _table_exists(conn, "position_events_legacy"):
-            conn.execute("ALTER TABLE position_events RENAME TO position_events_legacy")
-        else:
-            raise RuntimeError(
-                "legacy position_events collision unresolved: both legacy and alternate legacy tables exist"
-            )
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_position_events_legacy_trade_ts ON position_events_legacy(runtime_trade_id, timestamp)"
-            )
-        except sqlite3.OperationalError:
-            pass
-
+    """Apply canonical architecture kernel schema."""
     apply_architecture_kernel_schema(conn)
 
-LEGACY_RUNTIME_POSITION_EVENT_COLUMNS = (
-    "runtime_trade_id",
-    "position_state",
-    "strategy",
-    "source",
-    "details_json",
-    "timestamp",
-    "env",
-)
 
+def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
+    """Create derived backtest/reporting tables. Idempotent."""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_backtest_connection()
 
-def _legacy_position_events_table(conn: sqlite3.Connection) -> str:
-    for table in ("position_events_legacy", "position_events"):
-        columns = _table_columns(conn, table)
-        if columns and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns):
-            return table
-    return ""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            run_id TEXT PRIMARY KEY,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            authority_scope TEXT NOT NULL CHECK (
+                authority_scope = 'diagnostic_non_promotion'
+            ),
+            config_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS backtest_outcome_comparison (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('wu_settlement_sweep', 'trade_history_audit')
+            ),
+            subject_id TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            settlement_value REAL,
+            settlement_unit TEXT,
+            derived_wu_outcome INTEGER,
+            actual_trade_outcome INTEGER,
+            actual_pnl REAL,
+            truth_source TEXT NOT NULL,
+            divergence_status TEXT NOT NULL CHECK (
+                divergence_status IN (
+                    'not_applicable',
+                    'match',
+                    'wu_win_trade_loss',
+                    'wu_loss_trade_win',
+                    'trade_unresolved',
+                    'wu_missing',
+                    'bin_unparseable',
+                    'ambiguous_subject',
+                    'orphan_trade_decision'
+                )
+            ),
+            decision_reference_source TEXT,
+            forecast_reference_id TEXT,
+            evidence_json TEXT NOT NULL,
+            missing_reason_json TEXT NOT NULL,
+            authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
+                CHECK (authority_scope = 'diagnostic_non_promotion'),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_lane_city_date
+            ON backtest_outcome_comparison(lane, city, target_date);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_subject
+            ON backtest_outcome_comparison(subject_id);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_divergence
+            ON backtest_outcome_comparison(divergence_status);
+        CREATE INDEX IF NOT EXISTS idx_backtest_outcome_run
+            ON backtest_outcome_comparison(run_id);
+    """)
+    conn.commit()
+    if own_conn:
+        conn.close()
+
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -699,192 +1365,29 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def _canonical_position_surface_available(conn: sqlite3.Connection) -> bool:
-    event_columns = _table_columns(conn, "position_events")
-    current_columns = _table_columns(conn, "position_current")
-    return (
-        bool(event_columns)
-        and bool(current_columns)
-        and set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        and set(CANONICAL_POSITION_CURRENT_COLUMNS).issubset(current_columns)
-    )
+def _view_exists(conn: sqlite3.Connection, view: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ?",
+        (view,),
+    ).fetchone()
+    return row is not None
 
 
-def _missing_canonical_position_tables(conn: sqlite3.Connection) -> list[str]:
-    missing: list[str] = []
-    if not _table_exists(conn, "position_events"):
-        missing.append("position_events")
-    if not _table_exists(conn, "position_current"):
-        missing.append("position_current")
-    return missing
+def _table_or_view_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Return True if `name` exists as either a TABLE or a VIEW."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
 
 
-def _legacy_runtime_position_event_schema_available(conn: sqlite3.Connection) -> bool:
-    legacy_table = _legacy_position_events_table(conn)
-    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
-    return (
-        bool(event_columns)
-        and set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-    )
 
 
-def _assert_legacy_runtime_position_event_schema(conn: sqlite3.Connection) -> None:
-    legacy_table = _legacy_position_events_table(conn)
-    event_columns = _table_columns(conn, legacy_table) if legacy_table else set()
-    if not event_columns:
-        raise RuntimeError("legacy runtime position_events schema not installed")
-    if not set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns):
-        raise RuntimeError("legacy runtime position_events schema not installed")
 
 
-def backfill_open_legacy_paper_positions(
-    conn: sqlite3.Connection | None,
-    positions: Iterable[object],
-    *,
-    source_module: str = "scripts.backfill_open_positions_canonical",
-) -> dict:
-    positions = list(positions)
-    if conn is None:
-        return {
-            "status": "skipped_no_connection",
-            "seeded_trade_ids": [],
-            "seeded_count": 0,
-        }
-    if not _canonical_position_surface_available(conn):
-        return {
-            "status": "skipped_missing_canonical_tables",
-            "missing_tables": _missing_canonical_position_tables(conn),
-            "seeded_trade_ids": [],
-            "seeded_count": 0,
-        }
 
-    from src.engine.lifecycle_events import build_entry_canonical_write, canonical_phase_for_position
 
-    seeded_trade_ids: list[str] = []
-    skipped_existing_trade_ids: list[str] = []
-    skipped_non_open_trade_ids: list[str] = []
-    skipped_non_paper_trade_ids: list[str] = []
-
-    for position in positions:
-        trade_id = str(getattr(position, "trade_id", "") or "").strip()
-        if not trade_id:
-            raise ValueError("cannot backfill canonical open position without trade_id")
-
-        env = str(getattr(position, "env", "") or "paper").strip()
-        if env != "paper":
-            skipped_non_paper_trade_ids.append(trade_id)
-            continue
-
-        canonical_phase = canonical_phase_for_position(position)
-        if canonical_phase not in OPEN_EXPOSURE_PHASES:
-            skipped_non_open_trade_ids.append(trade_id)
-            continue
-
-        event_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
-                (trade_id,),
-            ).fetchone()[0]
-        )
-        projection_row = conn.execute(
-            """
-            SELECT 1
-            FROM position_current
-            WHERE position_id = ? OR trade_id = ?
-            LIMIT 1
-            """,
-            (trade_id, trade_id),
-        ).fetchone()
-        projection_exists = projection_row is not None
-        if bool(event_count) != projection_exists:
-            raise RuntimeError(
-                f"partial canonical state blocks open-position backfill for {trade_id}"
-            )
-        if event_count and projection_exists:
-            skipped_existing_trade_ids.append(trade_id)
-            continue
-
-        events, projection = build_entry_canonical_write(
-            position,
-            decision_id=None,
-            source_module=source_module,
-        )
-        append_many_and_project(conn, events, projection)
-        seeded_trade_ids.append(trade_id)
-
-    status = "seeded" if seeded_trade_ids else "seeded_empty"
-    return {
-        "status": status,
-        "candidate_count": len(positions),
-        "seeded_trade_ids": seeded_trade_ids,
-        "seeded_count": len(seeded_trade_ids),
-        "skipped_existing_trade_ids": skipped_existing_trade_ids,
-        "skipped_existing_count": len(skipped_existing_trade_ids),
-        "skipped_non_open_trade_ids": skipped_non_open_trade_ids,
-        "skipped_non_open_count": len(skipped_non_open_trade_ids),
-        "skipped_non_paper_trade_ids": skipped_non_paper_trade_ids,
-        "skipped_non_paper_count": len(skipped_non_paper_trade_ids),
-    }
-
-def record_shadow_attribution_trade(
-    conn: sqlite3.Connection,
-    trade_id: str,
-    market_id: str,
-    bin_label: str,
-    direction: str,
-    size_usd: float,
-    price: float,
-    p_raw: float,
-    p_posterior: float,
-    edge: float,
-    edge_source: str,
-    timestamp: str,
-    settlement_json: str = "",
-    epistemic_json: str = "",
-    edge_context_json: str = "",
-    # New Phase 3 Variables passed when completing loops
-    intended_size_usd: float = 0.0,
-    filled_price: float = 0.0,
-    settlement_prob: float = 0.0,
-    final_pnl_usd: float = 0.0,
-    is_early_exit: bool = False
-) -> None:
-    """Phase 3 Shadow Attribution: Persist truly split advantage metrics."""
-    
-    # Mathematical Splitting calculations
-    # 1. execution_slippage: intended vs filled price
-    slippage_usd = 0.0
-    if filled_price > 0 and price > 0:
-        slippage_usd = (size_usd / price) * filled_price - size_usd
-        
-    # 2. entry_alpha: actual theoretical expected jump vs market immediately
-    entry_alpha_usd = size_usd * edge
-    
-    # 3. exit_timing: did we secure value or get stopped false?
-    exit_timing_usd = final_pnl_usd if is_early_exit else 0.0
-    
-    # 4. risk_throttling: capital shielded from saturation
-    throttling_usd = (intended_size_usd - size_usd) * edge
-    
-    # 5. settlement_edge: the pure outcome movement
-    settlement_edge_usd = final_pnl_usd if not is_early_exit else 0.0
-
-    conn.execute("""
-        INSERT INTO trade_decisions (
-            market_id, bin_label, direction, size_usd, price, timestamp, 
-            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, 
-            status, edge_source, 
-            settlement_semantics_json, epistemic_context_json, edge_context_json,
-            entry_alpha_usd, execution_slippage_usd, exit_timing_usd, risk_throttling_usd, settlement_edge_usd
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        market_id, bin_label, direction, size_usd, price, timestamp,
-        p_raw, p_posterior, edge, 0.0, 0.0, 0.0,
-        "filled", edge_source,
-        settlement_json, epistemic_json, edge_context_json,
-        entry_alpha_usd, slippage_usd, exit_timing_usd, throttling_usd, settlement_edge_usd
-    ))
 
 
 
@@ -900,6 +1403,99 @@ def log_microstructure(conn, token_id: str, city: str, target_date: str, range_l
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log microstructure: %s', e)
+
+
+def log_rescue_event(
+    conn,
+    *,
+    trade_id: str,
+    chain_state: str,
+    reason: str,
+    occurred_at: str,
+    temperature_metric: str,
+    causality_status: str = "OK",
+    authority: str = "UNVERIFIED",
+    authority_source=None,
+    position_id=None,
+    decision_snapshot_id=None,
+) -> None:
+    """B063: append a durable audit row for a chain-rescue event.
+
+    Writes to `rescue_events_v2` (Phase 2 schema). Unlike the existing
+    CHAIN_RESCUE_AUDIT row in position_events, this row carries the
+    temperature_metric, causality_status, and provenance authority
+    needed to distinguish a legitimate low-lane N/A_CAUSAL skip from
+    a silent rescue loss.
+
+    Per SD-1 (MetricIdentity is binary) and SD-H (provenance authority
+    tagging), temperature_metric stays in {'high','low'} and the
+    `authority` column carries the tri-state confidence. Callers must
+    resolve ambiguity via `authority='UNVERIFIED'` + concrete high/low
+    tag rather than introducing a third temperature_metric value.
+
+    Exempt from the DT#1 commit_then_export choke point — the audit row
+    IS the authoritative observability record, not a derived export,
+    and must be durable before the cycle acknowledges the rescue
+    outcome. Same rule the existing CHAIN_RESCUE_AUDIT row follows.
+
+    Fails closed-soft: if the table is missing on legacy DBs or the
+    write raises, the error is logged but NOT re-raised, because the
+    caller (chain_reconciliation._emit_rescue_event) must continue
+    reconciling chain state even when the audit row cannot be
+    persisted. The pre-existing CHAIN_RESCUE_AUDIT row in position_events
+    provides a legacy-path audit trail as fallback.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    if conn is None:
+        _logger.warning(
+            "log_rescue_event: conn is None, skipping rescue_events_v2 write for trade_id=%s",
+            trade_id,
+        )
+        return
+    if temperature_metric not in ("high", "low"):
+        _logger.error(
+            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events_v2 write",
+            temperature_metric,
+            trade_id,
+        )
+        return
+    try:
+        conn.execute(
+            """
+            INSERT INTO rescue_events_v2
+                (trade_id, position_id, decision_snapshot_id,
+                 temperature_metric, causality_status,
+                 authority, authority_source,
+                 chain_state, reason, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade_id,
+                position_id,
+                decision_snapshot_id,
+                temperature_metric,
+                causality_status,
+                authority,
+                authority_source,
+                chain_state,
+                reason,
+                occurred_at,
+            ),
+        )
+    except sqlite3.OperationalError as exc:
+        _logger.warning(
+            "log_rescue_event: rescue_events_v2 write failed for trade_id=%s: %s",
+            trade_id,
+            exc,
+        )
+    except sqlite3.IntegrityError as exc:
+        _logger.info(
+            "log_rescue_event: idempotent duplicate for trade_id=%s occurred_at=%s: %s",
+            trade_id,
+            occurred_at,
+            exc,
+        )
 
 
 def log_shadow_signal(
@@ -1015,6 +1611,446 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
     return probability
 
 
+def _json_probability_vector(value) -> tuple[str | None, bool]:
+    if value is None:
+        return None, False
+    try:
+        values = value.tolist() if hasattr(value, "tolist") else list(value)
+    except TypeError:
+        return None, False
+    return json.dumps(values, ensure_ascii=False), len(values) > 0
+
+
+def _candidate_bin_labels(candidate) -> list[str]:
+    labels: list[str] = []
+    try:
+        outcomes = list(getattr(candidate, "outcomes", []) or [])
+    except TypeError:
+        return labels
+    for outcome in outcomes:
+        if outcome.get("range_low") is None and outcome.get("range_high") is None:
+            continue
+        title = str(outcome.get("title", "") or "")
+        if title:
+            labels.append(title)
+    return labels
+
+
+def _trace_direction(decision) -> str:
+    edge = getattr(decision, "edge", None)
+    direction = str(getattr(edge, "direction", "") or "unknown")
+    return direction if direction in {"buy_yes", "buy_no", "unknown"} else "unknown"
+
+
+def _trace_range_label(decision) -> str:
+    edge = getattr(decision, "edge", None)
+    return str(getattr(getattr(edge, "bin", None), "label", "") or "")
+
+
+def _trace_scalar_posterior(decision) -> float | None:
+    edge = getattr(decision, "edge", None)
+    if edge is not None:
+        try:
+            return float(getattr(edge, "p_posterior", None))
+        except (TypeError, ValueError):
+            return None
+    edge_context = getattr(decision, "edge_context", None)
+    if edge_context is not None:
+        try:
+            return float(getattr(edge_context, "p_posterior", None))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _trace_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def log_probability_trace_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    candidate,
+    decision,
+    recorded_at: str,
+    mode: str,
+) -> dict:
+    """Write one durable probability trace row for one decision.
+
+    This helper intentionally stores direct decision-time vectors only. It must
+    not scalar-backfill vector lineage from BinEdge scalar fields.
+    """
+    if conn is None:
+        logger.info("Probability trace write skipped: no connection")
+        return {"status": "skipped_no_connection", "table": "probability_trace_fact"}
+    if not _table_exists(conn, "probability_trace_fact"):
+        logger.info("Probability trace table unavailable; skipping durable write")
+        return {"status": "skipped_missing_table", "table": "probability_trace_fact"}
+
+    decision_id = str(getattr(decision, "decision_id", "") or "").strip()
+    if not decision_id:
+        return {"status": "skipped_missing_decision_id", "table": "probability_trace_fact"}
+
+    p_raw_json, has_p_raw = _json_probability_vector(getattr(decision, "p_raw", None))
+    p_cal_json, has_p_cal = _json_probability_vector(getattr(decision, "p_cal", None))
+    p_market_json, has_p_market = _json_probability_vector(getattr(decision, "p_market", None))
+    p_posterior_json, _has_p_posterior_vector = _json_probability_vector(
+        getattr(decision, "p_posterior_vector", None)
+    )
+
+    missing: list[str] = []
+    for name, present in (
+        ("p_raw_json", has_p_raw),
+        ("p_cal_json", has_p_cal),
+        ("p_market_json", has_p_market),
+    ):
+        if not present:
+            missing.append(name)
+
+    if not has_p_raw and not has_p_cal and not has_p_market:
+        trace_status = "pre_vector_unavailable"
+    elif not (has_p_raw and has_p_cal and has_p_market):
+        trace_status = "degraded_missing_vectors"
+    elif str(getattr(decision, "availability_status", "") or "").strip().upper() not in {"", "OK"}:
+        trace_status = "degraded_decision_context"
+    else:
+        trace_status = "complete"
+
+    rejection_stage = str(getattr(decision, "rejection_stage", "") or "")
+    availability_status = str(getattr(decision, "availability_status", "") or "")
+    missing_reasons = {
+        "missing_vectors": missing,
+        "rejection_stage": rejection_stage,
+        "availability_status": availability_status,
+    }
+    bin_labels = _candidate_bin_labels(candidate)
+    alpha = getattr(decision, "alpha", None)
+    try:
+        alpha = float(alpha) if alpha not in (None, "") else None
+    except (TypeError, ValueError):
+        alpha = None
+
+    conn.execute(
+        """
+        INSERT INTO probability_trace_fact (
+            trace_id,
+            decision_id,
+            decision_snapshot_id,
+            candidate_id,
+            city,
+            target_date,
+            range_label,
+            direction,
+            mode,
+            strategy_key,
+            discovery_mode,
+            entry_method,
+            selected_method,
+            trace_status,
+            missing_reason_json,
+            bin_labels_json,
+            p_raw_json,
+            p_cal_json,
+            p_market_json,
+            p_posterior_json,
+            p_posterior,
+            alpha,
+            agreement,
+            n_edges_found,
+            n_edges_after_fdr,
+            rejection_stage,
+            availability_status,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trace_id) DO UPDATE SET
+            decision_id=excluded.decision_id,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            mode=excluded.mode,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            entry_method=excluded.entry_method,
+            selected_method=excluded.selected_method,
+            trace_status=excluded.trace_status,
+            missing_reason_json=excluded.missing_reason_json,
+            bin_labels_json=excluded.bin_labels_json,
+            p_raw_json=excluded.p_raw_json,
+            p_cal_json=excluded.p_cal_json,
+            p_market_json=excluded.p_market_json,
+            p_posterior_json=excluded.p_posterior_json,
+            p_posterior=excluded.p_posterior,
+            alpha=excluded.alpha,
+            agreement=excluded.agreement,
+            n_edges_found=excluded.n_edges_found,
+            n_edges_after_fdr=excluded.n_edges_after_fdr,
+            rejection_stage=excluded.rejection_stage,
+            availability_status=excluded.availability_status,
+            recorded_at=excluded.recorded_at
+        """,
+        (
+            f"probtrace:{decision_id}",
+            decision_id,
+            str(getattr(decision, "decision_snapshot_id", "") or "") or None,
+            _opportunity_fact_candidate_id(candidate) or None,
+            _candidate_city_name(candidate) or None,
+            str(getattr(candidate, "target_date", "") or "") or None,
+            _trace_range_label(decision) or None,
+            _trace_direction(decision),
+            str(mode or "") or None,
+            str(getattr(decision, "strategy_key", "") or "").strip() or None,
+            str(getattr(candidate, "discovery_mode", "") or "") or None,
+            str(getattr(decision, "selected_method", "") or getattr(decision, "entry_method", "") or "") or None,
+            str(getattr(decision, "selected_method", "") or "") or None,
+            trace_status,
+            json.dumps(missing_reasons, ensure_ascii=False, sort_keys=True),
+            json.dumps(bin_labels, ensure_ascii=False),
+            p_raw_json,
+            p_cal_json,
+            p_market_json,
+            p_posterior_json,
+            _trace_scalar_posterior(decision),
+            alpha,
+            str(getattr(decision, "agreement", "") or "") or None,
+            _trace_int(getattr(decision, "n_edges_found", None)),
+            _trace_int(getattr(decision, "n_edges_after_fdr", None)),
+            rejection_stage or None,
+            availability_status or None,
+            recorded_at,
+        ),
+    )
+    return {
+        "status": "written",
+        "table": "probability_trace_fact",
+        "trace_status": trace_status,
+    }
+
+
+def query_probability_trace_completeness(conn: sqlite3.Connection | None) -> dict:
+    if conn is None:
+        return {
+            "status": "skipped_no_connection",
+            "trace_rows": 0,
+            "with_p_raw_json": 0,
+            "with_p_cal_json": 0,
+            "with_p_market_json": 0,
+            "complete_rows": 0,
+            "degraded_rows": 0,
+            "pre_vector_rows": 0,
+        }
+    if not _table_exists(conn, "probability_trace_fact"):
+        return {
+            "status": "missing_table",
+            "trace_rows": 0,
+            "with_p_raw_json": 0,
+            "with_p_cal_json": 0,
+            "with_p_market_json": 0,
+            "complete_rows": 0,
+            "degraded_rows": 0,
+            "pre_vector_rows": 0,
+        }
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS trace_rows,
+            SUM(CASE WHEN p_raw_json IS NOT NULL AND trim(p_raw_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_raw_json,
+            SUM(CASE WHEN p_cal_json IS NOT NULL AND trim(p_cal_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_cal_json,
+            SUM(CASE WHEN p_market_json IS NOT NULL AND trim(p_market_json) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS with_p_market_json,
+            SUM(CASE WHEN trace_status = 'complete' THEN 1 ELSE 0 END) AS complete_rows,
+            SUM(CASE WHEN trace_status IN ('degraded_missing_vectors', 'degraded_decision_context') THEN 1 ELSE 0 END) AS degraded_rows,
+            SUM(CASE WHEN trace_status = 'pre_vector_unavailable' THEN 1 ELSE 0 END) AS pre_vector_rows
+        FROM probability_trace_fact
+        """
+    ).fetchone()
+    return {
+        "status": "ok",
+        "trace_rows": int(row["trace_rows"] or 0),
+        "with_p_raw_json": int(row["with_p_raw_json"] or 0),
+        "with_p_cal_json": int(row["with_p_cal_json"] or 0),
+        "with_p_market_json": int(row["with_p_market_json"] or 0),
+        "complete_rows": int(row["complete_rows"] or 0),
+        "degraded_rows": int(row["degraded_rows"] or 0),
+        "pre_vector_rows": int(row["pre_vector_rows"] or 0),
+    }
+
+
+
+def log_selection_family_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    family_id: str,
+    cycle_mode: str,
+    created_at: str,
+    meta: dict,
+    decision_snapshot_id: str | None = None,
+    city: str | None = None,
+    target_date: str | None = None,
+    strategy_key: str | None = None,
+    discovery_mode: str | None = None,
+    decision_time_status: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "selection_family_fact"}
+    if not _table_exists(conn, "selection_family_fact"):
+        return {"status": "skipped_missing_table", "table": "selection_family_fact"}
+    if not family_id:
+        return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
+    conn.execute(
+        """
+        INSERT INTO selection_family_fact (
+            family_id, cycle_mode, decision_snapshot_id, city, target_date,
+            strategy_key, discovery_mode, created_at, meta_json, decision_time_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(family_id) DO UPDATE SET
+            cycle_mode=excluded.cycle_mode,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            created_at=excluded.created_at,
+            meta_json=excluded.meta_json,
+            decision_time_status=excluded.decision_time_status
+        """,
+        (
+            family_id,
+            cycle_mode,
+            decision_snapshot_id,
+            city,
+            target_date,
+            strategy_key,
+            discovery_mode,
+            created_at,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+            decision_time_status,
+        ),
+    )
+    return {"status": "written", "table": "selection_family_fact"}
+
+
+def log_selection_hypothesis_fact(
+    conn: sqlite3.Connection | None,
+    *,
+    hypothesis_id: str,
+    family_id: str,
+    city: str,
+    target_date: str,
+    range_label: str,
+    direction: str,
+    recorded_at: str,
+    meta: dict,
+    decision_id: str | None = None,
+    candidate_id: str | None = None,
+    p_value: float | None = None,
+    q_value: float | None = None,
+    ci_lower: float | None = None,
+    ci_upper: float | None = None,
+    edge: float | None = None,
+    tested: bool = True,
+    passed_prefilter: bool = False,
+    selected_post_fdr: bool = False,
+    rejection_stage: str | None = None,
+) -> dict:
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
+    if not _table_exists(conn, "selection_hypothesis_fact"):
+        return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
+    if not hypothesis_id:
+        return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
+    if not family_id:
+        return {"status": "skipped_missing_family_id", "table": "selection_hypothesis_fact"}
+    direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
+    conn.execute(
+        """
+        INSERT INTO selection_hypothesis_fact (
+            hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
+            range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
+            tested, passed_prefilter, selected_post_fdr, rejection_stage,
+            recorded_at, meta_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(hypothesis_id) DO UPDATE SET
+            family_id=excluded.family_id,
+            decision_id=excluded.decision_id,
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            p_value=excluded.p_value,
+            q_value=excluded.q_value,
+            ci_lower=excluded.ci_lower,
+            ci_upper=excluded.ci_upper,
+            edge=excluded.edge,
+            tested=excluded.tested,
+            passed_prefilter=excluded.passed_prefilter,
+            selected_post_fdr=excluded.selected_post_fdr,
+            rejection_stage=excluded.rejection_stage,
+            recorded_at=excluded.recorded_at,
+            meta_json=excluded.meta_json
+        """,
+        (
+            hypothesis_id,
+            family_id,
+            decision_id,
+            candidate_id,
+            city,
+            target_date,
+            range_label,
+            direction_value,
+            p_value,
+            q_value,
+            ci_lower,
+            ci_upper,
+            edge,
+            int(bool(tested)),
+            int(bool(passed_prefilter)),
+            int(bool(selected_post_fdr)),
+            rejection_stage,
+            recorded_at,
+            json.dumps(meta, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    return {"status": "written", "table": "selection_hypothesis_fact"}
+
+
+
+
+DATA_IMPROVEMENT_TABLES = (
+    "probability_trace_fact",
+    "calibration_decision_group",
+    "selection_family_fact",
+    "selection_hypothesis_fact",
+)
+
+
+def query_data_improvement_inventory(conn: sqlite3.Connection | None) -> dict:
+    """Return DB-truth readiness/counts for data-improvement substrates."""
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": {}}
+    inventory: dict[str, dict] = {}
+    for table in DATA_IMPROVEMENT_TABLES:
+        if not _table_exists(conn, table):
+            inventory[table] = {"exists": False, "rows": 0}
+            continue
+        count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        inventory[table] = {"exists": True, "rows": count}
+    missing = sorted(table for table, payload in inventory.items() if not payload["exists"])
+    return {
+        "status": "missing_tables" if missing else "ok",
+        "tables": inventory,
+        "missing_tables": missing,
+    }
+
+
 def log_opportunity_fact(
     conn: sqlite3.Connection | None,
     *,
@@ -1074,7 +2110,7 @@ def log_opportunity_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO opportunity_fact (
+        INSERT INTO opportunity_fact (
             decision_id,
             candidate_id,
             city,
@@ -1098,6 +2134,27 @@ def log_opportunity_fact(
             recorded_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(decision_id) DO UPDATE SET
+            candidate_id=excluded.candidate_id,
+            city=excluded.city,
+            target_date=excluded.target_date,
+            range_label=excluded.range_label,
+            direction=excluded.direction,
+            strategy_key=excluded.strategy_key,
+            discovery_mode=excluded.discovery_mode,
+            entry_method=excluded.entry_method,
+            snapshot_id=excluded.snapshot_id,
+            p_raw=excluded.p_raw,
+            p_cal=excluded.p_cal,
+            p_market=excluded.p_market,
+            alpha=excluded.alpha,
+            best_edge=excluded.best_edge,
+            ci_width=excluded.ci_width,
+            rejection_stage=excluded.rejection_stage,
+            rejection_reason_json=excluded.rejection_reason_json,
+            availability_status=excluded.availability_status,
+            should_trade=excluded.should_trade,
+            recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
         """,
         (
             str(getattr(decision, "decision_id", "") or ""),
@@ -1155,7 +2212,7 @@ def log_availability_fact(
     payload = json.dumps(details or {}, ensure_ascii=False, sort_keys=True)
     conn.execute(
         """
-        INSERT OR REPLACE INTO availability_fact (
+        INSERT INTO availability_fact (
             availability_id,
             scope_type,
             scope_key,
@@ -1166,6 +2223,14 @@ def log_availability_fact(
             details_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(availability_id) DO UPDATE SET
+            scope_type=excluded.scope_type,
+            scope_key=excluded.scope_key,
+            failure_type=excluded.failure_type,
+            started_at=excluded.started_at,
+            ended_at=excluded.ended_at,
+            impact=excluded.impact,
+            details_json=excluded.details_json
         """,
         (
             availability_id,
@@ -1182,12 +2247,34 @@ def log_availability_fact(
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    """Parse an ISO-8601-ish timestamp string into a tz-AWARE datetime.
+
+    Callers compare these timestamps with `>`/`<` across rows that may
+    come from heterogeneous writers: runtime code uses
+    datetime.now(timezone.utc).isoformat() (tz-aware), SQLite's built-in
+    datetime('now') function returns "YYYY-MM-DD HH:MM:SS" with no tz
+    (naive), and legacy writers sometimes used bare "Z" suffixes.
+    Comparing a naive datetime with an aware one raises TypeError, which
+    on 2026-04-11 crashed query_portfolio_loader_view every cycle after
+    the nuke rebuild script left 7 naive timestamps in position_current.
+
+    Contract: any value that parses at all is returned as UTC-aware. A
+    naive input is assumed to already be UTC (zeus has no local-time
+    writers — every producer is supposed to use UTC) and is upgraded
+    by attaching tzinfo=timezone.utc. Invalid inputs return None.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        # Naive → assume UTC. Zeus's convention is UTC-everywhere; any
+        # producer that writes naive is violating that convention and
+        # the safer assumption is UTC over local time.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _execution_intent_id(*, trade_id: str, order_role: str, explicit_intent_id: str | None = None) -> str:
@@ -1256,7 +2343,7 @@ def log_execution_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO execution_fact (
+        INSERT INTO execution_fact (
             intent_id,
             position_id,
             decision_id,
@@ -1274,6 +2361,21 @@ def log_execution_fact(
             terminal_exec_status
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(intent_id) DO UPDATE SET
+            position_id=excluded.position_id,
+            decision_id=excluded.decision_id,
+            order_role=excluded.order_role,
+            strategy_key=excluded.strategy_key,
+            posted_at=excluded.posted_at,
+            filled_at=excluded.filled_at,
+            voided_at=excluded.voided_at,
+            submitted_price=excluded.submitted_price,
+            fill_price=excluded.fill_price,
+            shares=excluded.shares,
+            fill_quality=excluded.fill_quality,
+            latency_seconds=excluded.latency_seconds,
+            venue_status=excluded.venue_status,
+            terminal_exec_status=excluded.terminal_exec_status
         """,
         (
             intent_id,
@@ -1359,7 +2461,7 @@ def log_outcome_fact(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO outcome_fact (
+        INSERT INTO outcome_fact (
             position_id,
             strategy_key,
             entered_at,
@@ -1375,6 +2477,19 @@ def log_outcome_fact(
             chain_corrections_count
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(position_id) DO UPDATE SET
+            strategy_key=excluded.strategy_key,
+            entered_at=excluded.entered_at,
+            exited_at=excluded.exited_at,
+            settled_at=excluded.settled_at,
+            exit_reason=excluded.exit_reason,
+            admin_exit_reason=excluded.admin_exit_reason,
+            decision_snapshot_id=excluded.decision_snapshot_id,
+            pnl=excluded.pnl,
+            outcome=excluded.outcome,
+            hold_duration_hours=excluded.hold_duration_hours,
+            monitor_count=excluded.monitor_count,
+            chain_corrections_count=excluded.chain_corrections_count
         """,
         (
             position_id,
@@ -1397,7 +2512,7 @@ def log_outcome_fact(
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
     """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", None) or settings.mode
+    env = getattr(pos, "env", "live")
     status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
     timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
     filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
@@ -1459,48 +2574,11 @@ def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
             import logging
             logging.getLogger(__name__).warning('Failed to log trade entry: %s', e)
 
-    if _legacy_runtime_position_event_schema_available(conn):
-        log_position_event(
-            conn,
-            "POSITION_ENTRY_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "fill_price": fill_price,
-                "submitted_price": getattr(pos, "entry_price", None),
-                "shares": getattr(pos, "shares", 0.0),
-                "chain_state": getattr(pos, "chain_state", ""),
-                "entry_method": getattr(pos, "entry_method", ""),
-                "selected_method": getattr(pos, "selected_method", ""),
-            },
-            timestamp=timestamp or None,
-            source="trade_decisions",
-        )
-    elif not _canonical_position_surface_available(conn):
-        log_position_event(
-            conn,
-            "POSITION_ENTRY_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "fill_price": fill_price,
-                "submitted_price": getattr(pos, "entry_price", None),
-                "shares": getattr(pos, "shares", 0.0),
-                "chain_state": getattr(pos, "chain_state", ""),
-                "entry_method": getattr(pos, "entry_method", ""),
-                "selected_method": getattr(pos, "selected_method", ""),
-            },
-            timestamp=timestamp or None,
-            source="trade_decisions",
-        )
+
 
 
 def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: str | None = None) -> None:
     """Append an execution telemetry event tied to the runtime trade."""
-    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
-    if not legacy_runtime_events_available:
-        if not _canonical_position_surface_available(conn):
-            _assert_legacy_runtime_position_event_schema(conn)
     if not getattr(pos, "trade_id", ""):
         return
     submitted_price = getattr(result, "submitted_price", None)
@@ -1531,12 +2609,6 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         or getattr(pos, "order_posted_at", None)
         or datetime.now(timezone.utc).isoformat()
     )
-    if status == "filled":
-        event_type = "ORDER_FILLED"
-    elif status in {"rejected", "cancelled", "canceled"}:
-        event_type = "ORDER_REJECTED"
-    else:
-        event_type = "ORDER_ATTEMPTED"
     terminal_exec_status = status or None
     voided_at = event_timestamp if status in {"rejected", "cancelled", "canceled"} else None
     posted_at = (
@@ -1565,15 +2637,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
     )
-    if legacy_runtime_events_available:
-        log_position_event(
-            conn,
-            event_type,
-            pos,
-            details=details,
-            timestamp=event_timestamp,
-            source="execution",
-        )
+
 
 
 def log_settlement_event(
@@ -1586,10 +2650,6 @@ def log_settlement_event(
     exited_at_override: str | None = None,
 ) -> None:
     """Append a durable settlement event for learning/risk consumers."""
-    legacy_runtime_events_available = _legacy_runtime_position_event_schema_available(conn)
-    if not legacy_runtime_events_available:
-        if not _canonical_position_surface_available(conn):
-            _assert_legacy_runtime_position_event_schema(conn)
     settled_at = getattr(pos, "last_exit_at", None)
     entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
     log_outcome_fact(
@@ -1607,20 +2667,7 @@ def log_settlement_event(
         monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
         chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
     )
-    if legacy_runtime_events_available:
-        log_position_event(
-            conn,
-            "POSITION_SETTLED",
-            pos,
-            details=_canonical_position_settled_payload(
-                pos,
-                winning_bin=winning_bin,
-                won=won,
-                outcome=outcome,
-            ),
-            timestamp=settled_at,
-            source="settlement",
-        )
+
 
 
 def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
@@ -1628,13 +2675,13 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
     try:
         from datetime import datetime
-        env = getattr(pos, "env", None) or settings.mode
+        env = getattr(pos, "env", "live")
         status = "voided" if getattr(pos, "state", "") == "voided" else "exited"
         values = (
-            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.utcnow().isoformat(),
+            pos.market_id, pos.bin_label, pos.direction, pos.size_usd, pos.entry_price, pos.last_exit_at or datetime.now(timezone.utc).isoformat(),
             getattr(pos, "decision_snapshot_id", None) or None,
             getattr(pos, "calibration_version", "") or None,
-            pos.p_posterior, pos.p_posterior, pos.edge, 0.0, 0.0, 0.0,
+            getattr(pos, "p_raw", None), getattr(pos, "p_posterior", None), pos.edge, 0.0, 0.0, 0.0,
             status, getattr(pos, "strategy", ""), pos.edge_source, _bin_type_for_label(pos.bin_label), env, pos.last_exit_at, pos.exit_price, getattr(pos, 'pnl', 0.0),
             getattr(pos, "trade_id", ""),
             getattr(pos, "order_id", ""),
@@ -1674,21 +2721,7 @@ def log_trade_exit(conn: sqlite3.Connection, pos) -> None:
             )
             VALUES ({placeholders})
         """, values)
-        log_position_event(
-            conn,
-            "POSITION_EXIT_RECORDED",
-            pos,
-            details={
-                "status": status,
-                "exit_price": getattr(pos, "exit_price", None),
-                "pnl": getattr(pos, "pnl", None),
-                "exit_trigger": getattr(pos, "exit_trigger", ""),
-                "exit_reason": getattr(pos, "exit_reason", ""),
-                "admin_exit_reason": getattr(pos, "admin_exit_reason", ""),
-            },
-            timestamp=getattr(pos, "last_exit_at", None),
-            source="trade_decisions",
-        )
+
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning('Failed to log trade exit: %s', e)
@@ -1698,6 +2731,8 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
     """Update the lifecycle state of the latest DB row for a runtime trade."""
     runtime_trade_id = getattr(pos, "trade_id", "")
     if not runtime_trade_id:
+        return
+    if not _table_exists(conn, "trade_decisions"):
         return
 
     row = conn.execute(
@@ -1750,23 +2785,7 @@ def update_trade_lifecycle(conn: sqlite3.Connection, pos) -> None:
         ),
     )
 
-    log_position_event(
-        conn,
-        "POSITION_LIFECYCLE_UPDATED",
-        pos,
-        details={
-            "status": status,
-            "filled_at": filled_at,
-            "fill_price": fill_price,
-            "entry_order_id": entry_order_id,
-            "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
-            "order_status": getattr(pos, "order_status", ""),
-            "chain_state": getattr(pos, "chain_state", ""),
-            "day0_entered_at": getattr(pos, "day0_entered_at", ""),
-        },
-        timestamp=timestamp or None,
-        source="trade_decisions",
-    )
+
 
 
 def _decode_position_event_rows(rows) -> list[dict]:
@@ -1803,18 +2822,6 @@ def _coerce_settlement_int(value) -> Optional[int]:
         return None
 
 
-def _canonical_position_settled_payload(pos, *, winning_bin: str, won: bool, outcome: int) -> dict:
-    return {
-        "contract_version": CANONICAL_POSITION_SETTLED_CONTRACT_VERSION,
-        "winning_bin": winning_bin,
-        "position_bin": getattr(pos, "bin_label", ""),
-        "won": bool(won),
-        "outcome": int(outcome),
-        "p_posterior": getattr(pos, "p_posterior", None),
-        "exit_price": getattr(pos, "exit_price", None),
-        "pnl": getattr(pos, "pnl", None),
-        "exit_reason": getattr(pos, "exit_reason", ""),
-    }
 
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
@@ -1886,17 +2893,28 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
 
 
 def query_position_events(conn: sqlite3.Connection, runtime_trade_id: str, limit: int = 50) -> list[dict]:
-    """Load recent durable position events for one runtime trade."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
+    """Load recent canonical position events for one position."""
     rows = conn.execute(
-        f"""
-        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-               city, target_date, market_id, bin_label, direction, strategy, edge_source,
-               source, details_json, timestamp, env
-        FROM {legacy_table}
-        WHERE runtime_trade_id = ?
-        ORDER BY id ASC
+        """
+        SELECT event_type,
+               position_id AS runtime_trade_id,
+               NULL AS position_state,
+               order_id,
+               snapshot_id AS decision_snapshot_id,
+               NULL AS city,
+               NULL AS target_date,
+               NULL AS market_id,
+               NULL AS bin_label,
+               NULL AS direction,
+               strategy_key AS strategy,
+               NULL AS edge_source,
+               source_module AS source,
+               payload_json AS details_json,
+               occurred_at AS timestamp,
+               NULL AS env
+        FROM position_events
+        WHERE position_id = ?
+        ORDER BY sequence_no ASC
         LIMIT ?
         """,
         (runtime_trade_id, limit),
@@ -1913,31 +2931,45 @@ def query_settlement_events(
     env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Load recent canonical settlement stage events from the durable event spine."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    filters = ["event_type = 'POSITION_SETTLED'"]
-    query_env = settings.mode if env is None else env
+    """Load recent canonical SETTLED events from the durable event spine."""
+    filters = ["e.event_type = 'SETTLED'"]
     params: list[object] = []
-    if query_env:
-        filters.append("env = ?")
-        params.append(query_env)
     if city is not None:
-        filters.append("city = ?")
+        filters.append("pc.city = ?")
         params.append(city)
     if target_date is not None:
-        filters.append("target_date = ?")
+        filters.append("pc.target_date = ?")
         params.append(target_date)
     if not_before is not None:
-        filters.append("timestamp >= ?")
+        filters.append("e.occurred_at >= ?")
         params.append(not_before)
+    where_clause = " AND ".join(filters)
     query = f"""
-        SELECT event_type, runtime_trade_id, position_state, order_id, decision_snapshot_id,
-               city, target_date, market_id, bin_label, direction, strategy, edge_source,
-               source, details_json, timestamp, env
-        FROM {legacy_table}
-        WHERE {' AND '.join(filters)}
-        ORDER BY id DESC
+        SELECT e.event_type,
+               e.position_id AS runtime_trade_id,
+               NULL AS position_state,
+               e.order_id,
+               e.snapshot_id AS decision_snapshot_id,
+               pc.city,
+               pc.target_date,
+               pc.market_id,
+               pc.bin_label,
+               pc.direction,
+               e.strategy_key AS strategy,
+               pc.edge_source,
+               e.source_module AS source,
+               e.payload_json AS details_json,
+               e.occurred_at AS timestamp,
+               NULL AS env
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY position_id ORDER BY sequence_no DESC) AS rn
+            FROM position_events
+            WHERE event_type = 'SETTLED'
+        ) e
+        LEFT JOIN position_current pc ON pc.position_id = e.position_id
+        WHERE rn = 1 AND {where_clause}
+        ORDER BY e.occurred_at DESC
         """
     if limit is not None:
         query += "\n        LIMIT ?"
@@ -2311,14 +3343,14 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         SELECT position_id, phase, trade_id, city, bin_label, direction,
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
-               decision_snapshot_id, last_monitor_market_price
+               decision_snapshot_id, last_monitor_market_price,
+               token_id, no_token_id, condition_id
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
 
     positions: list[dict] = []
     strategy_open_counts: dict[str, int] = {}
@@ -2334,9 +3366,6 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         if phase not in OPEN_EXPOSURE_PHASES:
             continue
         trade_id = str(row["trade_id"] or row["position_id"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
-        if latest_trade_status in TERMINAL_TRADE_DECISION_STATUSES:
-            continue
         hints = transitional_hints.get(trade_id, {})
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
@@ -2367,6 +3396,9 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                 "edge": None,
                 "bin_label": str(row["bin_label"] or ""),
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
+                "token_id": str(row["token_id"] or ""),
+                "no_token_id": str(row["no_token_id"] or ""),
+                "condition_id": str(row["condition_id"] or ""),
                 "day0_entered_at": day0_entered_at,
                 "mark_price": mark_price,
                 "unrealized_pnl": unrealized_pnl,
@@ -2399,95 +3431,80 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
     }
 
 
-def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
+def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_metric: str | None = None) -> dict:
     if conn is None:
         return {
             "status": "skipped_no_connection",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
     if not _table_exists(conn, "position_current"):
         return {
             "status": "missing_table",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
 
+    actual_cols = {row[1] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()}
+    if "temperature_metric" not in actual_cols:
+        raise RuntimeError(
+            "position_current.temperature_metric column missing; "
+            "init_schema ALTER must have failed. Re-run init or check DB integrity."
+        )
+
+    where_clause = ""
+    params: tuple = ()
+    if temperature_metric is not None:
+        where_clause = "WHERE temperature_metric = ?"
+        params = (temperature_metric,)
+
     rows = conn.execute(
-        """
+        f"""
         SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
                direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-               chain_state, order_id, order_status, updated_at
-        FROM position_current
+               chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
+               temperature_metric
+        FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
-        """
+        """,
+        params,
     ).fetchall()
     if not rows:
         return {
             "status": "empty",
             "table": "position_current",
             "positions": [],
+            "temperature_metric": temperature_metric,
         }
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    latest_trade_statuses = _latest_trade_decision_status_by_trade_id(conn, trade_ids)
-    legacy_latest_by_trade: dict[str, datetime] = {}
-    legacy_table = _legacy_position_events_table(conn)
-    if legacy_table:
-        placeholders = ", ".join("?" for _ in trade_ids)
-        legacy_rows = conn.execute(
-            f"""
-            SELECT runtime_trade_id, MAX(timestamp) AS latest_timestamp
-            FROM {legacy_table}
-            WHERE runtime_trade_id IN ({placeholders})
-            GROUP BY runtime_trade_id
-            """,
-            trade_ids,
-        ).fetchall()
-        for legacy_row in legacy_rows:
-            trade_id = str(legacy_row["runtime_trade_id"] or "")
-            parsed = _parse_iso_timestamp(str(legacy_row["latest_timestamp"] or ""))
-            if trade_id and parsed is not None:
-                legacy_latest_by_trade[trade_id] = parsed
 
-    current_mode = os.environ.get("ZEUS_MODE", settings.mode)
     positions: list[dict] = []
-    stale_trade_ids: list[str] = []
     for row in rows:
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
-        latest_trade_status = latest_trade_statuses.get(trade_id, "")
         hints = transitional_hints.get(trade_id, {})
-        position_env = str(hints.get("env") or current_mode)
-        if position_env != current_mode:
-            continue
-        projection_updated_at = _parse_iso_timestamp(str(row["updated_at"] or ""))
-        latest_legacy = legacy_latest_by_trade.get(trade_id)
-        if projection_updated_at is not None and latest_legacy is not None and latest_legacy > projection_updated_at:
-            stale_trade_ids.append(trade_id)
-            continue
         runtime_state = PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE.get(phase, phase)
-        terminal_runtime_state = _terminal_runtime_state_for_trade_decision_status(latest_trade_status)
-        if terminal_runtime_state:
-            runtime_state = terminal_runtime_state
         positions.append(
             {
                 "trade_id": trade_id,
-                "market_id": str(row["market_id"] or ""),
-                "city": str(row["city"] or ""),
-                "cluster": str(row["cluster"] or ""),
-                "target_date": str(row["target_date"] or ""),
-                "bin_label": str(row["bin_label"] or ""),
-                "direction": str(row["direction"] or "unknown"),
-                "unit": str(row["unit"] or "F"),
-                "size_usd": float(row["size_usd"] or 0.0),
-                "shares": float(row["shares"] or 0.0),
-                "cost_basis_usd": float(row["cost_basis_usd"] or 0.0),
-                "entry_price": float(row["entry_price"] or 0.0),
-                "p_posterior": float(row["p_posterior"] or 0.0),
+                "market_id": row["market_id"],
+                "city": row["city"],
+                "cluster": row["cluster"],
+                "target_date": row["target_date"],
+                "bin_label": row["bin_label"],
+                "direction": row["direction"],
+                "unit": row["unit"],
+                "size_usd": row["size_usd"],
+                "shares": row["shares"],
+                "cost_basis_usd": row["cost_basis_usd"],
+                "entry_price": row["entry_price"],
+                "p_posterior": row["p_posterior"],
                 "last_monitor_prob": float(row["last_monitor_prob"] or 0.0),
                 "last_monitor_edge": float(row["last_monitor_edge"] or 0.0),
                 "last_monitor_market_price": row["last_monitor_market_price"],
@@ -2495,38 +3512,29 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None) -> dict:
                 "entry_method": str(row["entry_method"] or ""),
                 "strategy_key": str(row["strategy_key"] or ""),
                 "strategy": str(row["strategy_key"] or ""),
-                "edge_source": str(row["edge_source"] or row["strategy_key"] or ""),
+                "edge_source": str(row["edge_source"] or ""),
                 "discovery_mode": str(row["discovery_mode"] or ""),
                 "chain_state": str(row["chain_state"] or "unknown"),
+                "token_id": str(row["token_id"] or ""),
+                "no_token_id": str(row["no_token_id"] or ""),
+                "condition_id": str(row["condition_id"] or ""),
                 "order_id": str(row["order_id"] or ""),
                 "order_status": str(row["order_status"] or ""),
                 "state": runtime_state,
-                "env": position_env,
-                "entered_at": str(hints.get("entered_at") or row["updated_at"] or ""),
+                "env": get_mode(),
+                "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": str(hints.get("exit_state") or ""),
                 "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
                 "entry_fill_verified": bool(hints.get("entry_fill_verified", False)),
+                "temperature_metric": str(row["temperature_metric"] or "high"),
             }
         )
-    if not positions:
-        return {
-            "status": "stale_legacy_fallback" if stale_trade_ids else "empty",
-            "table": "position_current",
-            "positions": [],
-            "stale_trade_ids": stale_trade_ids,
-        }
-    if stale_trade_ids:
-        return {
-            "status": "stale_legacy_fallback",
-            "table": "position_current",
-            "positions": [],
-            "stale_trade_ids": stale_trade_ids,
-        }
     return {
-        "status": "ok",
+        "status": "ok" if positions else "empty",
         "table": "position_current",
         "positions": positions,
+        "temperature_metric": temperature_metric,
     }
 
 
@@ -2544,16 +3552,21 @@ def upsert_control_override(
     effective_until: str | None = None,
     precedence: int = DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
 ) -> dict:
+    """Append a control override event. Writes into the append-only
+    `control_overrides_history` log; the `control_overrides` VIEW projects
+    the latest row (by `history_id`, AUTOINCREMENT) per `override_id`. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides"}
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides"}
+    recorded_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT OR REPLACE INTO control_overrides (
+        INSERT INTO control_overrides_history (
             override_id, target_type, target_key, action_type, value,
-            issued_by, issued_at, effective_until, reason, precedence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upsert', ?)
         """,
         (
             override_id,
@@ -2566,9 +3579,192 @@ def upsert_control_override(
             effective_until,
             reason,
             precedence,
+            recorded_at,
         ),
     )
     return {"status": "written", "table": "control_overrides", "override_id": override_id}
+
+
+def record_token_suppression(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    suppression_reason: str,
+    source_module: str,
+    condition_id: str | None = None,
+    created_at: str | None = None,
+    evidence: dict | None = None,
+) -> dict:
+    """Append a token suppression event to the append-only history log.
+
+    B071: writes into `token_suppression_history` (append-only log) AND
+    into the legacy `token_suppression` table (upsert, for backward compat
+    with callers that query the legacy table directly). The `token_suppression_current`
+    VIEW projects the latest row per `token_id` from the history table.
+
+    After running migrate_b071_token_suppression_to_history.py --apply --drop-legacy,
+    the legacy table is DROPped and replaced by a VIEW alias, and the dual-write
+    can be removed in a future cleanup phase.
+    """
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": "token_suppression"}
+    if not _table_exists(conn, "token_suppression_history"):
+        return {"status": "skipped_missing_table", "table": "token_suppression"}
+    normalized_token = str(token_id or "").strip()
+    if not normalized_token:
+        raise ValueError("token suppression requires token_id")
+    normalized_reason = str(suppression_reason or "").strip()
+    if normalized_reason not in TOKEN_SUPPRESSION_REASONS:
+        raise ValueError(f"unknown token suppression reason: {suppression_reason!r}")
+    normalized_source = str(source_module or "").strip()
+    if not normalized_source:
+        raise ValueError("token suppression requires source_module")
+    now = created_at or datetime.now(timezone.utc).isoformat()
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    evidence_payload = dict(evidence or {})
+    if normalized_reason == "chain_only_quarantined":
+        # Use MAX(history_id) — strictly monotone, no clock/tie dependency (B071).
+        # Fall back to legacy token_suppression table if no history row exists yet
+        # (pre-migration DBs that have rows only in the legacy table).
+        existing = conn.execute(
+            """
+            SELECT suppression_reason, created_at, evidence_json
+            FROM token_suppression_history
+            WHERE token_id = ?
+              AND history_id = (
+                  SELECT MAX(h2.history_id)
+                  FROM token_suppression_history h2
+                  WHERE h2.token_id = ?
+              )
+            """,
+            (normalized_token, normalized_token),
+        ).fetchone()
+        if existing is None and _table_exists(conn, "token_suppression"):
+            existing = conn.execute(
+                """
+                SELECT suppression_reason, created_at, evidence_json
+                FROM token_suppression
+                WHERE token_id = ?
+                """,
+                (normalized_token,),
+            ).fetchone()
+        if existing is not None and str(existing["suppression_reason"] or "") == "chain_only_quarantined":
+            try:
+                existing_evidence = json.loads(str(existing["evidence_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                existing_evidence = {}
+            first_seen_at = str(
+                existing_evidence.get("first_seen_at")
+                or existing["created_at"]
+                or ""
+            )
+            if first_seen_at:
+                evidence_payload["first_seen_at"] = first_seen_at
+    evidence_json = json.dumps(evidence_payload, sort_keys=True)
+    # B071 cycle-2 critic MINOR #1: wrap dual-write in a single transaction.
+    # Without this, a failure between the history INSERT and the legacy UPSERT
+    # leaves the two tables inconsistent — history says "suppressed" while
+    # legacy still shows the prior state (or nothing). `with conn:` uses the
+    # connection as a context manager that commits on success, rolls back on
+    # exception. Dual-write becomes atomic at the write-side seam.
+    with conn:
+        # Append to history (B071 — append-only, audit trail).
+        conn.execute(
+            """
+            INSERT INTO token_suppression_history (
+                token_id, condition_id, suppression_reason, source_module,
+                created_at, updated_at, evidence_json, operation, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'record', ?)
+            """,
+            (
+                normalized_token,
+                str(condition_id or ""),
+                normalized_reason,
+                normalized_source,
+                now,
+                now,
+                evidence_json,
+                recorded_at,
+            ),
+        )
+        # Dual-write: keep legacy token_suppression table in sync for backward
+        # compat with callers that query it directly (pre-migration). Removed
+        # after migrate_b071 --drop-legacy creates the VIEW alias.
+        if _table_exists(conn, "token_suppression"):
+            conn.execute(
+                """
+                INSERT INTO token_suppression (
+                    token_id, condition_id, suppression_reason, source_module,
+                    created_at, updated_at, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(token_id) DO UPDATE SET
+                    condition_id = CASE
+                        WHEN excluded.condition_id IS NULL OR excluded.condition_id = ''
+                        THEN token_suppression.condition_id
+                        ELSE excluded.condition_id
+                    END,
+                    suppression_reason = excluded.suppression_reason,
+                    source_module = excluded.source_module,
+                    updated_at = excluded.updated_at,
+                    evidence_json = excluded.evidence_json
+                """,
+                (
+                    normalized_token,
+                    str(condition_id or ""),
+                    normalized_reason,
+                    normalized_source,
+                    now,
+                    now,
+                    evidence_json,
+                ),
+            )
+    return {
+        "status": "written",
+        "table": "token_suppression",
+        "token_id": normalized_token,
+    }
+
+
+def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]:
+    """Return tokens that reconciliation must not resurrect from chain-only state.
+
+    Reads from `token_suppression` which is either the legacy mutable table
+    (pre-migration) or the VIEW alias created by
+    migrate_b071_token_suppression_to_history.py --apply --drop-legacy (B071).
+    The VIEW projects the latest row per token_id from the append-only history.
+    """
+    if conn is None or not _table_or_view_exists(conn, "token_suppression"):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT token_id
+        FROM token_suppression
+        WHERE suppression_reason IN ({", ".join(["?"] * len(RESOLVED_TOKEN_SUPPRESSION_REASONS))})
+        ORDER BY created_at ASC, token_id ASC
+        """,
+        RESOLVED_TOKEN_SUPPRESSION_REASONS,
+    ).fetchall()
+    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+
+
+def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
+    """Return unresolved chain-only quarantine facts for runtime cache hydration.
+
+    Reads from `token_suppression` which is either the legacy mutable table
+    (pre-migration) or the VIEW alias created by B071 migration. The VIEW
+    projects the latest row per token_id from the append-only history.
+    """
+    if conn is None or not _table_or_view_exists(conn, "token_suppression"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT token_id, condition_id, created_at, updated_at, evidence_json
+        FROM token_suppression
+        WHERE suppression_reason = 'chain_only_quarantined'
+        ORDER BY created_at ASC, token_id ASC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def expire_control_override(
@@ -2577,18 +3773,36 @@ def expire_control_override(
     override_id: str,
     expired_at: str,
 ) -> dict:
+    """Append an 'expire' event to `control_overrides_history` that sets
+    `effective_until = expired_at` on the latest row for this override_id.
+    No-op if no currently-active row exists. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides", "expired_count": 0}
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides", "expired_count": 0}
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    # Use history_id (AUTOINCREMENT) not recorded_at for the latest-row
+    # lookup: strictly monotone, no clock/tie dependency.
     cur = conn.execute(
         """
-        UPDATE control_overrides
-        SET effective_until = ?
-        WHERE override_id = ?
-          AND (effective_until IS NULL OR effective_until > ?)
+        INSERT INTO control_overrides_history (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence,
+            operation, recorded_at
+        )
+        SELECT h.override_id, h.target_type, h.target_key, h.action_type, h.value,
+               h.issued_by, h.issued_at, ?, h.reason, h.precedence,
+               'expire', ?
+        FROM control_overrides_history h
+        WHERE h.override_id = ?
+          AND h.history_id = (
+              SELECT MAX(h2.history_id)
+              FROM control_overrides_history h2
+              WHERE h2.override_id = ?
+          )
+          AND (h.effective_until IS NULL OR h.effective_until > ?)
         """,
-        (expired_at, override_id, expired_at),
+        (expired_at, recorded_at, override_id, override_id, expired_at),
     )
     return {
         "status": "expired" if cur.rowcount else "noop",
@@ -2608,19 +3822,23 @@ def query_control_override_state(
         return {
             "status": "skipped_no_connection",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
-    if not _table_exists(conn, "control_overrides"):
+    if not _table_exists(conn, "control_overrides_history"):
         return {
             "status": "missing_table",
             "entries_paused": False,
+            "entries_pause_source": None,
+            "entries_pause_reason": None,
             "edge_threshold_multiplier": 1.0,
             "strategy_gates": {},
         }
     rows = conn.execute(
         """
-        SELECT override_id, target_type, target_key, action_type, value, precedence, issued_at
+        SELECT override_id, target_type, target_key, action_type, value, issued_by, issued_at, reason, precedence
         FROM control_overrides
         WHERE target_type IN ('global', 'strategy')
           AND issued_at <= ?
@@ -2630,6 +3848,8 @@ def query_control_override_state(
         (current_time, current_time),
     ).fetchall()
     entries_paused = False
+    entries_pause_source = None
+    entries_pause_reason = None
     edge_threshold_multiplier = 1.0
     strategy_gates: dict[str, bool] = {}
     seen_strategy_gate: set[str] = set()
@@ -2642,6 +3862,18 @@ def query_control_override_state(
         value = str(row["value"] or "")
         if target_type == "global" and target_key == "entries" and action_type == "gate" and not global_gate_seen:
             entries_paused = _parse_boolish_text(value)
+            if entries_paused:
+                reason = str(row["reason"] or "")
+                issued_by = str(row["issued_by"] or "")
+                if issued_by == "system_auto_pause" or issued_by.startswith("auto:"):
+                    entries_pause_source = "auto_exception"
+                    entries_pause_reason = reason if issued_by == "system_auto_pause" else issued_by.replace("auto:", "", 1)
+                elif issued_by == "control_plane":
+                    entries_pause_source = "manual_command"
+                    entries_pause_reason = reason
+                else:
+                    entries_pause_source = "manual_command"
+                    entries_pause_reason = f"external:{issued_by}"
             global_gate_seen = True
             continue
         if target_type == "global" and target_key == "entries" and action_type == "threshold_multiplier" and not global_threshold_seen:
@@ -2657,6 +3889,8 @@ def query_control_override_state(
     return {
         "status": "ok",
         "entries_paused": entries_paused,
+        "entries_pause_source": entries_pause_source,
+        "entries_pause_reason": entries_pause_reason,
         "edge_threshold_multiplier": edge_threshold_multiplier,
         "strategy_gates": strategy_gates,
     }
@@ -2670,71 +3904,18 @@ def _shift_iso_timestamp(timestamp: str, *, days: int) -> str:
 
 
 def _parse_boolish_text(raw: str) -> bool:
+    # K1/#71: removed "gate" — action keyword, not boolean literal.
+    # Same rationale as _parse_boolish in policy.py.
     text = str(raw).strip().lower()
-    return text in {"1", "true", "yes", "on", "enabled", "gate"}
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError(f"unsupported boolish value in DB: {raw!r}")
 
 
-def _latest_trade_decision_status_by_trade_id(
-    conn: sqlite3.Connection,
-    trade_ids: list[str],
-) -> dict[str, str]:
-    if not trade_ids or not _table_exists(conn, "trade_decisions"):
-        return {}
-    placeholders = ", ".join("?" for _ in trade_ids)
-
-    def _query_latest_status_rows(target_conn: sqlite3.Connection) -> dict[str, str]:
-        rows = target_conn.execute(
-            f"""
-            WITH latest AS (
-                SELECT runtime_trade_id, MAX(trade_id) AS latest_trade_id
-                FROM trade_decisions
-                WHERE runtime_trade_id IN ({placeholders})
-                  AND runtime_trade_id IS NOT NULL
-                GROUP BY runtime_trade_id
-            )
-            SELECT td.runtime_trade_id, td.status
-            FROM latest
-            JOIN trade_decisions td ON td.trade_id = latest.latest_trade_id
-            """,
-            trade_ids,
-        ).fetchall()
-        return {
-            str(row["runtime_trade_id"] or ""): str(row["status"] or "")
-            for row in rows
-            if str(row["runtime_trade_id"] or "")
-        }
-
-    statuses = _query_latest_status_rows(conn)
-    try:
-        db_list = conn.execute("PRAGMA database_list").fetchall()
-        main_path = next((str(row[2]) for row in db_list if row[1] == "main"), "")
-    except sqlite3.OperationalError:
-        main_path = ""
-
-    if ZEUS_DB_PATH.exists() and str(ZEUS_DB_PATH) != main_path:
-        legacy_conn = sqlite3.connect(str(ZEUS_DB_PATH))
-        legacy_conn.row_factory = sqlite3.Row
-        try:
-            if _table_exists(legacy_conn, "trade_decisions"):
-                legacy_statuses = _query_latest_status_rows(legacy_conn)
-                for trade_id, legacy_status in legacy_statuses.items():
-                    if statuses.get(trade_id) not in TERMINAL_TRADE_DECISION_STATUSES and legacy_status in TERMINAL_TRADE_DECISION_STATUSES:
-                        statuses[trade_id] = legacy_status
-        finally:
-            legacy_conn.close()
-
-    return statuses
 
 
-def _terminal_runtime_state_for_trade_decision_status(status: str) -> str | None:
-    normalized = str(status or "").strip().lower()
-    if normalized == "exited":
-        return "economically_closed"
-    if normalized in {"settled", "voided", "admin_closed"}:
-        return normalized
-    if normalized == "unresolved_ghost":
-        return "admin_closed"
-    return None
 
 
 def _query_transitional_position_hints(
@@ -2745,18 +3926,7 @@ def _query_transitional_position_hints(
         return {}
     columns = _table_columns(conn, "position_events")
     placeholders = ", ".join("?" for _ in trade_ids)
-    if {"runtime_trade_id", "details_json", "timestamp"}.issubset(columns):
-        legacy_table = _legacy_position_events_table(conn) or "position_events"
-        rows = conn.execute(
-            f"""
-            SELECT runtime_trade_id AS trade_key, event_type, details_json AS payload, env, timestamp AS occurred_at
-            FROM {legacy_table}
-            WHERE runtime_trade_id IN ({placeholders})
-            ORDER BY timestamp DESC, id DESC
-            """,
-            trade_ids,
-        ).fetchall()
-    elif {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+    if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
         rows = conn.execute(
             f"""
             SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
@@ -2767,7 +3937,7 @@ def _query_transitional_position_hints(
             trade_ids,
         ).fetchall()
     else:
-        return {}
+        logger.warning("position_events table missing expected columns"); return {}
     hints: dict[str, dict] = {}
     for row in rows:
         trade_id = str(row["trade_key"] or "")
@@ -2801,12 +3971,7 @@ def _query_transitional_position_hints(
             status = details.get("status")
             if status not in (None, ""):
                 bucket["exit_state"] = str(status)
-        if "env" not in bucket:
-            env_value = None
-            if "env" in row.keys():
-                env_value = row["env"]
-            if env_value not in (None, ""):
-                bucket["env"] = str(env_value)
+        # env is not in canonical position_events; mode isolation is at DB level
     return hints
 
 
@@ -2905,33 +4070,26 @@ def query_execution_event_summary(
     limit: int | None = 500,
     not_before: str | None = None,
 ) -> dict:
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    query_env = settings.mode if env is None else env
-    filters = [
-        "env = ?",
-        """event_type IN (
-            'ORDER_ATTEMPTED', 'ORDER_FILLED', 'ORDER_REJECTED',
-            'EXIT_ORDER_ATTEMPTED', 'EXIT_ORDER_FILLED',
-            'EXIT_RETRY_SCHEDULED', 'EXIT_BACKOFF_EXHAUSTED',
-            'EXIT_FILL_CHECK_FAILED', 'EXIT_FILL_CHECKED',
-            'EXIT_FILL_CONFIRMED', 'EXIT_RETRY_RELEASED'
-          )""",
-    ]
-    params: list[object] = [query_env]
+    """Execution event summary from canonical position_events."""
+    filters = []
+    params: list[object] = []
     if not_before is not None:
-        filters.append("timestamp >= ?")
+        filters.append("occurred_at >= ?")
         params.append(not_before)
+    where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
     query = f"""
-        SELECT event_type, strategy
-        FROM {legacy_table}
-        WHERE {' AND '.join(filters)}
-        ORDER BY id DESC
+        SELECT event_type, strategy_key
+        FROM position_events
+        {where_clause}
+        ORDER BY occurred_at DESC
         """
     if limit is not None:
         query += "\n        LIMIT ?"
         params.append(limit)
-    rows = conn.execute(query, params).fetchall()
+    try:
+        rows = conn.execute(query, params).fetchall()
+    except Exception:
+        rows = []
 
     def _blank() -> dict:
         return {
@@ -2952,17 +4110,14 @@ def query_execution_event_summary(
     by_strategy: dict[str, dict] = {}
 
     mapping = {
-        "ORDER_ATTEMPTED": "entry_attempted",
-        "ORDER_FILLED": "entry_filled",
-        "ORDER_REJECTED": "entry_rejected",
-        "EXIT_ORDER_ATTEMPTED": "exit_attempted",
+        "POSITION_OPEN_INTENT": "entry_attempted",
+        "ENTRY_ORDER_FILLED": "entry_filled",
+        "ENTRY_ORDER_REJECTED": "entry_rejected",
+        "EXIT_ORDER_POSTED": "exit_attempted",
         "EXIT_ORDER_FILLED": "exit_filled",
+        "EXIT_ORDER_VOIDED": "exit_fill_confirmed",
+        "EXIT_ORDER_REJECTED": "exit_backoff_exhausted",
         "EXIT_RETRY_SCHEDULED": "exit_retry_scheduled",
-        "EXIT_BACKOFF_EXHAUSTED": "exit_backoff_exhausted",
-        "EXIT_FILL_CHECK_FAILED": "exit_fill_check_failed",
-        "EXIT_FILL_CHECKED": "exit_fill_checked",
-        "EXIT_FILL_CONFIRMED": "exit_fill_confirmed",
-        "EXIT_RETRY_RELEASED": "exit_retry_released",
     }
 
     for row in rows:
@@ -2971,7 +4126,7 @@ def query_execution_event_summary(
         if counter_key is None:
             continue
         overall[counter_key] += 1
-        strategy = str(row["strategy"] or "unclassified")
+        strategy = str(row["strategy_key"] or "unclassified")
         bucket = by_strategy.setdefault(strategy, _blank())
         bucket[counter_key] += 1
 
@@ -2980,84 +4135,6 @@ def query_execution_event_summary(
         "overall": overall,
         "by_strategy": by_strategy,
     }
-
-
-def log_position_event(
-    conn: sqlite3.Connection,
-    event_type: str,
-    pos,
-    *,
-    details: dict | None = None,
-    timestamp: str | None = None,
-    source: str = "runtime",
-    order_id: str | None = None,
-    position_state: str | None = None,
-) -> None:
-    """Append a stage-level position event without changing open-position authority."""
-    _assert_legacy_runtime_position_event_schema(conn)
-    legacy_table = _legacy_position_events_table(conn)
-    runtime_trade_id = getattr(pos, "trade_id", "")
-    if not runtime_trade_id:
-        return
-
-    env = getattr(pos, "env", None) or settings.mode
-    event_timestamp = (
-        timestamp
-        or getattr(pos, "last_exit_at", "")
-        or getattr(pos, "entered_at", "")
-        or getattr(pos, "order_posted_at", "")
-        or datetime.now(timezone.utc).isoformat()
-    )
-    payload = details or {}
-    event_order_id = (
-        order_id
-        or getattr(pos, "order_id", "")
-        or getattr(pos, "entry_order_id", "")
-        or getattr(pos, "last_exit_order_id", "")
-        or None
-    )
-    conn.execute(
-        f"""
-        INSERT INTO {legacy_table} (
-            event_type,
-            runtime_trade_id,
-            position_state,
-            order_id,
-            decision_snapshot_id,
-            city,
-            target_date,
-            market_id,
-            bin_label,
-            direction,
-            strategy,
-            edge_source,
-            source,
-            details_json,
-            timestamp,
-            env
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_type,
-            runtime_trade_id,
-            position_state if position_state is not None else (getattr(pos, "state", "") or None),
-            event_order_id,
-            getattr(pos, "decision_snapshot_id", "") or None,
-            getattr(pos, "city", "") or None,
-            getattr(pos, "target_date", "") or None,
-            getattr(pos, "market_id", "") or None,
-            getattr(pos, "bin_label", "") or None,
-            getattr(pos, "direction", "") or None,
-            getattr(pos, "strategy", "") or None,
-            getattr(pos, "edge_source", "") or None,
-            source,
-            json.dumps(payload, default=str),
-            event_timestamp,
-            env,
-        ),
-    )
-
 
 def log_exit_lifecycle_event(
     conn: sqlite3.Connection,
@@ -3136,15 +4213,7 @@ def log_exit_lifecycle_event(
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
         )
-    log_position_event(
-        conn,
-        event_type,
-        pos,
-        details=payload,
-        timestamp=timestamp,
-        source="exit_lifecycle",
-        order_id=order_id,
-    )
+
 
 
 def log_exit_retry_event(
@@ -3292,42 +4361,4 @@ def log_pending_exit_recovery_event(
         reason=reason,
         error=error,
         timestamp=timestamp,
-    )
-
-
-def log_reconciled_entry_event(conn: sqlite3.Connection, pos, *, timestamp: str, details: dict | None = None) -> None:
-    """Append exactly-once stage event for chain-reconciled pending fills."""
-    payload = {
-        "status": "entered",
-        "source": "chain_reconciliation",
-        "reason": "pending_fill_rescued",
-        "entry_order_id": getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", ""),
-        "entry_method": getattr(pos, "entry_method", ""),
-        "selected_method": getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
-        "applied_validations": list(getattr(pos, "applied_validations", []) or []),
-        "entry_fill_verified": getattr(pos, "entry_fill_verified", False),
-        "shares": getattr(pos, "shares", None),
-        "cost_basis_usd": getattr(pos, "cost_basis_usd", None),
-        "size_usd": getattr(pos, "size_usd", None),
-        "condition_id": getattr(pos, "condition_id", ""),
-        "order_status": getattr(pos, "order_status", ""),
-        "chain_state": getattr(pos, "chain_state", ""),
-    }
-    if details:
-        payload.update(details)
-    legacy_columns_present = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(
-        _table_columns(conn, "position_events")
-    )
-    if not _legacy_runtime_position_event_schema_available(conn):
-        if _canonical_position_surface_available(conn) and not legacy_columns_present:
-            return
-        _assert_legacy_runtime_position_event_schema(conn)
-    log_position_event(
-        conn,
-        "POSITION_LIFECYCLE_UPDATED",
-        pos,
-        details=payload,
-        timestamp=timestamp,
-        source="chain_reconciliation",
-        position_state="entered",
     )

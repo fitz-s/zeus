@@ -1,0 +1,265 @@
+schema_version: 1
+metadata:
+  created: "2026-04-14"
+  owner_packet: "Reference Replacement Matrix"
+  purpose: >
+    Track whether bulky reference docs have been replaced by machine manifests,
+    lore cards, contracts, tests, or digest routing. This manifest does not
+    delete files; it records deletion eligibility.
+
+allowed_replacement_statuses:
+  - not_replaced
+  - partial_replacement_candidate
+  - mostly_replaced
+  - replaced
+
+allowed_actions:
+  - keep_default
+  - keep_conditional
+  - demote_from_default_reads
+  - extract_lore_then_reassess
+  - keep_until_machine_inventory
+
+allowed_claim_roles:
+  - fact_spec
+  - failure_lore
+  - authority_candidate
+  - breadcrumb
+  - stale_claim
+  - derived_diagnostic
+
+allowed_claim_statuses:
+  - not_replaced
+  - partial_replacement_candidate
+  - mostly_replaced
+  - replaced
+  - intentionally_unpromoted
+  - stale_superseded
+
+allowed_proof_target_kinds:
+  - executable_contract
+  - blocking_test
+  - machine_manifest
+  - history_lore
+  - digest_route
+  - authority_doc
+  - operations_pointer
+
+required_entry_fields:
+  - path
+  - default_read
+  - replacement_status
+  - delete_allowed
+  - replaced_by
+  - unique_remaining
+  - allowed_action
+  - rationale
+
+entries:
+  - path: docs/reference/zeus_domain_model.md
+    default_read: true
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - AGENTS.md
+      - architecture/history_lore.yaml
+      - architecture/runtime_modes.yaml
+    unique_remaining:
+      - worked domain examples
+      - strategy shape explanations
+      - translation loss and structural decision methodology
+      - data provenance model narrative
+    allowed_action: keep_default
+    rationale: >
+      Root AGENTS keeps only the first-read mental model. This file remains the
+      conditional deep "why" reference for domain/math work.
+
+  - path: docs/reference/zeus_architecture_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - compact runtime/workspace architecture map
+      - truth/control surface orientation
+      - dual-track architecture routing
+      - high-blast-radius code hotspot map
+    allowed_action: keep_conditional
+    rationale: >
+      P1 populated this as the compact canonical architecture reference after
+      demoting legacy root snapshots to reports/artifacts evidence.
+
+  - path: docs/reference/zeus_market_settlement_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - compact settlement semantics and market structure routing
+      - source provenance risk model
+      - settlement mismatch triage map
+    allowed_action: keep_conditional
+    rationale: >
+      P1 populated this as the compact canonical market/settlement reference.
+      The detailed source table remains as a conditional reference because it
+      carries city/station evidence too dense for the compact anchor.
+
+  - path: docs/reference/zeus_data_and_replay_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - compact current data reality summary
+      - replay bottleneck map
+      - dual-track data identity implications
+      - active data-risk routing
+    allowed_action: keep_conditional
+    rationale: >
+      P1 populated this as the compact canonical data/replay reference while
+      keeping detailed inventory and roadmap sources conditional.
+
+  - path: docs/reference/zeus_failure_modes_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - compact durable failure-class taxonomy
+      - mitigation and antibody crosswalk
+      - authority/projection and workspace failure routing
+    allowed_action: keep_conditional
+    rationale: >
+      P1 populated this as the compact canonical failure-mode reference after
+      demoting the legacy pathology registry to reports evidence.
+
+  - path: docs/reference/zeus_execution_lifecycle_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - lifecycle state machine with phase transitions and write gates
+      - chain reconciliation logic and dedup contract
+      - executor order placement and authority contracts
+      - exit trigger evaluation and monitoring lanes
+      - settlement harvest flow and learning pipeline
+    allowed_action: keep_conditional
+    rationale: >
+      Code-grounded reference for the execution and lifecycle subsystems.
+      Contains exact thresholds, transition tables, and invariant anchors.
+
+  - path: docs/reference/zeus_risk_strategy_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - risk level state machine with runtime behavior table
+      - strategy family taxonomy with alpha profiles
+      - Kelly sizing formula and position limits
+      - edge decay model and confidence interval construction
+    allowed_action: keep_conditional
+    rationale: >
+      Code-grounded reference for risk management and strategy classification.
+      Contains exact formulas, risk escalation rules, and sizing parameters.
+
+  - path: docs/reference/zeus_math_spec.md
+    default_read: false
+    replacement_status: partial_replacement_candidate
+    delete_allowed: false
+    replaced_by:
+      - architecture/history_lore.yaml
+      - architecture/data_rebuild_topology.yaml
+      - tests/test_data_rebuild_relationships.py
+      - tests/test_instrument_invariants.py
+    unique_remaining:
+      - full math/statistics fact specification
+      - decision-group and calibration construction details
+      - known defects and deferred upgrade inventory
+    allowed_action: keep_conditional
+    rationale: >
+      This is not top-level authority, but its factual content is still a dense
+      reference until fully reflected in executable contracts and manifests.
+    claim_proofs:
+      - claim_id: WMO_HALF_UP_FORMULA
+        source:
+          path: docs/reference/zeus_math_spec.md
+          locator: "1.2 WMO asymmetric half-up rounding"
+        claim_role: fact_spec
+        claim_status: replaced
+        assertion: "Settlement-aligned WU values use floor(x + 0.5), not banker rounding."
+        proof_targets:
+          - kind: executable_contract
+            path: src/contracts/settlement_semantics.py
+            locator: SettlementSemantics
+          - kind: blocking_test
+            path: tests/test_instrument_invariants.py
+            locator: WMO_ROUNDING
+          - kind: history_lore
+            path: architecture/history_lore.yaml
+            locator: WMO_ROUNDING_BANKER_FAILURE
+        gates:
+          - python3 scripts/semantic_linter.py
+          - pytest -q tests/test_instrument_invariants.py
+        invalidation_condition: "Only an explicit WU/Polymarket settlement-source rule change."
+      - claim_id: ZEUS_MATH_SPEC_REFERENCE_ONLY
+        source:
+          path: docs/reference/zeus_math_spec.md
+          locator: "Purpose / Authority status"
+        claim_role: fact_spec
+        claim_status: replaced
+        assertion: "zeus_math_spec.md is high-confidence math reference, not top-level authority."
+        proof_targets:
+          - kind: machine_manifest
+            path: architecture/topology.yaml
+            locator: reference_fact_specs
+          - kind: machine_manifest
+            path: architecture/context_budget.yaml
+            locator: file_budgets
+          - kind: authority_doc
+            path: docs/reference/AGENTS.md
+            locator: "Default vs conditional read path"
+          - kind: digest_route
+            path: architecture/topology.yaml
+            locator: "reference artifact extraction"
+        gates:
+          - python3 scripts/topology_doctor.py --reference-replacement
+          - python3 scripts/topology_doctor.py --context-budget
+        invalidation_condition: "Only a governance packet may promote this fact spec into authority."
+      - claim_id: DECISION_GROUP_INDEPENDENCE
+        source:
+          path: docs/reference/zeus_math_spec.md
+          locator: "12.1 Decision group: the independent sample unit"
+        claim_role: fact_spec
+        claim_status: partial_replacement_candidate
+        assertion: "Calibration and bootstrap logic must treat decision_group as the independent sample unit."
+        proof_targets:
+          - kind: machine_manifest
+            path: architecture/data_rebuild_topology.yaml
+            locator: decision_group_sample_independence
+          - kind: blocking_test
+            path: tests/test_data_rebuild_relationships.py
+            locator: decision_group
+        gates:
+          - python3 scripts/topology_doctor.py --data-rebuild
+          - pytest -q tests/test_data_rebuild_relationships.py
+        invalidation_condition: "Only a strategy-math packet may redefine calibration sample independence."
+      - claim_id: OPEN_BOUNDARY_BINS
+        source:
+          path: docs/reference/zeus_math_spec.md
+          locator: "5.1 Bin definition (including open-boundary outer bins)"
+        claim_role: fact_spec
+        claim_status: partial_replacement_candidate
+        assertion: "Outer market bins are represented with -inf/+inf boundaries, not finite sentinels."
+        proof_targets:
+          - kind: machine_manifest
+            path: architecture/data_rebuild_topology.yaml
+            locator: inf_boundary_serialization
+          - kind: blocking_test
+            path: tests/test_data_rebuild_relationships.py
+            locator: "R4/R5 Bin ±inf"
+        gates:
+          - python3 scripts/topology_doctor.py --data-rebuild
+          - pytest -q tests/test_data_rebuild_relationships.py
+        invalidation_condition: "Only a market-contract topology packet may replace open-boundary bin semantics."

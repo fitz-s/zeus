@@ -1,0 +1,67 @@
+{
+  "task": "P1.1 source-role and training-eligibility registry implementation",
+  "packet": "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/AGENTS.md",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
+    "architecture/city_truth_contract.yaml",
+    "architecture/source_rationale.yaml",
+    "architecture/module_manifest.yaml",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+    "docs/operations/known_gaps.md",
+    "src/data/AGENTS.md",
+    "tests/AGENTS.md",
+    "docs/reference/modules/data.md",
+    "docs/reference/modules/tests.md"
+  ],
+  "allowed_files": [
+    "src/data/tier_resolver.py",
+    "tests/test_tier_resolver.py",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json"
+  ],
+  "future_implementation_allowed_files": [
+    "src/data/tier_resolver.py",
+    "tests/test_tier_resolver.py"
+  ],
+  "future_closeout_bookkeeping_files": [
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/plan.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".code-review-graph/graph.db",
+    "src/state/**",
+    "src/execution/**",
+    "src/calibration/**",
+    "src/data/observation_instants_v2_writer.py",
+    "docs/authority/**",
+    "architecture/**"
+  ],
+  "changed_files": [
+    "src/data/tier_resolver.py",
+    "tests/test_tier_resolver.py",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json"
+  ],
+  "tests_evidence": [
+    "tests/test_tier_resolver.py",
+    "tests/test_obs_v2_writer.py",
+    "tests/test_hk_rejects_vhhh_source.py",
+    "tests/test_backfill_scripts_match_live_config.py",
+    "docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md"
+  ]
+}

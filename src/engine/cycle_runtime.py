@@ -8,11 +8,14 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from src.engine.time_context import lead_hours_to_target
+from src.config import get_mode
+from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
+from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
@@ -25,6 +28,31 @@ CANONICAL_STRATEGY_KEYS = {
     "center_buy",
     "opening_inertia",
 }
+
+
+# T4.2-Phase1 2026-04-23 (D4 audit-only): exit triggers whose statistical
+# burden (2 consecutive negative cycles, no FDR correction) is weaker than
+# the entry-side burden (bootstrap CI + BH-FDR). DecisionEvidence symmetry
+# audit fires on these and only these.
+#
+# Excluded triggers and their rationale:
+# - SETTLEMENT_IMMINENT / WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
+#   FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
+#   driven by market-mechanics or risk-layer mandates, not statistical
+#   inference. Symmetry with a statistical entry burden is not a coherent
+#   question.
+# - DAY0_OBSERVATION_REVERSAL — single-cycle observation-authority exit
+#   fired when Day0 forward-edge drops below threshold while
+#   day0_active=True. It does NOT use a consecutive_confirmations gate,
+#   so the Phase1 weak-exit evidence template (sample_size=2,
+#   consecutive_confirmations=2) would misrepresent its actual burden and
+#   pollute the Phase1 audit_log_false_positive_rate metric. Phase3 may
+#   introduce an observation-grade evidence variant; out of Phase1 scope.
+_D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
+    "EDGE_REVERSAL",
+    "BUY_NO_EDGE_EXIT",
+    "BUY_NO_NEAR_EXIT",
+})
 
 
 def _resolve_strategy_key(decision) -> str:
@@ -102,21 +130,21 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 
 def run_chain_sync(portfolio, clob, conn=None, *, deps):
-    if getattr(clob, "paper_mode", True):
-        return {"skipped": "paper_mode"}, True
-
-    try:
-        api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
-    except Exception as exc:
-        deps.logger.warning("Chain sync fetch failed: %s", exc)
-        return {"skipped": "chain_api_unavailable"}, False
+    api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     if api_positions is None:
-        return {"skipped": "chain_api_unavailable"}, False
+        raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
     return deps.reconcile_with_chain(portfolio, api_positions, conn=conn), True
 
 
-def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
-    if getattr(clob, "paper_mode", True) or not hasattr(clob, "get_open_orders"):
+def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
+    """Cancel exchange orders that are not tracked locally.
+
+    Triple-confirmation guard (#63):
+      1. Order is NOT in local portfolio tracking (order_id / last_exit_order_id)
+      2. Order is NOT in execution_fact (recent command log) within 2 hours
+      3. Only then cancel — otherwise log warning and skip (quarantine)
+    """
+    if not hasattr(clob, "get_open_orders"):
         return 0
 
     tracked_order_ids = set()
@@ -125,10 +153,33 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
             tracked_order_ids.add(pos.order_id)
         if pos.last_exit_order_id:
             tracked_order_ids.add(pos.last_exit_order_id)
+
+    # Build set of recently-commanded order IDs from trade_decisions
+    recent_order_ids: set[str] = set()
+    if conn is not None:
+        try:
+            from src.state.db import _table_exists
+            if _table_exists(conn, "trade_decisions"):
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+                rows = conn.execute(
+                    "SELECT order_id FROM trade_decisions WHERE order_posted_at >= ? AND order_id IS NOT NULL AND order_id != ''",
+                    (cutoff,),
+                ).fetchall()
+                recent_order_ids = {str(r[0]) for r in rows}
+        except Exception as exc:
+            deps.logger.warning("Could not query trade_decisions for orphan guard: %s", exc)
+
     cancelled = 0
     for order in clob.get_open_orders():
         order_id = extract_order_id(order)
         if not order_id or order_id in tracked_order_ids:
+            continue
+        # Quarantine guard: if order appears in recent trade_decisions, do NOT cancel
+        if order_id in recent_order_ids:
+            deps.logger.warning(
+                "Orphan order %s found in recent execution_fact — quarantining instead of cancelling",
+                order_id,
+            )
             continue
         try:
             result = clob.cancel_order(order_id)
@@ -141,66 +192,57 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps) -> int:
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     config_cap = float(deps.settings.capital_base_usd)
-    effective = max(0.0, float(portfolio.initial_bankroll))
-    exposure = deps.total_exposure_usd(portfolio)
 
-    if getattr(clob, "paper_mode", True):
-        bankroll = min(config_cap, effective) if effective > 0 else 0.0
-        return bankroll, {
-            "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
-            "dynamic_cap_usd": min(config_cap, effective) if effective > 0 else 0.0,
-            "entry_bankroll_contract": "paper_effective_bankroll_capped_by_config",
-            "bankroll_truth_source": "portfolio.initial_bankroll",
-            "wallet_balance_used": False,
-        }
-
+    # P7: Live — wallet_balance is the PRIMARY bankroll source.
+    # config_cap acts as an upper-bound safety cap only.
     try:
         balance = float(clob.get_balance())
     except Exception as exc:
         deps.logger.warning("Wallet balance fetch failed: %s", exc)
         return None, {
             "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
             "wallet_balance_usd": None,
             "dynamic_cap_usd": None,
-            "entry_block_reason": "wallet_balance_unavailable",
-            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+            "entry_block_reason": "wallet_query_failed",
+            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
 
-    if balance <= 0.0 and exposure > 0:
-        deps.logger.warning(
-            "SUSPICIOUS: wallet balance $%.2f but exposure $%.2f — possible API error. Blocking new entries.",
-            balance,
-            exposure,
-        )
+    if balance <= 0.0:
+        deps.logger.warning("Wallet balance $%.2f — blocking new entries.", balance)
         return None, {
             "config_cap_usd": config_cap,
-            "effective_bankroll_usd": effective,
             "wallet_balance_usd": balance,
             "dynamic_cap_usd": None,
-            "entry_block_reason": "wallet_balance_zero_with_exposure",
-            "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-            "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+            "entry_block_reason": "entry_bankroll_non_positive",
+            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
 
-    dynamic_cap = min(config_cap, balance + exposure)
-    bankroll = min(dynamic_cap, effective) if effective > 0 else dynamic_cap
-    return max(0.0, bankroll), {
+    effective_bankroll = min(balance, config_cap)
+    return max(0.0, effective_bankroll), {
         "config_cap_usd": config_cap,
-        "effective_bankroll_usd": effective,
         "wallet_balance_usd": balance,
-        "dynamic_cap_usd": dynamic_cap,
-        "entry_bankroll_contract": "live_wallet_plus_exposure_capped_by_effective_and_config",
-        "bankroll_truth_source": "min(config_cap, wallet_balance + exposure, portfolio.initial_bankroll)",
+        "dynamic_cap_usd": effective_bankroll,
+        "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+        "bankroll_truth_source": "wallet_balance",
         "wallet_balance_used": True,
     }
 
 
-def materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, bankroll_at_entry=None, deps):
+def materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, env: str, bankroll_at_entry=None, deps):
+    # B097 [YELLOW / flag for §7c architect sign-off]: bankroll_at_entry
+    # must be captured authoritatively at the point of entry. Falling back
+    # to None (which previously propagated through to Position) corrupts
+    # subsequent per-position P&L and size-reconstruction analytics. Reject
+    # the materialization outright rather than synthesize a fake value.
+    if bankroll_at_entry is None:
+        raise ValueError(
+            f"materialize_position: bankroll_at_entry is None for trade_id={getattr(result, 'trade_id', '?')!r} "
+            f"state={state!r} env={env!r}; entry materialization requires an authoritative bankroll snapshot"
+        )
     now = deps._utcnow()
     entry_price = result.fill_price or result.submitted_price or decision.edge.entry_price
     shares = result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0)
@@ -226,7 +268,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         edge=decision.edge.edge,
         shares=shares,
         cost_basis_usd=decision.size_usd,
-        bankroll_at_entry=portfolio.initial_bankroll if bankroll_at_entry is None else bankroll_at_entry,
+        bankroll_at_entry=bankroll_at_entry,
         entered_at=now.isoformat() if state == "entered" else "",
         entry_ci_width=max(0.0, decision.edge.ci_upper - decision.edge.ci_lower),
         unit=city.settlement_unit,
@@ -251,11 +293,84 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_posted_at=now.isoformat() if state == "pending_tracked" else "",
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
-        env=deps.settings.mode,
+        env=env,
+        temperature_metric=getattr(candidate, "temperature_metric", "high"),
+        entry_model_agreement=getattr(decision, "agreement", "NOT_CHECKED"),
     )
 
 
-def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | None, deps) -> bool:
+def _emit_day0_window_entered_canonical_if_available(
+    conn,
+    pos,
+    *,
+    day0_entered_at: str,
+    previous_phase: str,
+    deps,
+) -> bool:
+    """Day0-canonical-event feature slice (2026-04-24): emit canonical
+    DAY0_WINDOW_ENTERED event after a successful day0 transition
+    (post-memory-mutation, post-update_trade_lifecycle persist).
+
+    Pre-this-slice: cycle_runtime set pos.state='day0_window' + persisted
+    via update_trade_lifecycle but never wrote a canonical position_events
+    record. This helper lands one via build_day0_window_entered_canonical
+    _write + append_many_and_project. Clears T1.c-followup L875 OBSOLETE_
+    PENDING_FEATURE (test_day0_transition_emits_durable_lifecycle_event).
+
+    Returns True on successful write, False on non-fatal skip (conn None
+    or RuntimeError from canonical transaction schema absence — matches
+    the pattern from _dual_write_canonical_entry_if_available).
+    """
+    if conn is None:
+        return False
+
+    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.state.db import append_many_and_project
+
+    try:
+        # Query next sequence_no for this position (same pattern as
+        # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
+        # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /
+        # ENTRY_ORDER_FILLED events (sequence_no 1-3); day0 event takes 4+.
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (getattr(pos, "trade_id", ""),),
+        ).fetchone()
+        next_seq = int((row[0] if row else 0) or 0) + 1
+        events, projection = build_day0_window_entered_canonical_write(
+            pos,
+            day0_entered_at=day0_entered_at,
+            sequence_no=next_seq,
+            previous_phase=previous_phase,
+            source_module="src.engine.cycle_runtime",
+        )
+        append_many_and_project(conn, events, projection)
+    except RuntimeError as exc:
+        deps.logger.warning(
+            "CANONICAL_DAY0_EMIT_SKIPPED trade_id=%s reason=%s",
+            pos.trade_id,
+            exc,
+        )
+        return False
+
+    return True
+
+
+def _dual_write_canonical_entry_if_available(
+    conn,
+    pos,
+    *,
+    decision_id: str | None,
+    deps,
+    decision_evidence: DecisionEvidence | None = None,
+) -> bool:
+    # T4.1b 2026-04-23 (D4 Option E): `decision_evidence` threads through
+    # to `build_entry_canonical_write` so the ENTRY_ORDER_POSTED payload
+    # carries the `decision_evidence_envelope` sidecar for T4.2-Phase1
+    # exit-side read-back via `json_extract(payload_json,
+    # '$.decision_evidence_envelope')`. Remains None on paths that do not
+    # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
+    # the payload simply omits the key, preserving pre-slice wire format.
     if conn is None:
         return False
 
@@ -267,10 +382,11 @@ def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | No
             pos,
             decision_id=decision_id,
             source_module="src.engine.cycle_runtime",
+            decision_evidence=decision_evidence,
         )
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:
-        deps.logger.debug("Canonical entry dual-write skipped for %s: %s", pos.trade_id, exc)
+        deps.logger.warning("CANONICAL_DUAL_WRITE_SKIPPED trade_id=%s reason=%s", pos.trade_id, exc)
         return False
 
     return True
@@ -278,9 +394,6 @@ def _dual_write_canonical_entry_if_available(conn, pos, *, decision_id: str | No
 
 def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     summary = {"entered": 0, "voided": 0, "dirty": False, "tracker_dirty": False}
-    if getattr(clob, "paper_mode", False):
-        return summary
-
     from src.execution.fill_tracker import check_pending_entries
 
     stats = check_pending_entries(
@@ -296,7 +409,7 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     return summary
 
 
-def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps) -> bool:
+def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps, conn=None) -> bool:
     portfolio_dirty = False
     for pos in list(portfolio.positions):
         if pos.chain_state not in {"quarantined", "quarantine_expired"}:
@@ -307,6 +420,24 @@ def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps) -> 
         if token_id in getattr(portfolio, "ignored_tokens", []):
             continue
         if not deps.has_acknowledged_quarantine_clear(token_id):
+            continue
+        result = deps.record_token_suppression(
+            conn,
+            token_id=token_id,
+            condition_id=getattr(pos, "condition_id", ""),
+            suppression_reason="operator_quarantine_clear",
+            source_module="src.engine.cycle_runtime",
+            evidence={"trade_id": getattr(pos, "trade_id", "")},
+        )
+        if result.get("status") != "written":
+            summary["operator_clears_suppression_failed"] = (
+                summary.get("operator_clears_suppression_failed", 0) + 1
+            )
+            deps.logger.warning(
+                "Quarantine clear for %s was acknowledged but token suppression was not persisted: %s",
+                token_id,
+                result,
+            )
             continue
         portfolio.ignored_tokens.append(token_id)
         summary["operator_clears_applied"] = summary.get("operator_clears_applied", 0) + 1
@@ -319,21 +450,50 @@ def _position_state_value(pos) -> str:
     return getattr(state, "value", state) or ""
 
 
-def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitContext):
+def _build_exit_context(
+    pos,
+    edge_ctx,
+    *,
+    hours_to_settlement,
+    ExitContext,
+    portfolio=None,
+):
     if False:
         _ = pos.entry_method
         _ = pos.selected_method
     p_market = None
     if getattr(edge_ctx, "p_market", None) is not None and len(edge_ctx.p_market) > 0:
+        # Bug #64: edge_ctx.p_market from monitor_refresh is single-element
+        # [held_bin_price], so index 0 is correct here. The held_bin_index
+        # routing happens in monitor_refresh._build_all_bins.
         p_market = float(edge_ctx.p_market[0])
     elif getattr(pos, "last_monitor_market_price", None) is not None:
         p_market = float(pos.last_monitor_market_price)
 
     best_bid = getattr(pos, "last_monitor_best_bid", None)
-    if paper_mode and best_bid is None and p_market is not None:
-        best_bid = p_market
 
     position_state = _position_state_value(pos)
+
+    # T6.4-phase2 (2026-04-24): thread portfolio context so
+    # HoldValue.compute_with_exit_costs can compute correlation-crowding
+    # cost over other held positions. Exclude self from the tuple; each
+    # element is (cluster, size_usd, trade_id). When portfolio is None,
+    # falls back to empty tuple / None bankroll — the downstream seam
+    # treats that as "no co-held positions, correlation_crowding=0".
+    portfolio_positions: tuple = ()
+    bankroll = None
+    if portfolio is not None:
+        try:
+            bankroll = float(getattr(portfolio, "bankroll", None) or 0.0) or None
+        except (TypeError, ValueError):
+            bankroll = None
+        others = getattr(portfolio, "positions", None) or ()
+        portfolio_positions = tuple(
+            (str(p.cluster), float(p.size_usd), str(p.trade_id))
+            for p in others
+            if getattr(p, "trade_id", None) != getattr(pos, "trade_id", None)
+        )
+
     return ExitContext(
         fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
@@ -346,9 +506,11 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, paper_mode, ExitC
         position_state=position_state,
         day0_active=position_state == "day0_window",
         whale_toxicity=getattr(pos, "last_monitor_whale_toxicity", None),
-        chain_is_fresh=None if paper_mode else pos.chain_state == "synced",
+        chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+        portfolio_positions=portfolio_positions,
+        bankroll=bankroll,
     )
 
 
@@ -389,27 +551,30 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    paper_mode = getattr(clob, "paper_mode", True)
-    portfolio_dirty = _apply_acknowledged_quarantine_clears(portfolio, summary, deps=deps)
+    portfolio_dirty = _apply_acknowledged_quarantine_clears(
+        portfolio,
+        summary,
+        deps=deps,
+        conn=conn,
+    )
     tracker_dirty = False
 
-    if not paper_mode:
-        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
-        if exit_stats["filled"] or exit_stats["retried"]:
-            portfolio_dirty = True
+    exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+    if exit_stats["filled"] or exit_stats["retried"]:
+        portfolio_dirty = True
 
-        for filled_pos in exit_stats.get("filled_positions", []):
-            artifact.add_exit(
-                filled_pos.trade_id,
-                filled_pos.exit_reason or "DEFERRED_SELL_FILL",
-                filled_pos.exit_price or 0.0,
-                "sell_filled",
-            )
-            tracker.record_exit(filled_pos)
-            tracker_dirty = True
+    for filled_pos in exit_stats.get("filled_positions", []):
+        artifact.add_exit(
+            filled_pos.trade_id,
+            filled_pos.exit_reason or "DEFERRED_SELL_FILL",
+            filled_pos.exit_price or 0.0,
+            "sell_filled",
+        )
+        tracker.record_exit(filled_pos)
+        tracker_dirty = True
 
-        summary["pending_exits_filled"] = exit_stats["filled"]
-        summary["pending_exits_retried"] = exit_stats["retried"]
+    summary["pending_exits_filled"] = exit_stats["filled"]
+    summary["pending_exits_retried"] = exit_stats["retried"]
 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
@@ -489,11 +654,19 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitor_skipped_unknown_direction"] = summary.get("monitor_skipped_unknown_direction", 0) + 1
             continue
 
+        # K1/#49: belt-and-suspenders guard — quarantine placeholders must not
+        # reach monitor_refresh where cities_by_name lookup would fail.
+        if getattr(pos, 'is_quarantine_placeholder', False):
+            logger.warning("Quarantine placeholder %s reached monitor loop — skipping", pos.trade_id)
+            summary["monitor_skipped_quarantine_placeholder"] = summary.get("monitor_skipped_quarantine_placeholder", 0) + 1
+            continue
+
+        hours_to_settlement = None
+        monitor_result_written = False
         try:
             city = deps.cities_by_name.get(pos.city)
-            hours_to_settlement = None
             if city is not None:
-                hours_to_settlement = lead_hours_to_target(
+                hours_to_settlement = lead_hours_to_settlement_close(
                     pos.target_date,
                     city.timezone,
                     deps._utcnow(),
@@ -501,33 +674,61 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 if (hours_to_settlement <= 6.0
                         and pos.state in {"entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
-                    pos.state = enter_day0_window_runtime_state(
+                    new_state = enter_day0_window_runtime_state(
                         pos.state,
                         exit_state=getattr(pos, "exit_state", ""),
                         chain_state=getattr(pos, "chain_state", ""),
                     )
-                    if not pos.day0_entered_at:
-                        pos.day0_entered_at = deps._utcnow().isoformat()
-                    portfolio_dirty = True
+                    new_day0_entered_at = pos.day0_entered_at or deps._utcnow().isoformat()
+                    # Day0-canonical-event slice 2026-04-24: capture
+                    # pre-transition phase so the canonical event records
+                    # the actual lifecycle transition (not just "from
+                    # active" default).
+                    previous_phase_str = "active" if pos.state == "holding" else "active"
+                    # Persist FIRST, then update memory (avoid split-brain)
                     if conn is not None:
                         try:
                             from src.state.db import update_trade_lifecycle
-
+                            # Temporarily set fields for persistence
+                            old_state = pos.state
+                            old_day0 = pos.day0_entered_at
+                            pos.state = new_state
+                            pos.day0_entered_at = new_day0_entered_at
                             update_trade_lifecycle(conn=conn, pos=pos)
                         except Exception as exc:
+                            # Revert memory to pre-transition state
+                            pos.state = old_state
+                            pos.day0_entered_at = old_day0
                             deps.logger.warning(
-                                "Failed to persist day0_window lifecycle for %s: %s",
+                                "Day0 transition ABORTED for %s: persist failed: %s",
                                 pos.trade_id,
                                 exc,
                             )
+                            continue
+                    else:
+                        pos.state = new_state
+                        pos.day0_entered_at = new_day0_entered_at
+                    portfolio_dirty = True
+                    # Day0-canonical-event slice 2026-04-24: emit typed
+                    # DAY0_WINDOW_ENTERED event post-transition. Clears
+                    # T1.c-followup L875 OBSOLETE_PENDING_FEATURE.
+                    # Non-fatal: if canonical schema absent or write fails,
+                    # logs warning but does not abort the cycle.
+                    _emit_day0_window_entered_canonical_if_available(
+                        conn,
+                        pos,
+                        day0_entered_at=new_day0_entered_at,
+                        previous_phase=previous_phase_str,
+                        deps=deps,
+                    )
 
             edge_ctx = refresh_position(conn, clob, pos)
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
                 hours_to_settlement=hours_to_settlement,
-                paper_mode=paper_mode,
                 ExitContext=ExitContext,
+                portfolio=portfolio,
             )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
@@ -536,6 +737,15 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             exit_reason = exit_decision.reason
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
                 summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
+                if hours_to_settlement is not None and hours_to_settlement <= 6.0:
+                    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+                    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_chain_missing_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": f"incomplete_exit_context:{exit_reason}",
+                        }
+                    )
                 deps.logger.warning(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,
@@ -552,6 +762,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     neg_edge_count=pos.neg_edge_count,
                 )
             )
+            monitor_result_written = True
             summary["monitors"] += 1
 
             if should_exit:
@@ -560,16 +771,88 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
+                # T4.2-Phase1 2026-04-23 (D4 audit-only symmetry check):
+                # for the three statistically-asymmetric exit triggers
+                # (EDGE_REVERSAL, BUY_NO_EDGE_EXIT, BUY_NO_NEAR_EXIT —
+                # each uses 2 consecutive cycles with no FDR vs entry's
+                # bootstrap CI + BH-FDR), load the entry evidence
+                # envelope (written by T4.1b on ENTRY_ORDER_POSTED),
+                # construct the current exit evidence reflecting the
+                # weak 2-cycle burden, and call
+                # DecisionEvidence.assert_symmetric_with. On
+                # EvidenceAsymmetryError, emit a structured JSON warning
+                # log so Phase1 can measure audit_log_false_positive_rate
+                # over the 7-day gate to T4.2-Phase2. NEVER blocks the
+                # exit. Force-majeure triggers (SETTLEMENT_IMMINENT /
+                # WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
+                # FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME /
+                # DAY0_OBSERVATION_REVERSAL) skip — symmetry does not
+                # apply to non-statistical exits.
+                if pos.exit_trigger in _D4_ASYMMETRIC_EXIT_TRIGGERS and conn is not None:
+                    try:
+                        from src.state.decision_chain import load_entry_evidence
+                        entry_evidence = load_entry_evidence(conn, pos.trade_id)
+                        if entry_evidence is not None:
+                            exit_evidence = DecisionEvidence(
+                                evidence_type="exit",
+                                statistical_method="consecutive_confirmation",
+                                sample_size=2,
+                                # no FDR on exit — confidence_level=1.0 is
+                                # a contract-satisfying placeholder per
+                                # __post_init__ (0, 1] bound; the semantic
+                                # "no alpha" is expressed by
+                                # fdr_corrected=False below.
+                                confidence_level=1.0,
+                                fdr_corrected=False,
+                                consecutive_confirmations=2,
+                            )
+                            try:
+                                exit_evidence.assert_symmetric_with(entry_evidence)
+                            except EvidenceAsymmetryError as asym:
+                                deps.logger.warning(
+                                    "exit_evidence_asymmetry "
+                                    + json.dumps(
+                                        {
+                                            "trigger": pos.exit_trigger,
+                                            "trade_id": pos.trade_id,
+                                            "entry_evidence_envelope": entry_evidence.to_json(),
+                                            "exit_evidence_envelope": exit_evidence.to_json(),
+                                            "error": str(asym),
+                                            "timestamp": deps._utcnow().isoformat(),
+                                        },
+                                        sort_keys=True,
+                                    )
+                                )
+                                summary["exit_evidence_asymmetry_audit"] = (
+                                    summary.get("exit_evidence_asymmetry_audit", 0) + 1
+                                )
+                    except Exception as audit_exc:
+                        # Audit MUST NOT block the exit. Emit the same
+                        # `<key> + json.dumps({...}, sort_keys=True)` shape
+                        # as the asymmetry path so Phase2's FP-rate
+                        # aggregator has one parse path, not two.
+                        deps.logger.warning(
+                            "exit_evidence_audit_skipped "
+                            + json.dumps(
+                                {
+                                    "trade_id": pos.trade_id,
+                                    "reason": str(audit_exc),
+                                    "timestamp": deps._utcnow().isoformat(),
+                                },
+                                sort_keys=True,
+                            )
+                        )
+                        summary["exit_evidence_audit_skipped"] = (
+                            summary.get("exit_evidence_audit_skipped", 0) + 1
+                        )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
-                    paper_mode=paper_mode,
                 )
                 outcome = execute_exit(
                     portfolio=portfolio,
                     position=pos,
                     exit_context=replace(exit_context, exit_reason=exit_reason),
-                    paper_mode=paper_mode,
                     clob=clob,
                     conn=conn,
                     exit_intent=exit_intent,
@@ -581,6 +864,36 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 portfolio_dirty = True
         except Exception as e:
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e)
+            summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
+            reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
+            if hours_to_settlement is None:
+                try:
+                    city = deps.cities_by_name.get(pos.city)
+                    if city is not None:
+                        lead_hours_to_settlement_close(pos.target_date, city.timezone, deps._utcnow())
+                except Exception:
+                    reason_prefix = f"time_context_failed:{e.__class__.__name__}"
+            near_settlement = (
+                hours_to_settlement is None
+                or hours_to_settlement <= 6.0
+                or pos.state in {"day0_window", "pending_exit"}
+            )
+            if near_settlement and not monitor_result_written and "execution failed" not in str(e).lower():
+                summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+                summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+                summary.setdefault("monitor_chain_missing_reasons", []).append(
+                    {"position_id": pos.trade_id, "reason": reason_prefix}
+                )
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=pos.last_monitor_prob or pos.p_posterior,
+                        fresh_edge=pos.last_monitor_edge,
+                        should_exit=False,
+                        exit_reason=f"MONITOR_CHAIN_MISSING:{reason_prefix}",
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
 
     return portfolio_dirty, tracker_dirty
 
@@ -607,7 +920,7 @@ def _availability_status_for_exception(exc: Exception) -> str:
     return "DATA_UNAVAILABLE"
 
 
-def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, deps):
+def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
     portfolio_dirty = False
     tracker_dirty = False
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
@@ -630,6 +943,30 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         except Exception as exc:
             deps.logger.warning(
                 "Opportunity fact write failed for %s: %s",
+                getattr(decision, "decision_id", ""),
+                exc,
+            )
+
+    def _record_probability_trace(candidate, decision):
+        try:
+            from src.state.db import log_probability_trace_fact
+
+            result = log_probability_trace_fact(
+                conn,
+                candidate=candidate,
+                decision=decision,
+                recorded_at=decision_time.isoformat(),
+                mode=mode.value,
+            )
+            if result.get("status") != "written":
+                deps.logger.warning(
+                    "Probability trace not written for %s: %s",
+                    getattr(decision, "decision_id", ""),
+                    result.get("status"),
+                )
+        except Exception as exc:
+            deps.logger.warning(
+                "Probability trace write failed for %s: %s",
                 getattr(decision, "decision_id", ""),
                 exc,
             )
@@ -710,7 +1047,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if "min_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
-        markets = [m for m in markets if m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+        markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
 
     for market in markets:
         city = market.get("city")
@@ -761,6 +1098,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         edge_source="",
                         availability_status=availability_status,
                         rejection_reasons=[str(e)],
+                        market_hours_open=market.get("hours_since_open"),
                         timestamp=decision_time.isoformat(),
                     )
                 )
@@ -774,6 +1112,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             outcomes=market["outcomes"],
             hours_since_open=market["hours_since_open"],
             hours_to_resolution=market["hours_to_resolution"],
+            temperature_metric=str(market.get("temperature_metric", "high") or "high"),
             event_id=market.get("event_id", ""),
             slug=market.get("slug", ""),
             observation=obs,
@@ -782,10 +1121,26 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         summary["candidates"] += 1
 
         try:
-            decisions = deps.evaluate_candidate(candidate, conn, portfolio, clob, limits, entry_bankroll=entry_bankroll)
+            # B091: forward the cycle's authoritative decision_time to the
+            # evaluator so per-cycle `recorded_at` timestamps derive from
+            # the cycle boundary rather than being silently re-fabricated
+            # as `datetime.now()` inside the evaluator per-candidate.
+            decisions = deps.evaluate_candidate(
+                candidate, conn, portfolio, clob, limits,
+                entry_bankroll=entry_bankroll,
+                decision_time=decision_time,
+            )
             if decisions:
+                # Accumulate FDR health metrics into cycle summary
+                if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):
+                    summary["fdr_fallback_fired"] = True
+                family_sizes = [getattr(d, "fdr_family_size", 0) for d in decisions if getattr(d, "fdr_family_size", 0) > 0]
+                if family_sizes:
+                    summary["fdr_family_size"] = summary.get("fdr_family_size", 0) + family_sizes[0]
+                for trace_decision in decisions:
+                    _record_probability_trace(candidate, trace_decision)
                 try:
-                    from src.engine.time_context import lead_hours_to_target
+                    from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
                     from src.state.db import log_shadow_signal
                     first = decisions[0]
                     edges_payload = [
@@ -810,10 +1165,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         p_raw_json=json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
                         p_cal_json=json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
                         edges_json=json.dumps(edges_payload),
-                        lead_hours=float(lead_hours_to_target(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
+                        lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc)
+                    summary["degraded"] = True
             for d in decisions:
                 if False:
                     _ = d.calibration
@@ -857,6 +1213,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                                 p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                                 alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
                                 agreement=getattr(d, "agreement", ""),
                                 timestamp=decision_time.isoformat(),
                             )
@@ -903,6 +1260,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                                 p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                                 alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
                                 agreement=getattr(d, "agreement", ""),
                                 timestamp=decision_time.isoformat(),
                             )
@@ -969,20 +1327,36 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             city,
                             mode,
                             state=initial_entry_runtime_state_for_order_status(result.status),
+                            env=env,
                             bankroll_at_entry=entry_bankroll,
                             deps=deps,
                         )
                         deps.add_position(portfolio, pos)
                         from src.state.db import log_execution_report, log_trade_entry
 
-                        log_trade_entry(conn, pos)
-                        _dual_write_canonical_entry_if_available(
-                            conn,
-                            pos,
-                            decision_id=d.decision_id,
-                            deps=deps,
-                        )
-                        log_execution_report(conn, pos, result, decision_id=d.decision_id)
+                        sp_name = f"sp_candidate_{str(d.decision_id).replace('-', '_')}"
+                        conn.execute(f"SAVEPOINT {sp_name}")
+                        try:
+                            log_trade_entry(conn, pos)
+                            log_execution_report(conn, pos, result, decision_id=d.decision_id)
+                            # Post-audit fix #2 (2026-04-24): dual-write moved
+                            # INSIDE sp_candidate_* — DR-33-B (commit 2a62623)
+                            # replaced with-conn inside append_many_and_project
+                            # with explicit nested SAVEPOINT, so placing the
+                            # dual-write here no longer releases sp_candidate_*
+                            # on commit. Closes torn-state window per T4.0 F3.
+                            _dual_write_canonical_entry_if_available(
+                                conn,
+                                pos,
+                                decision_id=d.decision_id,
+                                deps=deps,
+                                decision_evidence=getattr(d, "decision_evidence", None),
+                            )
+                            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        except Exception:
+                            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                            raise
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)
@@ -1066,6 +1440,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
                             p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                             alpha=getattr(d, "alpha", 0.0),
+                            market_hours_open=candidate.hours_since_open,
                             agreement=getattr(d, "agreement", ""),
                             timestamp=decision_time.isoformat(),
                         )

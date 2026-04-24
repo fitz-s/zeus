@@ -1,0 +1,360 @@
+schema_version: 1
+metadata:
+  created: "2026-04-23"
+  owner_packet: "Guidance Kernel Semantic Boot"
+  purpose: >
+    Question-first boot profiles for source-sensitive, settlement-sensitive,
+    data-ingest, calibration, docs-authority, and graph-review tasks. These
+    profiles route agents through semantic facts and fatal-misread antibodies
+    before they use code structure as sufficient context.
+  authority_status: machine_boot_contract
+
+required_profile_fields:
+  - id
+  - purpose
+  - trigger_terms
+  - required_reads
+  - current_fact_surfaces
+  - required_proofs
+  - fatal_misreads
+  - forbidden_shortcuts
+  - graph_usage
+  - verification_gates
+
+required_task_classes:
+  - source_routing
+  - settlement_semantics
+  - hourly_observation_ingest
+  - day0_monitoring
+  - calibration
+  - docs_authority
+  - graph_review
+
+allowed_graph_stages:
+  - not_required
+  - stage_2_after_semantic_boot
+
+profiles:
+  - id: source_routing
+    purpose: >
+      Decide which source family, station, unit, and date-scoped evidence may
+      be used for a city before editing ingest, client, backfill, or source
+      routing code.
+    trigger_terms: [source, routing, station, endpoint, WU, HKO, NOAA, Ogimet, city source]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/reference/zeus_domain_model.md
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+      - docs/operations/known_gaps.md
+      - config/cities.json
+      - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+    required_proofs:
+      - id: settlement_source_by_city_date
+        question: "Which source family settles this city/date, and is the evidence fresh enough?"
+        evidence:
+          - docs/operations/current_source_validity.md
+          - config/cities.json
+          - architecture/city_truth_contract.yaml
+      - id: source_family_not_endpoint_health
+        question: "Does the chosen source prove settlement correctness, not just HTTP availability?"
+        evidence:
+          - docs/operations/current_source_validity.md
+          - docs/operations/known_gaps.md
+    fatal_misreads:
+      - api_returns_data_not_settlement_correct_source
+      - airport_station_not_city_settlement_station
+      - hong_kong_hko_explicit_caution_path
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not treat endpoint 200/data presence as settlement-source proof."
+      - "Do not infer city settlement source from airport code, station code, or config comments alone."
+      - "Do not use fossil source routing as current routing without fresh audit evidence."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [impacted files, callers, tests, blast radius]
+      not_for: [settlement truth, source validity, city/date authority]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+
+  - id: settlement_semantics
+    purpose: >
+      Work on market resolution, rounding, settlement values, harvester writes,
+      or replay labels without collapsing source truth into generic daily-high
+      assumptions.
+    trigger_terms: [settlement, resolution, rounding, harvester, market settles, oracle]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/reference/zeus_domain_model.md
+      - docs/authority/zeus_current_architecture.md
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
+      - architecture/core_claims.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_source_validity.md
+    required_proofs:
+      - id: settlement_value_path
+        question: "Which source, unit, and rounding law produce the settlement value for this market?"
+        evidence:
+          - docs/reference/zeus_domain_model.md
+          - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
+          - architecture/core_claims.yaml
+      - id: dual_track_separation
+        question: "Does this high/low family preserve separate physical quantity and calibration identity?"
+        evidence:
+          - docs/authority/zeus_current_architecture.md
+    fatal_misreads:
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - airport_station_not_city_settlement_station
+      - hong_kong_hko_explicit_caution_path
+    forbidden_shortcuts:
+      - "Do not treat all cities as WU integer daily-high markets."
+      - "Do not mix HIGH and LOW settlement, replay, or calibration identities."
+      - "Do not bypass SettlementSemantics for DB/event settlement writes."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [callers, tests, blast radius]
+      not_for: [rounding law, city source truth]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --core-claims --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+
+  - id: hourly_observation_ingest
+    purpose: >
+      Edit hourly/instant observation clients, writers, backfill, and audit
+      lanes while preserving extrema, provenance, source family, and current
+      data posture.
+    trigger_terms: [hourly, observation_instants, instants, backfill, Ogimet, historical hourly]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+      - docs/operations/known_gaps.md
+      - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    required_proofs:
+      - id: hourly_source_and_extrema
+        question: "Which hourly source is valid for this city/date, and does aggregation preserve maxima/minima?"
+        evidence:
+          - docs/operations/current_data_state.md
+          - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
+          - architecture/source_rationale.yaml
+      - id: writer_provenance_gate
+        question: "Does the write path stamp non-default authority, data_version, and provenance?"
+        evidence:
+          - architecture/source_rationale.yaml
+    fatal_misreads:
+      - hourly_downsample_preserves_extrema
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - hong_kong_hko_explicit_caution_path
+    forbidden_shortcuts:
+      - "Do not average, first-sample, or last-sample sub-hourly readings when extrema are required."
+      - "Do not use Open-Meteo grid-snap as a settlement-source escape hatch."
+      - "Do not infer v2 readiness from legacy observation_instants coverage."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [writer/client/backfill callers, tests]
+      not_for: [source family truth, data freshness]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --source --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+
+  - id: day0_monitoring
+    purpose: >
+      Work on same-day monitoring, Day0 nowcast, exits, or observed-so-far
+      logic with the correct live source and high/low causality.
+    trigger_terms: [Day0, day0, monitor, nowcast, observed so far, exit trigger]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/reference/zeus_domain_model.md
+      - docs/authority/zeus_current_architecture.md
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+      - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_source_validity.md
+      - docs/operations/current_data_state.md
+    required_proofs:
+      - id: day0_source_vs_settlement_source
+        question: "Is the live Day0 monitor source the same as settlement for this city/date, or explicitly different?"
+        evidence:
+          - docs/operations/current_source_validity.md
+          - docs/operations/current_data_state.md
+          - architecture/city_truth_contract.yaml
+      - id: high_low_day0_causality
+        question: "Does the task preserve high uses observed max floor and low uses observed min ceiling?"
+        evidence:
+          - docs/authority/zeus_current_architecture.md
+          - docs/reference/zeus_domain_model.md
+    fatal_misreads:
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - hourly_downsample_preserves_extrema
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not use settlement-daily truth as proof that live Day0 monitoring is fresh."
+      - "Do not reuse high-temperature max logic for low-temperature min logic."
+      - "Do not treat stale current_data_state as green for live monitoring."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [callers, tests, impacted monitor paths]
+      not_for: [live source validity, data freshness]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+
+  - id: calibration
+    purpose: >
+      Edit calibration, replay, Platt fitting, or forecast skill without mixing
+      settlement values, historical observations, source families, or HIGH/LOW
+      identities.
+    trigger_terms: [calibration, Platt, replay, forecast skill, training, backtest]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/reference/zeus_domain_model.md
+      - docs/authority/zeus_current_architecture.md
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+      - architecture/source_rationale.yaml
+      - architecture/city_truth_contract.yaml
+      - architecture/core_claims.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    required_proofs:
+      - id: training_source_identity
+        question: "Which historical observation and settlement source trains this calibration family?"
+        evidence:
+          - docs/operations/current_data_state.md
+          - docs/operations/current_source_validity.md
+          - architecture/city_truth_contract.yaml
+      - id: strategy_key_and_dual_track
+        question: "Does the change preserve strategy_key and HIGH/LOW calibration separation?"
+        evidence:
+          - docs/authority/zeus_current_architecture.md
+          - architecture/source_rationale.yaml
+    fatal_misreads:
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - wu_website_daily_summary_not_wu_api_hourly_max
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not train from an observation source just because it is populated."
+      - "Do not mix HIGH/LOW rows in Platt fitting, replay bins, or settlement rebuild identity."
+      - "Do not treat forecast_skill_source as settlement_daily_source."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [calibration callers, replay/test blast radius]
+      not_for: [training truth, settlement truth]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --core-claims --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+
+  - id: docs_authority
+    purpose: >
+      Change guidance, packets, docs registry, or authority routing while
+      preserving authority/context/history separation and current-fact freshness.
+    trigger_terms: [docs, authority, packet, registry, current_state, guidance]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/operations/current_state.md
+      - docs/operations/AGENTS.md
+      - architecture/docs_registry.yaml
+      - architecture/topology.yaml
+      - architecture/map_maintenance.yaml
+      - architecture/fatal_misreads.yaml
+    current_fact_surfaces:
+      - docs/operations/current_state.md
+    required_proofs:
+      - id: authority_context_history_layering
+        question: "Which surfaces are authority, derived context, current fact, or history?"
+        evidence:
+          - AGENTS.md
+          - workspace_map.md
+          - architecture/docs_registry.yaml
+      - id: active_packet_receipt
+        question: "Is the active packet tracked and receipt-backed?"
+        evidence:
+          - docs/operations/current_state.md
+          - docs/operations/AGENTS.md
+    fatal_misreads:
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not promote archives, generated reports, or .omx scratch into default authority by reference."
+      - "Do not leave new docs or architecture files unregistered."
+      - "Do not leave current_state pointing at closed work."
+    graph_usage:
+      stage: not_required
+      authority_status: derived_not_authority
+      use_for: []
+      not_for: [authority classification, current packet truth]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --docs --json
+      - python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --json
+
+  - id: graph_review
+    purpose: >
+      Use Code Review Graph for review/debug routing without letting structural
+      graph evidence answer semantic source, settlement, or current-fact
+      questions.
+    trigger_terms: [graph, Code Review Graph, CRG, impact, blast radius, review]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - architecture/task_boot_profiles.yaml
+      - architecture/fatal_misreads.yaml
+      - architecture/source_rationale.yaml
+    current_fact_surfaces:
+      - docs/operations/current_state.md
+    required_proofs:
+      - id: semantic_boot_before_graph
+        question: "Has the task class been identified before graph impact analysis?"
+        evidence:
+          - architecture/task_boot_profiles.yaml
+          - architecture/fatal_misreads.yaml
+      - id: graph_is_derived_context
+        question: "Is graph output used only for where/impact/review order?"
+        evidence:
+          - AGENTS.md
+          - workspace_map.md
+    fatal_misreads:
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not let graph results waive required reads, proofs, planning lock, or tests."
+      - "Do not ask graph to decide settlement/source/current truth."
+      - "Prefer explicit changed_files/repo_root when graph tooling needs impact scope."
+    graph_usage:
+      stage: stage_2_after_semantic_boot
+      authority_status: derived_not_authority
+      use_for: [impacted files, callers, tests, review order]
+      not_for: [semantic truth, source validity, packet authority]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --code-review-graph-status --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json

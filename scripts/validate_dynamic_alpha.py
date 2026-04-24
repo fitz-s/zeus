@@ -1,3 +1,10 @@
+# Lifecycle: created=2025-11-22; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Dynamic α validation v2 — compares Brier scores across α methods
+#          using per-lead-day MAE from forecast_skill × settlements JOIN.
+# Reuse: H3 (2026-04-24) hardened the Brier JOIN to pin
+#        s.temperature_metric='high' because forecast_skill tracks
+#        forecast_temp without a metric column; LOW settlements would
+#        spuriously double-match and bias Brier validation.
 """Dynamic α validation v2: uses raw forecast_skill (53K rows) instead of aggregated model_skill (20 rows).
 
 Key improvements over v1:
@@ -62,7 +69,8 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.db import get_shared_connection as get_connection
+from src.state.db import get_world_connection as get_connection
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 
 
 def season_from_date(date_str: str, city_name: str = "") -> str:
@@ -163,12 +171,18 @@ def run():
     print()
     
     # For each target_date with settlement + forecast, simulate Brier    
+    # H3 (2026-04-24): pin s.temperature_metric='high' because forecast_skill
+    # uses forecast_temp without a metric column; once LOW settlements exist
+    # the JOIN would double-match and corrupt Brier validation.
     results = conn.execute("""
         SELECT fs.city, fs.target_date, fs.forecast_temp, fs.actual_temp,
                fs.error, fs.season, fs.lead_days,
                s.settlement_value, s.winning_bin
         FROM forecast_skill fs
-        JOIN settlements s ON fs.city = s.city AND fs.target_date = s.target_date
+        JOIN settlements s
+          ON fs.city = s.city
+         AND fs.target_date = s.target_date
+         AND s.temperature_metric = 'high'
         WHERE fs.source = 'ecmwf'
           AND fs.actual_temp IS NOT NULL
           AND s.settlement_value IS NOT NULL
@@ -195,7 +209,11 @@ def run():
         season = row["season"]
         lead = row["lead_days"]
         error = abs(row["error"])
-        actual = round(float(row["settlement_value"])) if row["settlement_value"] is not None else None
+        actual = (
+            round_wmo_half_up_value(float(row["settlement_value"]))
+            if row["settlement_value"] is not None
+            else None
+        )
         forecast = row["forecast_temp"]
         
         cs_key = (city, season)

@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-23
+# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for provenance registry enforcement. §P9.7 / INV-13."""
 import ast
 import time
@@ -40,7 +43,6 @@ def _load_registry_yaml() -> dict:
 class TestAllStrategyConstantsRegistered:
     """Every constant in kelly.py and market_fusion.py appears in provenance_registry.yaml."""
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_kelly_constants_in_registry(self):
         """Core Kelly sizing constant appears in registry."""
@@ -50,7 +52,6 @@ class TestAllStrategyConstantsRegistered:
             "Add a ProvenanceRecord for it."
         )
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_market_fusion_constants_in_registry(self):
         """TAIL_ALPHA_SCALE appears in registry under its namespaced key."""
@@ -61,7 +62,6 @@ class TestAllStrategyConstantsRegistered:
             f"Keys present: {sorted(k for k in registry if 'fusion' in k or 'alpha' in k.lower())}"
         )
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_registry_yaml_structure_when_present(self):
         """Every entry has required fields."""
@@ -72,7 +72,6 @@ class TestAllStrategyConstantsRegistered:
                 missing = required_fields - set(record.keys())
                 assert not missing, f"Registry entry '{name}' missing fields: {missing}"
 
-    @pytest.mark.skipif(not REGISTRY_YAML.exists(), reason="Registry YAML not yet created")
     @pytest.mark.skipif(not HAS_YAML, reason="PyYAML not installed")
     def test_in_memory_registry_populated(self):
         """REGISTRY loaded at module import contains expected keys."""
@@ -181,3 +180,111 @@ class TestEmergencyBypassLogsAndExpires:
         expiry = _emergency_bypasses.get(name)
         assert expiry is not None
         assert before + _BYPASS_TTL_SECONDS <= expiry <= after + _BYPASS_TTL_SECONDS + 1
+
+
+# ---------------------------------------------------------------------------
+# B009 relationship tests: per-entry YAML parse isolation (SD-B)
+# ---------------------------------------------------------------------------
+
+class TestB009YamlPerEntryIsolation:
+    """_load_registry must not discard the entire registry on a single
+    malformed entry. One bad row should log and skip; good rows survive.
+    """
+
+    def test_b009_single_bad_entry_does_not_poison_registry(self, tmp_path):
+        """A YAML with 2 good entries and 1 missing-key entry should
+        return a registry with 2 good records (not empty/degraded)."""
+        from src.contracts.provenance_registry import _load_registry
+        yaml_text = """
+constants:
+  - constant_name: good_alpha
+    file_location: src/strategy/kelly.py
+    declared_target: risk_cap
+    data_basis: "calibration backtest 2026-03"
+    validated_at: "2026-03-15"
+    replacement_criteria: "recalibrate on Platt refit"
+  - constant_name: bad_beta
+    # missing file_location, declared_target, etc. — should be skipped
+    data_basis: "partial"
+  - constant_name: good_gamma
+    file_location: src/strategy/market_fusion.py
+    declared_target: ev
+    data_basis: "ensemble spread study 2026-03"
+    validated_at: "2026-03-20"
+    replacement_criteria: "re-fit on tail recalibration"
+"""
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(yaml_text)
+
+        registry, degraded = _load_registry(f)
+
+        # Degraded flag False because the STRUCTURE was fine; just one
+        # entry was bad. Registry has the two good ones.
+        assert degraded is False
+        assert "good_alpha" in registry
+        assert "good_gamma" in registry
+        assert "bad_beta" not in registry
+        assert len(registry) == 2
+
+    def test_b009_all_bad_entries_still_returns_empty_but_not_broken(self, tmp_path):
+        """If every entry is malformed, registry is empty; loader does
+        not crash."""
+        from src.contracts.provenance_registry import _load_registry
+        yaml_text = """
+constants:
+  - constant_name: bad_one
+  - data_basis: "no constant_name at all"
+"""
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(yaml_text)
+        registry, degraded = _load_registry(f)
+        assert registry == {}
+        # Loader did not raise — per-entry skip is the path.
+
+    def test_b009_structural_yaml_failure_still_degrades_whole_file(self, tmp_path):
+        """Malformed YAML at top level (not parseable) still degrades
+        to empty+degraded=True. Per-entry isolation only applies once
+        the top-level ``constants`` list is iterable."""
+        from src.contracts.provenance_registry import _load_registry
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text("constants: [unclosed: {list\n")
+        registry, degraded = _load_registry(f)
+        assert registry == {}
+        assert degraded is True
+
+
+    def test_b009_non_dict_entry_does_not_poison_registry(self, tmp_path):
+        """Amendment (critic-alice review): a bare string entry in the
+        ``constants`` list raises AttributeError on entry.get(...).
+        Before the amendment this would fall through to the outer
+        ``except Exception`` and poison the ENTIRE registry (empty +
+        degraded=True), defeating B009. With AttributeError in the
+        per-entry catch tuple, the string entry is logged and skipped
+        while valid sibling entries survive.
+        """
+        from src.contracts.provenance_registry import _load_registry
+        f = tmp_path / "provenance_registry.yaml"
+        f.write_text(
+            "constants:\n"
+            "  - \"i am a bare string not a dict\"\n"
+            "  - constant_name: good1\n"
+            "    file_location: src/x.py:1\n"
+            "    declared_target: ev\n"
+            "    data_basis: calib_v1\n"
+            "    validated_at: 2026-01-01\n"
+            "    replacement_criteria: review\n"
+            "  - constant_name: good2\n"
+            "    file_location: src/y.py:2\n"
+            "    declared_target: risk_cap\n"
+            "    data_basis: calib_v1\n"
+            "    validated_at: 2026-01-01\n"
+            "    replacement_criteria: review\n"
+        )
+        registry, degraded = _load_registry(f)
+        assert degraded is False, (
+            "A non-dict entry must NOT mark the whole registry degraded; "
+            "per-entry isolation should log-and-skip. Got degraded=True."
+        )
+        assert "good1" in registry, "sibling valid entry must survive"
+        assert "good2" in registry, "sibling valid entry must survive"
+        assert len(registry) == 2

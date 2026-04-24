@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import settings
+from src.config import get_mode
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -24,7 +24,7 @@ from src.engine.cycle_runner import _classify_edge_source, _classify_strategy
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import MarketCandidate, evaluate_candidate
 from src.riskguard.riskguard import get_current_level
-from src.state.db import get_shared_connection as get_connection, log_shadow_signal
+from src.state.db import get_world_connection as get_connection, log_shadow_signal
 from src.state.decision_chain import CycleArtifact, NoTradeCase, store_artifact
 from src.state.portfolio import load_portfolio
 from src.strategy.risk_limits import RiskLimits
@@ -34,7 +34,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=(settings.mode == "paper"))
+    clob = PolymarketClient()
     limits = RiskLimits()
 
     summary = {
@@ -161,7 +161,7 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
                 for d in decisions
             ]
             try:
-                from src.engine.time_context import lead_hours_to_target
+                from src.engine.time_context import lead_hours_to_date_start
                 from datetime import date
 
                 log_shadow_signal(
@@ -173,13 +173,14 @@ def run_capture(mode: DiscoveryMode, *, limit: int | None = None) -> dict:
                     p_raw_json=json.dumps(first.p_raw.tolist() if first.p_raw is not None else []),
                     p_cal_json=json.dumps(first.p_cal.tolist() if first.p_cal is not None else []),
                     edges_json=json.dumps(edges_payload),
-                    lead_hours=float(lead_hours_to_target(date.fromisoformat(candidate.target_date), city.timezone, datetime.fromisoformat(started_at.replace("Z", "+00:00")))),
+                    lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, datetime.fromisoformat(started_at.replace("Z", "+00:00")))),
                 )
             except Exception:
                 pass
 
     artifact.completed_at = datetime.now(timezone.utc).isoformat()
     store_artifact(conn, artifact)
+    conn.commit()  # Fix B: store_artifact no longer commits internally; caller must commit.
     conn.close()
     return summary
 

@@ -8,10 +8,23 @@ lead time, and market freshness.
 import numpy as np
 
 from src.config import settings
+from src.contracts.alpha_decision import AlphaDecision
+from src.contracts.tail_treatment import TailTreatment
+from src.contracts.vig_treatment import VigTreatment
 from src.types.temperature import TemperatureDelta
 
+
+class AuthorityViolation(ValueError):
+    """Raised when the computation chain receives UNVERIFIED calibration data.
+
+    K4 hard gate: market_fusion refuses to compute alpha on data whose
+    provenance has not been verified. This is not a soft warning -- it is
+    a hard raise that prevents UNVERIFIED data from entering the edge
+    computation chain.
+    """
+
 # Spread thresholds defined in °F, auto-converted via .to() for any unit.
-# This prevents the Rainstorm bug where 2.0 was used for both °F and °C cities.
+# This prevents the legacy-predecessor bug where 2.0 was used for both °F and °C cities.
 # HARDCODED(setting_key="edge.spread_tight_f", note_key="edge._spread_tight_f_note",
 #           tier=2, replace_after="1000+ ENS snapshots per city",
 #           data_needed="per-city spread distribution percentiles")
@@ -30,24 +43,29 @@ BASE_ALPHA_BY_LEVEL = {
     3: settings["edge"]["base_alpha"]["level3"],
     4: settings["edge"]["base_alpha"]["level4"],
 }
+TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is Brier-optimal
+DEFAULT_TAIL_TREATMENT = TailTreatment(
+    scale_factor=TAIL_ALPHA_SCALE,
+    serves="calibration_accuracy",
+    validated_against=(
+        "D3 sweep 2026-03-31 tail bins, Brier improvement -0.042; "
+        "not validated against buy_no P&L"
+    ),
+)
+COMPLETE_MARKET_VIG_MIN = 0.90
+COMPLETE_MARKET_VIG_MAX = 1.10
 
 
 def vwmp(best_bid: float, best_ask: float,
          bid_size: float, ask_size: float) -> float:
     """Volume-Weighted Micro-Price. Spec §4.1.
 
-    If total_size = 0: fall back to mid-price + log warning.
+    If total_size <= 0: raise ValueError("Illiquid market: VWMP total size is 0.")
     Per CLAUDE.md: never use mid-price for edge calculations (VWMP required).
     """
     total = bid_size + ask_size
-    if total == 0:
-        # CLAUDE.md: VWMP with total size = 0 → fall back to mid-price + log
-        import logging
-        logging.getLogger(__name__).warning(
-            "VWMP total_size=0, falling back to mid-price: bid=%.3f ask=%.3f",
-            best_bid, best_ask
-        )
-        return (best_bid + best_ask) / 2.0
+    if total <= 0:
+        raise ValueError("Illiquid market: VWMP total size is 0, cannot fall back to mid-price")
     return (best_bid * ask_size + best_ask * bid_size) / total
 
 
@@ -59,7 +77,9 @@ def compute_alpha(
     hours_since_open: float,
     city_name: str = "",
     season: str = "",
-) -> float:
+    *,
+    authority_verified: bool,
+) -> AlphaDecision:
     """Compute α for model-market blending. Spec §4.5.
 
     Higher α → trust model more. Lower α → trust market more.
@@ -70,26 +90,28 @@ def compute_alpha(
     - D3: tail bin scaling (applied in compute_posterior, not here)
     - Lead days (short → +0.05, long → -0.05)
 
-    DEPRECATED: per-city α override via alpha_overrides table.
-    D1 analysis showed MAE→α mapping has r=+0.032 (no signal).
-    Override lookup kept for manual experimentation but table is empty
-    and no longer auto-populated by the weekly cycle.
-
     ensemble_spread must be a TemperatureDelta. This is a hard rule:
     spread thresholds are unit-aware and must not silently fall back to bare floats.
     """
+    # K4 authority hard gate: refuse UNVERIFIED calibration data.
+    # The evaluator already gates via get_pairs_for_bucket(authority_filter='VERIFIED');
+    # this is a second line of defense at the market_fusion boundary.
+    if not authority_verified:
+        raise AuthorityViolation(
+            f"market_fusion refused UNVERIFIED calibration for "
+            f"{city_name!r}/{season!r} "
+            f"(calibration_level={calibration_level})"
+        )
+
     if not isinstance(ensemble_spread, TemperatureDelta):
         raise TypeError(
             "compute_alpha requires ensemble_spread to be TemperatureDelta. "
             "Wrap raw spreads with the city settlement unit first."
         )
 
-    # Per-city override lookup (DEPRECATED — kept for manual experiments only)
-    # Was part of the dynamic-α per-city approach. alpha_overrides has 0 rows.
-    # Do NOT auto-populate this table; per-decision adjustments are superior.
-    base = _get_alpha_override(city_name, season)
-    if base is None:
-        base = BASE_ALPHA_BY_LEVEL[calibration_level]
+    # K1/#5: deprecated alpha override removed — alpha_overrides table had 0 rows
+    # and per-decision adjustments (below) are the correct alpha mechanism.
+    base = BASE_ALPHA_BY_LEVEL[calibration_level]
     a = base
 
     # Ensemble spread adjustments — typed thresholds prevent °C/°F confusion
@@ -121,55 +143,12 @@ def compute_alpha(
     if hours_since_open < 6:
         a += 0.05  # Cumulative with above
 
-    return max(0.20, min(0.85, a))
-
-
-# Cache to avoid repeated DB lookups within a cycle
-_alpha_override_cache: dict[tuple[str, str], float | None] = {}
-_alpha_cache_ts: float = 0.0
-
-
-def _get_alpha_override(city_name: str, season: str) -> float | None:
-    """Look up per-city alpha override. Returns None if no override exists."""
-    import time
-    global _alpha_override_cache, _alpha_cache_ts
-
-    if not city_name or not season:
-        return None
-
-    # Cache for 300s to avoid DB thrashing during a cycle
-    now = time.time()
-    if now - _alpha_cache_ts > 300:
-        _alpha_override_cache.clear()
-        _alpha_cache_ts = now
-
-    key = (city_name, season)
-    if key in _alpha_override_cache:
-        return _alpha_override_cache[key]
-
-    try:
-        from src.state.db import get_shared_connection
-        conn = get_shared_connection()
-        row = conn.execute(
-            "SELECT alpha FROM alpha_overrides "
-            "WHERE city = ? AND season = ? AND source = 'validated_optimal'",
-            (city_name, season),
-        ).fetchone()
-        conn.close()
-
-        result = float(row["alpha"]) if row else None
-        _alpha_override_cache[key] = result
-
-        if result is not None:
-            import logging
-            logging.getLogger(__name__).info(
-                "Using validated α=%.3f for %s/%s", result, city_name, season,
-            )
-        return result
-
-    except Exception:
-        _alpha_override_cache[key] = None
-        return None
+    return AlphaDecision(
+        value=max(0.20, min(0.85, a)),
+        optimization_target="risk_cap",
+        evidence_basis="D1 resolution: conservative blending weight, not pure Brier minimizer",
+        ci_bound=0.05,
+    )
 
 
 def compute_posterior(
@@ -187,28 +166,76 @@ def compute_posterior(
     overall Brier by 0.042. When bins are provided, tail bins get
     α_tail = α × TAIL_ALPHA_SCALE.
 
-    p_market sums to vig (~0.95-1.05), not 1.0, so the blend must
-    be re-normalized. CLAUDE.md types: p_posterior sums to 1.0.
+    Complete p_market vectors sum to plausible vig (~0.90-1.10), not 1.0, so vig is
+    removed before blending. Sparse monitor vectors are not complete market
+    families and stay in raw observed-price space. The final posterior is still
+    normalized because per-bin tail alpha can make the blended vector drift.
     """
-    # D3: per-bin alpha scaling for tail bins
-    # Tail bins = bins where one boundary is None (open-ended: "X or below", "X or higher")
-    # Scale factor 0.5 gives Brier improvement of -0.042 over uniform α
-    TAIL_ALPHA_SCALE = 0.5  # Validated: sweep [0.5, 0.6, ..., 1.0], 0.5 is optimal
-
-    if bins is not None and len(bins) == len(p_cal):
-        alpha_vec = np.full_like(p_cal, alpha)
-        for i, b in enumerate(bins):
-            is_tail = (hasattr(b, 'low') and b.low is None) or (hasattr(b, 'high') and b.high is None)
-            if not is_tail and hasattr(b, 'label'):
-                label = b.label.lower()
-                is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
-            if is_tail:
-                alpha_vec[i] = max(0.20, alpha * TAIL_ALPHA_SCALE)
-        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * p_market
+    if not np.all(np.isfinite(p_market)):
+        raise ValueError("p_market must be finite")
+    if np.any(p_market < 0.0):
+        raise ValueError("p_market must be non-negative")
+    market_total = float(np.sum(p_market))
+    if market_total <= 0.0:
+        raise ValueError(f"Invalid market probability vector sum <= 0: {market_total}")
+        
+    positive_components = int(np.count_nonzero(p_market > 0.0))
+    looks_complete = positive_components >= min(len(p_market), 2)
+    has_zeros = bool(np.any(p_market == 0.0))
+    if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
+        market = VigTreatment.from_raw(p_market).clean_prices
+    elif has_zeros:
+        # T6.3 (supersedes B086): sparse monitor vectors have zeros for non-held
+        # bins. We now impute those zeros from p_cal as a fallback reference
+        # (imputation_source="p_cal_fallback"), with provenance recorded on the
+        # VigTreatment record. This is NOT a silent revival of pre-B086 behavior:
+        # the imputed bins and reference source are typed-visible on the returned
+        # VigTreatment record, so downstream auditors can tell which posterior
+        # bins were derived from market data vs model priors. A future slice may
+        # thread real cross-market sibling snapshots through this same kwarg with
+        # imputation_source="sibling_market". See
+        # docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17
+        # (B086 entry) for supersedence record.
+        market = VigTreatment.from_raw(
+            p_market,
+            sibling_snapshot=p_cal,
+            imputation_source="p_cal_fallback",
+        ).clean_prices
     else:
-        raw = alpha * p_cal + (1.0 - alpha) * p_market
+        # Distorted-vig complete market (vig out of [0.90, 1.10] band, no zeros).
+        # Pre-T6.3 behavior preserved: raw pass-through. We deliberately do NOT
+        # route through VigTreatment.from_raw with sibling_snapshot here because
+        # that would silently demote the auditable "p_cal_fallback" intent to
+        # "none" (no impute needed when raw has no zeros), masking the distorted-
+        # vig signal. Surrogate-critic 2026-04-24 HIGH finding: preserve category
+        # immunity by keeping the distorted-vig case OUT of the impute call site.
+        # A future slice may introduce imputation_source="vig_out_of_band" if
+        # auditors need that discriminator.
+        market = p_market.copy()
+        
+    if bins is not None and len(bins) == len(p_cal):
+        alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
+        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * market
+    else:
+        raw = alpha * p_cal + (1.0 - alpha) * market
 
     total = raw.sum()
     if total > 0:
         return raw / total
     return raw
+
+
+def alpha_for_bin(alpha: float, bin) -> float:
+    """Return the effective alpha for one bin, including tail scaling."""
+    is_tail = bool(getattr(bin, "is_shoulder", False))
+    if not is_tail:
+        is_tail = (
+            (hasattr(bin, 'low') and bin.low is None)
+            or (hasattr(bin, 'high') and bin.high is None)
+        )
+    if not is_tail and hasattr(bin, 'label'):
+        label = bin.label.lower()
+        is_tail = 'or below' in label or 'or higher' in label or 'or above' in label
+    if is_tail:
+        return max(0.20, float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor)
+    return float(alpha)

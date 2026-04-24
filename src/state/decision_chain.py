@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from src.config import settings
+from src.config import get_mode
 from src.contracts.semantic_types import Direction, RejectionStage, DirectionAlias
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,7 @@ class NoTradeCase:
     p_cal_vector: list[float] = field(default_factory=list)
     p_market_vector: list[float] = field(default_factory=list)
     alpha: float = 0.0
+    market_hours_open: float | None = None
     agreement: str = ""
     timestamp: str = ""
     
@@ -190,19 +191,27 @@ class SettlementRecord:
     contract_version: str = LEGACY_SETTLEMENT_CONTRACT_VERSION
 
 
-def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> None:
-    """Store cycle artifact to decision_log table."""
-    from src.config import settings
+def store_artifact(conn, artifact: CycleArtifact, env: str = "") -> "int | None":
+    """Store cycle artifact to decision_log table.
+
+    Returns the inserted row's decision_log.id (for DT#1 / INV-17 tracking),
+    or None if the id cannot be determined.
+
+    NOTE (DT#1): Does NOT commit internally. The caller owns the commit.
+    When called via commit_then_export(), commit_then_export() issues conn.commit()
+    after this returns. Standalone callers (e.g. scripts) must commit explicitly.
+    """
+    from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
-    env = env or settings.mode
-    conn.execute("""
+    env = env or _get_mode()
+    cursor = conn.execute("""
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         artifact.mode, artifact.started_at, artifact.completed_at,
         json.dumps(asdict(artifact), default=str), now, env,
     ))
-    conn.commit()
+    return cursor.lastrowid
 
 
 def store_settlement_records(
@@ -215,9 +224,9 @@ def store_settlement_records(
     if not records:
         return
 
-    from src.config import settings
+    from src.config import get_mode as _get_mode
     now = datetime.now(timezone.utc).isoformat()
-    env = settings.mode
+    env = _get_mode()
 
     serialized_records: list[dict] = []
     for record in records:
@@ -242,7 +251,8 @@ def store_settlement_records(
         """,
         ("settlement", now, now, json.dumps(artifact, default=str), now, env),
     )
-    conn.commit()
+    # NOTE (DT#1): No internal commit. Caller owns the commit.
+    # Standalone callers (harvester, tests) must conn.commit() after this returns.
 
 
 def query_settlement_records(
@@ -276,7 +286,7 @@ def query_legacy_settlement_records(
     not_before: str | None = None,
 ) -> list[dict]:
     """Load recent settlement records written into legacy decision_log blobs only."""
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     sql = """
         SELECT artifact_json, timestamp, env FROM decision_log
         WHERE mode = 'settlement'
@@ -395,7 +405,7 @@ def query_no_trade_cases(
     not_before: str | None = None,
 ) -> list[dict]:
     """Query recent NoTradeCase entries for diagnostics."""
-    query_env = settings.mode if env is None else env
+    query_env = get_mode() if env is None else env
     if not_before:
         try:
             cutoff_dt = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
@@ -539,3 +549,57 @@ def query_learning_surface_summary(
         "execution": execution_summary,
         "by_strategy": by_strategy,
     }
+
+
+def load_entry_evidence(
+    conn,
+    runtime_trade_id: str,
+):
+    """Load the entry-time DecisionEvidence envelope from position_events.
+
+    T4.2-Phase1 (D4 audit-only read side, pairs with T4.1b write side at
+    ``src/engine/lifecycle_events.py``): scans the canonical event stream
+    for the earliest ``ENTRY_ORDER_POSTED`` event on ``runtime_trade_id``,
+    extracts the ``decision_evidence_envelope`` key from its parsed
+    ``details`` payload, and rehydrates via
+    ``DecisionEvidence.from_json``.
+
+    Returns None when any of:
+    - No ``ENTRY_ORDER_POSTED`` event exists for this trade_id (position
+      predates canonical emission; legacy pre-T4.1b entry).
+    - The event exists but its payload lacks ``decision_evidence_envelope``
+      (e.g. the ``src/execution/exit_lifecycle.py`` legacy-backfill path
+      emits ``decision_evidence_reason`` sentinel instead).
+    - Payload is malformed or the envelope fails from_json validation
+      (``UnknownContractVersionError`` / ``ValueError``).
+
+    T4.2-Phase1 callers treat None as "skip symmetry audit" — the
+    asymmetry signal is only meaningful when both entry and exit evidence
+    exist. Legacy positions and backfilled events have known-missing
+    evidence by design, distinguishable via the reason sentinel when
+    needed (T4.2-Phase2 exit gate will use the sentinel to separate
+    ``missing-because-legacy`` from ``missing-because-bug``).
+    """
+    from src.contracts.decision_evidence import (
+        DecisionEvidence,
+        UnknownContractVersionError,
+    )
+    from src.state.db import query_position_events
+
+    events = query_position_events(conn, runtime_trade_id, limit=50)
+    for event in events:
+        if event.get("event_type") != "ENTRY_ORDER_POSTED":
+            continue
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        envelope = details.get("decision_evidence_envelope")
+        if not isinstance(envelope, str) or not envelope:
+            # ENTRY_ORDER_POSTED without envelope = legacy-backfill or
+            # pre-T4.1b; absence is informative (skip audit).
+            return None
+        try:
+            return DecisionEvidence.from_json(envelope)
+        except (ValueError, UnknownContractVersionError):
+            return None
+    return None

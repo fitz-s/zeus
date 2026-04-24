@@ -56,7 +56,7 @@ def run(mode: str | None = None) -> dict:
         history_payload["accounting"] = history_accounting
         history_path.write_text(json.dumps(history_payload, ensure_ascii=False, indent=2))
 
-    portfolio, _truth = read_mode_truth_json("positions.json", mode=mode)
+    portfolio, _truth = read_mode_truth_json("positions.json")
     tracker = StrategyTracker()
 
     for row in portfolio.get("positions", []):

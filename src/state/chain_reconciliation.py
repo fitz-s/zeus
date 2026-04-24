@@ -8,7 +8,6 @@ Rules:
 2. Local but NOT on chain → VOID immediately (don't ask why)
 3. Chain but NOT local → QUARANTINE (low confidence, 48h forced exit eval)
 
-Paper mode: skip (no chain to reconcile).
 Live mode: MANDATORY every cycle before any trading.
 """
 
@@ -16,14 +15,38 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
+from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     rescue_pending_runtime_state,
 )
-from src.state.portfolio import INACTIVE_RUNTIME_STATES, Position, PortfolioState, void_position
+from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
 
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
+
+
+def resolve_rescue_authority(position) -> tuple[str, str, str]:
+    """Resolve (temperature_metric, authority, authority_source) for a
+    rescue_events_v2 row from a Position object.
+
+    SD-1 (binary temperature_metric) + SD-H (provenance on authority):
+    - Position materialized through materialize_position() carries a valid
+      temperature_metric in {"high", "low"} → VERIFIED + "position_materialized".
+    - Position with missing, None, empty, or out-of-domain temperature_metric
+      (quarantine placeholder, stale JSON reconstruction, legacy row) falls
+      back to the SD-1 default "high" but MUST be tagged UNVERIFIED with a
+      concrete authority_source so downstream analytics can filter on
+      authority='VERIFIED' for strict forensic work.
+
+    This helper is the single source of truth for the authority rule. Both
+    `_emit_rescue_event` (live path) and B063 tests import this function to
+    avoid logic drift between prod and test (B063 P1 fix per critic review).
+    """
+    _raw_metric = getattr(position, "temperature_metric", None)
+    if _raw_metric in ("high", "low"):
+        return (_raw_metric, "VERIFIED", "position_materialized")
+    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
 
 
 @dataclass
@@ -43,6 +66,11 @@ class ChainPositionView:
     Built once per cycle from chain API. All downstream code reads from this
     snapshot, never from live API calls mid-cycle. Prevents inconsistent reads
     when chain state changes during a cycle.
+
+    Fix D (Option 4b): The `state: ChainState` field has been removed.
+    Classification is a per-reconcile-call fact computed by classify_chain_state()
+    inside reconcile(), not something cached on the view. No external caller
+    outside reconcile() was found to read a `.state` field on this view.
     """
     positions: tuple  # tuple of ChainPosition (frozen requires immutable)
     fetched_at: str = ""
@@ -83,10 +111,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     Safety: if chain returns 0 positions but local has N, the API likely
     returned incomplete data. Skip voiding to prevent false PHANTOM kills.
     """
-    log_reconciled_entry_event = None
     update_trade_lifecycle = None
     if conn is not None:
-        from src.state.db import log_reconciled_entry_event, update_trade_lifecycle
+        from src.state.db import update_trade_lifecycle
 
     def _next_canonical_sequence_no(position_id: str) -> int:
         if conn is None:
@@ -116,16 +143,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if conn is None:
             return False
         try:
-            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
-        except Exception:
-            return False
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation rescue does not support hybrid position_events schema")
-        try:
             row = conn.execute(
                 "SELECT phase FROM position_current WHERE position_id = ?",
                 (position_id,),
@@ -144,16 +161,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
             return False
-        try:
-            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(position_events)").fetchall()}
-        except Exception:
-            return False
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(event_columns)
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation size-correction does not support hybrid position_events schema")
         try:
             row = conn.execute(
                 "SELECT phase FROM position_current WHERE position_id = ?",
@@ -202,6 +209,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     ) -> bool:
         if conn is None:
             return False
+        # Race: if the fill just landed, the position is still in pending_entry
+        # phase when chain reconciliation runs. The fill event will set the
+        # correct size in its own path — skip canonical size correction here
+        # to avoid colliding with fill detection. On the next cycle the phase
+        # will be 'active' and real size corrections can proceed normally.
+        try:
+            _phase_row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (getattr(position, "trade_id", ""),),
+            ).fetchone()
+        except Exception:
+            _phase_row = None
+        if _phase_row is not None and str(_phase_row[0] or "") == "pending_entry":
+            return False
         expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
         if not _canonical_size_correction_baseline_available(
             getattr(position, "trade_id", ""),
@@ -227,71 +248,102 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
-    def _legacy_rescue_query_available() -> bool:
-        if conn is None:
-            return False
-        rows = conn.execute("PRAGMA table_info(position_events)").fetchall()
-        columns = {row[1] for row in rows}
-        if not columns:
-            raise RuntimeError("reconciliation rescue query legacy schema not installed")
-
-        from src.state.db import CANONICAL_POSITION_EVENT_COLUMNS, LEGACY_RUNTIME_POSITION_EVENT_COLUMNS
-
-        has_canonical = set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(columns)
-        has_legacy = set(LEGACY_RUNTIME_POSITION_EVENT_COLUMNS).issubset(columns)
-
-        if has_canonical and has_legacy:
-            raise RuntimeError("reconciliation rescue query does not support hybrid position_events schema")
-        if has_legacy:
-            return True
-        if has_canonical:
-            return False
-        raise RuntimeError("reconciliation rescue query legacy schema not installed")
-
     def _already_logged_rescue_event(position) -> bool:
+        """Check canonical position_events for a prior rescue event."""
         if conn is None:
             return False
-        if not _legacy_rescue_query_available():
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM position_events
+                WHERE position_id = ?
+                  AND source_module LIKE '%chain_reconciliation%'
+                LIMIT 1
+                """,
+                (getattr(position, 'trade_id', ''),),
+            ).fetchone()
+            return row is not None
+        except Exception:
             return False
-        row = conn.execute(
-            """
-            SELECT 1 FROM position_events
-            WHERE runtime_trade_id = ?
-              AND event_type = 'POSITION_LIFECYCLE_UPDATED'
-              AND source = 'chain_reconciliation'
-              AND json_extract(details_json, '$.reason') = 'pending_fill_rescued'
-            LIMIT 1
-            """,
-            (getattr(position, 'trade_id', ''),),
-        ).fetchone()
-        return row is not None
 
     def _emit_rescue_event(position, *, rescued_at: str) -> None:
-        if log_reconciled_entry_event is None or _already_logged_rescue_event(position):
-            return
-        log_reconciled_entry_event(
-            conn,
-            position,
-            timestamp=rescued_at,
-            details={
-                "from_state": "pending_tracked",
-                "to_state": "entered",
-                "rescue_condition_id": getattr(position, 'condition_id', ''),
-                "historical_entry_method": getattr(position, 'entry_method', ''),
-                "historical_selected_method": getattr(position, 'selected_method', '') or getattr(position, 'entry_method', ''),
-            },
+        # Bug #54: log rescue for observability (canonical write is in
+        # _append_canonical_rescue_if_available).
+        logger.info(
+            "RESCUE: %s rescued at %s (chain_state=%s, shares=%.4f, entry=%.4f)",
+            getattr(position, "trade_id", "?"),
+            rescued_at,
+            getattr(position, "chain_state", "?"),
+            getattr(position, "shares", 0.0),
+            getattr(position, "entry_price", 0.0),
         )
+        if conn is not None:
+            import json
+            from src.state.db import log_rescue_event
+            # B063 P1 fix: unify occurred_at across the legacy
+            # CHAIN_RESCUE_AUDIT row and the new rescue_events_v2 row so
+            # post-mortem JOINs on occurred_at correlate correctly and
+            # the v2 UNIQUE(trade_id, occurred_at) key matches whatever
+            # the legacy row recorded. Capture once, use twice.
+            _rescue_ts = datetime.now(timezone.utc).isoformat()
+            try:
+                conn.execute(
+                    "INSERT INTO position_events (position_id, sequence_no, event_type, occurred_at, payload, source_module) "
+                    "VALUES (?, (SELECT COALESCE(MAX(sequence_no),0)+1 FROM position_events WHERE position_id=?), ?, ?, ?, ?)",
+                    (
+                        getattr(position, "trade_id", ""),
+                        getattr(position, "trade_id", ""),
+                        "CHAIN_RESCUE_AUDIT",
+                        _rescue_ts,
+                        json.dumps({
+                            "chain_state": getattr(position, "chain_state", "?"),
+                            "shares": getattr(position, "shares", 0.0),
+                            "entry_price": getattr(position, "entry_price", 0.0)
+                        }),
+                        "src.state.chain_reconciliation_audit"
+                    )
+                )
+                # B063: also append the Phase 2 v2 audit row. This row
+                # carries temperature_metric + causality_status + provenance
+                # authority, which the legacy CHAIN_RESCUE_AUDIT row above
+                # does NOT. Dual-write pattern: keep the legacy row for
+                # existing consumers (test_live_safety_invariants, etc.),
+                # add rescue_events_v2 for the new audit contract.
+                #
+                # Authority resolution lives in the module-level
+                # `resolve_rescue_authority` helper so live code and tests
+                # share the same rule (no copy-paste drift).
+                _metric, _authority, _authority_source = resolve_rescue_authority(position)
+                log_rescue_event(
+                    conn,
+                    trade_id=getattr(position, "trade_id", ""),
+                    position_id=getattr(position, "trade_id", None),
+                    chain_state=str(getattr(position, "chain_state", "?")),
+                    reason="chain_reconciliation_rescue",
+                    occurred_at=_rescue_ts,
+                    temperature_metric=_metric,
+                    causality_status="UNKNOWN",
+                    authority=_authority,
+                    authority_source=_authority_source,
+                )
+                # INFO(DT#1): This commit is exempt from the commit_then_export
+                # choke point. The CHAIN_RESCUE_AUDIT row is itself the
+                # authoritative observability record (not a derived export),
+                # and durability must survive a subsequent cycle crash.
+                # rescue_events_v2 inherits the same exemption rule — it is
+                # an authoritative audit record, not a derived export.
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to durability-log rescue event: {e}")
 
     def _sync_reconciled_trade_lifecycle(position) -> None:
         if update_trade_lifecycle is None:
             return
         try:
-            if not _legacy_rescue_query_available():
-                return
             update_trade_lifecycle(conn, position)
         except Exception as exc:
             raise RuntimeError(
-                f"legacy reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
+                f"reconciliation lifecycle sync failed for {position.trade_id}: {exc}"
             ) from exc
 
     chain_by_token = {cp.token_id: cp for cp in chain_positions}
@@ -312,23 +364,58 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             or getattr(position, "exit_state", "") in PENDING_EXIT_STATES
         )
 
-    # Count non-pending local positions for incomplete-response guard
-    active_local = sum(
-        1 for p in portfolio.positions
-        if p.state != "pending_tracked"
-        and p.state not in INACTIVE_RUNTIME_STATES
-        and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
+    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
+        if conn is None:
+            return
+        from src.state.db import record_token_suppression
+
+        try:
+            result = record_token_suppression(
+                conn,
+                token_id=token_id,
+                condition_id=chain.condition_id,
+                suppression_reason="chain_only_quarantined",
+                source_module="src.state.chain_reconciliation",
+                evidence={
+                    "size": chain.size,
+                    "avg_price": chain.avg_price,
+                    "cost": chain.cost or (chain.size * chain.avg_price),
+                    "condition_id": chain.condition_id,
+                    "first_seen_at": now,
+                },
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"chain-only quarantine fact write failed for {token_id}: {exc}"
+            ) from exc
+        if result.get("status") != "written":
+            raise RuntimeError(
+                f"chain-only quarantine fact write failed for {token_id}: {result}"
+            )
+
+    # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
+    # reconcile() is only called when the chain API responded (cycle_runtime.py
+    # raises if api_positions is None). Treat the call timestamp as fetched_at.
+    # Fix E: fetched_at=now is correct here — reconcile() is only called after
+    # the chain API returns a non-None response, so the fetch itself is fresh.
+    # CHAIN_UNKNOWN reachability inside reconcile is exclusively via the
+    # empty-chain-with-recent-local-verified branch of classify_chain_state.
+    chain_state: ChainState = classify_chain_state(
+        fetched_at=now,  # API responded (non-None) — use current timestamp
+        chain_positions=chain_positions,
+        portfolio=portfolio,
     )
-    # If chain returned 0 positions but we have active local positions,
-    # the API response is likely incomplete. Skip voiding.
-    skip_voiding = active_local > 0 and len(chain_positions) == 0
-    if skip_voiding:
+    if chain_state == ChainState.CHAIN_UNKNOWN:
         logger.warning(
-            "INCOMPLETE CHAIN RESPONSE: 0 chain positions but %d local active. "
+            "INCOMPLETE CHAIN RESPONSE: classify_chain_state=CHAIN_UNKNOWN. "
             "Skipping Rule 2 (void) to prevent false PHANTOM kills.",
-            active_local,
         )
-        stats["skipped_void_incomplete_api"] = active_local
+        stats["skipped_void_incomplete_api"] = sum(
+            1 for p in portfolio.positions
+            if p.state != "pending_tracked"
+            and p.state not in INACTIVE_RUNTIME_STATES
+            and (p.token_id if p.direction == "buy_yes" else p.no_token_id)
+        )
 
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
@@ -353,9 +440,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if chain is None:
                 stats["skipped_pending"] += 1
                 continue
-            legacy_rescue_query_available = conn is None or _legacy_rescue_query_available()
             canonical_rescue_baseline_available = _canonical_rescue_baseline_available(getattr(pos, "trade_id", ""))
-            if not legacy_rescue_query_available and not canonical_rescue_baseline_available:
+            if not canonical_rescue_baseline_available:
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
                 continue
@@ -381,12 +467,29 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 chain_state=getattr(rescued, "chain_state", ""),
             )
             if not rescued.entered_at:
-                rescued.entered_at = now
+                # B064: entered_at is fabricated because the pending position
+                # arrived at rescue with no real entry timestamp. Emit a
+                # structured warning so operators can notice + backfill, and
+                # avoid feeding the sentinel into temporal consumers below.
+                logger.warning(
+                    "ENTERED_AT_FABRICATED: trade_id=%s token=%s chain_state=%s rescued_at=%s",
+                    getattr(rescued, "trade_id", "?"),
+                    tid,
+                    getattr(rescued, "chain_state", "?"),
+                    now,
+                )
+                rescued.entered_at = "unknown_entered_at"
+                _entered_at_was_fabricated = True
+            else:
+                _entered_at_was_fabricated = False
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
-            if legacy_rescue_query_available:
-                _sync_reconciled_trade_lifecycle(rescued)
-                _emit_rescue_event(rescued, rescued_at=rescued.entered_at or now)
+            _sync_reconciled_trade_lifecycle(rescued)
+            # B064: when entered_at is the fabrication sentinel, the rescue
+            # event's display timestamp must be the reconcile `now`, not the
+            # sentinel string.
+            _rescue_display_ts = now if _entered_at_was_fabricated else (rescued.entered_at or now)
+            _emit_rescue_event(rescued, rescued_at=_rescue_display_ts)
             pos.entry_order_id = rescued.entry_order_id
             pos.order_id = rescued.order_id
             pos.chain_state = rescued.chain_state
@@ -406,7 +509,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         if chain is None:
-            if skip_voiding:
+            if chain_state == ChainState.CHAIN_UNKNOWN:
                 continue  # Don't void — API response is suspect
             if (
                 getattr(pos, "entry_fill_verified", False)
@@ -450,12 +553,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 if not _append_canonical_size_correction_if_available(
                     corrected,
                     local_shares_before=local_shares,
-                ) and not _legacy_rescue_query_available():
+                ):
+                    logger.warning(
+                        "SIZE MISMATCH UNRESOLVED: %s — no canonical baseline for correction "
+                        "(local=%.4f, chain=%.4f); quarantining position",
+                        pos.trade_id, local_shares, chain.size,
+                    )
+                    corrected.state = "quarantine_size_mismatch"
+                    corrected.chain_state = "size_mismatch_unresolved"
+                    corrected.shares = local_shares
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )
-                    continue
-                stats["updated"] += 1
+                else:
+                    stats["updated"] += 1
             pos.chain_state = corrected.chain_state
             pos.chain_shares = corrected.chain_shares
             pos.chain_verified_at = corrected.chain_verified_at
@@ -479,16 +590,26 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 tid[-4:],
             )
             quarantine_pos = Position(
-                trade_id=f"quarantine_{tid[:8]}",
-                market_id=chain.condition_id,
-                city="UNKNOWN", cluster="Other",
-                target_date="UNKNOWN", bin_label="UNKNOWN",
+                # B066: synthesize IDs with an explicit QUARANTINE_SENTINEL
+                # value rather than empty strings. Empty-string trade_id /
+                # market_id can collide with degraded-but-live positions
+                # elsewhere (e.g. pre-fill pending state where the venue
+                # order_id has not yet been returned). Using the same
+                # sentinel already adopted by portfolio.py void_position()
+                # for city/target_date/bin_label keeps the quarantine-vs-
+                # real classification deterministic: downstream consumers
+                # can match on ``is_quarantine_placeholder`` OR on any of
+                # these sentinel-valued identifier fields.
+                trade_id=QUARANTINE_SENTINEL,
+                market_id=QUARANTINE_SENTINEL,
+                city=QUARANTINE_SENTINEL, cluster=QUARANTINE_SENTINEL,
+                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
                 direction="unknown",
-                size_usd=chain.cost or (chain.size * chain.avg_price),
-                entry_price=chain.avg_price,
-                p_posterior=chain.avg_price,
+                size_usd=0.0,
+                entry_price=0.0,
+                p_posterior=0.0,
                 edge=0.0,
-                entered_at=datetime.now(timezone.utc).isoformat(),
+                entered_at="unknown_entered_at",
                 token_id=tid,
                 state=enter_chain_quarantined_runtime_state(),
                 strategy="",
@@ -501,6 +622,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 condition_id=chain.condition_id,
                 quarantined_at=now,
             )
+            _persist_chain_only_quarantine_fact(tid, chain)
             portfolio.positions.append(quarantine_pos)
             stats["quarantined"] += 1
 
@@ -531,6 +653,13 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         if pos.chain_state != "quarantined":
             continue
         if not pos.quarantined_at:
+            # No timestamp at all — treat as maximally stale, force expiry
+            logger.warning(
+                "QUARANTINE MISSING TIMESTAMP: %s — forcing exit evaluation",
+                pos.trade_id,
+            )
+            pos.chain_state = "quarantine_expired"
+            expired += 1
             continue
 
         try:
@@ -538,6 +667,12 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
                 pos.quarantined_at.replace("Z", "+00:00")
             )
         except ValueError:
+            logger.warning(
+                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing exit evaluation",
+                pos.trade_id, pos.quarantined_at,
+            )
+            pos.chain_state = "quarantine_expired"
+            expired += 1
             continue
 
         hours_quarantined = (now - quarantined_dt).total_seconds() / 3600

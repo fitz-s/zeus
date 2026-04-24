@@ -115,7 +115,7 @@ def analyze():
     if result["trades"]["avg_edge"] > 0.25:
         warnings.append(
             f"CAUTION: avg edge {result['trades']['avg_edge']:.3f} is very high. "
-            f"Rainstorm autopsy: model was most wrong when most confident (avg edge 0.317). "
+            f"Legacy-predecessor autopsy: model was most wrong when most confident (avg edge 0.317). "
             f"FDR filter may need tightening."
         )
     if result["portfolio"].get("heat_pct", 0) > 40:

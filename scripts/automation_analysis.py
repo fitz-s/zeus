@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def get_conn() -> sqlite3.Connection:
-    from src.state.db import get_shared_connection as get_connection
+    from src.state.db import get_world_connection as get_connection
     return get_connection()
 
 
@@ -35,6 +35,21 @@ def fmt(emoji: str, text: str) -> str:
 
 def section(title: str) -> str:
     return f"\n**{'='*40}**\n**{title}**\n"
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not _table_exists(conn, table_name):
+        raise sqlite3.OperationalError(f"missing table: {table_name}")
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) == column_name for row in rows)
 
 
 # ── 1. Alpha Overrides ────────────────────────────────────────────────────────
@@ -162,7 +177,7 @@ def analyze_etl_freshness(conn: sqlite3.Connection) -> str:
 def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
     try:
         from src.config import settings
-        bias_enabled = settings._data.get("bias_correction_enabled", False)
+        bias_enabled = settings.bias_correction_enabled
     except Exception:
         bias_enabled = False
 
@@ -170,33 +185,48 @@ def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
         "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
     ).fetchone()[0]
 
-    n_pairs_with_flag = 0
+    n_pairs_with_flag: int | None = 0
+    n_pairs_status = "ok"
     try:
         n_pairs_with_flag = conn.execute(
             "SELECT COUNT(*) FROM calibration_pairs WHERE bias_corrected = 1"
         ).fetchone()[0]
-    except Exception:
-        pass
+    except sqlite3.OperationalError as exc:
+        n_pairs_with_flag = None
+        n_pairs_status = f"query_failed:{exc}"
 
-    n_active_bias_models = 0
-    try:
+    platt_bias_instrumented = _table_has_column(
+        conn,
+        "platt_models",
+        "trained_with_bias_correction",
+    )
+    n_active_bias_models: int | None = None
+    if platt_bias_instrumented:
         n_active_bias_models = conn.execute(
             "SELECT COUNT(*) FROM platt_models WHERE is_active=1 AND "
             "trained_with_bias_correction = 1"
         ).fetchone()[0]
-    except sqlite3.OperationalError:
-        pass  # Column not added yet
+    active_bias_model_text = (
+        str(n_active_bias_models)
+        if n_active_bias_models is not None
+        else "unknown (schema not instrumented)"
+    )
 
     status_lines = [
         f"  bias_correction_enabled: **{bias_enabled}**",
         f"  model_bias ECMWF rows (n≥20): **{n_bias_rows}**",
-        f"  calibration_pairs bias_corrected=1: **{n_pairs_with_flag}**",
-        f"  platt_models trained w/ bias: **{n_active_bias_models}**",
+        f"  calibration_pairs bias_corrected=1: **{n_pairs_with_flag if n_pairs_with_flag is not None else 'unknown'}**"
+        + ("" if n_pairs_status == "ok" else f" ({n_pairs_status})"),
+        f"  platt_models trained w/ bias: **{active_bias_model_text}**",
     ]
 
-    if bias_enabled and n_bias_rows > 0 and n_pairs_with_flag > 0 and n_active_bias_models > 0:
+    if n_pairs_with_flag is None:
+        status = "🔴 calibration_pairs bias_corrected 查询失败——无法判断 bias readiness"
+    elif not platt_bias_instrumented:
+        status = "⚠️ platt_models 缺少 trained_with_bias_correction 字段——model bias readiness 未被持久化"
+    elif bias_enabled and n_bias_rows > 0 and n_pairs_with_flag > 0 and n_active_bias_models and n_active_bias_models > 0:
         status = "✅ **Bias correction 可以激活**"
-    elif not bias_enabled and n_bias_rows > 0:
+    elif not bias_enabled and n_bias_rows > 0 and n_pairs_with_flag > 0 and n_active_bias_models and n_active_bias_models > 0:
         status = "⚠️ bias_correction_enabled=false，但数据已就绪——可考虑开启"
     elif n_bias_rows == 0:
         status = "🔴 model_bias 样本不足，无法激活 bias correction"

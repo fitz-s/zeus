@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import uuid
 
 from src.state.portfolio import load_portfolio, save_portfolio, Position, add_position, close_position
-from src.state.db import get_trade_connection_with_shared as get_connection, log_trade_entry
+from src.state.db import get_trade_connection_with_world as get_connection, log_trade_entry
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mock_lifecycle")
@@ -16,7 +16,7 @@ def run():
     
     # 1. Grab a real token_id with tick history so Replay works
     row = conn.execute(
-        "SELECT token_id, city, target_date, range_label FROM shared.token_price_log "
+        "SELECT token_id, city, target_date, range_label FROM world.token_price_log "
         "WHERE token_id IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
     

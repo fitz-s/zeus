@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.contracts.decision_evidence import DecisionEvidence
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     fold_lifecycle_phase,
@@ -90,31 +91,51 @@ def build_position_current_projection(position: Any) -> dict:
         "edge_source": _nullable(getattr(position, "edge_source", "")),
         "discovery_mode": _nullable(getattr(position, "discovery_mode", "")),
         "chain_state": _nullable(getattr(position, "chain_state", "")),
+        "token_id": _nullable(getattr(position, "token_id", "")),
+        "no_token_id": _nullable(getattr(position, "no_token_id", "")),
+        "condition_id": _nullable(getattr(position, "condition_id", "")),
         "order_id": _nullable(getattr(position, "order_id", "")),
         "order_status": _nullable(getattr(position, "order_status", "")),
         "updated_at": projection_updated_at(position),
+        "temperature_metric": getattr(position, "temperature_metric", "high"),
     }
 
 
-def _entry_event_payload(position: Any, *, phase_after: str) -> str:
-    return json.dumps(
-        {
-            "city": getattr(position, "city", ""),
-            "target_date": getattr(position, "target_date", ""),
-            "bin_label": getattr(position, "bin_label", ""),
-            "direction": getattr(position, "direction", ""),
-            "unit": getattr(position, "unit", "F"),
-            "size_usd": getattr(position, "size_usd", 0.0),
-            "shares": getattr(position, "shares", 0.0),
-            "entry_price": getattr(position, "entry_price", 0.0),
-            "order_status": getattr(position, "order_status", ""),
-            "chain_state": getattr(position, "chain_state", ""),
-            "entry_method": getattr(position, "entry_method", ""),
-            "phase_after": phase_after,
-        },
-        default=str,
-        sort_keys=True,
-    )
+def _entry_event_payload(
+    position: Any,
+    *,
+    phase_after: str,
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
+) -> str:
+    # T4.1b 2026-04-23 (D4 Option E): attach DecisionEvidence envelope or
+    # a reason sentinel onto ENTRY_ORDER_POSTED payloads. The two keys are
+    # mutually exclusive semantic variants — `decision_evidence_envelope`
+    # is the verbatim `DecisionEvidence.to_json()` output (read-side uses
+    # `json_extract(payload_json, '$.decision_evidence_envelope')` then
+    # `DecisionEvidence.from_json(...)`); `decision_evidence_reason`
+    # records a known-missing-evidence context (e.g. legacy-position
+    # backfill) so T4.2-Phase1 exit-side audit can distinguish
+    # missing-because-legacy from missing-because-bug.
+    payload: dict[str, Any] = {
+        "city": getattr(position, "city", ""),
+        "target_date": getattr(position, "target_date", ""),
+        "bin_label": getattr(position, "bin_label", ""),
+        "direction": getattr(position, "direction", ""),
+        "unit": getattr(position, "unit", "F"),
+        "size_usd": getattr(position, "size_usd", 0.0),
+        "shares": getattr(position, "shares", 0.0),
+        "entry_price": getattr(position, "entry_price", 0.0),
+        "order_status": getattr(position, "order_status", ""),
+        "chain_state": getattr(position, "chain_state", ""),
+        "entry_method": getattr(position, "entry_method", ""),
+        "phase_after": phase_after,
+    }
+    if decision_evidence is not None:
+        payload["decision_evidence_envelope"] = decision_evidence.to_json()
+    if decision_evidence_reason is not None:
+        payload["decision_evidence_reason"] = decision_evidence_reason
+    return json.dumps(payload, default=str, sort_keys=True)
 
 
 def _entry_event(
@@ -128,6 +149,8 @@ def _entry_event(
     decision_id: str | None,
     source_module: str,
     order_id: str | None,
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
 ) -> dict:
     trade_id = str(getattr(position, "trade_id"))
     slug = event_type.lower()
@@ -149,7 +172,12 @@ def _entry_event(
         "idempotency_key": f"{trade_id}:{slug}",
         "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
-        "payload_json": _entry_event_payload(position, phase_after=phase_after),
+        "payload_json": _entry_event_payload(
+            position,
+            phase_after=phase_after,
+            decision_evidence=decision_evidence,
+            decision_evidence_reason=decision_evidence_reason,
+        ),
     }
 
 
@@ -158,7 +186,18 @@ def build_entry_canonical_write(
     *,
     decision_id: str | None = None,
     source_module: str = "src.engine.lifecycle_events",
+    decision_evidence: DecisionEvidence | None = None,
+    decision_evidence_reason: str | None = None,
 ) -> tuple[list[dict], dict]:
+    # T4.1b 2026-04-23 (D4 Option E): `decision_evidence` lands as a
+    # `decision_evidence_envelope` payload sidecar on the ENTRY_ORDER_POSTED
+    # event only (the single event that represents the committed decision
+    # with full data still in frame). POSITION_OPEN_INTENT precedes the
+    # statistical decision fully materializing; ENTRY_ORDER_FILLED arrives
+    # after the decision frame has released. Callers without evidence
+    # (legacy-position backfill from src.execution.exit_lifecycle) pass
+    # `decision_evidence_reason` instead so the exit-side audit can
+    # distinguish missing-because-legacy from missing-because-bug.
     projection = build_position_current_projection(position)
     canonical_phase = projection["phase"]
     if canonical_phase not in {PENDING_ENTRY, ACTIVE, DAY0_WINDOW}:
@@ -194,6 +233,8 @@ def build_entry_canonical_write(
             decision_id=decision_id,
             source_module=source_module,
             order_id=order_id,
+            decision_evidence=decision_evidence,
+            decision_evidence_reason=decision_evidence_reason,
         ),
     ]
 
@@ -217,6 +258,154 @@ def build_entry_canonical_write(
             )
         )
 
+    return events, projection
+
+
+def build_day0_window_entered_canonical_write(
+    position: Any,
+    *,
+    day0_entered_at: str,
+    sequence_no: int,
+    previous_phase: str = ACTIVE,
+    source_module: str = "src.engine.cycle_runtime",
+) -> tuple[list[dict], dict]:
+    """Day0-canonical-event feature slice (2026-04-24): emit a canonical
+    DAY0_WINDOW_ENTERED event when cycle_runtime transitions a position from
+    active/holding into the day0_window lifecycle phase.
+
+    Pre-T4.1b / pre-Day0-canonical: cycle_runtime.execute_monitoring_phase
+    updated position_current.phase via update_trade_lifecycle and
+    optionally wrote a legacy POSITION_LIFECYCLE_UPDATED trade_decisions
+    row, but did NOT emit a canonical position_events record for the
+    day0 transition. Post-this-slice: the transition emits a typed
+    position_events row with event_type=DAY0_WINDOW_ENTERED, phase_before=
+    previous_phase, phase_after=day0_window, and a payload carrying
+    day0_entered_at plus the standard position identity fields.
+
+    Args:
+        position: Position instance AFTER the state transition (state must
+            already be "day0_window" in memory). Used for identity fields.
+        day0_entered_at: ISO8601 UTC timestamp of the day0 transition.
+            Caller should pass pos.day0_entered_at immediately after setting.
+        sequence_no: The event sequence number relative to the caller's
+            canonical write batch. For in-cycle single-event emissions,
+            callers typically use 1; ledger append_many_and_project will
+            assign the global monotonic position-level sequence.
+        previous_phase: The lifecycle phase the position was in before the
+            transition (ACTIVE / PENDING_ENTRY). Defaults to ACTIVE because
+            that's the common path (entry → holding/active → day0_window).
+        source_module: Caller module name for audit provenance.
+
+    Returns:
+        (events, projection) tuple suitable for append_many_and_project.
+        events is a single-element list containing the DAY0_WINDOW_ENTERED
+        event; projection is build_position_current_projection(position)
+        reflecting the post-transition state.
+
+    Raises:
+        ValueError: if the position is not in the DAY0_WINDOW phase
+            post-transition (enforced to catch caller ordering bugs —
+            pos.state must be mutated to "day0_window" BEFORE this builder
+            is invoked so the projection reflects the transition).
+    """
+    projection = build_position_current_projection(position)
+    canonical_phase = projection["phase"]
+    if canonical_phase != DAY0_WINDOW:
+        raise ValueError(
+            f"day0 canonical builder requires post-transition position "
+            f"to be in day0_window phase, got {canonical_phase!r}. "
+            f"Caller must set pos.state='day0_window' before invoking."
+        )
+
+    if not day0_entered_at:
+        raise ValueError(
+            "day0_entered_at must be a non-empty ISO8601 timestamp"
+        )
+
+    trade_id = str(getattr(position, "trade_id"))
+    slug = "day0_window_entered"
+
+    payload: dict[str, Any] = {
+        "city": getattr(position, "city", ""),
+        "target_date": getattr(position, "target_date", ""),
+        "bin_label": getattr(position, "bin_label", ""),
+        "direction": getattr(position, "direction", ""),
+        "unit": getattr(position, "unit", "F"),
+        "size_usd": getattr(position, "size_usd", 0.0),
+        "entry_price": getattr(position, "entry_price", 0.0),
+        "day0_entered_at": day0_entered_at,
+        "entry_method": getattr(position, "entry_method", ""),
+        "phase_before": previous_phase,
+        "phase_after": DAY0_WINDOW,
+    }
+
+    event = {
+        "event_id": f"{trade_id}:{slug}",
+        "position_id": trade_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "DAY0_WINDOW_ENTERED",
+        "occurred_at": day0_entered_at,
+        "phase_before": previous_phase,
+        "phase_after": DAY0_WINDOW,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": None,
+        "idempotency_key": f"{trade_id}:{slug}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "payload_json": json.dumps(payload, default=str, sort_keys=True),
+    }
+
+    return [event], projection
+
+
+def build_entry_fill_only_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    decision_id: str | None = None,
+    source_module: str = "src.execution.fill_tracker",
+) -> tuple[list[dict], dict]:
+    """Emit ONLY the ENTRY_ORDER_FILLED event for a position whose
+    POSITION_OPEN_INTENT and ENTRY_ORDER_POSTED events already exist.
+
+    Used by fill detection (fill_tracker._mark_entry_filled) to advance a
+    position from pending_entry → active without re-inserting the earlier
+    two entry events (which would violate the unique (position_id, seq) key).
+
+    The caller must pass the next available sequence_no. The position's
+    runtime state must have already been updated so that
+    canonical_phase_for_position(position) == 'active' or 'day0_window'.
+    """
+    projection = build_position_current_projection(position)
+    canonical_phase = projection["phase"]
+    if canonical_phase not in {ACTIVE, DAY0_WINDOW}:
+        raise ValueError(
+            f"entry fill-only builder requires active/day0_window phase, got {canonical_phase!r}"
+        )
+    filled_at = _non_empty(
+        getattr(position, "entered_at", ""),
+        getattr(position, "day0_entered_at", ""),
+        getattr(position, "order_posted_at", ""),
+    )
+    order_id = _nullable(getattr(position, "order_id", ""))
+    events = [
+        _entry_event(
+            position=position,
+            event_type="ENTRY_ORDER_FILLED",
+            sequence_no=sequence_no,
+            occurred_at=filled_at,
+            phase_before=PENDING_ENTRY,
+            phase_after=fold_lifecycle_phase(PENDING_ENTRY, canonical_phase).value,
+            decision_id=decision_id,
+            source_module=source_module,
+            order_id=order_id,
+        )
+    ]
     return events, projection
 
 
@@ -314,6 +503,9 @@ def build_economic_close_canonical_write(
         "payload_json": json.dumps(
             {
                 "exit_price": getattr(position, "exit_price", None),
+                "fill_price": getattr(position, "exit_price", None),
+                "best_bid": getattr(position, "last_monitor_best_bid", None),
+                "current_market_price": getattr(position, "last_monitor_market_price", None),
                 "pnl": getattr(position, "pnl", None),
                 "exit_reason": getattr(position, "exit_reason", ""),
                 "exit_state": getattr(position, "exit_state", ""),

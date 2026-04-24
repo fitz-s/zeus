@@ -61,6 +61,13 @@ def test_refresh_paper_runtime_artifacts_rebinds_paths_for_explicit_state_dir(mo
     import src.riskguard.riskguard as riskguard_module
     import src.observability.status_summary as status_module
 
+    # Capture originals before the call to verify restore.
+    orig_state_dir = db_module.STATE_DIR
+    orig_db_path = db_module.ZEUS_DB_PATH
+    orig_risk_path = db_module.RISK_DB_PATH
+    orig_positions = portfolio_module.POSITIONS_PATH
+    orig_tracker = tracker_module.TRACKER_PATH
+
     calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
@@ -82,11 +89,14 @@ def test_refresh_paper_runtime_artifacts_rebinds_paths_for_explicit_state_dir(mo
         "status": "refreshed",
         "state_dir": str(tmp_path.resolve()),
     }
-    assert db_module.STATE_DIR == Path(tmp_path)
-    assert db_module.RISK_DB_PATH == Path(tmp_path) / "risk_state-paper.db"
-    assert portfolio_module.POSITIONS_PATH == Path(tmp_path) / "positions-paper.json"
-    assert tracker_module.TRACKER_PATH == Path(tmp_path) / "strategy_tracker-paper.json"
+    # Paths were overridden during execution (verified via captured calls).
     assert calls == [
         ("tick", str(Path(tmp_path) / "risk_state-paper.db")),
         ("write_status", str(Path(tmp_path) / "status_summary-paper.json")),
     ]
+    # Paths are restored after the call returns (context-manager guard).
+    assert db_module.STATE_DIR == orig_state_dir
+    assert db_module.ZEUS_DB_PATH == orig_db_path
+    assert db_module.RISK_DB_PATH == orig_risk_path
+    assert portfolio_module.POSITIONS_PATH == orig_positions
+    assert tracker_module.TRACKER_PATH == orig_tracker

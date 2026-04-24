@@ -1,0 +1,68 @@
+{
+  "receipt_type": "t2_family_closure",
+  "family": "T2",
+  "family_intent": "Canonical-path antibody wave — align test-currency for selection-family materialization, sparse-monitor vig handling, and canonical event shape under the post-T4.1b canonical write path.",
+  "created_at": "2026-04-24",
+  "authority_source": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T2.a-g",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/",
+  "t2_slices_closed": [
+    {
+      "slice_id": "T2.a + T2.b",
+      "commit": "c4ee26a",
+      "scope": "R14 quarantine test fixture updates",
+      "outcome": "closed full"
+    },
+    {
+      "slice_id": "T2.c",
+      "commit": "absorbed into co-tenant f8f403e (xfail scaffolding) + closed via T6.3 Option C (pending commit this session)",
+      "scope": "D5 sparse-monitor imputes missing sibling prices",
+      "outcome": "closed full — T6.3 Option C flipped the xfail(strict=True) marker via XPASS detection; fixture asymmetrized to [0.20,0.50,0.30] to kill silent-sibling-equivalence ambiguity (con-nyx pre-edit finding a); asymmetry assertion added so p_cal impute source is discriminable from symmetric-sibling outcomes.",
+      "test": "tests/test_market_analysis.py::TestComputePosterior::test_sparse_monitor_market_vector_imputes_missing_sibling_prices",
+      "closure_trigger_fired": "T6.3 VigTreatment.from_raw sparse-impute implementation 2026-04-24 (Option C per architectural decision)"
+    },
+    {
+      "slice_id": "T2.d + T2.e + T2.f",
+      "commit": "7d064be",
+      "scope": "SelectionFamilySubstrate 3 tests rewritten against canonical post-T4.1b event shape",
+      "outcome": "closed full (3/3 green)"
+    },
+    {
+      "slice_id": "T2.g",
+      "commit_initial": "xfail(strict=False) absorbed into co-tenant f8f403e 2026-04-24",
+      "commit_closure": "pending (this session — W4 closure 2026-04-24)",
+      "scope": "Un-monkeypatched real-Day0Router fail-closed verification",
+      "outcome": "closed full — xfail(strict=False) marker removed after Day0TemporalContext fixture was built (Dallas/2026-04-12/CDT DST-active SolarDay with sunrise 12:00 UTC ≈ 07:00 CDT, sunset 00:45 UTC next day ≈ 19:45 CDT; peak_hour=15, post_peak_confidence=0.4, daylight_progress=0.5). Fixture replaces the prior SimpleNamespace(current_utc_timestamp=now) stub so Day0HighSignal.p_vector can traverse solar_day / peak_hour / daylight_progress via its Day0Signal delegation without TypeError.",
+      "test": "tests/test_fdr.py::TestSelectionFamilySubstrate::test_evaluate_candidate_exercises_real_day0_router_on_fixture_db — PASSES real Day0Router dispatch; terminal assertion `decisions[0].rejection_stage == 'SIZING_TOO_SMALL'` matches the monkeypatched T2.d variant (RiskLimits(min_order_usd=999999.0) forces rejection after real Day0HighSignal.p_vector runs over 4 fixture bins).",
+      "category_immunity": "Future Day0TemporalContext schema drift (new required field, renamed field, dropped attribute) now fails LOUD via this test instead of silently xfail-passing."
+    }
+  ],
+  "t2_family_effective_status": {
+    "slices_planned": 7,
+    "closed_full": ["T2.a", "T2.b", "T2.c", "T2.d", "T2.e", "T2.f", "T2.g"],
+    "closed_as_xfail_antibody": [],
+    "unresolved_deferrals": [],
+    "closure_history": {
+      "T2.c": "2026-04-24 — T6.3 Option C landed; xfail(strict=True) XPASS forced marker removal; fixture asymmetrized per con-nyx pre-edit finding a.",
+      "T2.g": "2026-04-24 W4 closure — Day0TemporalContext fixture built (Dallas/2026-04-12/CDT); xfail(strict=False) removed; real Day0Router dispatch path exercised end-to-end with SIZING_TOO_SMALL terminal rejection matching monkeypatched variant."
+    }
+  },
+  "t2_d_1_substitute_slice": {
+    "original_spec": "v2 snapshot fixture setup to populate ensemble_snapshots_v2 with boundary_ambiguous=0 row",
+    "delivered_instead": "surrogate-critic-driven verification that init_schema(conn) already creates empty ensemble_snapshots_v2; natural empty-table query returns {} so DT7 gate passes without stubbing. F1 HIGH finding from adversarial critic prompt caught that an explicit monkeypatch was redundant and would have cemented bad precedent. TODO(T2.g) breadcrumbs added at top of each of 3 T2.d/e/f tests so future real-fixture slice has explicit anchors.",
+    "commit": "7d064be"
+  },
+  "critic_prompt_degradation_fix": {
+    "context": "Operator flagged 6+ prior slices producing zero substantive surrogate findings. Root cause: prompts had accreted self-justification language (\"pattern proven\", \"narrow scope, self-validating\") that primed APPROVE.",
+    "fix": "Rewrote surrogate dispatch prompt for T2.d.1 with 10 explicit adversarial asks, no scope-narrowing language, specific failure-mode probes.",
+    "result": "Surrogate returned REQUEST_CHANGES with 6 findings (HIGH×1 + MED×2 + LOW×3). F1 HIGH caught real redundant-stub issue that would have cemented bad precedent. All 6 findings addressed inline.",
+    "lesson": "Adversarial framing is load-bearing for critic machinery. Future slices must preserve it; never skip surrogate on 'narrow scope' grounds without active challenge."
+  },
+  "cross_references": {
+    "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "packet_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "t1_receipt": "docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json",
+    "midstream_fix_plan_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md (T2 family rows L63-72)",
+    "paired_t6_3_slice": "plan L103 — T6.3 VigTreatment.from_raw implementation (size 10h, deps T2.c boundary test)"
+  }
+}

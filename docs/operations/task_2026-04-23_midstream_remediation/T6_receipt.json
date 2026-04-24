@@ -1,0 +1,230 @@
+{
+  "receipt_type": "family_partial_closure",
+  "family": "T6",
+  "family_intent": "D1/D2/D5/D6 MITIGATED → antibody promotion. 4-slice family per plan L103-110; only T6.3 + T6.4 available now, T6.1/T6.2 doubly-blocked on live-readiness B3 + settlement corpus.",
+  "created_at": "2026-04-24",
+  "authority_source": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T6.1-T6.4",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/",
+  "parent_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+  "parent_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+  "t6_slices_status": [
+    {
+      "slice_id": "T6.1",
+      "status": "BLOCKED",
+      "scope": "D1 EV-optimized α — replaces risk-cap blend; derived from realized-P&L regression.",
+      "estimated_size": 16,
+      "blockers": ["live-readiness B3 upgrade", "≥ 30-settlement P&L corpus"],
+      "wave": "W5"
+    },
+    {
+      "slice_id": "T6.2",
+      "status": "BLOCKED",
+      "scope": "D2 profit-validated TailTreatment — direction-aware, buy_no P&L evidence.",
+      "estimated_size": 12,
+      "blockers": ["live-readiness B3 upgrade", "≥ 30 buy_no settlements"],
+      "wave": "W5"
+    },
+    {
+      "slice_id": "T6.3",
+      "status": "CLOSED_FULL",
+      "commit": "pending (this session)",
+      "architectural_decision": "Option C — sibling_snapshot primary kwarg with p_cal fallback under explicit imputation_source provenance tag",
+      "scope": "D5 sparse-monitor VigTreatment with provenance; VigTreatment.from_raw(raw_market_prices, *, sibling_snapshot=None, imputation_source='none'); records imputed_bins + imputation_source.",
+      "estimated_size": 10,
+      "actual_size_estimate": "~4-5h (foundation pre-existed per plan-premise correction #15)",
+      "paired_slice": "T2.c (closure trigger fired via XPASS; xfail marker removed)",
+      "plan_premise_corrections_introduced": [
+        "#15: VigTreatment class + from_raw classmethod already existed; T6.3 was signature-extension + provenance-fields + sparse-branch-policy-flip, not greenfield",
+        "#19: 3-way collision between B086 archive (no-impute), T2.c xfail body (p_cal impute literal), and plan L109 sibling_snapshot semantics — surfaced by con-nyx pre-edit 10-ask adversarial review; resolved via operator-chosen Option C",
+        "#20: test_sparse_vs_complete_held_bin_stability was silently RED on master at HEAD 3eaa772/a7fc74c since B086; T1 currency audit (T1.a/e) missed this because it checked only dated headers, not pytest green-ness"
+      ],
+      "files_modified": [
+        "src/contracts/vig_treatment.py",
+        "src/strategy/market_fusion.py",
+        "tests/test_market_analysis.py",
+        "tests/test_k3_slice_p.py",
+        "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md"
+      ],
+      "files_added": [
+        "tests/test_vig_treatment_provenance.py"
+      ],
+      "regression_delta": {
+        "touched_scope_pre": "9 passed / 1 failed / 1 xfailed (HEAD 3eaa772; reproduced on HEAD a7fc74c post-rebase)",
+        "touched_scope_post": "25 passed / 0 failed / 0 xfailed (pre-surrogate-fixups) → 27 passed / 0 failed / 0 xfailed (post-surrogate-fixups — 2 new zero-for-zero filter antibodies in tests/test_vig_treatment_provenance.py)",
+        "delta": "+14 new passes from contract tests + 1 previously-RED flipped green (finding f) + 1 xfail→XPASS→marker removed (T2.c) + 2 new antibodies for surrogate MED finding (zero-for-zero substitution filter)",
+        "new_contract_tests_file": "tests/test_vig_treatment_provenance.py (16 tests post-fixup)",
+        "pre_existing_failures_outside_scope": [
+          "tests/test_market_analysis.py::TestVWMP::test_zero_size_fallback (vwmp() raises ValueError per post-B084 law; unrelated to T6.3)",
+          "tests/test_architecture_contracts.py::test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent (test-harness _Logger.warning attribute gap; unrelated)"
+        ]
+      },
+      "surrogate_critic_findings_addressed_inline": {
+        "HIGH_1": "compute_posterior distorted-vig mis-route — added has_zeros gate so out-of-vig-band complete markets preserve pre-T6.3 raw pass-through (category-immunity claim restored). market_fusion.py:182-214.",
+        "MED_2": "sibling-zero-at-zero-index no-op filter — from_raw now computes effective_impute_mask = zero_mask & (sibling > 0.0); zero-for-zero substitutions excluded from imputed_bins; 2 new antibody tests added. vig_treatment.py:216-259.",
+        "MED_4": "imputation_source now typed as Literal['none','sibling_market','p_cal_fallback'] via module-level ImputationSource alias; type system catches typos at mypy/pyright time (defense-in-depth: runtime validator preserved). vig_treatment.py:27-33.",
+        "LOW_5": "vig_factor=1.0 sentinel docstring clarified — 1.0 is NOT a unique sparse discriminator (legit vig-free markets also produce 1.0); authoritative sparse marker is imputed_bins non-empty or imputation_source != 'none'. vig_treatment.py:47-54.",
+        "LOW_6": "T2.c ratio assertion added — result[0]/result[2] == p_cal[0]/p_cal[2] (alpha-independent) pins impute source specifically to p_cal, not any asymmetric reference. test_market_analysis.py:154-165.",
+        "NICE_9": "this regression_delta block now references tests/test_vig_treatment_provenance.py explicitly."
+      },
+      "surrogate_critic_findings_deferred": {
+        "MED_3": "compute_posterior normalization relationship test (across-module invariant: mixed VigTreatment + compute_posterior always produces sum=1.0 posterior). Deferred to dedicated relationship-test slice per Fitz 'test relationships, not functions'. New breadcrumb task appended to receipt.",
+        "LOW_7": "bootstrap CI semantic note under sparse+impute (Platt-resampled p_cal as 'sibling' means CI reflects calibration variance not independent market observation). Deferred per surrogate's own recommendation.",
+        "LOW_8": "test_sparse_vs_complete_held_bin_stability tolerance tightening (currently 15%, actual post-T6.3 ratio is 3.57%). Kept loose as safety margin against future Platt/tail-scaling interactions; revisit if future slice introduces dedicated sparse-impute stability monitoring."
+      },
+      "category_immunity": "1.0/1.0 — silent revival of pre-B086 policy is now structurally impossible: the impute path MUST name its source through the typed record, making audit-blind regression surface-visible.",
+      "b086_supersedence": {
+        "durable_committed_records": [
+          "docs/operations/task_2026-04-23_midstream_remediation/T6_receipt.json (this file)",
+          "src/contracts/vig_treatment.py module docstring L14-20 (T6.3 supersedence note inline with contract)",
+          "src/strategy/market_fusion.py:186-214 (policy flip comment, replaces stale B086 rationale)",
+          "docs/operations/task_2026-04-23_midstream_remediation/work_log.md (T6.3 slice row)"
+        ],
+        "local_scratch_annotation": "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17 — local-only pointer; NOT committed (archives/ is gitignored per .gitignore:11). Durable supersedence lives in the committed records above. A future dedicated slice may promote this to architecture/history_lore.yaml if denser durable-lesson encoding is needed."
+      }
+    },
+    {
+      "slice_id": "T6.4",
+      "status": "CLOSED_MINIMAL",
+      "commit": "pending (this session)",
+      "scope_delivered": "D6 fee + time opportunity cost wired into HoldValue at live exit seam via HoldValue.compute_with_exit_costs() factory; feature-flag-gated (HOLD_VALUE_EXIT_COSTS default OFF) so pre-T6.4 behavior preserved during shadow validation. 4 call sites rewired: src/state/portfolio.py:_buy_yes_exit L545 (Day0) + L598 (Layer-4 EV) + _buy_no_exit L684 (Day0) + L760 (Layer-4 EV).",
+      "scope_deferred_to_phase2": "D6 correlation crowding cost — requires threading portfolio context (list of currently-held Positions for correlated_exposure computation) through ExitContext dataclass. More invasive architectural change; phase2 ticket.",
+      "estimated_size": 14,
+      "actual_size_estimate": "~6-7h (4 wire-in sites + new factory + config settings + feature flag + test file + HoldValue dataclass bug #22 fix)",
+      "plan_premise_corrections_introduced": [
+        "#18: src/execution/exit_triggers.py has ZERO production callers (only tests/test_lifecycle.py) — real seam is Position.evaluate_exit ← cycle_runtime.py:630, inside src/state/** planning-lock zone. Plan cited dead module.",
+        "#21: _buy_no_exit path (L626, L672 pre-edit) bypassed HoldValue entirely — used bare math `shares * current_market_price <= shares * current_p_posterior`. T6.4 brought it through the contract for consistency with _buy_yes_exit (flag-gated).",
+        "#22: HoldValue.compute() accepts extra_costs dict per docstring, but __post_init__ validator only checked `net_value == gross - fee - time` — extras caused construction failure. Latent bug uncovered when T6.4 correlation_crowding=0.15 factory call raised. Fix: added trailing `extra_costs_total: float = 0.0` field with validator accounting."
+      ],
+      "files_modified": [
+        "src/contracts/hold_value.py (new compute_with_exit_costs factory + extra_costs_total field + validator fix for #22)",
+        "src/config.py (3 new getters: exit_fee_rate, exit_daily_hurdle_rate, hold_value_exit_costs_enabled)",
+        "config/settings.json (new exit.fee_rate + exit.daily_hurdle_rate + feature_flags.HOLD_VALUE_EXIT_COSTS)",
+        "src/state/portfolio.py (4 call site wire-ins + hours_to_settlement threading into _buy_yes_exit + updated 2 callers)"
+      ],
+      "files_added": [
+        "tests/test_hold_value_exit_costs.py (12 tests across 3 classes)"
+      ],
+      "feature_flag": "HOLD_VALUE_EXIT_COSTS (default OFF). Flip protocol: after operator validates should_exit-rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a soft prerequisite; a live A/B on a fraction of capital is the stronger signal).",
+      "regression_delta": {
+        "touched_scope_post": "53 passed / 0 failed / 0 xfailed (across test_hold_value_exit_costs + test_vig_treatment_provenance + test_k3_slice_p + test_market_analysis::TestComputePosterior)",
+        "broader_regression": "80 passed / 1 failed — the 1 failure is TestVWMP::test_zero_size_fallback (pre-existing since post-B084 vwmp ValueError; unrelated to T6.4).",
+        "hold_value_specific": "15 passed / 0 failed across all hold_value-keyed tests (HoldValue dataclass changes backwards-compatible with existing callers)."
+      },
+      "category_immunity": "0.7/1.0 — fee + time cost category closed (prior silent zero-cost violation of D6 is now eliminated at both buy_yes and buy_no seams when flag ON). Remaining 0.3: correlation crowding category still open (needs phase2 portfolio-context threading); operator flag flip gate is the current safety mechanism rather than structural impossibility."
+    }
+  ],
+  "t6_family_effective_status": {
+    "slices_planned": 4,
+    "closed_full": ["T6.3"],
+    "closed_minimal_with_phase2_deferred": ["T6.4"],
+    "blocked": ["T6.1", "T6.2"]
+  },
+  "t6_4_pre_flag_flip_checklist": {
+    "owner": "operator (before flipping feature_flags.HOLD_VALUE_EXIT_COSTS=true)",
+    "items_remaining_unenforced_by_code": [
+      {
+        "id": "currency_verify_polymarket_fee",
+        "source": "con-nyx T6.4 post-edit finding (a)",
+        "action": "Re-verify Polymarket fee schedule at https://docs.polymarket.com/trading/fees against `src/contracts/execution_price.py:130 polymarket_fee` formula `rate × p × (1-p)` with fee_rate=0.05. Record verification date in T6.4 receipt addendum. Currently last-verified 2026-03 (per git log on execution_price.py)."
+      },
+      {
+        "id": "replay_receipt_precondition",
+        "source": "con-nyx T6.4 post-edit finding (j)",
+        "action": "Operator confirms T6.3-followup-1 production-corpus bootstrap-CI + should_exit delta audit has been executed AND accepted before flipping HOLD_VALUE_EXIT_COSTS=true. Current state: flag-note at config/settings.json:147 documents the prerequisite in prose; code does NOT enforce file-existence. A future hardening slice could add a file-presence assertion inside hold_value_exit_costs_enabled() pointing at docs/operations/.../T6.3-followup-1_replay_receipt.json; deferred for operator policy decision."
+      }
+    ]
+  },
+  "t6_4_hardening_con_nyx_post_edit": {
+    "commit": "pending (this session)",
+    "scope": "Third T6.4 hardening pass addressing con-nyx post-edit review of commit 96fd850 (which was timed just before commit 6b4455f; 6b4455f already covered con-nyx's hurdle-bounds portion of finding (j)). This commit closes the remaining CONDITIONAL (c) hours=None D6-bypass + cheap NICEs (b) docstring + (d) flag-OFF parity antibody + (h) local-import cleanup + (i) fee_rate two-source-of-truth coupling.",
+    "changes": [
+      "CONDITIONAL (c) hours=None authority-gap breadcrumb: when flag ON and hours_to_settlement is None or <0, _buy_yes_exit + _buy_no_exit now append 'hold_value_hours_unknown_time_cost_zero' to applied_validations. Surfaces the D6-bypass via monitor summary counts instead of silent degradation. 3 new tests lock the behavior at both buy_yes/buy_no paths + regression guard that breadcrumb does NOT fire when hours is valid.",
+      "NICE (b) capital_locked semantic docstring: hold_value.py compute_with_exit_costs docstring clarified — mark-to-market (shares × best_bid) is D6-correct over entry notional (size_usd) because entry is sunk cost; what's actually locked is the exit value you'd release by closing now.",
+      "NICE (d) flag-OFF parity antibody: test_flag_off_parity_with_pre_t64_bare_math exercises _buy_yes_exit with flag OFF and asserts the decision matches the pre-T6.4 bare-math `sell_value <= hold_gross` formula inline. Belt-and-suspenders against silent regression in flag-OFF preservation path.",
+      "NICE (h) local-import cleanup: polymarket_fee import moved to module-level in hold_value.py. Verified no circular dependency (execution_price does not import hold_value). Cleaner, eliminates per-call import-cache lookup.",
+      "NICE (i) fee_rate coupling antibody: test_fee_rate_config_matches_polymarket_fee_default pins config.exit.fee_rate == polymarket_fee.__defaults__ at CI time. Drift in either source is caught before deploy."
+    ],
+    "tests_added": 5,
+    "regression": "24 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 19; +5 hardening tests).",
+    "con_nyx_findings_deferred_to_pre_flag_flip_checklist": ["a (currency verify)", "j remaining (replay-receipt enforcement)"]
+  },
+  "t6_4_hardening_landed_inline": {
+    "commit": "pending (this session)",
+    "scope": "Close surrogate post-edit 2 HIGH + 2 MEDIUM findings before operator flag flip.",
+    "changes": [
+      "HIGH #1: polymarket_fee(price ∈ {0.0, 1.0}) crash — factory now clamps best_bid to (EPS=1e-6, 1-EPS) so extreme prices don't propagate ValueError through cycle_runtime except-all into silent monitor_failed state. Fixed at src/contracts/hold_value.py:168-179.",
+      "HIGH #2: 2 of 4 wire-in sites lacked integration coverage — added test_flag_on_buy_yes_day0_exit_records_cost_awareness + test_flag_on_buy_no_day0_exit_records_cost_awareness + test_flag_on_extreme_best_bid_does_not_crash (3 new tests in tests/test_hold_value_exit_costs.py).",
+      "MED #3: negative correlation_crowding silently dropped — factory now raises ValueError pre-compute. src/contracts/hold_value.py:147-153.",
+      "MED #4: daily_hurdle_rate + fee_rate unbounded — getter-level bounds validation [0, 0.01] and [0, 0.1] respectively. src/config.py:exit_daily_hurdle_rate + exit_fee_rate.",
+      "Receipt claim corrected: '4 wire-in integration assertions' now materially honored (Day0 + Layer-4 × buy_yes + buy_no = 4 sites tested)."
+    ],
+    "deferred_from_surrogate_review": [
+      "MED #5 (naming ambiguity): buy_no wire-in uses current_market_price as best_bid kwarg — factor polymarket_fee is symmetric in p but naming is slightly inexact. Docstring tuned but full fix (best_bid_no threaded separately) awaits T6.4-phase2 ExitContext extension.",
+      "LOW findings: costs_declared ordering contract, frozen-but-mutable List[str], negative-hours breadcrumb — all noted for future hardening slice, none flag-ON-safety-critical."
+    ],
+    "regression": "19 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 12; +7 hardening). Broader HoldValue-keyed 19+ still green."
+  },
+  "t6_4_phase2_closed": {
+    "id": "T6.4-phase2",
+    "status": "CLOSED_FULL",
+    "commit": "pending (this session)",
+    "scope_delivered": "D6 correlation crowding cost wired through ExitContext. ExitContext dataclass gains portfolio_positions: tuple = () + bankroll: Optional[float] = None (both trailing defaults, frozen-dataclass safe). cycle_runtime._build_exit_context() accepts portfolio kwarg and populates the tuple from PortfolioState.positions (self-excluded via trade_id filter). _buy_yes_exit / _buy_no_exit signatures extended with portfolio_positions + bankroll kwargs; 4 evaluate_exit call sites thread them through. Helper _compute_exit_correlation_crowding(this_cluster, portfolio_positions, bankroll, shares, best_bid, crowding_rate) reuses src/strategy/correlation.py::get_correlation and returns dollar-denominated crowding cost: rate × exposure_ratio × shares × best_bid. Cost plumbed into all 4 HoldValue.compute_with_exit_costs factory calls via correlation_crowding kwarg; applied_validations breadcrumb `hold_value_correlation_crowding_applied` fires when cost > 0. Config: exit.correlation_crowding_rate default 0.0 (safe no-op — phase2 shipping does NOT alter live behavior until operator flips after T6.3-followup-1 replay audit), bounded [0, 0.1] via getter.",
+    "estimated_size": 6,
+    "actual_size_estimate": "~4h (reused correlated_exposure semantics via direct get_correlation loop; no new invariants introduced at ExitContext authority layer — portfolio_positions + bankroll are optional trailing defaults)",
+    "category_immunity_delta": "D6 0.7/1.0 → 1.0/1.0 when exit.correlation_crowding_rate > 0. The architectural seam is now complete; crowding activation becomes a config flip rather than code change. Silent D6 bypass at the correlation dimension is now structurally impossible (any non-zero rate flows through typed ExitContext → helper → HoldValue factory with breadcrumb).",
+    "regression_delta": {
+      "touched_scope_post": "36 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 24; +12 phase2 tests across new TestCorrelationCrowdingPhase2 class)",
+      "broader": "97 passed / 4 failed on test_hold_value_exit_costs + test_lifecycle + test_live_safety_invariants; the 4 failures are ALL pre-existing on HEAD 6fbdabb (verified via git stash — unrelated to phase2). 0 new failures."
+    },
+    "feature_flag_semantics_unchanged": "HOLD_VALUE_EXIT_COSTS still default OFF; phase2 correlation crowding piggybacks on that gate + gets its own rate-based no-op safeguard (default 0.0 even when feature flag ON).",
+    "files_modified": [
+      "config/settings.json (exit.correlation_crowding_rate + note)",
+      "src/config.py (exit_correlation_crowding_rate getter with bounds [0, 0.1])",
+      "src/state/portfolio.py (ExitContext 2 new fields + _compute_exit_correlation_crowding helper + 4 wire-in sites + _buy_yes_exit/_buy_no_exit signature extensions + 4 evaluate_exit caller updates)",
+      "src/engine/cycle_runtime.py (_build_exit_context portfolio kwarg + tuple construction with self-filter + 1 caller update at L623)"
+    ],
+    "files_added": [],
+    "tests_added_in_existing_file": "12 tests in tests/test_hold_value_exit_costs.py::TestCorrelationCrowdingPhase2 covering: helper-zero-when-rate-zero, helper-zero-when-no-other-positions, helper-zero-when-bankroll-missing, helper-golden-path-arithmetic, helper-does-not-re-filter-self (contract documentation), helper-skips-malformed-entries, rate-bounds-validation, rate-default-zero, breadcrumb-fires-when-rate-positive, breadcrumb-silent-when-rate-zero, _build_exit_context-excludes-self, _build_exit_context-portfolio-none-produces-empty-tuple."
+  },
+  "surrogate_critic_notes": {
+    "con_nyx_pre_edit_review_quality": "HIGH — surfaced 3 findings the team-lead initial scope missed: (b) B086 rationale staleness, (e) test vacuity, (f) latent RED test. Adversarial 10-ask template per feedback_critic_prompt_adversarial_template.md is load-bearing for this level of architectural review.",
+    "con_nyx_post_edit_review_quality": "HIGH — verified commit 6f53ef2 post-push; 0 BLOCKERs, 4 CONDITIONALs (b/d/e/j), 5 NICE-TO-HAVE (a/c/g/h/i), 1 live-readiness gap (f). Added 2 CONDITIONALs (b + j) as inline hardening follow-up commit; 2 CONDITIONALs (d + e) + 1 live-readiness (f) deferred to T6.3-followup slices.",
+    "code_reviewer_opus_post_edit_review_quality": "HIGH — identified HIGH finding that the team-lead initial implementation missed (compute_posterior distorted-vig silent demotion); HIGH + 3 inline-cheap findings addressed before commit 6f53ef2."
+  },
+  "t6_3_followup_tracked": [
+    {
+      "id": "T6.3-followup-1",
+      "source": "con-nyx post-edit finding (f)",
+      "scope_original": "Bootstrap CI + FDR p-value + should_trade delta audit — replay harness over frozen monitor_refresh corpus, compare T6.3 p_cal_fallback vs pre-T6.3 no-impute on identical seed; report |delta| per direction.",
+      "status": "PARTIAL — regression-guard antibody landed (`test_sparse_p_market_bootstrap_produces_finite_ci` in tests/test_k3_slice_p.py) asserting T6.3 does not produce NaN/Inf CI on sparse p_market via MarketAnalysis._bootstrap_bin. Full comparative delta audit requires frozen monitor_refresh corpus from production logs (not available in-session); tracked as live-readiness B3 precondition.",
+      "remaining_blocker_for": "live-readiness B3 closure",
+      "blocker_for_commit": false
+    },
+    {
+      "id": "T6.3-followup-2",
+      "source": "con-nyx post-edit finding (d)",
+      "scope": "Tail-path impute coverage test — `test_tail_bin_impute_respects_tail_alpha_scaling` in tests/test_k3_slice_p.py. Pins the raw[tail] = p_cal[tail] identity collapse under p_cal_fallback (tail_alpha weight distribution becomes mathematically degenerate because both blend terms equal p_cal[tail]); regression signal for a future sibling_market policy that would NOT collapse identically.",
+      "status": "CLOSED_INLINE in T6.3-followup-batch commit this session"
+    },
+    {
+      "id": "T6.3-followup-3",
+      "source": "con-nyx post-edit finding (e)",
+      "scope": "Zero-p_cal tail cascade documentation — `test_zero_p_cal_at_sparse_position_does_not_claim_impute` in tests/test_k3_slice_p.py. Documents that when p_cal[i]=0 at a sparse position, MED_2 effective_impute_mask excludes position from imputed_bins (honest provenance: 'we chose not to repair this bin' vs 'we imputed and failed'). Posterior[i] ≈ 0 but record is provenance-truthful — sufficient for Fitz Constraint #3 without forcing a raise/uniform-prior policy decision in this slice.",
+      "status": "CLOSED_INLINE in T6.3-followup-batch commit this session"
+    },
+    {
+      "id": "T6.3-hardening (b + j)",
+      "source": "con-nyx post-edit findings (b) + (j)",
+      "scope": "Validator hardening — (b) __post_init__ enforces raw_market_prices[imputed_bins[i]] == 0.0 (bogus provenance rejected); (j) from_raw rejects imputation_source != 'none' when sibling_snapshot is None (caller-intent drift detection). 3 new antibody tests added. Closes two silent-failure categories surfaced by post-edit adversarial review.",
+      "status": "LANDED in commit d83d5ff"
+    }
+  ],
+  "cross_references": {
+    "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "packet_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "t2_receipt": "docs/operations/task_2026-04-23_midstream_remediation/T2_receipt.json (T2.c closed via this slice)",
+    "b086_archive": "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md (B086 entry carries T6.3 supersedence pointer)",
+    "midstream_fix_plan_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md (T6 family rows L103-110)"
+  }
+}

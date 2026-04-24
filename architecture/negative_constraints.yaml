@@ -62,3 +62,39 @@ constraints:
     enforced_by:
       scripts:
         - scripts/check_work_packets.py
+  - id: NC-11
+    statement: No writing of daily-low rows on legacy (non-v2) tables.
+    enforced_by:
+      schema:
+        - migrations/2026_04_02_architecture_kernel.sql
+      tests:
+        - tests/test_architecture_contracts.py::test_no_daily_low_on_legacy_table
+  - id: NC-12
+    statement: No mixing of high and low rows in any Platt model, calibration pair set, bin lookup, or settlement identity.
+    enforced_by:
+      tests:
+        - tests/test_cross_module_invariants.py::test_no_high_low_mix_in_platt_or_bins
+      semgrep_rule_ids:
+        - zeus-no-high-low-row-mix
+  - id: NC-13
+    statement: No JSON export write before the corresponding DB commit returns.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-json-before-db-commit
+      tests:
+        - tests/test_cross_module_invariants.py::test_json_export_after_db_commit
+  - id: NC-14
+    statement: No bare static entry_price passed to kelly_size() at cross-layer seams.
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-bare-entry-price-kelly
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_kelly_input_carries_distributional_info
+  - id: NC-15
+    statement: make_family_id() must not be called with strategy_key sometimes empty and sometimes set across call sites; per-path drift in family key construction is forbidden.
+    invariants: [INV-22]
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-fdr-family-key-drift
+      tests:
+        - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical

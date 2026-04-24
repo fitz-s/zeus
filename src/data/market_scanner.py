@@ -7,8 +7,10 @@ Parses bin structure, token IDs, and prices from market data.
 import json
 import logging
 import re
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 
@@ -18,12 +20,93 @@ logger = logging.getLogger(__name__)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
+# B017: data-provenance types. See also src/data/__init__.py note.
+# Authority literal follows the house pattern established in
+# src/contracts/observation_atom.py::ObservationAtom.authority.
+ScanAuthority = Literal["VERIFIED", "STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"]
+
+
+@dataclass(frozen=True)
+class MarketSnapshot:
+    """A provenance-tagged snapshot of active weather events.
+
+    The ``authority`` field explicitly distinguishes:
+      - ``VERIFIED``       : fresh network fetch succeeded this call
+      - ``STALE``          : network fetch failed, cached data returned
+                             (``stale_age_seconds`` > 0, originally fetched
+                             at ``fetched_at_utc``)
+      - ``EMPTY_FALLBACK`` : network fetch failed AND no cache was
+                             available (events == [])
+      - ``NEVER_FETCHED``  : initial state before any fetch attempted
+
+    Callers MAY treat the events as a plain ``list[dict]`` for backwards
+    compatibility, but live-trading call paths SHOULD branch on
+    ``authority`` before generating new BUY/SELL signals on potentially
+    stale event data (Fitz methodology constraint #4: data provenance).
+    """
+
+    events: list[dict] = field(default_factory=list)
+    authority: ScanAuthority = "NEVER_FETCHED"
+    fetched_at_utc: datetime | None = None
+    stale_age_seconds: float | None = None
+
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
+
+_LOW_METRIC_KEYWORDS = (
+    "lowest temperature",
+    "low temperature",
+    "lowest temp",
+    "minimum temperature",
+    "minimum temp",
+    "min temperature",
+    "daily low",
+    "overnight low",
+    "coldest temperature",
+)
 
 # Tag slugs to search (in priority order)
 TAG_SLUGS = ["temperature", "weather", "daily-temperature"]
 _ACTIVE_EVENTS_CACHE: list[dict] | None = None
+_ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
+_ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
+_ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
+_ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
+
+
+def infer_temperature_metric(*text_surfaces: str) -> str:
+    """Infer market metric from free text.
+
+    Returns:
+        "low" when text clearly describes daily lows; otherwise "high".
+    """
+    text = " ".join(str(surface or "") for surface in text_surfaces).lower()
+    if any(keyword in text for keyword in _LOW_METRIC_KEYWORDS):
+        return "low"
+    return "high"
+
+
+def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, retries: int = 3) -> httpx.Response:
+    """GET a Gamma API path with retries on transient connection errors.
+
+    The proxy path to gamma-api.polymarket.com periodically returns
+    'Connection reset by peer' (errno 54). Retrying with a short backoff
+    recovers reliably without masking real failures — after `retries`
+    attempts the last exception propagates.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = httpx.get(f"{GAMMA_BASE}{path}", params=params, timeout=timeout)
+            return resp
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def find_weather_markets(
@@ -50,10 +133,10 @@ def find_weather_markets(
 
 
 def get_current_yes_price(market_id: str) -> Optional[float]:
-    """Fetch the current YES-side price for an active market in paper mode.
+    """Fetch the current YES-side price for an active market via Gamma event data.
 
-    Paper mode uses Gamma event data, not live CLOB VWMP, as the observable
-    market price source during monitor cycles.
+    Used during monitor cycles as the observable market price source when live
+    CLOB VWMP is not available (e.g. non-CLOB positions).
     """
     events = _get_active_events()
     if not events:
@@ -84,23 +167,105 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
 
 
 def _get_active_events() -> list[dict]:
-    global _ACTIVE_EVENTS_CACHE
-    if _ACTIVE_EVENTS_CACHE is None:
-        _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
-    return list(_ACTIVE_EVENTS_CACHE)
+    """Return active events list (legacy API, backwards-compatible).
+
+    Prefer ``_get_active_events_snapshot()`` when you need provenance
+    metadata (B017). This wrapper unpacks the snapshot's events list so
+    existing callers continue to work unchanged.
+    """
+    return list(_get_active_events_snapshot().events)
+
+
+def _get_active_events_snapshot() -> MarketSnapshot:
+    """Return a MarketSnapshot with explicit provenance (B017 / SD-H).
+
+    On successful fetch: authority="VERIFIED", stale_age_seconds=0.0.
+    On network failure with cache: authority="STALE", stale_age_seconds
+        = seconds since last successful fetch.
+    On network failure without cache: authority="EMPTY_FALLBACK",
+        events=[].
+    """
+    global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
+    global _ACTIVE_EVENTS_CACHE_AT_UTC, _ACTIVE_EVENTS_LAST_STATUS
+    now = time.monotonic()
+    fresh_needed = (
+        _ACTIVE_EVENTS_CACHE is None
+        or (now - _ACTIVE_EVENTS_CACHE_AT) > _ACTIVE_EVENTS_TTL
+    )
+    if fresh_needed:
+        try:
+            _ACTIVE_EVENTS_CACHE = _fetch_events_by_tags()
+            _ACTIVE_EVENTS_CACHE_AT = now
+            _ACTIVE_EVENTS_CACHE_AT_UTC = datetime.now(timezone.utc)
+            _ACTIVE_EVENTS_LAST_STATUS = "VERIFIED"
+        except httpx.RequestError as e:
+            if _ACTIVE_EVENTS_CACHE is not None:
+                stale_age = now - _ACTIVE_EVENTS_CACHE_AT
+                logger.error(
+                    "Active events fetch failed, returning STALE cache: "
+                    "error=%s stale_age_seconds=%.1f cache_ttl=%.1f",
+                    e,
+                    stale_age,
+                    _ACTIVE_EVENTS_TTL,
+                )
+                _ACTIVE_EVENTS_LAST_STATUS = "STALE"
+                return MarketSnapshot(
+                    events=list(_ACTIVE_EVENTS_CACHE),
+                    authority="STALE",
+                    fetched_at_utc=_ACTIVE_EVENTS_CACHE_AT_UTC,
+                    stale_age_seconds=stale_age,
+                )
+            logger.error(
+                "Active events fetch failed and no cache available: %s", e
+            )
+            _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+            return MarketSnapshot(
+                events=[],
+                authority="EMPTY_FALLBACK",
+                fetched_at_utc=None,
+                stale_age_seconds=None,
+            )
+    # Cache still valid (within TTL) -- treat as VERIFIED from the most
+    # recent successful fetch. stale_age_seconds reflects elapsed time
+    # since that fetch (informational only; within TTL it is not stale).
+    _ACTIVE_EVENTS_LAST_STATUS = "VERIFIED"
+    return MarketSnapshot(
+        events=list(_ACTIVE_EVENTS_CACHE) if _ACTIVE_EVENTS_CACHE else [],
+        authority="VERIFIED",
+        fetched_at_utc=_ACTIVE_EVENTS_CACHE_AT_UTC,
+        stale_age_seconds=0.0,
+    )
+
+
+def get_last_scan_authority() -> ScanAuthority:
+    """Return the provenance authority of the most recent scan (B017).
+
+    Dual-Track callers that need to fail-closed on stale market data may
+    check this after calling ``find_weather_markets``/``get_current_yes_price``
+    /``get_sibling_outcomes``. Returns ``"NEVER_FETCHED"`` before any
+    scan has occurred.
+    """
+    return _ACTIVE_EVENTS_LAST_STATUS
 
 
 def _clear_active_events_cache() -> None:
-    global _ACTIVE_EVENTS_CACHE
+    global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
+    global _ACTIVE_EVENTS_CACHE_AT_UTC, _ACTIVE_EVENTS_LAST_STATUS
     _ACTIVE_EVENTS_CACHE = None
+    _ACTIVE_EVENTS_CACHE_AT = 0.0
+    _ACTIVE_EVENTS_CACHE_AT_UTC = None
+    _ACTIVE_EVENTS_LAST_STATUS = "NEVER_FETCHED"
 
 
 def _fetch_events_by_tags() -> list[dict]:
     """Fetch events using tag slugs."""
+    network_errors = 0
+    all_events = []
+    seen_ids = set()
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
-            resp = httpx.get(f"{GAMMA_BASE}/tags/slug/{tag_slug}", timeout=15.0)
+            resp = _gamma_get(f"/tags/slug/{tag_slug}")
             if resp.status_code != 200:
                 continue
             tag_data = resp.json()
@@ -112,9 +277,9 @@ def _fetch_events_by_tags() -> list[dict]:
             events = []
             offset = 0
             while True:
-                resp = httpx.get(f"{GAMMA_BASE}/events", params={
+                resp = _gamma_get("/events", params={
                     "tag_id": tag_id, "closed": "false", "limit": 50, "offset": offset
-                }, timeout=15.0)
+                })
                 resp.raise_for_status()
                 batch = resp.json()
                 if not batch:
@@ -124,21 +289,33 @@ def _fetch_events_by_tags() -> list[dict]:
                     break
                 offset += 50
 
-            if events:
-                return events
+            for event in events:
+                event_id = event.get("id") or event.get("slug")
+                if event_id not in seen_ids:
+                    seen_ids.add(event_id)
+                    event["_matched_tags"] = [tag_slug]
+                    all_events.append(event)
+                else:
+                    for ex in all_events:
+                        if (ex.get("id") or ex.get("slug")) == event_id:
+                            ex.setdefault("_matched_tags", []).append(tag_slug)
+                            break
         except httpx.HTTPError as e:
             logger.warning("Tag fetch failed for %s: %s", tag_slug, e)
+            network_errors += 1
             continue
 
-    return []
+    if network_errors == len(TAG_SLUGS):
+        raise httpx.RequestError(f"All {len(TAG_SLUGS)} tag fetches failed due to network errors")
+    return all_events
 
 
 def _fetch_events_by_keyword(keyword: str) -> list[dict]:
     """Fallback: fetch events by keyword search."""
     try:
-        resp = httpx.get(f"{GAMMA_BASE}/events", params={
+        resp = _gamma_get("/events", params={
             "closed": "false", "limit": 100, "title": keyword
-        }, timeout=15.0)
+        })
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
@@ -162,9 +339,18 @@ def _parse_event(
     city = _match_city(title, event.get("slug", ""))
     if city is None:
         return None
+    sanity_rejection = _market_city_sanity_rejection(event, city)
+    if sanity_rejection is not None:
+        logger.warning(
+            "Rejecting Gamma market city mismatch: city=%s reason=%s event=%s",
+            city.name,
+            sanity_rejection,
+            event.get("id") or event.get("slug"),
+        )
+        return None
 
     # Parse target date from slug or end date
-    target_date = _parse_target_date(event)
+    target_date = _parse_target_date(event, city)
     if target_date is None:
         return None
 
@@ -177,14 +363,38 @@ def _parse_event(
             if hours_to_resolution < min_hours:
                 return None
         except (ValueError, TypeError):
-            hours_to_resolution = 24.0  # Default if unparseable
+            logger.warning(
+                "Unparseable endDate %r for event %s — skipping market",
+                end_str,
+                event.get("id") or event.get("slug"),
+            )
+            return None
     else:
-        hours_to_resolution = 24.0
+        hours_to_resolution = None
 
     # Extract bin structure from markets
     outcomes = _extract_outcomes(event)
     if not outcomes:
         return None
+
+    metric_surfaces = [
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("description", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        metric_surfaces.extend(
+            [
+                market.get("question", ""),
+                market.get("title", ""),
+                market.get("description", ""),
+                market.get("groupItemTitle", ""),
+                market.get("group_item_title", ""),
+            ]
+        )
+    temperature_metric = infer_temperature_metric(*metric_surfaces)
 
     # Compute hours since market opened
     created_str = event.get("createdAt") or event.get("created_at")
@@ -202,6 +412,7 @@ def _parse_event(
         "title": event.get("title", ""),
         "city": city,
         "target_date": target_date,
+        "temperature_metric": temperature_metric,
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         "outcomes": outcomes,
@@ -210,26 +421,92 @@ def _parse_event(
 
 def _match_city(title: str, slug: str) -> Optional[City]:
     """Match event title/slug to a configured city using aliases from cities.json."""
-    from src.config import cities_by_alias, cities
+    from src.config import cities
 
     text = f"{title} {slug}".lower()
+    slug_text = slug.lower()
 
-    # Use aliases from cities.json (validated, includes slug_names)
+    # Use boundary-aware aliases. Short aliases such as "LA" and "SF" must not
+    # match inside longer city names like "Kuala Lumpur" or unrelated words.
+    candidates: list[tuple[str, City, str]] = []
     for city in cities:
-        # Check aliases (case-insensitive)
-        for alias in city.aliases:
-            if alias.lower() in text:
-                return city
-        # Check slug_names
-        for sn in city.slug_names:
-            if sn in slug.lower():
-                return city
+        candidates.extend((alias.lower(), city, "text") for alias in city.aliases)
+        candidates.extend((slug_name.lower(), city, "slug") for slug_name in city.slug_names)
+
+    for alias, city, surface in sorted(candidates, key=lambda item: len(item[0]), reverse=True):
+        haystack = slug_text if surface == "slug" else text
+        pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+        if re.search(pattern, haystack):
+            return city
 
     return None
 
 
-def _parse_target_date(event: dict) -> Optional[str]:
-    """Extract target date from event slug or end date."""
+def _city_match_tokens(city: City) -> set[str]:
+    tokens = {
+        city.name,
+        city.wu_station,
+        city.airport_name,
+        city.settlement_source,
+        *city.aliases,
+        *city.slug_names,
+    }
+    return {str(token).strip().lower() for token in tokens if str(token).strip()}
+
+
+def _token_in_text(token: str, text: str) -> bool:
+    if not token:
+        return False
+    normalized = token.lower()
+    if "/" in normalized or "." in normalized:
+        return normalized in text
+    if "-" in normalized:
+        return normalized in text or normalized.replace("-", " ") in text
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None:
+    """Reject Gamma events that explicitly identify a different configured city."""
+    from src.config import cities
+
+    text_fields = [
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("description", ""),
+        event.get("resolutionSource", ""),
+        event.get("resolution_source", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        text_fields.extend([
+            market.get("question", ""),
+            market.get("slug", ""),
+            market.get("description", ""),
+            market.get("resolutionSource", ""),
+            market.get("resolution_source", ""),
+            market.get("groupItemTitle", ""),
+            market.get("group_item_title", ""),
+        ])
+    combined = " ".join(str(field) for field in text_fields if field).lower()
+    if not combined:
+        return None
+
+    matched_tokens = _city_match_tokens(matched_city)
+    for city in cities:
+        if city.name == matched_city.name:
+            continue
+        for token in sorted(_city_match_tokens(city), key=len, reverse=True):
+            if token in matched_tokens:
+                continue
+            if _token_in_text(token, combined):
+                return f"matched {matched_city.name} but text references {city.name} via {token!r}"
+    return None
+
+
+def _parse_target_date(event: dict, city: Optional["City"] = None) -> Optional[str]:
+    """Extract target date from event slug or end date. Using city timezone if available."""
     slug = event.get("slug", "")
 
     # Try slug pattern: highest-temperature-in-{city}-on-{month}-{day}-{year}
@@ -243,12 +520,18 @@ def _parse_target_date(event: dict) -> Optional[str]:
         except ValueError:
             pass
 
-    # Fallback: use end date
+    # Fallback: use end date and city timezone
     end_str = event.get("endDate") or event.get("end_date")
     if end_str:
         try:
+            if city and city.timezone:
+                import pytz
+                from datetime import datetime as dt
+                end_dt = dt.fromisoformat(end_str.replace("Z", "+00:00"))
+                tz = pytz.timezone(city.timezone)
+                return end_dt.astimezone(tz).strftime("%Y-%m-%d")
             return end_str[:10]  # YYYY-MM-DD
-        except (IndexError, TypeError):
+        except (IndexError, TypeError, ValueError):
             pass
 
     return None
@@ -275,15 +558,47 @@ def _extract_outcomes(event: dict) -> list[dict]:
         yes_token = clob_tokens[0]
         no_token = clob_tokens[1]
 
+        # K1/#43: Validate token→outcome label mapping instead of assuming
+        # positional order.  Polymarket markets carry an "outcomes" list
+        # (e.g. ["Yes", "No"]) whose indices correspond to clobTokenIds.
+        outcome_labels = market.get("outcomes", "[]")
+        if isinstance(outcome_labels, str):
+            try:
+                outcome_labels = json.loads(outcome_labels)
+            except (json.JSONDecodeError, TypeError):
+                outcome_labels = []
+        if len(outcome_labels) >= 2:
+            label_0 = str(outcome_labels[0]).strip().lower()
+            label_1 = str(outcome_labels[1]).strip().lower()
+            if label_0 == "no" and label_1 == "yes":
+                # Tokens are reversed vs our assumption — swap.
+                yes_token, no_token = no_token, yes_token
+                _labels_swapped = True
+            elif label_0 != "yes" or label_1 != "no":
+                # Unrecognised outcome labels — skip this market.
+                continue
+            else:
+                _labels_swapped = False
+        else:
+            _labels_swapped = False
+
         # Parse prices — may be JSON string or list
         prices = market.get("outcomePrices", "[]")
         if isinstance(prices, str):
             try:
                 prices = json.loads(prices)
             except (json.JSONDecodeError, TypeError):
-                prices = [0.5, 0.5]
-        yes_price = float(prices[0]) if len(prices) > 0 else 0.5
-        no_price = float(prices[1]) if len(prices) > 1 else 0.5
+                logger.warning("outcomePrices parse failed for market %s, skipping",
+                               market.get("questionID", "?"))
+                continue
+        if len(prices) < 2:
+            logger.warning("outcomePrices has < 2 elements for market %s, skipping",
+                           market.get("questionID", "?"))
+            continue
+        yes_price = float(prices[0])
+        no_price = float(prices[1])
+        if _labels_swapped:
+            yes_price, no_price = no_price, yes_price
 
         # Parse range from question text
         range_low, range_high = _parse_temp_range(question)
@@ -324,10 +639,80 @@ def _parse_temp_range(question: str) -> tuple[Optional[float], Optional[float]]:
     if m:
         return float(m.group(1)), None
 
-    # "X°C" single degree
+    # "X°C" single degree (end-of-string anchored — matches canonical labels
+    # like "17°C" produced by _canonical_bin_label).
     m = re.search(r"(-?\d+\.?\d*)\s*°[Cc]$", q)
     if m:
         val = float(m.group(1))
         return val, val
 
+    # "X°F" single degree (end-of-string anchored) — parallel to °C case
+    # for P-E / DR-33 canonical Fahrenheit point-bin labels.
+    m = re.search(r"(-?\d+\.?\d*)\s*°[Ff]$", q)
+    if m:
+        val = float(m.group(1))
+        return val, val
+
+    # DR-33 / P-D §6.1 Gamma question point-bin form: "... be 17°C on April 15?"
+    # — matches X°C/X°F followed by " on " date/etc. Explicitly NOT matching
+    # "or higher/lower/below/above/more" fragments (handled by earlier branches
+    # which run first). The " on " word-boundary anchor prevents matches on
+    # intra-word occurrences.
+    m = re.search(r"(-?\d+\.?\d*)\s*°[CcFf]\s+on\b", q)
+    if m:
+        val = float(m.group(1))
+        return val, val
+
     return None, None
+
+
+# S2.4 (2026-04-23, data-readiness-tail NH-E1 hardening): STRICT parser for
+# canonical bin labels emitted by `src/execution/harvester.py::_canonical_bin_label`.
+# Uses `re.fullmatch` so the ENTIRE input must match one of the 4 canonical
+# shapes; trailing garbage / prefix garbage / unicode-shoulders are rejected.
+#
+# Use this for ROUND-TRIP verification (label emitted by writer must survive
+# a strict reparse) and for any caller that receives a canonical label from
+# within-system serialization. Do NOT use this for free-form Polymarket market
+# questions — those need the tolerant `_parse_temp_range` above.
+#
+# Motivation (NH-E1 / closure-banner rule 15): P-E's critic-opus discovered
+# that `re.search` on unanchored patterns silently accepts near-canonical but
+# semantically-broken labels (e.g. "17°Cfoo" parses as 17.0 point bin, leaking
+# trailing garbage into settlement authority).
+_CANONICAL_BIN_LABEL_FULLMATCH = [
+    # "X-Y°F" or "X-Y°C" — finite bounded range
+    (re.compile(r"(-?\d+)-(-?\d+)°([FfCc])"),
+     lambda m: (float(m.group(1)), float(m.group(2)))),
+    # "X°F or below" / "X°C or below" — left-shoulder
+    (re.compile(r"(-?\d+)°([FfCc])\s+or\s+below"),
+     lambda m: (None, float(m.group(1)))),
+    # "X°F or higher" / "X°C or higher" — right-shoulder
+    (re.compile(r"(-?\d+)°([FfCc])\s+or\s+higher"),
+     lambda m: (float(m.group(1)), None)),
+    # "X°C" / "X°F" — point bin
+    (re.compile(r"(-?\d+)°([FfCc])"),
+     lambda m: (float(m.group(1)), float(m.group(1)))),
+]
+
+
+def _parse_canonical_bin_label(label: str) -> Optional[tuple[Optional[float], Optional[float]]]:
+    """Strict parser for canonical bin labels.
+
+    Returns (low, high) tuple on exact match against one of 4 canonical shapes
+    ("X-Y°F", "X°F or below", "X°F or higher", "X°F"). Returns None if the
+    input does NOT fully match any canonical shape — including near-matches
+    with trailing/leading garbage, unicode shoulders (≥/≤), or float/non-integer
+    degree values.
+
+    This is the NH-E1 antibody companion to `_canonical_bin_label` in
+    `src/execution/harvester.py`: every label that function emits MUST
+    round-trip through this parser, and no non-canonical label can.
+    """
+    if not isinstance(label, str):
+        return None
+    for pattern, extractor in _CANONICAL_BIN_LABEL_FULLMATCH:
+        m = pattern.fullmatch(label)
+        if m:
+            return extractor(m)
+    return None

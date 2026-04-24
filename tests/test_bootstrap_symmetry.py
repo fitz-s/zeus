@@ -77,7 +77,7 @@ class TestBootstrapContextStashing:
     @patch("src.engine.monitor_refresh.get_calibrator")
     @patch("src.engine.monitor_refresh.fetch_ensemble")
     @patch("src.engine.monitor_refresh.validate_ensemble", return_value=True)
-    @patch("src.engine.monitor_refresh.lead_days_to_target", return_value=3.0)
+    @patch("src.engine.monitor_refresh.lead_days_to_date_start", return_value=3.0)
     @patch("src.engine.monitor_refresh._check_persistence_anomaly", return_value=1.0)
     def test_ens_refresh_stashes_bootstrap_context(
         self, mock_anomaly, mock_lead, mock_validate, mock_fetch_ens,
@@ -117,7 +117,7 @@ class TestBootstrapContextStashing:
             mock_ens.spread.return_value = MagicMock(value=2.0)
             mock_ens_cls.return_value = mock_ens
 
-            with patch("src.engine.monitor_refresh.compute_alpha", return_value=0.6):
+            with patch("src.engine.monitor_refresh.compute_alpha", return_value=MagicMock(value=0.6)):
                 result = _refresh_ens_member_counting(
                     position=pos,
                     current_p_market=0.40,
@@ -134,7 +134,7 @@ class TestBootstrapContextStashing:
         assert "alpha" in ctx
         assert "bins" in ctx
         assert "held_idx" in ctx
-        assert "member_maxes" in ctx
+        assert "member_extrema" in ctx
         assert "calibrator" in ctx
         assert "lead_days" in ctx
         assert "unit" in ctx
@@ -196,7 +196,7 @@ class TestBootstrapCIInRefreshPosition:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 3.0,
             "unit": "F",
@@ -252,7 +252,7 @@ class TestBootstrapCIInRefreshPosition:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 3.0,
             "unit": "F",
@@ -295,7 +295,7 @@ class TestBootstrapCIInRefreshPosition:
                 Bin(low=50.0, high=51.0, label="50-51°F", unit="F"),
             ],
             "held_idx": 1,
-            "member_maxes": np.array([]),  # Empty — will cause bootstrap to fail
+            "member_extrema": np.array([]),  # Empty — will cause bootstrap to fail
             "calibrator": None,  # No calibrator — may cause issues
             "lead_days": 3.0,
             "unit": "F",
@@ -346,7 +346,7 @@ class TestDay0WindowBootstrapPropagation:
             "alpha": 0.6,
             "bins": bins,
             "held_idx": 1,
-            "member_maxes": member_maxes,
+            "member_extrema": member_maxes,
             "calibrator": cal,
             "lead_days": 0.0,
             "unit": "F",

@@ -1,0 +1,46 @@
+{
+  "task": "docs truth refresh post-closeout review",
+  "packet": "docs/operations/task_2026-04-22_docs_truth_refresh/plan.md",
+  "route_source": "current_state",
+  "route_evidence": [
+    "docs/operations/current_state.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "architecture/change_receipt_schema.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/topology.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "architecture/topology.yaml",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md",
+    "docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json"
+  ],
+  "changed_files": [
+    "architecture/topology.yaml",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-22_docs_truth_refresh/work_log.md",
+    "docs/operations/task_2026-04-22_docs_truth_refresh/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**",
+    "state/**",
+    "raw/**",
+    ".code-review-graph/graph.db",
+    "docs/archives/**",
+    "docs/authority/**"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "python scripts/topology_doctor.py --reference-replacement --json",
+    "python scripts/topology_doctor.py --planning-lock --changed-files architecture/topology.yaml --plan-evidence docs/operations/current_state.md --json",
+    "python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files architecture/topology.yaml --json",
+    "pytest -q tests/test_topology_doctor.py -k \"docs or map_maintenance or context_budget\"",
+    "git diff --check -- architecture/topology.yaml"
+  ]
+}

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class LifecyclePhase(str, Enum):
@@ -13,6 +16,7 @@ class LifecyclePhase(str, Enum):
     VOIDED = "voided"
     QUARANTINED = "quarantined"
     ADMIN_CLOSED = "admin_closed"
+    UNKNOWN = "unknown"
 
 
 PENDING_EXIT_RUNTIME_STATES = frozenset(
@@ -76,6 +80,13 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
     LifecyclePhase.VOIDED: frozenset({LifecyclePhase.VOIDED}),
     LifecyclePhase.QUARANTINED: frozenset({LifecyclePhase.QUARANTINED}),
     LifecyclePhase.ADMIN_CLOSED: frozenset({LifecyclePhase.ADMIN_CLOSED}),
+    LifecyclePhase.UNKNOWN: frozenset(
+        {
+            LifecyclePhase.UNKNOWN,
+            LifecyclePhase.QUARANTINED,
+            LifecyclePhase.VOIDED,
+        }
+    ),
 }
 
 
@@ -131,9 +142,11 @@ def phase_for_runtime_position(
         return LifecyclePhase.DAY0_WINDOW
     if normalized_state in {"entered", "holding"}:
         return LifecyclePhase.ACTIVE
-    raise ValueError(
-        f"unsupported runtime position state for canonical phase mapping: {normalized_state!r}"
+    logger.warning(
+        "unmapped runtime position state %r — returning UNKNOWN phase",
+        normalized_state,
     )
+    return LifecyclePhase.UNKNOWN
 
 
 def fold_lifecycle_phase(
@@ -178,9 +191,14 @@ def enter_day0_window_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
-    if current_phase is not LifecyclePhase.ACTIVE:
+    if current_phase not in {
+        LifecyclePhase.ACTIVE,
+        LifecyclePhase.PENDING_ENTRY,
+        LifecyclePhase.DAY0_WINDOW,
+    }:
         raise ValueError(
-            f"day0 transition requires active runtime phase, got {current_phase.value!r}"
+            f"day0 transition requires active/pending_entry/day0_window runtime phase, "
+            f"got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.DAY0_WINDOW)
     return LifecyclePhase.DAY0_WINDOW.value
@@ -235,27 +253,20 @@ def enter_settled_runtime_state(
     exit_state: object = "",
     chain_state: object = "",
 ) -> str:
-    normalized_exit_state = _normalized_state(exit_state)
     current_phase = phase_for_runtime_position(
         state=current_state,
         exit_state=exit_state,
         chain_state=chain_state,
     )
-    if current_phase == LifecyclePhase.PENDING_EXIT:
-        if normalized_exit_state != "backoff_exhausted":
-            raise ValueError(
-                "settlement requires active/day0/economically_closed runtime phase, "
-                "or pending_exit with backoff_exhausted"
-            )
-        fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
-        return LifecyclePhase.SETTLED.value
     if current_phase not in {
         LifecyclePhase.ACTIVE,
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.ECONOMICALLY_CLOSED,
+        LifecyclePhase.PENDING_EXIT,
     }:
         raise ValueError(
-            f"settlement requires active/day0/economically_closed runtime phase, got {current_phase.value!r}"
+            f"settlement requires active/day0/economically_closed/pending_exit runtime phase, "
+            f"got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
     return LifecyclePhase.SETTLED.value
@@ -297,19 +308,25 @@ def enter_voided_runtime_state(
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.PENDING_EXIT,
         LifecyclePhase.ECONOMICALLY_CLOSED,
+        LifecyclePhase.UNKNOWN,
     }:
         raise ValueError(
-            "void transition requires pending/active/day0/pending_exit/economically_closed runtime phase, "
+            "void transition requires pending/active/day0/pending_exit/economically_closed/unknown runtime phase, "
             f"got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.VOIDED)
     return LifecyclePhase.VOIDED.value
 
 
+_TERMINAL_ORDER_STATUSES = frozenset({"canceled", "cancelled", "rejected", "expired", "dead"})
+
+
 def initial_entry_runtime_state_for_order_status(status: object) -> str:
     normalized = _normalized_state(status).lower()
     if normalized == "filled":
         return "entered"
+    if normalized in _TERMINAL_ORDER_STATUSES:
+        return "voided"
     return "pending_tracked"
 
 

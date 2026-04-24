@@ -1,0 +1,55 @@
+{
+  "task": "authority rehydration archive extraction and closeout",
+  "packet": "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "architecture/AGENTS.md",
+    "docs/archive_registry.md",
+    "architecture/history_lore.yaml",
+    "docs/operations/AGENTS.md"
+  ],
+  "allowed_files": [
+    "architecture/history_lore.yaml",
+    "docs/archive_registry.md",
+    "docs/reference/modules/*.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/receipt.json"
+  ],
+  "forbidden_files": [
+    "src/**/*.py",
+    "state/**",
+    ".code-review-graph/graph.db",
+    "runtime DBs",
+    "current source/data semantics",
+    "docs/authority/** broad rewrites",
+    "archive bodies"
+  ],
+  "changed_files": [
+    "architecture/history_lore.yaml",
+    "docs/archive_registry.md",
+    "docs/reference/modules/contracts.md",
+    "docs/reference/modules/execution.md",
+    "docs/reference/modules/strategy.md",
+    "docs/reference/modules/topology_system.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/plan.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/work_log.md",
+    "docs/operations/task_2026-04-23_authority_rehydration/receipt.json"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs --json",
+    "python scripts/topology_doctor.py --context-budget --json",
+    "git grep -n \"docs/archives/\" docs AGENTS.md workspace_map.md architecture || true",
+    "python scripts/topology_doctor.py --work-record --changed-files <P4 files> --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --json",
+    "python scripts/topology_doctor.py --change-receipts --changed-files <P4 files> --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "python scripts/topology_doctor.py closeout --changed-files <P4 files> --plan-evidence docs/operations/task_2026-04-23_authority_rehydration/plan.md --work-record-path docs/operations/task_2026-04-23_authority_rehydration/work_log.md --receipt-path docs/operations/task_2026-04-23_authority_rehydration/receipt.json --json",
+    "git diff --check -- <P4 files>"
+  ]
+}

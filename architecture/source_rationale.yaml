@@ -1,0 +1,1226 @@
+schema_version: 1
+metadata:
+  created: '2026-04-13'
+  owner_packet: Packet 4 source file rationale map
+  note: 'Per-file rationale map for tracked src/** files. This file indexes why source files exist and what they protect;
+    it does not override zones.yaml.
+
+    '
+hazard_badges:
+  DERIVED_ONLY: Derived output/read model; never canonical truth.
+  NO_WRITE_PATH: Must not write canonical truth.
+  VENUS_CONTROL_ONLY: External writes must flow through Venus/control contracts.
+  TRANSITIONAL_DO_NOT_DEEPEN: Transitional compatibility surface; do not deepen dependency.
+  WMO_ROUNDING_LAW: Settlement-aligned values must use WMO half-up.
+  ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
+write_routes:
+  canonical_position_write:
+    owner: src/state/ledger.py
+    projection: src/state/projection.py
+    lifecycle_gate: src/state/lifecycle_manager.py
+  control_write:
+    owner: src/control/control_plane.py
+    external_contract: src/supervisor_api/contracts.py
+  settlement_write:
+    owner: src/execution/harvester.py
+    rounding_law: src/contracts/settlement_semantics.py
+    db_gate: src/state/db.py
+    # DR-33-A (2026-04-23): harvester live-enablement code-only phase.
+    # Feature-flagged via ZEUS_HARVESTER_LIVE_ENABLED (default OFF).
+    # Canonical-authority write path (INV-14 identity + provenance_json +
+    # SettlementSemantics.assert_settlement_value gate) parallels P-E
+    # reconstruction pattern. Writer signature: harvester_live_dr33.
+    # P-E alternate writer signature (one-off reconstruction): p_e_reconstruction_2026-04-23.
+    # See:
+    # - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
+    # - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pe_reconstruction_plan.md
+    dr33_live_enablement: docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+    feature_flag: ZEUS_HARVESTER_LIVE_ENABLED
+    live_enabled_default: false
+  backtest_diagnostic_write:
+    owner: src/engine/replay.py
+    db: state/zeus_backtest.db
+    authority_scope: diagnostic_non_promotion
+  calibration_persistence_write:
+    owner: src/calibration/store.py
+    tables:
+    - calibration_pairs
+    - platt_models
+    guardrail: Settlement values must use WMO helper; decision_group_id must stay stable.
+  calibration_decision_group_write:
+    owner: src/calibration/effective_sample_size.py
+    tables:
+    - calibration_decision_group
+    - calibration_pairs
+    guardrail: Additive/shadow accounting only until promoted by a governance packet.
+  decision_artifact_write:
+    owner: src/state/decision_chain.py
+    tables:
+    - decision_log
+    guardrail: Decision artifacts are evidence/read-model facts, not lifecycle authority.
+  script_repair_write:
+    owner: scripts/**
+    guardrail: dry-run/apply metadata required in later scripts manifest packet
+package_defaults:
+  src/contracts:
+    zone: K0_frozen_kernel
+    authority_role: executable_law
+    gates:
+    - pytest -q tests/test_instrument_invariants.py tests/test_structural_linter.py
+  src/types:
+    zone: K0_frozen_kernel
+    authority_role: executable_law
+    gates:
+    - pytest -q tests/test_temperature.py tests/test_instrument_invariants.py
+  src/state:
+    zone: mixed_k0_k2
+    authority_role: truth_surface
+    gates:
+    - pytest -q tests/test_architecture_contracts.py tests/test_truth_surface_health.py
+  src/control:
+    zone: K1_governance
+    authority_role: governance_write_surface
+    gates:
+    - pytest -q tests/test_gate_decision.py tests/test_runtime_guards.py
+  src/riskguard:
+    zone: K1_governance
+    authority_role: risk_policy_runtime
+    gates:
+    - pytest -q tests/test_riskguard.py tests/test_live_safety_invariants.py
+  src/execution:
+    zone: K2_runtime
+    authority_role: live_execution_boundary
+    gates:
+    - pytest -q tests/test_executor.py tests/test_exit_authority.py
+  src/engine:
+    zone: K2_K3_coordination
+    authority_role: orchestration
+    gates:
+    - pytest -q tests/test_architecture_contracts.py tests/test_run_replay_cli.py
+  src/data:
+    zone: K2_runtime
+    authority_role: external_data_boundary
+    gates:
+    - pytest -q tests/test_ensemble_client.py tests/test_observation_contract.py
+  src/signal:
+    zone: K3_extension
+    authority_role: probability_signal
+    gates:
+    - pytest -q tests/test_ensemble_signal.py tests/test_day0_signal.py
+  src/calibration:
+    zone: K3_extension
+    authority_role: calibration_math
+    gates:
+    - pytest -q tests/test_platt.py tests/test_calibration_manager.py
+  src/strategy:
+    zone: K3_extension
+    authority_role: strategy_math
+    gates:
+    - pytest -q tests/test_market_analysis.py tests/test_fdr.py tests/test_kelly.py
+  src/observability:
+    zone: K2_runtime
+    authority_role: derived_operator_read_model
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    gates:
+    - pytest -q tests/test_healthcheck.py
+  src/supervisor_api:
+    zone: K2_runtime
+    authority_role: external_contract
+    hazards:
+    - VENUS_CONTROL_ONLY
+    gates:
+    - pytest -q tests/test_runtime_guards.py
+  src/analysis:
+    zone: K4_experimental
+    authority_role: placeholder
+    hazards:
+    - NO_WRITE_PATH
+    gates: []
+files:
+  src/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Source-root navigation and zone summary.
+  src/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks src as importable package.
+  src/main.py:
+    zone: K2_runtime
+    authority_role: live_daemon_entry
+    why: Live-only daemon entry point.
+  src/config.py:
+    zone: K2_runtime
+    authority_role: runtime_config_seed
+    why: Loads settings, cities, state paths, and live-only runtime configuration.
+    downstream:
+    - src/calibration/effective_sample_size.py
+    - src/calibration/manager.py
+    - src/calibration/platt.py
+    - src/calibration/store.py
+    - src/contracts/calibration_bins.py
+    - src/control/control_plane.py
+    - src/data/daily_obs_append.py
+    - src/data/ecmwf_open_data.py
+    - src/data/ensemble_client.py
+    - src/data/forecasts_append.py
+    - src/data/hole_scanner.py
+    - src/data/hourly_instants_append.py
+    - src/data/ingestion_guard.py
+    - src/data/market_scanner.py
+    - src/data/observation_client.py
+    - src/data/rebuild_validators.py
+    - src/data/solar_append.py
+    - src/data/tier_resolver.py
+    - src/data/wu_scheduler.py
+    - src/engine/cycle_runner.py
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/execution/executor.py
+    - src/execution/harvester.py
+    - src/main.py
+    - src/observability/scheduler_health.py
+    - src/observability/status_summary.py
+    - src/riskguard/discord_alerts.py
+    - src/riskguard/riskguard.py
+    - src/signal/day0_signal.py
+    - src/signal/ensemble_signal.py
+    - src/state/chronicler.py
+    - src/state/db.py
+    - src/state/decision_chain.py
+    - src/state/portfolio.py
+    - src/state/strategy_tracker.py
+    - src/state/truth_files.py
+    - src/strategy/correlation.py
+    - src/strategy/fdr_filter.py
+    - src/strategy/market_analysis.py
+    - src/strategy/market_fusion.py
+    - src/strategy/risk_limits.py
+  src/analysis/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Analysis package registry.
+  src/analysis/__init__.py:
+    zone: K4_experimental
+    authority_role: package_marker
+    why: Marks analysis namespace; currently placeholder.
+  src/contracts/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: K0 contract package rules and file registry.
+  src/contracts/__init__.py:
+    zone: K0_frozen_kernel
+    authority_role: contract_exports
+    why: Exports semantic contracts for downstream packages.
+  src/contracts/alpha_decision.py:
+    zone: K0_frozen_kernel
+    authority_role: typed_decision_contract
+    why: Declares alpha target and evidence so strategy consumers cannot silently mix objectives.
+    downstream:
+    - src/engine/evaluator.py
+    - src/strategy/market_fusion.py
+  src/contracts/decision_evidence.py:
+    zone: K0_frozen_kernel
+    authority_role: typed_decision_contract
+    why: Bundles decision evidence for symmetric entry/exit reasoning.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+    - src/engine/lifecycle_events.py
+  src/contracts/edge_context.py:
+    zone: K0_frozen_kernel
+    authority_role: typed_probability_contract
+    why: Carries edge provenance across strategy/execution seams.
+    downstream:
+    - src/engine/monitor_refresh.py
+  src/contracts/epistemic_context.py:
+    zone: K0_frozen_kernel
+    authority_role: uncertainty_contract
+    why: Carries uncertainty context so raw confidence is not treated as certainty.
+  src/contracts/ensemble_snapshot_provenance.py:
+    zone: K0_frozen_kernel
+    authority_role: ensemble_snapshot_quarantine_contract
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    why: 'Defines the refuse-list for ensemble_snapshots.data_version before live or backfill writes, and partitions quarantined
+      rows on read so legacy TIGGE point-forecast rows cannot enter calibration as if they matched the live local-day-maximum
+      physical quantity.
+
+      '
+    write_routes:
+    - script_repair_write
+    upstream:
+    - scripts/rebuild_calibration_pairs_canonical.py
+    - src/signal/ensemble_signal.py
+    - src/engine/evaluator.py
+    gates:
+    - pytest -q tests/test_calibration_bins_canonical.py tests/test_replay_time_provenance.py
+  src/contracts/exceptions.py:
+    zone: K0_frozen_kernel
+    authority_role: contract_exception_surface
+    why: Defines semantic contract violation exceptions.
+    downstream:
+    - src/contracts/settlement_semantics.py
+    - src/data/observation_client.py
+    - src/data/polymarket_client.py
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+  src/contracts/execution_intent.py:
+    zone: K0_frozen_kernel
+    authority_role: execution_intent_contract
+    why: Separates intent semantics from order mechanics.
+  src/contracts/execution_price.py:
+    zone: K0_frozen_kernel
+    authority_role: typed_price_contract
+    why: Prevents native/held side and fee-treatment price confusion.
+    downstream:
+    - src/engine/evaluator.py
+    - src/execution/executor.py
+    - src/strategy/kelly.py
+  src/contracts/expiring_assumption.py:
+    zone: K0_frozen_kernel
+    authority_role: assumption_contract
+    why: Makes external assumptions time-bounded and reviewable.
+  src/contracts/hold_value.py:
+    zone: K0_frozen_kernel
+    authority_role: hold_value_contract
+    why: Makes hold-cost assumptions explicit for exit EV reasoning.
+    downstream:
+    - src/execution/exit_triggers.py
+    - src/state/portfolio.py
+  src/contracts/provenance_registry.py:
+    zone: K0_frozen_kernel
+    authority_role: provenance_law
+    why: Enforces registration of safety-critical constants and cascades.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/strategy/kelly.py
+  src/contracts/calibration_bins.py:
+    zone: K0_frozen_kernel
+    authority_role: calibration_bin_partition_contract
+    why: Canonical per-unit bin grids (F=2F pairs + shoulders, C=1C points + shoulders) that decouple Platt training from
+      market_events; complete real-line partitions so sum(P_raw) stays 1.0 in training.
+    downstream:
+    - src/calibration/effective_sample_size.py
+    - src/calibration/manager.py
+  src/contracts/boundary_policy.py:
+    zone: K0_frozen_kernel
+    authority_role: external_boundary_policy
+    why: Pins which external/control surfaces may cross the Zeus boundary without rewriting runtime truth.
+    downstream:
+    - src/engine/evaluator.py
+  src/contracts/reality_contract.py:
+    zone: K0_frozen_kernel
+    authority_role: external_reality_contract
+    why: Models external assumption contracts for drift detection.
+    downstream:
+    - src/contracts/reality_contracts_loader.py
+    - src/contracts/reality_verifier.py
+    - src/engine/evaluator.py
+  src/contracts/reality_contracts_loader.py:
+    zone: K0_frozen_kernel
+    authority_role: contract_loader
+    why: Loads YAML reality contracts into typed contract objects.
+  src/contracts/reality_verifier.py:
+    zone: K0_frozen_kernel
+    authority_role: reality_drift_detector
+    why: Verifies reality contracts against current evidence.
+    downstream:
+    - src/contracts/reality_contract.py
+  src/contracts/semantic_types.py:
+    zone: K0_frozen_kernel
+    authority_role: semantic_atom_contracts
+    why: Defines direction, strategy attribution, held/native probability and price semantics.
+    downstream:
+    - src/contracts/edge_context.py
+    - src/contracts/execution_intent.py
+    - src/state/decision_chain.py
+    - src/state/portfolio.py
+  src/contracts/settlement_semantics.py:
+    zone: K0_frozen_kernel
+    authority_role: settlement_rounding_law
+    why: Settlement rounding contract (wmo_half_up + oracle_truncate) for DB writes and MC simulation. for_city() factory
+      routes HKO to oracle_truncate, all others to wmo_half_up.
+    hazards:
+    - WMO_ROUNDING_LAW
+    - ORACLE_TRUNCATION_BIAS
+    write_routes:
+    - settlement_write
+    downstream:
+    - src/calibration/store.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/execution/harvester.py
+    - src/signal/day0_signal.py
+    - src/signal/ensemble_signal.py
+    - src/strategy/market_analysis.py
+  src/contracts/snapshot_ingest_contract.py:
+    zone: K0_frozen_kernel
+    authority_role: snapshot_ingest_contract
+    why: Declares point-in-time ingest requirements so forecast snapshot writes cannot masquerade as timeless truth.
+  src/contracts/tail_treatment.py:
+    zone: K0_frozen_kernel
+    authority_role: probability_treatment_contract
+    why: Declares tail probability treatment and validation basis.
+    downstream:
+    - src/strategy/market_fusion.py
+  src/contracts/vig_treatment.py:
+    zone: K0_frozen_kernel
+    authority_role: market_probability_contract
+    why: Declares vig treatment before posterior fusion.
+    downstream:
+    - src/strategy/market_fusion.py
+  src/types/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Type package rules and file registry.
+  src/types/__init__.py:
+    zone: K0_frozen_kernel
+    authority_role: type_exports
+    why: Exports unit-safe and market type surfaces.
+  src/types/market.py:
+    zone: K0_frozen_kernel
+    authority_role: market_bin_contract
+    why: Defines Bin and market types, including unit/bin-width semantics.
+    downstream:
+    - src/contracts/calibration_bins.py
+    - src/engine/evaluator.py
+    - src/signal/ensemble_signal.py
+    - src/strategy/market_analysis.py
+  src/types/metric_identity.py:
+    zone: K0_frozen_kernel
+    authority_role: metric_identity_contract
+    why: Defines temperature metric identity so dual-track surfaces cannot silently collapse into one family.
+    downstream:
+    - src/calibration/metric_specs.py
+    - src/calibration/store.py
+    - src/contracts/ensemble_snapshot_provenance.py
+    - src/contracts/snapshot_ingest_contract.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/execution/harvester.py
+    - src/signal/day0_extrema.py
+    - src/signal/day0_high_signal.py
+    - src/signal/day0_router.py
+    - src/signal/day0_signal.py
+    - src/signal/day0_window.py
+    - src/signal/ensemble_signal.py
+  src/types/observation_atom.py:
+    zone: K0_frozen_kernel
+    authority_role: observation_atom_contract
+    why: Frozen provenance-complete observation atom that rejects malformed or unverified observations at construction.
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/ingestion_guard.py
+  src/types/solar.py:
+    zone: K0_frozen_kernel
+    authority_role: solar_context_contract
+    why: Defines solar/daylight context used by day0 logic.
+  src/types/temperature.py:
+    zone: K0_frozen_kernel
+    authority_role: unit_safety_contract
+    why: Separates Temperature from TemperatureDelta to prevent unit math bugs.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/signal/ensemble_signal.py
+    - src/strategy/market_fusion.py
+  src/control/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Control package rules and file registry.
+  src/control/__init__.py:
+    zone: K1_governance
+    authority_role: package_marker
+    why: Marks control namespace.
+  src/control/control_plane.py:
+    zone: K1_governance
+    authority_role: control_write_surface
+    why: Durable Venus/operator control commands; only approved external write path.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - control_write
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/observability/status_summary.py
+    - src/riskguard/policy.py
+  src/control/gate_decision.py:
+    zone: K1_governance
+    authority_role: gate_decision_contract
+    why: Carries strategy gate decisions with reason provenance instead of bare booleans.
+    downstream:
+    - src/control/control_plane.py
+    - src/observability/status_summary.py
+  src/riskguard/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: RiskGuard package rules and registry.
+  src/riskguard/__init__.py:
+    zone: K1_governance
+    authority_role: package_marker
+    why: Marks riskguard namespace.
+  src/riskguard/discord_alerts.py:
+    zone: K1_governance
+    authority_role: operator_alerting
+    why: Sends operator alerts for risk and settlement events.
+    downstream:
+    - src/execution/executor.py
+    - src/execution/harvester.py
+    - src/riskguard/riskguard.py
+  src/riskguard/metrics.py:
+    zone: K1_governance
+    authority_role: risk_metrics
+    why: Computes risk metrics that feed behavior-changing risk levels.
+    downstream:
+    - src/riskguard/riskguard.py
+  src/riskguard/policy.py:
+    zone: K1_governance
+    authority_role: risk_policy
+    why: Defines policy thresholds and risk actions.
+    downstream:
+    - src/engine/evaluator.py
+  src/riskguard/risk_level.py:
+    zone: K1_governance
+    authority_role: risk_level_contract
+    why: Defines GREEN/YELLOW/ORANGE/RED semantics.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/riskguard/metrics.py
+    - src/riskguard/riskguard.py
+  src/riskguard/riskguard.py:
+    zone: K1_governance
+    authority_role: risk_runtime
+    why: Independent risk process; risk output must change trading behavior.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/observability/status_summary.py
+  src/data/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Data package rules and registry.
+  src/data/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks data namespace.
+  src/data/ecmwf_open_data.py:
+    zone: K2_runtime
+    authority_role: forecast_fetcher
+    why: Fetches ECMWF/Open-Meteo ensemble data for probability generation.
+    downstream:
+    - src/main.py
+  src/data/ensemble_client.py:
+    zone: K2_runtime
+    authority_role: forecast_reader
+    why: Reads ensemble data from DB for live/replay use.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/data/daily_obs_append.py:
+    zone: K2_runtime
+    authority_role: live_daily_observation_append
+    why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard.
+    downstream:
+    - src/data/wu_hourly_client.py
+    - src/main.py
+  src/data/forecasts_append.py:
+    zone: K2_runtime
+    authority_role: live_forecast_append
+    why: Appends live forecast-history rows and coverage for post-backfill freshness.
+    downstream:
+    - src/main.py
+  src/data/hole_scanner.py:
+    zone: K2_runtime
+    authority_role: data_hole_scanner
+    why: Scans expected-vs-covered upstream rows and records missing/failed/legitimate-gap coverage.
+    downstream:
+    - src/data/forecasts_append.py
+    - src/main.py
+  src/data/hourly_instants_append.py:
+    zone: K2_runtime
+    authority_role: live_hourly_observation_append
+    why: Appends live hourly observation instants and coverage for Day0/runtime use.
+    downstream:
+    - src/main.py
+  src/data/ingestion_guard.py:
+    zone: K2_runtime
+    authority_role: observation_ingestion_gate
+    why: Validates ObservationAtom writes across unit, bounds, seasonal, timing, and DST layers.
+    write_routes:
+    - script_repair_write
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/hourly_instants_append.py
+  src/data/market_scanner.py:
+    zone: K2_runtime
+    authority_role: market_discovery
+    why: Discovers and parses Polymarket weather markets and bin labels.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/execution/harvester.py
+  src/data/observation_client.py:
+    zone: K2_runtime
+    authority_role: observation_reader
+    why: Reads current observations for day0/monitor logic.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/data/openmeteo_client.py:
+    zone: K2_runtime
+    authority_role: openmeteo_http_boundary
+    why: Shared Open-Meteo HTTP client with retry/429 handling and quota tracking so rate-limit behavior stays explicit across
+      fetchers.
+    downstream:
+    - src/data/forecasts_append.py
+    - src/data/hourly_instants_append.py
+    - src/data/solar_append.py
+  src/data/openmeteo_quota.py:
+    zone: K2_runtime
+    authority_role: quota_guard
+    why: Tracks Open-Meteo rate limits so data gaps are explicit.
+    downstream:
+    - src/data/ensemble_client.py
+    - src/data/observation_client.py
+    - src/data/openmeteo_client.py
+  src/data/polymarket_client.py:
+    zone: K2_runtime
+    authority_role: clob_boundary
+    why: CLOB market data and order API boundary.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/execution/executor.py
+    - src/execution/harvester.py
+    - src/main.py
+  src/data/proxy_health.py:
+    zone: K2_runtime
+    authority_role: proxy_health_boundary
+    why: Tracks HTTP proxy health so quota/fallback workarounds stay observable instead of silently changing source routing.
+    downstream:
+    - src/main.py
+  src/data/rebuild_validators.py:
+    zone: K2_runtime
+    authority_role: rebuild_row_validator
+    why: Validates rebuild rows before authority-stamped output atoms are written.
+    write_routes:
+    - script_repair_write
+  src/data/observation_instants_v2_writer.py:
+    zone: K2_runtime
+    authority_role: observation_instants_v2_typed_writer
+    why: Typed writer enforcing plan v3 antibodies A1 (non-default authority/data_version/provenance_json), A2 (per-city expected
+      source), and A6 (HK must route hko_hourly_accumulator, never VHHH) before every observation_instants_v2 INSERT.
+  src/data/meteostat_bulk_client.py:
+    zone: K2_runtime
+    authority_role: meteostat_bulk_boundary
+    why: Bulk CDN CSV archive fetcher for Meteostat station files. Parallel-safe, no per-IP rate limit. Replaces ~12-hour
+      Ogimet serial fill with <1-min parallel downloads for the 45 WU cities whose ICAO has a Meteostat archive. Bulk archives
+      lag real-time by weeks-months; use only for historical range, not live feed.
+  src/data/ogimet_hourly_client.py:
+    zone: K2_runtime
+    authority_role: ogimet_hourly_metar_boundary
+    why: Ogimet METAR hourly fetch + snap-to-UTC-hour for the 3 noaa-settled cities (Istanbul/Moscow/Tel Aviv). Byte-identical
+      mirror of NOAA's server-rendered HTML endpoint; no unit conversion when settlement_unit=='C'.
+  src/data/solar_append.py:
+    zone: K2_runtime
+    authority_role: live_solar_append
+    why: Appends deterministic sunrise/sunset rows and coverage for live solar_daily freshness.
+    downstream:
+    - src/main.py
+  src/data/tier_resolver.py:
+    zone: K2_runtime
+    authority_role: observation_source_tier_resolver
+    why: Deterministic (city -> Tier) mapping for observation_instants_v2 routing; encodes P1 settlement-source-IS-observation-source
+      invariant with no OpenMeteo grid-snap escape hatch.
+    downstream:
+    - src/data/observation_instants_v2_writer.py
+  src/data/wu_hourly_client.py:
+    zone: K2_runtime
+    authority_role: wu_icao_hourly_boundary
+    why: WU ICAO historical.json hourly fetch + snap-to-UTC-hour for 47 wu_icao cities. Reuses WU_API_KEY public-key fallback
+      from daily_obs_append to avoid the Day-0 ghost-trade regression (commit 65921ed).
+    downstream:
+    - src/data/meteostat_bulk_client.py
+    - src/data/ogimet_hourly_client.py
+  src/data/wu_scheduler.py:
+    zone: K2_runtime
+    authority_role: physical_clock_scheduler
+    why: Computes per-city WU collection schedule from local peak time with DST-aware conversion.
+    downstream:
+    - src/data/daily_obs_append.py
+  src/engine/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Engine package rules and registry.
+  src/engine/__init__.py:
+    zone: K2_K3_coordination
+    authority_role: package_marker
+    why: Marks engine namespace.
+  src/engine/cycle_runner.py:
+    zone: K2_runtime
+    authority_role: cycle_orchestrator
+    why: Coordinates live cycle from fetch to evaluation to execution without owning lifecycle law.
+    downstream:
+    - src/main.py
+  src/engine/cycle_runtime.py:
+    zone: K2_runtime
+    authority_role: runtime_helper
+    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority.
+  src/engine/discovery_mode.py:
+    zone: K2_runtime
+    authority_role: mode_enum
+    why: Defines discovery cycle modes used by runner/evaluator.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/main.py
+  src/engine/evaluator.py:
+    zone: K3_extension
+    authority_role: signal_strategy_sizing_pipeline
+    why: Converts forecast/market inputs into candidate decisions and sizing.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/cycle_runtime.py
+    - src/engine/replay.py
+  src/engine/lifecycle_events.py:
+    zone: K2_runtime
+    authority_role: lifecycle_event_builder
+    why: Builds canonical event/projection payloads; must not bypass lifecycle manager.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/execution/exit_lifecycle.py
+    - src/execution/fill_tracker.py
+    - src/execution/harvester.py
+    - src/state/chain_reconciliation.py
+  src/engine/monitor_refresh.py:
+    zone: K2_runtime
+    authority_role: position_monitoring
+    why: Refreshes held position probabilities and exit signals using entry-parity math.
+    downstream:
+    - src/engine/cycle_runtime.py
+  src/engine/process_lock.py:
+    zone: K2_runtime
+    authority_role: process_safety
+    why: Prevents overlapping daemon instances.
+  src/engine/replay.py:
+    zone: K3_extension
+    authority_role: diagnostic_replay
+    why: Runs diagnostic replay/backtest lanes with non-promotion authority.
+    hazards:
+    - DERIVED_ONLY
+    write_routes:
+    - backtest_diagnostic_write
+  src/engine/time_context.py:
+    zone: K2_runtime
+    authority_role: time_semantics
+    why: Computes lead-time and target-date context without timezone drift.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/execution/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Execution package rules and registry.
+  src/execution/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks execution namespace.
+  src/execution/collateral.py:
+    zone: K2_runtime
+    authority_role: collateral_math
+    why: Computes collateral requirements for order sizing/execution.
+    downstream:
+    - src/execution/exit_lifecycle.py
+  src/execution/executor.py:
+    zone: K2_runtime
+    authority_role: live_order_executor
+    why: Places live CLOB limit orders; real-money boundary.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/execution/exit_lifecycle.py
+  src/execution/exit_lifecycle.py:
+    zone: K2_runtime
+    authority_role: exit_lifecycle_runtime
+    why: Manages exit order lifecycle while preserving exit vs settlement split.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/execution/harvester.py
+  src/execution/exit_triggers.py:
+    zone: K2_runtime
+    authority_role: exit_decision_runtime
+    why: Implements churn-defense exit trigger evaluation in native probability space.
+  src/execution/fill_tracker.py:
+    zone: K2_runtime
+    authority_role: fill_tracking
+    why: Tracks fills/timeouts for execution learning and lifecycle updates.
+    downstream:
+    - src/engine/cycle_runtime.py
+  src/execution/harvester.py:
+    zone: K2_runtime
+    authority_role: settlement_harvester
+    why: Detects settlements, records settlement events, creates calibration facts.
+    write_routes:
+    - settlement_write
+    - canonical_position_write
+    downstream:
+    - src/main.py
+  src/signal/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Signal package rules and registry.
+  src/signal/__init__.py:
+    zone: K3_extension
+    authority_role: package_marker
+    why: Marks signal namespace.
+  src/signal/day0_extrema.py:
+    zone: K3_extension
+    authority_role: day0_extrema_logic
+    why: Preserves observed extrema semantics for day0 high/low routing before residual/no-nowcast logic applies.
+    downstream:
+    - src/signal/day0_window.py
+  src/signal/day0_high_signal.py:
+    zone: K3_extension
+    authority_role: day0_high_signal
+    why: High-track Day0 signal path; must preserve local-day max semantics and current-observation truth plane.
+    downstream:
+    - src/signal/day0_router.py
+  src/signal/day0_low_nowcast_signal.py:
+    zone: K3_extension
+    authority_role: day0_low_nowcast_signal
+    why: Low-track nowcast path; must not mirror high-track causality or source assumptions.
+    downstream:
+    - src/signal/day0_router.py
+  src/signal/day0_router.py:
+    zone: K3_extension
+    authority_role: day0_signal_router
+    why: Routes day0 signal families so high, low, and nowcast semantics stay explicit.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/signal/day0_signal.py:
+    zone: K3_extension
+    authority_role: day0_probability_signal
+    why: Combines observed high floor with residual ENS forecast; uses WMO settlement rounding.
+    hazards:
+    - WMO_ROUNDING_LAW
+    downstream:
+    - src/signal/day0_high_signal.py
+  src/signal/day0_window.py:
+    zone: K3_extension
+    authority_role: day0_mode_gate
+    why: Determines when a market should use day0 logic.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/signal/diurnal.py:
+    zone: K3_extension
+    authority_role: diurnal_context
+    why: Computes diurnal/solar context for day0 signal.
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/hourly_instants_append.py
+    - src/data/ingestion_guard.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+  src/signal/ensemble_signal.py:
+    zone: K3_extension
+    authority_role: p_raw_engine
+    why: 51-member ensemble Monte Carlo to P_raw; core probability engine.
+    hazards:
+    - WMO_ROUNDING_LAW
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/signal/day0_window.py
+    - src/signal/forecast_uncertainty.py
+  src/signal/forecast_uncertainty.py:
+    zone: K3_extension
+    authority_role: uncertainty_parameters
+    why: Centralizes sigma/instrument/quantization uncertainty sources.
+    downstream:
+    - src/signal/day0_signal.py
+    - src/strategy/market_analysis.py
+  src/signal/model_agreement.py:
+    zone: K3_extension
+    authority_role: model_agreement_signal
+    why: Scores agreement between model sources for alpha/decision context.
+    downstream:
+    - src/engine/evaluator.py
+  src/calibration/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Calibration package rules and registry.
+  src/calibration/__init__.py:
+    zone: K3_extension
+    authority_role: package_marker
+    why: Marks calibration namespace.
+  src/calibration/blocked_oos.py:
+    zone: K3_extension
+    authority_role: shadow_calibration_eval
+    why: Blocked out-of-sample evaluation facts; shadow only.
+    hazards:
+    - DERIVED_ONLY
+  src/calibration/drift.py:
+    zone: K3_extension
+    authority_role: calibration_drift_detection
+    why: Detects calibration degradation over time.
+  src/calibration/effective_sample_size.py:
+    zone: K3_extension
+    authority_role: decision_group_sample_accounting
+    why: Accounts for effective sample size by decision group.
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    write_routes:
+    - calibration_decision_group_write
+    downstream:
+    - src/execution/harvester.py
+  src/calibration/decision_group.py:
+    zone: K3_extension
+    authority_role: decision_group_identity_contract
+    why: Canonical producer of decision_group_id so independent-sample identity stays stable across code paths.
+    downstream:
+    - src/execution/harvester.py
+  src/calibration/manager.py:
+    zone: K3_extension
+    authority_role: calibration_lifecycle
+    why: Controls Platt maturity gates and model retrieval/refit.
+    downstream:
+    - src/calibration/blocked_oos.py
+    - src/data/daily_obs_append.py
+    - src/data/observation_client.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/execution/harvester.py
+    - src/signal/diurnal.py
+    - src/signal/ensemble_signal.py
+  src/calibration/metric_specs.py:
+    zone: K3_extension
+    authority_role: metric_spec_catalog
+    why: Defines per-metric calibration identities so high/low families cannot silently share the wrong calibration surface.
+  src/calibration/platt.py:
+    zone: K3_extension
+    authority_role: platt_model_math
+    why: Extended Platt calibrator with lead-days feature and bootstrap params.
+    downstream:
+    - src/calibration/blocked_oos.py
+    - src/calibration/manager.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/strategy/market_analysis.py
+  src/calibration/store.py:
+    zone: K3_extension
+    authority_role: calibration_persistence
+    why: Persists calibration pairs and Platt models; settlement values use WMO rounding.
+    write_routes:
+    - calibration_persistence_write
+    downstream:
+    - src/calibration/blocked_oos.py
+    - src/calibration/manager.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/execution/harvester.py
+  src/strategy/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Strategy package rules and registry.
+  src/strategy/__init__.py:
+    zone: K3_extension
+    authority_role: package_marker
+    why: Marks strategy namespace.
+  src/strategy/correlation.py:
+    zone: K3_extension
+    authority_role: correlation_model
+    why: Cross-city/bin correlation helper for risk-aware strategy.
+  src/strategy/fdr_filter.py:
+    zone: K3_extension
+    authority_role: fdr_law
+    why: Benjamini-Hochberg control over active tested hypothesis family.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/replay.py
+  src/strategy/kelly.py:
+    zone: K3_extension
+    authority_role: sizing_law
+    why: Fractional Kelly sizing and bounded cascade multipliers.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/replay.py
+  src/strategy/market_analysis.py:
+    zone: K3_extension
+    authority_role: edge_bootstrap_engine
+    why: Edge scan and double-bootstrap CI; settlement bootstrap uses WMO rounding.
+    hazards:
+    - WMO_ROUNDING_LAW
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+  src/strategy/market_analysis_family_scan.py:
+    zone: K3_extension
+    authority_role: tested_family_accounting
+    why: Builds full tested family for FDR truth.
+    downstream:
+    - src/engine/evaluator.py
+  src/strategy/market_fusion.py:
+    zone: K3_extension
+    authority_role: posterior_fusion
+    why: Computes alpha-weighted P_cal/P_market posterior and VWMP.
+    downstream:
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/strategy/market_analysis.py
+  src/strategy/risk_limits.py:
+    zone: K3_extension
+    authority_role: strategy_risk_limits
+    why: Strategy-level risk limits before execution sizing.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+  src/strategy/oracle_penalty.py:
+    zone: K3_extension
+    authority_role: oracle_error_rate_penalty
+    why: Per-city oracle error rate classification and Kelly sizing penalty multiplier. Loads data/oracle_error_rates.json.
+    hazards:
+    - ORACLE_TRUNCATION_BIAS
+    downstream:
+    - src/engine/evaluator.py
+  src/strategy/selection_family.py:
+    zone: K3_extension
+    authority_role: hypothesis_family_model
+    why: Represents selection family for statistical testing.
+    downstream:
+    - src/engine/evaluator.py
+  src/state/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: State package rules and registry.
+  src/state/__init__.py:
+    zone: mixed_k0_k2
+    authority_role: package_marker
+    why: Marks state namespace; package is mixed authority.
+  src/state/chain_reconciliation.py:
+    zone: K2_runtime
+    authority_role: chain_truth_reconciliation
+    why: Applies Chain > Chronicler > Portfolio reconciliation rules.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/cycle_runtime.py
+  src/state/chain_state.py:
+    zone: K2_runtime
+    authority_role: chain_state_read_model
+    why: Typed three-state chain truth helpers that preserve unknown vs empty semantics during reconciliation.
+    downstream:
+    - src/state/chain_reconciliation.py
+  src/state/canonical_write.py:
+    zone: K0_frozen_kernel
+    authority_role: canonical_write_guard
+    why: Shared canonical write helpers that keep append-first truth discipline explicit across state writers.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/execution/harvester.py
+  src/state/chronicler.py:
+    zone: K2_runtime
+    authority_role: event_log_runtime
+    why: Append-only event log compatibility/runtime event surface.
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    downstream:
+    - src/execution/harvester.py
+  src/state/data_coverage.py:
+    zone: K2_runtime
+    authority_role: derived_data_coverage_ledger
+    why: Tracks missing/written/failed/legitimate-gap ingestion coverage for upstream data tables.
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/forecasts_append.py
+    - src/data/hole_scanner.py
+    - src/data/hourly_instants_append.py
+    - src/data/solar_append.py
+  src/state/db.py:
+    zone: K2_runtime
+    authority_role: db_connection_schema_runtime
+    why: SQLite connections, schema setup, and canonical DB queries.
+    write_routes:
+    - canonical_position_write
+    - settlement_write
+    - backtest_diagnostic_write
+    downstream:
+    - src/calibration/store.py
+    - src/control/control_plane.py
+    - src/data/ecmwf_open_data.py
+    - src/data/hole_scanner.py
+    - src/data/ingestion_guard.py
+    - src/data/observation_client.py
+    - src/data/rebuild_validators.py
+    - src/engine/cycle_runner.py
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/engine/replay.py
+    - src/execution/exit_lifecycle.py
+    - src/execution/fill_tracker.py
+    - src/execution/harvester.py
+    - src/main.py
+    - src/observability/status_summary.py
+    - src/riskguard/riskguard.py
+    - src/signal/diurnal.py
+    - src/signal/ensemble_signal.py
+    - src/state/chain_reconciliation.py
+    - src/state/decision_chain.py
+    - src/state/portfolio.py
+    - src/state/strategy_tracker.py
+  src/state/decision_chain.py:
+    zone: K2_runtime
+    authority_role: decision_fact_logging
+    why: Records decision and rejection facts for explainability.
+    write_routes:
+    - decision_artifact_write
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/execution/harvester.py
+    - src/observability/status_summary.py
+    - src/state/db.py
+  src/state/ledger.py:
+    zone: K0_frozen_kernel
+    authority_role: canonical_event_ledger
+    why: Authoritative position event append and current projection transaction boundary.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/state/chronicler.py
+    - src/state/db.py
+  src/state/lifecycle_manager.py:
+    zone: K0_frozen_kernel
+    authority_role: lifecycle_law
+    why: Only legal lifecycle transition authority; enforces LEGAL_LIFECYCLE_FOLDS.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/lifecycle_events.py
+    - src/execution/exit_lifecycle.py
+    - src/execution/fill_tracker.py
+    - src/execution/harvester.py
+    - src/state/chain_reconciliation.py
+    - src/state/portfolio.py
+  src/state/portfolio.py:
+    zone: K2_runtime
+    authority_role: runtime_portfolio_model
+    why: Runtime position model/read surface; transitional, not canonical event law.
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+    - src/engine/monitor_refresh.py
+    - src/execution/exit_lifecycle.py
+    - src/execution/exit_triggers.py
+    - src/execution/fill_tracker.py
+    - src/execution/harvester.py
+    - src/riskguard/riskguard.py
+    - src/state/chain_reconciliation.py
+  src/state/portfolio_loader_policy.py:
+    zone: K2_runtime
+    authority_role: truth_source_routing
+    why: Controls DB-vs-fallback portfolio loading policy.
+    downstream:
+    - src/riskguard/riskguard.py
+    - src/state/portfolio.py
+  src/state/projection.py:
+    zone: K0_frozen_kernel
+    authority_role: canonical_projection_law
+    why: Projects event ledger into position_current and defines projection columns.
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/state/chronicler.py
+    - src/state/db.py
+    - src/state/ledger.py
+  src/state/schema/__init__.py:
+    zone: K0_frozen_kernel
+    authority_role: state_schema_namespace
+    why: Marks schema namespace so versioned trade/world DB contracts can be imported without ad hoc path logic.
+  src/state/schema/v2_schema.py:
+    zone: K0_frozen_kernel
+    authority_role: state_schema_contract
+    why: Declares v2 state schema DDL and table contracts for canonical trade/world truth.
+    downstream:
+    - src/state/db.py
+  src/state/strategy_tracker.py:
+    zone: K2_runtime
+    authority_role: derived_strategy_tracker
+    why: Derived/no-write strategy attribution surface; not runtime authority.
+    hazards:
+    - DERIVED_ONLY
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/execution/harvester.py
+    - src/riskguard/riskguard.py
+  src/state/truth_files.py:
+    zone: K2_runtime
+    authority_role: truth_file_helpers
+    why: Mode-aware file helpers and legacy-state deprecation tooling.
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    downstream:
+    - src/observability/status_summary.py
+    - src/state/portfolio.py
+  src/observability/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Observability package rules and registry.
+  src/observability/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks observability namespace.
+  src/observability/scheduler_health.py:
+    zone: K2_runtime
+    authority_role: derived_scheduler_health
+    why: Derived scheduler/job-health view for operators; must stay evidence-only and never become canonical truth.
+    downstream:
+    - src/main.py
+  src/observability/status_summary.py:
+    zone: K2_runtime
+    authority_role: derived_status_read_model
+    why: Produces operator/Venus health snapshot; derived only.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - src/control/control_plane.py
+    - src/engine/cycle_runner.py
+    - src/main.py
+  src/supervisor_api/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Supervisor API package rules and registry.
+  src/supervisor_api/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks supervisor API namespace.
+  src/supervisor_api/contracts.py:
+    zone: K2_runtime
+    authority_role: venus_external_contract
+    why: Typed Observation/Proposal/Command/Outcome surface for Venus.
+    hazards:
+    - VENUS_CONTROL_ONLY

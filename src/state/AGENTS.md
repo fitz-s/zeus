@@ -1,33 +1,93 @@
-File: src/state/AGENTS.md
-Disposition: NEW
-Authority basis: architecture/kernel_manifest.yaml; architecture/invariants.yaml; architecture/negative_constraints.yaml; docs/architecture/zeus_durable_architecture_spec.md; current runtime truth surfaces in src/state/db.py and src/state/portfolio.py.
-Supersedes / harmonizes: ad hoc state conventions and JSON-first assumptions.
-Why this file exists now: this is the most drift-prone truth zone in the repo.
-Current-phase or long-lived: Long-lived.
+# src/state AGENTS — Zone K0/K1 (Truth Ownership)
 
-# src/state AGENTS
+Module book: `docs/reference/modules/state.md`
+Machine registry: `architecture/module_manifest.yaml`
 
-This directory is the truth and transition zone.
+## WHY this zone matters
 
-## Current reality
-- `position_events` is a real event spine
-- open-position truth is still mixed
-- JSON/state-object surfaces still exist as transitional runtime reality
-- `position_current` is target-state, not current-state
+State owns **canonical truth** — the single source of what Zeus's positions are,
+what has happened to them, and what on-chain reality says. If you corrupt
+append-first discipline, lifecycle grammar, or reconciliation semantics, Zeus
+either hallucinates positions (trading on phantom state) or fails to reconcile
+with on-chain reality (missing real fills or voiding live positions).
 
-## Required posture
-- preserve truthful classification of current vs target
-- do not promote JSON exports back to principal authority
-- do not create new shadow persistence surfaces
-- `strategy_key` remains the sole governance key
+The truth hierarchy is absolute:
+`Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`
 
-## High-risk files
-- `db.py`
-- `portfolio.py`
-- lifecycle/projection/ledger additions
-- any future canonical projection path
+Everything downstream — JSON exports, status summaries, reports — is derived.
+Derived surfaces may never become truth by being convenient.
 
-## Forbidden
-- defaulting unknown strategy to a governance bucket
-- silent fallback to legacy settlement truth when canonical truth should exist
-- schema or truth-path changes without packet + rollback
+## Key files
+
+| File | What it does | Danger level |
+|------|-------------|--------------|
+| `db.py` | Canonical DB write/query substrate | CRITICAL — all truth flows through here |
+| `lifecycle_manager.py` | Sole lifecycle transition authority | CRITICAL — only legal phase transitions |
+| `ledger.py` | Append-only event spine | CRITICAL — canonical event history |
+| `projection.py` | Deterministic projection fold from events | CRITICAL — current state from events |
+| `chain_reconciliation.py` | On-chain truth convergence | HIGH — Chain > local |
+| `portfolio.py` | Runtime position read model | HIGH — what evaluator/executor see |
+| `portfolio_loader_policy.py` | DB-vs-fallback load discipline | HIGH — truth source selection |
+| `decision_chain.py` | Point-in-time decision lineage | MEDIUM |
+
+## Domain rules
+
+- **Append-first discipline is load-bearing.** The canonical write path is:
+  1. append domain event to `position_events`
+  2. fold deterministic projection to `position_current`
+  3. event append and projection update in one transaction boundary
+  
+  Separating steps 1 and 2 into different transactions creates torn state.
+
+- **Lifecycle phases come only from `LifecyclePhase` enum.** The 9 legal
+  phases are: `pending_entry → active → day0_window → pending_exit →
+  economically_closed → settled`. Terminal: `voided`, `quarantined`,
+  `admin_closed`. No code may invent phase strings.
+
+- **Exit intent ≠ economic close ≠ settlement.** These are three separate
+  lifecycle events with different semantic meaning:
+  - EXIT_INTENT: the decision to exit (phase stays current until order posts)
+  - EXIT_ORDER_FILLED: economically closed (P&L locked)
+  - SETTLED: market resolution confirmed (final truth)
+
+- **Void requires known absence, not unknown chain status.** If the chain
+  status is unknown/stale, you cannot void a local position — it might exist
+  on-chain. Only known absence (chain confirmed "not present") permits void.
+
+- **DB commits must precede JSON export writes.** The canonical truth is the
+  DB. JSON/status files are derived exports that must trail, never lead.
+
+- **`strategy_key` is the sole governance identity.** All position attribution,
+  risk policy resolution, and performance slicing flows through `strategy_key`.
+  Do not invent parallel governance keys.
+
+## Common mistakes
+
+- Setting `phase = "holding"` or similar string literals instead of routing
+  through `lifecycle_manager.apply_transition()` → violates INV-01/INV-08
+- Separating `INSERT INTO position_events` from `UPDATE position_current` into
+  separate transactions → torn state if process crashes between them
+- Treating `positions-live.json` as canonical truth instead of querying
+  `position_current` from DB → JSON can be stale or partially written
+- Collapsing unknown chain status into "empty" → premature void of a position
+  that actually exists on-chain (the most expensive possible error)
+- "Small schema tweak" that actually changes truth ownership, transaction
+  boundaries, or projection semantics → this is always architecture work
+- Reading `portfolio.py` cache after a write without going through the
+  proper refresh path → stale read model
+
+## Required tests
+
+- `tests/test_db.py`
+- `tests/test_dt1_commit_ordering.py`
+- `tests/test_dt1_savepoint_integration.py`
+- `tests/test_dt4_chain_three_state.py`
+- `tests/test_b070_control_overrides_history_v2.py`
+- `tests/test_chronicle_dedup.py`
+- `tests/test_cross_module_invariants.py`
+
+## Planning lock
+
+Any schema, truth-owner, projection, reconciliation, or lifecycle write-path
+change under `src/state/**` requires an approved packet and planning-lock
+evidence.

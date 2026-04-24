@@ -11,18 +11,94 @@ Contract:
 """
 
 import logging
+import warnings
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
+import os
 import httpx
 
 from src.config import City
+from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 from src.data.openmeteo_quota import quota_tracker
+
+
+@dataclass(frozen=True, slots=True)
+class Day0ObservationContext:
+    """Typed observation snapshot returned by every provider path.
+
+    low_so_far is required and may never be None — providers that cannot
+    produce it must raise ObservationUnavailableError instead.
+
+    causality_status: INV-16 enforcement. "OK" means the low-track slot is
+    causal (the day has not yet started at the decision time). Any other value
+    (e.g., "N/A_CAUSAL_DAY_ALREADY_STARTED") causes the evaluator to route
+    through a separate rejection gate instead of forecast Platt lookup.
+    Added P10E S3a.
+    """
+
+    current_temp: float
+    high_so_far: float
+    low_so_far: float
+    source: str
+    observation_time: object  # raw timestamp — str | int | float | None
+    unit: str
+    causality_status: str = "OK"
+
+    def __post_init__(self) -> None:
+        if self.low_so_far is None:
+            raise ValueError("Day0ObservationContext.low_so_far must not be None")
+
+    def as_dict(self) -> dict:
+        """Backward-compat shim — callers that still use dict access."""
+        warnings.warn(
+            "Day0ObservationContext.as_dict() is deprecated; access fields directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {
+            "current_temp": self.current_temp,
+            "high_so_far": self.high_so_far,
+            "low_so_far": self.low_so_far,
+            "source": self.source,
+            "observation_time": self.observation_time,
+            "unit": self.unit,
+        }
+
+    # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh
+    def get(self, key: str, default=None):
+        warnings.warn(
+            f"Day0ObservationContext.get('{key}') is deprecated; access field directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str):
+        warnings.warn(
+            f"Day0ObservationContext['{key}'] is deprecated; access field directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
 
 logger = logging.getLogger(__name__)
 
-WU_API_KEY = "6532d6454b8aa370768e63d6ba5a832e"
+# WU public web key — see src/data/daily_obs_append.py for the full rationale.
+# A prior "Security S1 fix" removed the default and forced env-var-only. When
+# WU_API_KEY is unset, _require_wu_api_key() raises SystemExit, which kills the
+# daemon before it can even reach the OpenMeteo fallback chain. Operator
+# correction 2026-04-21: the key is WU's own browser-embedded key (verified
+# HTTP 200 against /v1/geocode/*/observations/timeseries.json returning
+# obs_id=KORD — the same ICAO station that Polymarket settles against).
+# Public fallback restored; operator can still override via WU_API_KEY env.
+_WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_KEY = os.environ.get("WU_API_KEY") or _WU_PUBLIC_WEB_KEY
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 
@@ -113,7 +189,7 @@ def get_current_observation(
     city: City,
     target_date: date | str | None = None,
     reference_time: datetime | str | None = None,
-) -> Optional[dict]:
+) -> Day0ObservationContext:
     """Get the current target-date observation for Day0 signal."""
 
     target_day, _, reference_local, tz = _resolve_observation_context(
@@ -133,8 +209,6 @@ def get_current_observation(
     if result is not None:
         return result
 
-    from src.contracts.exceptions import ObservationUnavailableError
-
     logger.error(
         "No observation source available for %s on local target_date=%s up to %s",
         city.name,
@@ -144,13 +218,22 @@ def get_current_observation(
     raise ObservationUnavailableError(f"All observation providers failed for {city.name}/{target_day.isoformat()}")
 
 
+def _require_wu_api_key() -> None:
+    """Defensive assertion — the public fallback guarantees WU_API_KEY is
+    never empty. Kept so a future refactor that strips the fallback surfaces
+    loudly instead of silently falling through to OpenMeteo (ghost-trade risk
+    per operator 2026-04-21 analysis)."""
+    assert WU_API_KEY, "WU_API_KEY resolved empty; _WU_PUBLIC_WEB_KEY fallback broken?"
+
+
 def _fetch_wu_observation(
     city: City,
     *,
     target_day: date,
     reference_local: datetime,
     tz: ZoneInfo,
-) -> Optional[dict]:
+) -> Optional[Day0ObservationContext]:
+    _require_wu_api_key()
     try:
         url = WU_OBS_URL.format(lat=city.lat, lon=city.lon)
         unit = "e" if city.settlement_unit == "F" else "m"
@@ -190,16 +273,18 @@ def _fetch_wu_observation(
 
         current_temp, _, raw_time = selected[-1]
         high_so_far = max(temp for temp, _, _ in selected)
-        return {
-            "high_so_far": float(high_so_far),
-            "current_temp": float(current_temp),
-            "source": "wu_api",
-            "observation_time": raw_time,
-            "unit": city.settlement_unit,
-        }
+        low_so_far = min(temp for temp, _, _ in selected)
+        return Day0ObservationContext(
+            high_so_far=float(high_so_far),
+            low_so_far=float(low_so_far),
+            current_temp=float(current_temp),
+            source="wu_api",
+            observation_time=raw_time,
+            unit=city.settlement_unit,
+        )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
-        logger.debug("WU observation fetch failed for %s: %s", city.name, e)
+        logger.warning("WU observation fetch failed for %s (%s): %s", city.name, type(e).__name__, e)
         return None
 
 
@@ -245,16 +330,30 @@ def _fetch_iem_asos(
         offset = _get_asos_wu_offset(city, target_date=target_day)
 
         current_temp = float(temp_f) + offset
-        high_so_far = float(ob["max_tmpf"]) + offset if ob.get("max_tmpf") is not None else current_temp
+        if ob.get("max_tmpf") is None or ob.get("min_tmpf") is None:
+            # IEM ASOS current endpoint may not carry daily max/min yet (early in day).
+            # Silently defaulting to current_temp would violate NC-8 / fail-closed law.
+            # Return None so the next provider is tried.
+            logger.debug(
+                "IEM ASOS for %s missing max_tmpf or min_tmpf — skipping (fail-closed, not defaulting)",
+                city.name,
+            )
+            return None
+        high_so_far = float(ob["max_tmpf"]) + offset
+        low_so_far = float(ob["min_tmpf"]) + offset
 
-        return {
-            "high_so_far": high_so_far,
-            "current_temp": current_temp,
-            "source": "iem_asos",
-            "observation_time": local_valid,
-            "unit": "F",
-        }
+        return Day0ObservationContext(
+            high_so_far=high_so_far,
+            low_so_far=low_so_far,
+            current_temp=current_temp,
+            source="iem_asos",
+            observation_time=local_valid,
+            unit="F",
+        )
 
+    except MissingCalibrationError:
+        logger.debug("IEM ASOS skipped for %s — no calibrated ASOS→WU offset, falling through", city.name)
+        return None
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("IEM ASOS fetch failed for %s: %s", city.name, e)
         return None
@@ -312,13 +411,15 @@ def _fetch_openmeteo_hourly(
 
         current_temp, _, raw_time = selected[-1]
         high_so_far = max(temp for temp, _, _ in selected)
-        return {
-            "high_so_far": float(high_so_far),
-            "current_temp": float(current_temp),
-            "source": "openmeteo_hourly",
-            "observation_time": raw_time,
-            "unit": city.settlement_unit,
-        }
+        low_so_far = min(temp for temp, _, _ in selected)
+        return Day0ObservationContext(
+            high_so_far=float(high_so_far),
+            low_so_far=float(low_so_far),
+            current_temp=float(current_temp),
+            source="openmeteo_hourly",
+            observation_time=raw_time,
+            unit=city.settlement_unit,
+        )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
         logger.warning("Open-Meteo hourly fetch failed for %s: %s", city.name, e)
@@ -327,7 +428,7 @@ def _fetch_openmeteo_hourly(
 
 def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> float:
     try:
-        from src.state.db import get_shared_connection as get_connection
+        from src.state.db import get_world_connection as get_connection
 
         if target_date is None:
             raise ValueError("target_date must be explicit for ASOS→WU offset lookup")
@@ -336,12 +437,14 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
         season = season_from_date(target_day.isoformat(), lat=city.lat)
 
         conn = get_connection()
-        row = conn.execute(
-            "SELECT offset, std, n_samples FROM asos_wu_offsets "
-            "WHERE city = ? AND season = ?",
-            (city.name, season),
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT offset, std, n_samples FROM asos_wu_offsets "
+                "WHERE city = ? AND season = ?",
+                (city.name, season),
+            ).fetchone()
+        finally:
+            conn.close()
 
         if row and row["n_samples"] >= 10:
             offset_val = row["offset"]
@@ -367,8 +470,12 @@ def _get_asos_wu_offset(city: City, target_date: date | str | None = None) -> fl
 
     except Exception as e:
         from src.contracts.exceptions import MissingCalibrationError
+        import sqlite3
 
         if isinstance(e, MissingCalibrationError):
             raise
+        if isinstance(e, sqlite3.Error):
+            logger.error("Database infrastructure failure loading ASOS→WU offset for %s: %s", city.name, e)
+            raise RuntimeError(f"Database infrastructure failure: {e}") from e
         logger.warning("Failed to load ASOS→WU offset for %s: %s", city.name, e)
         raise MissingCalibrationError(f"Offset load failed for {city.name}: {e}") from e

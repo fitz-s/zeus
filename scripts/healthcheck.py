@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import settings, state_path
+from src.config import get_mode, state_path
 from src.state.db import get_connection
 from src.state.decision_chain import query_no_trade_cases
 
@@ -36,7 +36,7 @@ RISK_DETAILS_REQUIRED_KEYS = (
 
 
 def _mode() -> str:
-    return os.environ.get("ZEUS_MODE", settings.mode)
+    return get_mode()
 
 
 def _launchd_label() -> str:
@@ -175,14 +175,26 @@ def check() -> dict:
                 result["action_required"] = False
                 result["auto_action_available"] = False
             result["last_cycle"] = status.get("timestamp", "unknown")
-            result["risk_level"] = status.get("risk", {}).get("level", "UNKNOWN")
-            risk_details = status.get("risk", {}).get("details", {}) or {}
+            risk = status.get("risk", {}) if isinstance(status.get("risk", {}), dict) else {}
+            result["risk_level"] = risk.get("level", "UNKNOWN")
+            result["infrastructure_level"] = risk.get("infrastructure_level")
+            infrastructure_issues = risk.get("infrastructure_issues", [])
+            result["infrastructure_issues"] = (
+                list(infrastructure_issues)
+                if isinstance(infrastructure_issues, list)
+                else []
+            )
+            risk_details = risk.get("details", {}) or {}
             if isinstance(risk_details, dict):
                 result["risk_details"] = risk_details
             result["positions"] = status.get("portfolio", {}).get("open_positions", 0)
             result["exposure"] = status.get("portfolio", {}).get("total_exposure_usd", 0)
+            result["entries_pause_source"] = control.get("entries_pause_source")
+            result["entries_pause_reason"] = control.get("entries_pause_reason")
             cycle = status.get("cycle", {}) or {}
             result["entries_blocked_reason"] = cycle.get("entries_blocked_reason")
+            result["force_exit_review_scope"] = cycle.get("force_exit_review_scope")
+            result["quarantine_expired"] = cycle.get("quarantine_expired")
             result["cycle_failed"] = bool(cycle.get("failed", False))
             result["failure_reason"] = cycle.get("failure_reason")
             execution = status.get("execution", {}) or {}
@@ -286,6 +298,7 @@ def check() -> dict:
         and bool(result.get("riskguard_contract_valid"))
         and bool(result.get("assumptions_valid"))
         and not bool(result.get("cycle_failed"))
+        and result.get("infrastructure_level") != "RED"
     )
     return result
 

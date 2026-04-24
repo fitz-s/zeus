@@ -1,0 +1,621 @@
+#!/usr/bin/env python3
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-21
+# Authority basis: plan v3 Phase 0 file #6 (.omc/plans/observation-instants-
+#                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
+"""Multi-tier backfill driver for observation_instants_v2.
+
+Per-city tier resolution dispatches to the matching hourly client
+(``wu_hourly_client`` or ``ogimet_hourly_client``), attaches plan-v3
+provenance (``authority`` + ``data_version`` + ``provenance_json``),
+and writes through ``observation_instants_v2_writer.insert_rows`` which
+enforces A1/A2/A6 row-by-row.
+
+Default usage (Phase 0 pilot)
+-----------------------------
+::
+
+    python scripts/backfill_obs_v2.py \\
+        --cities Chicago London Tokyo "Sao Paulo" Moscow \\
+        --start 2024-01-01 --end 2026-04-21 \\
+        --data-version v1.wu-native.pilot
+
+Idempotency
+-----------
+``INSERT OR REPLACE`` on ``UNIQUE(city, source, utc_timestamp)`` — running
+the same command twice is a no-op on every row that already matched.
+Re-running with a different ``--data-version`` writes a second parallel
+corpus (Phase 0 pilot and Phase 1 fleet coexist by data_version).
+
+Observability
+-------------
+Per-window HTTP status is appended to ``state/obs_v2_backfill_log.jsonl``.
+Each line is a JSON object with city, station, local date range, HTTP
+outcome, raw+snapped row counts, and retry count. Tail the file to watch
+progress::
+
+    tail -f state/obs_v2_backfill_log.jsonl | jq -c '.'
+
+Rate-limit handling
+-------------------
+On HTTP 429/403/5xx, the driver retries with exponential backoff
+(2s → 4s → 8s, capped at 3 attempts per window). After the cap is
+reached the window is logged as failed but the driver continues with
+the next city — it does not abort the whole batch. A separate
+resume command (``--resume``) can be added later; for now, the
+``audit_observation_instants_v2.py`` script identifies gaps via
+row-count comparison.
+
+Safety
+------
+- Respects ``--dry-run`` (no writes, just fetch + snap + log).
+- Refuses to run if ``--data-version`` doesn't match ``^v1\\.``
+  (the writer enforces this too; the pre-check catches typos at
+  the shell level before any HTTP request fires).
+- Never writes ``data_version='v0'`` — that sentinel belongs to
+  ``zeus_meta`` only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import sqlite3
+import sys
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+# Add repo root to sys.path so `python scripts/backfill_obs_v2.py` works
+# without an editable install.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.config import cities_by_name  # noqa: E402
+from src.data.observation_instants_v2_writer import (  # noqa: E402
+    InvalidObsV2RowError,
+    ObsV2Row,
+    insert_rows,
+)
+from src.data.ogimet_hourly_client import fetch_ogimet_hourly  # noqa: E402
+from src.data.tier_resolver import (  # noqa: E402
+    Tier,
+    expected_source_for_city,
+    tier_for_city,
+)
+from src.data.wu_hourly_client import (  # noqa: E402
+    HourlyObservation,
+    fetch_wu_hourly,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
+DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "obs_v2_backfill_log.jsonl"
+
+# Exponential-backoff schedule per window on transient failures.
+_RETRY_DELAYS_SEC = [2.0, 4.0, 8.0]
+
+# WU prefers ~30-day windows to keep payloads manageable; larger windows
+# are often fine but hit transient timeouts more frequently.
+WU_WINDOW_DAYS = 30
+
+# Ogimet also chunks at 30 days internally (OGIMET_CHUNK_DAYS) so the
+# outer driver uses 60-day windows to minimize request count.
+OGIMET_WINDOW_DAYS = 60
+
+_DATA_VERSION_SAFE_RE = re.compile(r"^v1\.[a-z0-9\-\._]+$")
+
+
+@dataclass(frozen=True)
+class BackfillStats:
+    city: str
+    tier: str
+    station: str
+    rows_written: int
+    rows_raw: int
+    windows_attempted: int
+    windows_failed: int
+
+
+# ----------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------
+
+
+def _write_log(path: Path, entry: dict) -> None:
+    """Append one JSON line to the backfill log. Atomic at line grain."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+# ----------------------------------------------------------------------
+# Row construction — HourlyObservation → ObsV2Row
+# ----------------------------------------------------------------------
+
+
+def _hourly_obs_to_v2_row(
+    obs: HourlyObservation,
+    *,
+    data_version: str,
+    imported_at: str,
+    tier_name: str,
+) -> ObsV2Row:
+    """Build an ObsV2Row from a client's HourlyObservation.
+
+    Extremum-preserving mapping (plan v3 + 2026-04-22 critic correction):
+    - ``running_max`` <- ``hour_max_temp``  (THE settlement-correct field)
+    - ``running_min`` <- ``hour_min_temp``
+    - ``temp_current`` <- ``None``  (see M1 below)
+    - ``observation_count`` = raw obs in the bucket
+    - ``provenance_json`` carries both raw timestamps + count so audits
+      can verify the extremum is a legitimate SPECI.
+
+    M1 footgun fix: temp_current is set to NULL, NOT hour_max_temp. A
+    prior revision stamped temp_current = hour_max_temp so legacy
+    HIGH-track consumers reading ``SELECT temp_current`` still got a
+    settlement-correct value. But LOW-track consumers reading the same
+    column would silently receive the per-hour MAXIMUM — a systematic
+    high bias that poisons any LOW-track query. NULL forces consumers
+    to make track awareness explicit via running_max / running_min, or
+    crash loudly at query time.
+
+    Authority is always 'VERIFIED' for Phase 0 pilot (no HK in pilot).
+    Phase 1 HK rows will use 'ICAO_STATION_NATIVE' via a separate code
+    path (accumulator, not this driver).
+    """
+    provenance = {
+        "tier": tier_name,
+        "station_id": obs.station_id,
+        "hour_max_raw_ts": obs.hour_max_raw_ts,
+        "hour_min_raw_ts": obs.hour_min_raw_ts,
+        "raw_obs_count": obs.observation_count,
+        "aggregation": "utc_hour_bucket_extremum",
+    }
+    return ObsV2Row(
+        city=obs.city,
+        target_date=obs.target_date,
+        source=expected_source_for_city(obs.city),
+        timezone_name=cities_by_name[obs.city].timezone,
+        local_hour=obs.local_hour,
+        local_timestamp=obs.local_timestamp,
+        utc_timestamp=obs.utc_timestamp,
+        utc_offset_minutes=obs.utc_offset_minutes,
+        dst_active=obs.dst_active,
+        is_ambiguous_local_hour=obs.is_ambiguous_local_hour,
+        is_missing_local_hour=obs.is_missing_local_hour,
+        time_basis=obs.time_basis,
+        temp_current=None,  # M1: force track-awareness (no HIGH-biased default)
+        running_max=obs.hour_max_temp,  # explicit per-hour maximum
+        running_min=obs.hour_min_temp,  # explicit per-hour minimum
+        temp_unit=obs.temp_unit,
+        station_id=obs.station_id,
+        observation_count=obs.observation_count,
+        imported_at=imported_at,
+        authority="VERIFIED",
+        data_version=data_version,
+        provenance_json=json.dumps(provenance, separators=(",", ":")),
+    )
+
+
+# ----------------------------------------------------------------------
+# Per-city drivers
+# ----------------------------------------------------------------------
+
+
+def _retry_schedule() -> list[float]:
+    """Return the retry delay list. Kept as a function for test override."""
+    return list(_RETRY_DELAYS_SEC)
+
+
+def _backfill_wu_city(
+    conn: sqlite3.Connection,
+    city_name: str,
+    start_date: date,
+    end_date: date,
+    data_version: str,
+    log_path: Path,
+    dry_run: bool,
+) -> BackfillStats:
+    """WU backfill for one city.
+
+    Windows OVERLAP by 1 day (C2 fix): ``cursor_date = window_end`` for the
+    next iteration, not ``window_end + 1``. Without overlap the aggregator's
+    local-date filter drops UTC hours whose local date belongs to the
+    boundary local-date (e.g. UTC 2024-02-29 21:00 in Moscow tz = local
+    2024-03-01 00:00 — the filter rejects it under window [2024-01-01,
+    2024-02-29] and the NEXT window starting UTC 2024-03-01 00:00 = local
+    03:00 doesn't retrieve the missing 00-02 local hours). Overlap + INSERT
+    OR REPLACE re-fetches the boundary UTC hours under the next window's
+    filter, so every local hour of every local date is captured.
+    """
+    city = cities_by_name[city_name]
+    icao = city.wu_station
+    cc = city.country_code
+    unit = city.settlement_unit
+    tz_name = city.timezone
+
+    cursor_date = start_date
+    total_written = 0
+    total_raw = 0
+    windows_attempted = 0
+    windows_failed = 0
+
+    from datetime import timedelta
+
+    while cursor_date <= end_date:
+        window_end = min(cursor_date + timedelta(days=WU_WINDOW_DAYS - 1), end_date)
+        windows_attempted += 1
+
+        for attempt, delay in enumerate([0.0] + _retry_schedule()):
+            if delay > 0:
+                time.sleep(delay)
+            result = fetch_wu_hourly(
+                icao=icao,
+                cc=cc,
+                start_date=cursor_date,
+                end_date=window_end,
+                unit=unit,
+                timezone_name=tz_name,
+                city_name=city_name,
+            )
+            _write_log(
+                log_path,
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "city": city_name,
+                    "tier": "WU_ICAO",
+                    "station": icao,
+                    "window_start": cursor_date.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "attempt": attempt,
+                    "failed": result.failed,
+                    "failure_reason": result.failure_reason,
+                    "raw_count": result.raw_observation_count,
+                    "snap_count": len(result.observations),
+                    "dry_run": dry_run,
+                },
+            )
+            if not result.failed:
+                break
+            if not result.retryable:
+                break
+        if result.failed:
+            windows_failed += 1
+            if window_end >= end_date:
+                break
+            cursor_date = window_end  # C2 fix: overlap by 1 day (INSERT OR REPLACE dedupes)
+            continue
+
+        total_raw += result.raw_observation_count
+        if not dry_run and result.observations:
+            imported_at = datetime.now(timezone.utc).isoformat()
+            rows = []
+            build_errors = 0
+            for obs in result.observations:
+                try:
+                    rows.append(
+                        _hourly_obs_to_v2_row(
+                            obs,
+                            data_version=data_version,
+                            imported_at=imported_at,
+                            tier_name="WU_ICAO",
+                        )
+                    )
+                except (InvalidObsV2RowError, ValueError) as exc:
+                    build_errors += 1
+                    logger.warning(
+                        "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
+                    )
+            if build_errors:
+                _write_log(
+                    log_path,
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "city": city_name,
+                        "event": "row_build_failures",
+                        "window_start": cursor_date.isoformat(),
+                        "window_end": window_end.isoformat(),
+                        "build_errors": build_errors,
+                        "rows_salvaged": len(rows),
+                    },
+                )
+            conn.execute("BEGIN")
+            try:
+                written = insert_rows(conn, rows)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            total_written += written
+        if window_end >= end_date:
+            break
+        cursor_date = window_end  # C2 fix: overlap by 1 day
+
+    return BackfillStats(
+        city=city_name,
+        tier="WU_ICAO",
+        station=icao,
+        rows_written=total_written,
+        rows_raw=total_raw,
+        windows_attempted=windows_attempted,
+        windows_failed=windows_failed,
+    )
+
+
+def _backfill_ogimet_city(
+    conn: sqlite3.Connection,
+    city_name: str,
+    start_date: date,
+    end_date: date,
+    data_version: str,
+    log_path: Path,
+    dry_run: bool,
+) -> BackfillStats:
+    city = cities_by_name[city_name]
+    station_map = {
+        "Istanbul": "LTFM",
+        "Moscow": "UUWW",
+        "Tel Aviv": "LLBG",
+    }
+    station = station_map[city_name]
+    unit = city.settlement_unit  # 'C' for all three
+    tz_name = city.timezone
+    source_tag = expected_source_for_city(city_name)
+
+    from datetime import timedelta
+
+    cursor_date = start_date
+    total_written = 0
+    total_raw = 0
+    windows_attempted = 0
+    windows_failed = 0
+
+    while cursor_date <= end_date:
+        window_end = min(
+            cursor_date + timedelta(days=OGIMET_WINDOW_DAYS - 1), end_date
+        )
+        windows_attempted += 1
+
+        for attempt, delay in enumerate([0.0] + _retry_schedule()):
+            if delay > 0:
+                time.sleep(delay)
+            result = fetch_ogimet_hourly(
+                station=station,
+                start_date=cursor_date,
+                end_date=window_end,
+                city_name=city_name,
+                timezone_name=tz_name,
+                source_tag=source_tag,
+                unit=unit,
+            )
+            _write_log(
+                log_path,
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "city": city_name,
+                    "tier": "OGIMET_METAR",
+                    "station": station,
+                    "window_start": cursor_date.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "attempt": attempt,
+                    "failed": result.failed,
+                    "failure_reason": result.failure_reason,
+                    "raw_count": result.raw_metar_count,
+                    "snap_count": len(result.observations),
+                    "dry_run": dry_run,
+                },
+            )
+            if not result.failed:
+                break
+            if not result.retryable:
+                break
+        if result.failed:
+            windows_failed += 1
+            if window_end >= end_date:
+                break
+            cursor_date = window_end  # C2 fix: overlap by 1 day
+            continue
+
+        total_raw += result.raw_metar_count
+        if not dry_run and result.observations:
+            imported_at = datetime.now(timezone.utc).isoformat()
+            rows = []
+            build_errors = 0
+            for obs in result.observations:
+                try:
+                    rows.append(
+                        _hourly_obs_to_v2_row(
+                            obs,
+                            data_version=data_version,
+                            imported_at=imported_at,
+                            tier_name="OGIMET_METAR",
+                        )
+                    )
+                except (InvalidObsV2RowError, ValueError) as exc:
+                    build_errors += 1
+                    logger.warning(
+                        "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
+                    )
+            if build_errors:
+                _write_log(
+                    log_path,
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "city": city_name,
+                        "event": "row_build_failures",
+                        "build_errors": build_errors,
+                        "rows_salvaged": len(rows),
+                    },
+                )
+            conn.execute("BEGIN")
+            try:
+                written = insert_rows(conn, rows)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            total_written += written
+        if window_end >= end_date:
+            break
+        cursor_date = window_end  # C2 fix: overlap by 1 day
+
+    return BackfillStats(
+        city=city_name,
+        tier="OGIMET_METAR",
+        station=station,
+        rows_written=total_written,
+        rows_raw=total_raw,
+        windows_attempted=windows_attempted,
+        windows_failed=windows_failed,
+    )
+
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+
+
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="observation_instants_v2 multi-tier backfill driver",
+    )
+    p.add_argument(
+        "--cities",
+        nargs="+",
+        required=True,
+        help="City names from config/cities.json (e.g. Chicago London 'Sao Paulo').",
+    )
+    p.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        required=True,
+        help="Inclusive start local date (YYYY-MM-DD).",
+    )
+    p.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        required=True,
+        help="Inclusive end local date (YYYY-MM-DD).",
+    )
+    p.add_argument(
+        "--data-version",
+        required=True,
+        help="data_version tag for every written row (e.g. 'v1.wu-native.pilot').",
+    )
+    p.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"SQLite DB path (default: {DEFAULT_DB_PATH}).",
+    )
+    p.add_argument(
+        "--log",
+        type=Path,
+        default=DEFAULT_LOG_PATH,
+        help=f"JSONL log path (default: {DEFAULT_LOG_PATH}).",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch + snap + log, but do not write to the DB.",
+    )
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Emit INFO-level progress to stderr.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    if not _DATA_VERSION_SAFE_RE.match(args.data_version):
+        print(
+            f"FATAL: --data-version={args.data_version!r} must match "
+            f"{_DATA_VERSION_SAFE_RE.pattern!r}. Example: 'v1.wu-native.pilot'.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.start > args.end:
+        print(
+            f"FATAL: --start {args.start} is after --end {args.end}.",
+            file=sys.stderr,
+        )
+        return 2
+    for name in args.cities:
+        if name not in cities_by_name:
+            print(
+                f"FATAL: city {name!r} not in config/cities.json.",
+                file=sys.stderr,
+            )
+            return 2
+
+    conn = sqlite3.connect(str(args.db))
+    try:
+        # Ensure zeus_meta + observation_instants_v2 schema is current.
+        # Cheap; idempotent; protects against running on a DB that was
+        # never migrated.
+        from src.state.schema.v2_schema import apply_v2_schema
+        apply_v2_schema(conn)
+
+        all_stats: list[BackfillStats] = []
+        for name in args.cities:
+            tier = tier_for_city(name)
+            if tier is Tier.WU_ICAO:
+                stats = _backfill_wu_city(
+                    conn, name, args.start, args.end, args.data_version,
+                    args.log, args.dry_run,
+                )
+            elif tier is Tier.OGIMET_METAR:
+                stats = _backfill_ogimet_city(
+                    conn, name, args.start, args.end, args.data_version,
+                    args.log, args.dry_run,
+                )
+            elif tier is Tier.HKO_NATIVE:
+                print(
+                    f"SKIP: {name} is Tier HKO_NATIVE; backfill not supported "
+                    "(plan v3 Phase 0 deliberately excludes HK — accumulator-"
+                    "only from deploy forward). Use the hko accumulator path.",
+                    file=sys.stderr,
+                )
+                continue
+            else:  # pragma: no cover
+                raise RuntimeError(f"Unknown tier {tier!r} for {name!r}")
+            all_stats.append(stats)
+            logger.info(
+                "city=%s tier=%s station=%s rows_written=%d rows_raw=%d "
+                "windows=%d/%d_failed",
+                stats.city, stats.tier, stats.station, stats.rows_written,
+                stats.rows_raw, stats.windows_attempted, stats.windows_failed,
+            )
+            print(
+                f"{stats.city:16s} tier={stats.tier:13s} station={stats.station:6s} "
+                f"rows={stats.rows_written:7d}  raw={stats.rows_raw:7d}  "
+                f"windows={stats.windows_attempted}/{stats.windows_failed}_failed"
+            )
+
+        # Summary footer
+        total_written = sum(s.rows_written for s in all_stats)
+        total_failed = sum(s.windows_failed for s in all_stats)
+        print(f"\nTotal rows written: {total_written}")
+        print(f"Total failed windows: {total_failed}")
+        return 0 if total_failed == 0 else 1
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

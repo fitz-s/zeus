@@ -11,8 +11,8 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from src.config import cities_by_name, settings
-from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
+from src.config import cities_by_name, get_mode, settings
+from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -21,13 +21,14 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
 from src.execution.executor import create_execution_intent, execute_intent
 from src.riskguard.risk_level import RiskLevel
-from src.riskguard.riskguard import get_current_level, get_force_exit_review
+from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
+from src.state.canonical_write import commit_then_export
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
-from src.state.db import get_trade_connection_with_shared
+from src.state.db import get_trade_connection_with_world, record_token_suppression
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
-get_connection = get_trade_connection_with_shared
+get_connection = get_trade_connection_with_world
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (
     Position,
@@ -46,6 +47,65 @@ from src.strategy.risk_limits import RiskLimits
 logger = logging.getLogger(__name__)
 
 KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
+
+# DT#2 P9B (INV-19): terminal position states are excluded from the RED
+# force-exit sweep. Mirrors `_TERMINAL_POSITION_STATES` in src/state/portfolio.py
+# (module-private there; duplicated here to avoid cross-layer coupling).
+_TERMINAL_POSITION_STATES_FOR_SWEEP = frozenset({
+    "settled",
+    "voided",
+    "admin_closed",
+    "quarantined",
+})
+
+
+def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
+    """DT#2 / INV-19 RED force-exit sweep (Phase 9B).
+
+    Marks all active (non-terminal) positions with `exit_reason="red_force_exit"`
+    so the existing exit_lifecycle machinery picks them up on the next
+    monitor_refresh cycle and posts sell orders through the normal exit lane.
+
+    Does NOT post sell orders in-cycle — keeps the sweep low-risk + testable.
+    Already-exiting positions (non-empty `exit_reason` from a prior exit flow)
+    are NOT overridden — we mark only positions that have no exit flow yet.
+
+    Law reference: docs/authority/zeus_current_architecture.md §17 +
+    docs/authority/zeus_dual_track_architecture.md §6 DT#2. Pre-P9B behavior
+    was entry-block-only (Phase 1 scope); this closes the Phase 2 sweep gap.
+
+    Returns:
+        dict with counts: {attempted, already_exiting, skipped_terminal}
+    """
+    attempted = 0
+    already_exiting = 0
+    skipped_terminal = 0
+
+    for pos in portfolio.positions:
+        # pos.state may be a LifecycleState enum (str-subclass) or a bare string;
+        # under Python 3.14 str(enum) returns fully-qualified "ClassName.MEMBER",
+        # so extract .value when available.
+        raw_state = getattr(pos, "state", "") or ""
+        state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
+        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP:
+            skipped_terminal += 1
+            continue
+        existing_reason = str(getattr(pos, "exit_reason", "") or "").strip()
+        if existing_reason:
+            already_exiting += 1
+            continue
+        pos.exit_reason = "red_force_exit"
+        attempted += 1
+
+    return {
+        "attempted": attempted,
+        "already_exiting": already_exiting,
+        "skipped_terminal": skipped_terminal,
+    }
+
+
+def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
+    return risk_level == RiskLevel.GREEN
 
 
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
@@ -83,15 +143,15 @@ def _run_chain_sync(portfolio: PortfolioState, clob, conn):
     return _runtime.run_chain_sync(portfolio, clob, conn=conn, deps=sys.modules[__name__])
 
 
-def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob) -> int:
-    return _runtime.cleanup_orphan_open_orders(portfolio, clob, deps=sys.modules[__name__])
+def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob, conn=None) -> int:
+    return _runtime.cleanup_orphan_open_orders(portfolio, clob, deps=sys.modules[__name__], conn=conn)
 
 
 def _entry_bankroll_for_cycle(portfolio: PortfolioState, clob):
     return _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=sys.modules[__name__])
 
 
-def _materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, bankroll_at_entry: float | None = None):
+def _materialize_position(candidate, decision, result, portfolio, city, mode, *, state: str, env: str, bankroll_at_entry: float | None = None):
     return _runtime.materialize_position(
         candidate,
         decision,
@@ -100,6 +160,7 @@ def _materialize_position(candidate, decision, result, portfolio, city, mode, *,
         city,
         mode,
         state=state,
+        env=env,
         bankroll_at_entry=bankroll_at_entry,
         deps=sys.modules[__name__],
     )
@@ -113,7 +174,7 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
     return _runtime.execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=sys.modules[__name__])
 
 
-def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime):
+def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime, *, env: str):
     return _runtime.execute_discovery_phase(
         conn,
         clob,
@@ -125,6 +186,7 @@ def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tra
         summary,
         entry_bankroll,
         decision_time,
+        env=env,
         deps=sys.modules[__name__],
     )
 
@@ -145,13 +207,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     try:
         from src.data.ensemble_client import _clear_cache as _clear_ensemble_cache
         _clear_ensemble_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("ensemble cache clear failed: %s", exc)
     try:
         from src.data.market_scanner import _clear_active_events_cache
         _clear_active_events_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("market scanner cache clear failed: %s", exc)
     try:
         from src.control.control_plane import process_commands
         process_commands()
@@ -161,7 +223,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # C1/INV-13: one-time provenance registry validation — no-op mode
     try:
         from src.contracts.provenance_registry import require_provenance
-        require_provenance("kelly_mult", requires_provenance=False)
+        require_provenance("kelly_mult")
     except Exception as e:
         logger.warning("Provenance registry precheck failed: %s", e)
 
@@ -170,7 +232,27 @@ def run_cycle(mode: DiscoveryMode) -> dict:
 
     conn = get_connection()
     portfolio = load_portfolio()
-    clob = PolymarketClient(paper_mode=(settings.mode == "paper"))
+    if getattr(portfolio, 'portfolio_loader_degraded', False):
+        # DT#6 graceful degradation (Phase 8 R-BQ): do NOT raise RuntimeError.
+        # Run the degraded-mode riskguard tick so risk_level reflects DATA_DEGRADED
+        # (riskguard.tick_with_portfolio surfaces the degraded authority into
+        # overall_level). Downstream entry gates honour risk_level != GREEN,
+        # suppressing new-entry paths while monitor / exit / reconciliation
+        # lanes continue read-only. See docs/authority/zeus_dual_track_architecture.md
+        # §6 DT#6 law: "process must not raise RuntimeError; disable new-entry
+        # paths; keep monitor/exit/reconciliation running read-only".
+        logger.warning(
+            "Portfolio loader degraded — running DT#6 graceful-degradation cycle "
+            "(new-entry paths suppressed via risk_level; monitor/exit/reconciliation continue)"
+        )
+        summary["portfolio_degraded"] = True
+        risk_level = tick_with_portfolio(portfolio)
+        # Phase 9A MINOR-M4: intentional overwrite of summary["risk_level"] set
+        # at L176 from get_current_level() — the degraded tick's level supersedes
+        # the pre-lookup per DT#6 semantics. Canonical value for this cycle is
+        # whatever tick_with_portfolio returned (typically RiskLevel.DATA_DEGRADED).
+        summary["risk_level"] = risk_level.value
+    clob = PolymarketClient()
     tracker = get_tracker()
     limits = RiskLimits()
     portfolio_dirty = False
@@ -182,7 +264,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     summary["trades"] += pending_updates["entered"]
     summary["pending_voids"] = pending_updates["voided"]
 
-    chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
+    try:
+        chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
+    except Exception as exc:
+        logger.error("Chain sync FAILED — entries will be blocked: %s", exc)
+        chain_stats, chain_ready = {"error": str(exc)}, False
     if chain_stats:
         summary["chain_sync"] = chain_stats
         if chain_stats.get("synced") or chain_stats.get("voided") or chain_stats.get("quarantined") or chain_stats.get("updated"):
@@ -195,7 +281,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["quarantine_expired"] = q_expired
         portfolio_dirty = True
 
-    stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob)
+    try:
+        stale_cancelled = _cleanup_orphan_open_orders(portfolio, clob, conn=conn)
+    except Exception as exc:
+        logger.warning("Orphan open-order cleanup failed — continuing cycle: %s", exc)
+        stale_cancelled = 0
     if stale_cancelled:
         summary["stale_orders_cancelled"] = stale_cancelled
 
@@ -206,12 +296,28 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     portfolio_dirty = portfolio_dirty or p_dirty
     tracker_dirty = tracker_dirty or t_dirty
 
-    # B5: When daily_loss RED, block new entries (Phase 1 scope: entry-blocking only;
-    # forced exit sweep for active positions is a Phase 2 item)
+    # B5 + DT#2 P9B: When daily_loss RED, block new entries AND sweep active
+    # positions toward exit (previously Phase 1 was entry-block-only; Phase 9B
+    # closes the sweep gap per zeus_dual_track_architecture.md §6 DT#2 law:
+    # "RED must cancel all pending orders AND initiate an exit sweep on
+    # active positions"). Sweep marks `exit_reason="red_force_exit"` on each
+    # non-terminal, not-already-exiting position; exit_lifecycle machinery
+    # picks up on next monitor_refresh cycle.
     force_exit = get_force_exit_review()
     if force_exit:
         summary["force_exit_review"] = True
-        logger.warning("B5: force_exit_review active — daily loss RED. Blocking new entries.")
+        summary["force_exit_review_scope"] = "sweep_active_positions"
+        sweep_result = _execute_force_exit_sweep(portfolio)
+        summary["force_exit_sweep"] = sweep_result
+        if sweep_result["attempted"] > 0:
+            portfolio_dirty = True  # positions' exit_reason changed; persist
+        logger.warning(
+            "B5/DT#2: force_exit_review active — daily loss RED. "
+            "Sweep: attempted=%d already_exiting=%d skipped_terminal=%d.",
+            sweep_result["attempted"],
+            sweep_result["already_exiting"],
+            sweep_result["skipped_terminal"],
+        )
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
@@ -222,18 +328,42 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         pos.chain_state in {"quarantined", "quarantine_expired"}
         for pos in portfolio.positions
     )
+    # ONE-TIME smoke test portfolio cap — see settings.json note.
+    # Blocks new entries once the sum of cost_basis_usd across all non-terminal
+    # positions reaches the configured ceiling. Remove this branch together
+    # with the setting after the first full lifecycle has been observed.
+    try:
+        smoke_test_cap = settings["smoke_test_portfolio_cap_usd"]
+    except KeyError:
+        smoke_test_cap = None
+    open_cost_basis_usd = 0.0
+    if smoke_test_cap is not None:
+        terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}
+        open_cost_basis_usd = sum(
+            float(getattr(pos, "cost_basis_usd", 0.0) or 0.0)
+            for pos in portfolio.positions
+            if str(getattr(pos, "state", "") or "") not in terminal_states
+        )
+        summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
+        summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
-    elif risk_level in (RiskLevel.ORANGE, RiskLevel.RED):
+    elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED, RiskLevel.DATA_DEGRADED):
+        # Phase 9A R-BT: DATA_DEGRADED from DT#6 (portfolio_loader_degraded) must
+        # populate entries_blocked_reason so operators see a reason code in
+        # summary / status_summary / Discord reports. Pre-P9A: DATA_DEGRADED
+        # fell through to None while entries were silently blocked.
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
     elif entry_bankroll <= 0:
         entries_blocked_reason = "entry_bankroll_non_positive"
+    elif smoke_test_cap is not None and open_cost_basis_usd >= float(smoke_test_cap):
+        entries_blocked_reason = f"smoke_test_portfolio_cap_reached({open_cost_basis_usd:.2f}>={float(smoke_test_cap):.2f})"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
 
@@ -241,10 +371,19 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
-    if risk_level == RiskLevel.GREEN and not entries_paused and entries_blocked_reason is None:
-        p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time)
-        portfolio_dirty = portfolio_dirty or p_dirty
-        tracker_dirty = tracker_dirty or t_dirty
+    if entries_paused and entries_blocked_reason is None:
+        entries_blocked_reason = "entries_paused"
+    if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
+        try:
+            p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
+            portfolio_dirty = portfolio_dirty or p_dirty
+            tracker_dirty = tracker_dirty or t_dirty
+        except Exception as exc:
+            reason_code = f"auto_pause:{type(exc).__name__}"
+            pause_entries(reason_code)
+            logger.error("Entry path raised %s -- entries auto-paused: %s", type(exc).__name__, exc)
+            summary["entries_paused"] = True
+            summary["entries_pause_reason"] = reason_code
     else:
         if entries_paused:
             summary["entries_paused"] = True
@@ -253,25 +392,47 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             if entries_blocked_reason == "near_max_exposure":
                 summary["near_max_exposure"] = True
 
-    if portfolio_dirty or summary["trades"] > 0 or summary["exits"] > 0:
-        save_portfolio(portfolio)
-    if tracker_dirty:
-        save_tracker(tracker)
-
     artifact.completed_at = _utcnow().isoformat()
+
+    # DT#1 / INV-17: DB commit FIRST, then JSON exports in order.
+    # commit_then_export handles rollback-on-db-failure and
+    # log-but-continue-on-json-failure.
+    portfolio_should_save = portfolio_dirty or summary["trades"] > 0 or summary["exits"] > 0
+    # Mutable container so closures can read the committed artifact_id.
+    _artifact_id_box: list = [None]
+
+    def _db_op() -> "int | None":
+        aid = store_artifact(conn, artifact)
+        _artifact_id_box[0] = aid
+        return aid
+
+    def _export_portfolio() -> None:
+        if portfolio_should_save:
+            save_portfolio(
+                portfolio,
+                last_committed_artifact_id=_artifact_id_box[0],
+                source="cycle_housekeeping",  # Phase 9C B3 audit tag
+            )
+
+    def _export_tracker() -> None:
+        if tracker_dirty:
+            save_tracker(tracker)
+
+    def _export_status() -> None:
+        from src.observability.status_summary import write_status
+        write_status(summary)
+
     try:
-        store_artifact(conn, artifact)
+        commit_then_export(
+            conn,
+            db_op=_db_op,
+            json_exports=[_export_portfolio, _export_tracker, _export_status],
+        )
     except Exception as e:
         logger.warning("Decision chain recording failed: %s", e)
 
     conn.close()
     summary["completed_at"] = _utcnow().isoformat()
-
-    try:
-        from src.observability.status_summary import write_status
-        write_status(summary)
-    except Exception as e:
-        logger.warning("Status summary write failed: %s", e)
 
     logger.info(
         "Cycle %s: %d monitors, %d exits, %d candidates, %d trades",

@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 import numpy as np
 
-from src.calibration.manager import get_calibrator
+from src.calibration.manager import get_calibrator, season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.config import cities_by_name, day0_n_mc, edge_n_bootstrap, ensemble_n_mc
 from src.contracts import (
@@ -18,17 +18,19 @@ from src.contracts import (
     recompute_native_probability,
     SettlementSemantics,
 )
+from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
-from src.engine.time_context import lead_days_to_target
-from src.signal.day0_signal import Day0Signal
-from src.signal.day0_window import remaining_member_maxes_for_day0
+from src.engine.time_context import lead_days_to_date_start
+from src.signal.day0_router import Day0Router, Day0SignalInputs
+from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.portfolio import Position
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.types import Bin
+from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
@@ -98,7 +100,7 @@ def _refresh_ens_member_counting(
 
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
-    requested_lead_days = max(0.0, lead_days_to_target(target_d, city.timezone))
+    requested_lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
     if requested_lead_days < 0:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
@@ -107,7 +109,7 @@ def _refresh_ens_member_counting(
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
-    lead_days = max(0.0, lead_days_to_target(target_d, city.timezone, ens_result.get("fetch_time")))
+    lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, ens_result.get("fetch_time")))
 
     semantics = SettlementSemantics.for_city(city)
     ens = EnsembleSignal(
@@ -130,7 +132,13 @@ def _refresh_ens_member_counting(
 
     p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
 
-    cal, cal_level = get_calibrator(conn, city, position.target_date)
+    # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
+    # its own Platt model (pre-P9C this was metric-blind and LOW silently
+    # received HIGH calibration — critical blocker for LOW deployment).
+    cal, cal_level = get_calibrator(
+        conn, city, position.target_date,
+        temperature_metric=getattr(position, "temperature_metric", "high"),
+    )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
             p_raw_vector,
@@ -162,18 +170,40 @@ def _refresh_ens_member_counting(
         except Exception:
             pass  # Malformed timestamp → fall back to 48h
 
+    # K1/#68: verify calibration authority before computing alpha.
+    # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
+    _authority_verified = False
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_d, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            logger.warning(
+                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
+                len(_unverified_pairs), city.name, _cal_season,
+            )
+            _set_monitor_probability_fresh(position, False)
+            applied.append("authority_gate_blocked")
+            return position.p_posterior, applied
+        _authority_verified = True
+
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ens.spread(),
-        model_agreement="AGREE",
+        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
         lead_days=float(lead_days),
         hours_since_open=hours_since_open,
-    )
+        authority_verified=_authority_verified,
+    ).value_for_consumer("ev")
 
     # Persistence anomaly check: if ENS predicts a historically rare
     # day-to-day temperature change, discount model trust
     anomaly_discount = _check_persistence_anomaly(
-        conn, city.name, target_d, float(np.mean(ens.member_maxes))
+        conn, city.name, target_d, float(np.mean(ens.member_maxes)),
+        temperature_metric=position.temperature_metric,
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
@@ -198,7 +228,7 @@ def _refresh_ens_member_counting(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_maxes": ens.member_maxes,
+        "member_extrema": ens.member_maxes,
         "calibrator": cal,
         "lead_days": float(lead_days),
         "unit": city.settlement_unit,
@@ -232,7 +262,7 @@ def _refresh_day0_observation(
     if obs is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation"]
-    if not obs.get("observation_time"):
+    if not obs.observation_time:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
 
@@ -252,8 +282,8 @@ def _refresh_day0_observation(
             city.name,
             target_d,
             city.timezone,
-            observation_time=obs.get("observation_time"),
-            observation_source=obs.get("source", ""),
+            observation_time=obs.observation_time,
+            observation_source=obs.source,
         )
     except Exception:
         temporal_context = None
@@ -262,34 +292,47 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
 
-    remaining_member_maxes, hours_remaining = remaining_member_maxes_for_day0(
+    # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
+    # so Day0Signal receives the typed object, not a bare str.
+    temperature_metric = MetricIdentity.from_raw(
+        getattr(position, "temperature_metric", "high")
+    )
+
+    extrema, hours_remaining = remaining_member_extrema_for_day0(
         ens_result["members_hourly"],
         ens_result["times"],
         city.timezone,
         target_d,
         now=temporal_context.current_utc_timestamp,
+        temperature_metric=temperature_metric,
     )
-    if remaining_member_maxes.size == 0:
+    if extrema is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
-    day0 = Day0Signal(
-        observed_high_so_far=float(obs["high_so_far"]),
-        current_temp=float(obs["current_temp"]),
+    day0 = Day0Router.route(Day0SignalInputs(
+        temperature_metric=temperature_metric,
+        observed_high_so_far=float(obs.high_so_far) if obs.high_so_far is not None else None,
+        observed_low_so_far=float(obs.low_so_far) if obs.low_so_far is not None else None,
+        current_temp=float(obs.current_temp),
         hours_remaining=hours_remaining,
-        member_maxes_remaining=remaining_member_maxes,
+        member_maxes_remaining=extrema.maxes,
+        member_mins_remaining=extrema.mins,
         unit=city.settlement_unit,
-        observation_source=str(obs.get("source", "")),
-        observation_time=obs.get("observation_time"),
-        current_utc_timestamp=temporal_context.current_utc_timestamp.isoformat(),
+        observation_source=str(obs.source),
+        observation_time=obs.observation_time,
         temporal_context=temporal_context,
-    )
+    ))
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
     all_bins, held_idx = _build_all_bins(position, city)
 
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
-    cal, cal_level = get_calibrator(conn, city, position.target_date)
+    # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
+    cal, cal_level = get_calibrator(
+        conn, city, position.target_date,
+        temperature_metric=getattr(position, "temperature_metric", "high"),
+    )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
             p_raw_vector,
@@ -310,7 +353,7 @@ def _refresh_day0_observation(
         p_cal_yes = float(p_raw_vector[held_idx])
         applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise"]
 
-    ensemble_spread = TemperatureDelta(float(np.std(remaining_member_maxes)), city.settlement_unit)
+    ensemble_spread = TemperatureDelta(float(np.std(extrema.maxes)), city.settlement_unit)
 
     hours_since_open = 48.0
     if position.entered_at:
@@ -322,13 +365,33 @@ def _refresh_day0_observation(
         except Exception:
             pass
 
+    # K1/#68: verify calibration authority before computing alpha.
+    _authority_verified = False
+    if conn is not None and hasattr(conn, 'execute'):
+        from src.calibration.store import get_pairs_for_bucket as _get_pairs
+        _cal_season = season_from_date(target_d, lat=city.lat)
+        try:
+            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+        except Exception:
+            _unverified_pairs = []
+        if _unverified_pairs:
+            logger.warning(
+                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
+                len(_unverified_pairs), city.name, _cal_season,
+            )
+            _set_monitor_probability_fresh(position, False)
+            applied.append("authority_gate_blocked")
+            return position.p_posterior, applied
+        _authority_verified = True
+
     alpha = compute_alpha(
         calibration_level=cal_level,
         ensemble_spread=ensemble_spread,
-        model_agreement="AGREE",
+        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
         lead_days=0.0,
         hours_since_open=hours_since_open,
-    )
+        authority_verified=_authority_verified,
+    ).value_for_consumer("ev")
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
     current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
 
@@ -340,7 +403,7 @@ def _refresh_day0_observation(
         "alpha": alpha,
         "bins": all_bins,
         "held_idx": held_idx,
-        "member_maxes": remaining_member_maxes,
+        "member_extrema": extrema.maxes if extrema.maxes is not None else extrema.mins,
         "calibrator": cal,
         "lead_days": 0.0,
         "unit": city.settlement_unit,
@@ -372,7 +435,8 @@ def _delta_bucket(delta: float) -> str:
 
 
 def _check_persistence_anomaly(
-    conn, city_name: str, target_date, predicted_high: float
+    conn, city_name: str, target_date, predicted_high: float,
+    *, temperature_metric=None,
 ) -> float:
     """Check if ENS-predicted temp change from recent days is historically rare.
 
@@ -381,7 +445,19 @@ def _check_persistence_anomaly(
     - n < 30: not enough data → no discount
     - n=30: 10% discount
     - n=100+: 30% max discount
+
+    LOW metric gate: legacy settlements has no metric column; LOW lookups would
+    cross-compare against HIGH historical values. Defer to metric-aware query
+    when settlements_v2 populated (P10D).
     """
+    if temperature_metric is not None:
+        is_low = (
+            getattr(temperature_metric, "is_low", lambda: False)()
+            or temperature_metric == "low"
+        )
+        if is_low:
+            return 1.0  # no persistence discount for LOW
+
     from datetime import timedelta
 
     try:
@@ -392,13 +468,26 @@ def _check_persistence_anomaly(
         deltas = []
         for days_back in range(1, 4):
             d = (target_date - timedelta(days=days_back)).isoformat()
+            # H3 (2026-04-24): pin temperature_metric='high' explicitly.
+            # LOW callers early-return at L453-459 before reaching this query,
+            # so the HIGH filter is safe: any caller reaching this SELECT has
+            # already committed to the HIGH axis (via explicit HIGH
+            # temperature_metric kwarg, or the default pre-dual-track path).
+            # Without the filter, a future LOW settlement row for the same
+            # (city, target_date) would silently match and produce a cross-
+            # metric delta anyway.
             row = conn.execute(
                 "SELECT settlement_value FROM settlements "
-                "WHERE city = ? AND target_date = ? LIMIT 1",
+                "WHERE city = ? AND target_date = ? "
+                "AND temperature_metric = 'high' LIMIT 1",
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
-                deltas.append(predicted_high - round(float(row["settlement_value"])))
+                # Note: uses WMO half-up as generic directional delta.
+                # oracle_truncate precision not critical here (±0.5 max).
+                deltas.append(
+                    predicted_high - round_wmo_half_up_value(float(row["settlement_value"]))
+                )
 
         if not deltas:
             logger.warning(
@@ -462,7 +551,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # 1. Refresh market price
     market_refreshed = False
-    if getattr(clob, "paper_mode", True):
+    if getattr(clob, "paper_mode", False):
         try:
             gamma_yes = get_current_yes_price(pos.market_id)
             if gamma_yes is not None:
@@ -579,6 +668,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             from src.strategy.market_analysis import MarketAnalysis
             held_idx = bootstrap_ctx["held_idx"]
             bins = bootstrap_ctx["bins"]
+            if len(bootstrap_ctx["member_extrema"]) == 0:
+                raise ValueError("Bootstrap context has no member_extrema")
             p_market_arr = np.zeros(len(bins))
             # A1: MarketAnalysis expects YES-side market prices (entry convention).
             # For buy_no, current_p_market is native NO-side — convert back to YES.
@@ -591,7 +682,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 p_market=p_market_arr,
                 alpha=bootstrap_ctx["alpha"],
                 bins=bins,
-                member_maxes=bootstrap_ctx["member_maxes"],
+                member_maxes=bootstrap_ctx["member_extrema"],
                 calibrator=bootstrap_ctx["calibrator"],
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],

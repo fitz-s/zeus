@@ -1,0 +1,251 @@
+schema_version: 1
+metadata:
+  created: "2026-04-15"
+  owner_packet: "Core Map Compiler"
+  purpose: >
+    Proof-backed semantic claims that generated topology views may emit as
+    verified facts. This is not a new authority source; every claim points to
+    executable contracts, tests, manifests, authority docs, or lore.
+
+required_claim_fields:
+  - claim_id
+  - claim_status
+  - assertion
+  - source
+  - proof_targets
+  - gates
+  - invalidation_condition
+
+allowed_claim_statuses:
+  - replaced
+  - partial_replacement_candidate
+  - intentionally_unpromoted
+  - stale_superseded
+
+allowed_source_kinds:
+  - executable_contract
+  - blocking_test
+  - machine_manifest
+  - history_lore
+  - authority_doc
+
+allowed_proof_target_kinds:
+  - executable_contract
+  - blocking_test
+  - machine_manifest
+  - history_lore
+  - authority_doc
+
+claims:
+  - claim_id: TEMPERATURE_DELTA_SCALE_ONLY
+    claim_status: replaced
+    assertion: "TemperatureDelta conversion is scale-only; it never applies the +32 absolute-temperature offset."
+    source:
+      kind: executable_contract
+      path: src/types/temperature.py
+      locator: TemperatureDelta.to
+    proof_targets:
+      - kind: executable_contract
+        path: src/types/temperature.py
+        locator: TemperatureDelta
+      - kind: blocking_test
+        path: tests/test_temperature.py
+        locator: test_delta_vs_absolute_differ
+    gates:
+      - pytest -q tests/test_temperature.py
+    invalidation_condition: "Only a unit semantics contract packet may alter TemperatureDelta conversion."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: EXECUTION_PRICE_NOT_IMPLIED_PROBABILITY
+    claim_status: replaced
+    assertion: "Kelly entry cost must flow through typed ExecutionPrice; implied market probability is not execution cost."
+    source:
+      kind: executable_contract
+      path: src/contracts/execution_price.py
+      locator: ExecutionPrice.assert_kelly_safe
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/execution_price.py
+        locator: ExecutionPrice
+      - kind: blocking_test
+        path: tests/test_no_bare_float_seams.py
+        locator: test_implied_probability_fails_kelly_safe
+    gates:
+      - pytest -q tests/test_no_bare_float_seams.py
+    invalidation_condition: "Only an execution-price contract packet may change Kelly cost semantics."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: ALPHA_TARGET_COMPATIBILITY
+    claim_status: replaced
+    assertion: "Alpha values carry an optimization target; Brier-optimized alpha must not be consumed as EV-safe alpha."
+    source:
+      kind: executable_contract
+      path: src/contracts/alpha_decision.py
+      locator: AlphaDecision.assert_target_compatible
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/alpha_decision.py
+        locator: AlphaDecision
+      - kind: blocking_test
+        path: tests/test_alpha_target_coherence.py
+        locator: test_brier_into_ev_raises
+      - kind: executable_contract
+        path: src/engine/evaluator.py
+        locator: value_for_consumer("ev")
+    gates:
+      - pytest -q tests/test_alpha_target_coherence.py
+    invalidation_condition: "Only an alpha-target contract packet may change consumer compatibility."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: VIG_BEFORE_BLEND
+    claim_status: replaced
+    assertion: "Vig normalization must happen before posterior blending through VigTreatment."
+    source:
+      kind: executable_contract
+      path: src/contracts/vig_treatment.py
+      locator: VigTreatment
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/vig_treatment.py
+        locator: applied_before_blend
+      - kind: executable_contract
+        path: src/strategy/market_fusion.py
+        locator: VigTreatment.from_raw
+      - kind: blocking_test
+        path: tests/test_no_bare_float_seams.py
+        locator: TestVigTreatmentSeam
+    gates:
+      - pytest -q tests/test_no_bare_float_seams.py
+    invalidation_condition: "Only a market-probability contract packet may change vig treatment order."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: ORACLE_TRUNCATION_RULE
+    claim_status: replaced
+    assertion: "HKO/Oracle settlement semantics use oracle_truncate, while WU/default settlement semantics use WMO half-up."
+    source:
+      kind: executable_contract
+      path: src/contracts/settlement_semantics.py
+      locator: SettlementSemantics.for_city
+    proof_targets:
+      - kind: executable_contract
+        path: src/contracts/settlement_semantics.py
+        locator: oracle_truncate
+      - kind: history_lore
+        path: architecture/history_lore.yaml
+        locator: ORACLE_TRUNCATION_BIAS
+    gates:
+      - python3 scripts/topology_doctor.py --history-lore
+    invalidation_condition: "Only a settlement semantics packet may alter source-specific rounding law."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: ORACLE_PENALTY_THRESHOLD
+    claim_status: replaced
+    assertion: "Oracle penalty uses <3% incidental, 3-10% caution, and >10% blacklist thresholds from data/oracle_error_rates.json."
+    source:
+      kind: executable_contract
+      path: src/strategy/oracle_penalty.py
+      locator: get_oracle_info
+    proof_targets:
+      - kind: executable_contract
+        path: src/strategy/oracle_penalty.py
+        locator: CAUTION_THRESHOLD
+      - kind: machine_manifest
+        path: architecture/history_lore.yaml
+        locator: ORACLE_TRUNCATION_BIAS
+    gates:
+      - python3 scripts/topology_doctor.py --history-lore
+    invalidation_condition: "Only an oracle-penalty packet may change oracle error thresholds."
+    applicable_profiles: [probability-chain]
+
+  - claim_id: SOURCE_ROLES_NOT_INTERCHANGEABLE
+    claim_status: replaced
+    assertion: "Settlement daily source, Day0 live monitor source, historical hourly source, and forecast skill source are distinct roles that must be proven separately."
+    source:
+      kind: machine_manifest
+      path: architecture/city_truth_contract.yaml
+      locator: source_roles
+    proof_targets:
+      - kind: machine_manifest
+        path: architecture/city_truth_contract.yaml
+        locator: settlement_daily_source
+      - kind: machine_manifest
+        path: architecture/task_boot_profiles.yaml
+        locator: daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - kind: machine_manifest
+        path: architecture/fatal_misreads.yaml
+        locator: daily_day0_hourly_forecast_sources_are_not_interchangeable
+    gates:
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    invalidation_condition: "Only a source-contract packet with city/date evidence may collapse source roles for a bounded scope."
+    applicable_profiles: [semantic-boot]
+
+  - claim_id: HONG_KONG_CURRENT_TRUTH_REQUIRES_FRESH_AUDIT
+    claim_status: replaced
+    assertion: "Hong Kong/HKO is an explicit current caution path; present-tense source truth must route through fresh audit evidence, not generic station assumptions."
+    source:
+      kind: authority_doc
+      path: docs/operations/current_source_validity.md
+      locator: "Hong Kong is the explicit current caution path."
+    proof_targets:
+      - kind: machine_manifest
+        path: architecture/fatal_misreads.yaml
+        locator: hong_kong_hko_explicit_caution_path
+      - kind: machine_manifest
+        path: architecture/city_truth_contract.yaml
+        locator: hong_kong_explicit_caution
+      - kind: machine_manifest
+        path: config/cities.json
+        locator: "\"name\": \"Hong Kong\""
+    gates:
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    invalidation_condition: "Only a fresh Hong Kong audit receipt may change this caution path."
+    applicable_profiles: [semantic-boot]
+
+  - claim_id: HOURLY_EXTREMA_PRESERVATION_REQUIRED
+    claim_status: replaced
+    assertion: "Hourly/sub-hourly ingest must preserve required maxima/minima; first, last, or average downsampling is not safe for extrema-sensitive tasks."
+    source:
+      kind: machine_manifest
+      path: architecture/fatal_misreads.yaml
+      locator: hourly_downsample_preserves_extrema
+    proof_targets:
+      - kind: machine_manifest
+        path: architecture/city_truth_contract.yaml
+        locator: historical_hourly_source
+      - kind: machine_manifest
+        path: architecture/source_rationale.yaml
+        locator: observation_instants_v2_writer
+      - kind: machine_manifest
+        path: architecture/task_boot_profiles.yaml
+        locator: hourly_source_and_extrema
+    gates:
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    invalidation_condition: "Only a metric-specific ingest contract may replace extrema preservation."
+    applicable_profiles: [semantic-boot]
+
+  - claim_id: CODE_REVIEW_GRAPH_DERIVED_NOT_SEMANTIC_AUTHORITY
+    claim_status: replaced
+    assertion: "Code Review Graph answers where to inspect and what blast radius exists; it does not decide settlement truth, source validity, current facts, or authority rank."
+    source:
+      kind: authority_doc
+      path: AGENTS.md
+      locator: "Code Review Graph is tracked derived context, not authority"
+    proof_targets:
+      - kind: authority_doc
+        path: workspace_map.md
+        locator: "tracked derived context"
+      - kind: machine_manifest
+        path: architecture/fatal_misreads.yaml
+        locator: code_review_graph_answers_where_not_what_settles
+      - kind: machine_manifest
+        path: architecture/task_boot_profiles.yaml
+        locator: graph_review
+    gates:
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    invalidation_condition: "Only a graph-authority packet with source/date proof integration may change graph's derived-only rank."
+    applicable_profiles: [semantic-boot]

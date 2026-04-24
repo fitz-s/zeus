@@ -78,8 +78,8 @@ class ProvenanceRecord:
 # YAML loader
 # ---------------------------------------------------------------------------
 
-def _load_registry(yaml_path: Path) -> dict[str, ProvenanceRecord]:
-    """Load provenance_registry.yaml and return a dict keyed by constant_name."""
+def _load_registry(yaml_path: Path) -> tuple[dict[str, ProvenanceRecord], bool]:
+    """Load provenance_registry.yaml and return (registry_dict, degraded_flag)."""
     try:
         import yaml  # pyyaml
     except ImportError:
@@ -87,40 +87,82 @@ def _load_registry(yaml_path: Path) -> dict[str, ProvenanceRecord]:
             "PyYAML not available. ProvenanceRegistry will be empty. "
             "Install pyyaml to enable INV-13 enforcement."
         )
-        return {}
+        return {}, True
 
     if not yaml_path.exists():
-        logger.warning(
+        logger.error(
             "provenance_registry.yaml not found at %s. "
             "INV-13 enforcement is disabled until the file exists.",
             yaml_path,
         )
-        return {}
+        return {}, True
 
-    with open(yaml_path) as f:
-        raw = yaml.safe_load(f)
+    try:
+        with open(yaml_path) as f:
+            raw = yaml.safe_load(f)
 
-    if not raw or "constants" not in raw:
-        logger.warning("provenance_registry.yaml has no 'constants' key; registry is empty.")
-        return {}
+        if not raw or "constants" not in raw:
+            logger.error("provenance_registry.yaml has no 'constants' key; registry is empty.")
+            return {}, True
 
-    registry: dict[str, ProvenanceRecord] = {}
-    for entry in raw["constants"]:
-        cb_raw = entry.get("cascade_bound")
-        cascade_bound = tuple(cb_raw) if cb_raw else None
-        record = ProvenanceRecord(
-            constant_name=entry["constant_name"],
-            file_location=entry["file_location"],
-            declared_target=entry["declared_target"],
-            data_basis=entry["data_basis"],
-            validated_at=entry["validated_at"],
-            replacement_criteria=entry["replacement_criteria"],
-            cascade_bound=cascade_bound,  # type: ignore[arg-type]
-        )
-        registry[record.constant_name] = record
+        registry: dict[str, ProvenanceRecord] = {}
+        # B009: per-entry isolation (SD-B). Previously a single malformed
+        # entry (missing key, bad cascade_bound shape, invalid declared_target)
+        # would raise inside this loop, the outer ``except Exception`` would
+        # fire, and the ENTIRE registry would be returned as empty/degraded.
+        # One bad row should not poison INV-13 enforcement for all other
+        # constants. Per-entry try/except logs the offending record and
+        # continues; only truly structural YAML failures (missing
+        # ``constants`` key, load error) still degrade the whole file.
+        entries_skipped = 0
+        for entry in raw["constants"]:
+            try:
+                cb_raw = entry.get("cascade_bound")
+                cascade_bound = tuple(cb_raw) if cb_raw else None
+                record = ProvenanceRecord(
+                    constant_name=entry["constant_name"],
+                    file_location=entry["file_location"],
+                    declared_target=entry["declared_target"],
+                    data_basis=entry["data_basis"],
+                    validated_at=entry["validated_at"],
+                    replacement_criteria=entry["replacement_criteria"],
+                    cascade_bound=cascade_bound,  # type: ignore[arg-type]
+                )
+                if record.constant_name in registry:
+                    raise ValueError(
+                        f"Duplicate provenance constant_name: {record.constant_name}"
+                    )
+                registry[record.constant_name] = record
+            except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
+                # Amendment (critic-alice review): AttributeError was
+                # omitted from the first pass. A non-dict YAML entry
+                # (e.g. a bare string ``- "just text"`` in the
+                # constants list) calls ``entry.get("cascade_bound")``
+                # which raises AttributeError, falling through to the
+                # outer ``except Exception`` and poisoning the ENTIRE
+                # registry \u2014 exactly the failure B009 claimed to
+                # prevent. Live repro confirmed: a single string entry
+                # with 3 valid dict entries returned an empty registry
+                # and degraded=True. AttributeError + IndexError now
+                # in the per-entry tuple.
+                entries_skipped += 1
+                logger.error(
+                    "provenance_registry.yaml entry skipped (%s): %s",
+                    exc, entry if isinstance(entry, dict) else repr(entry),
+                )
+                continue
 
-    logger.info("ProvenanceRegistry loaded %d records", len(registry))
-    return registry
+        if entries_skipped:
+            logger.error(
+                "provenance_registry: %d entries skipped due to per-entry "
+                "errors; INV-13 enforcement may be partial.",
+                entries_skipped,
+            )
+        logger.info("ProvenanceRegistry loaded %d records", len(registry))
+        return registry, False
+    except Exception as exc:
+        logger.error("Failed to parse provenance_registry.yaml (%s). Falling back to degraded state.", exc)
+        return {}, True
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +209,7 @@ def _is_bypass_active(constant_name: str) -> bool:
 # Runtime check function
 # ---------------------------------------------------------------------------
 
-def require_provenance(constant_name: str, requires_provenance: bool = True) -> ProvenanceRecord:
+def require_provenance(constant_name: str, requires_provenance: bool = True) -> Optional[ProvenanceRecord]:
     """Assert that constant_name is registered in REGISTRY.
 
     Use this at any cascade entry point where a hardcoded constant is consumed.
@@ -180,10 +222,17 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
             flagged as outside the provenance requirement).
 
     Returns:
-        The ProvenanceRecord for the constant.
+        The ProvenanceRecord for the constant, or None if the check was skipped
+        or an emergency bypass is active.
     """
     if not requires_provenance:
-        return None  # type: ignore[return-value]
+        return None
+
+    if REGISTRY_DEGRADED:
+        raise UnregisteredConstantError(
+            f"INV-13: provenance registry failed to load — governance disabled. "
+            f"Constant '{constant_name}' cannot be validated and fail-close is enforced."
+        )
 
     record = REGISTRY.get(constant_name)
     if record is not None:
@@ -194,7 +243,7 @@ def require_provenance(constant_name: str, requires_provenance: bool = True) -> 
             "INV-13: constant '%s' not in REGISTRY but emergency bypass is active.",
             constant_name,
         )
-        return None  # type: ignore[return-value]
+        return None
 
     raise UnregisteredConstantError(
         f"Constant '{constant_name}' is not registered in provenance_registry.yaml "
@@ -215,7 +264,9 @@ _DEFAULT_YAML = (
     / "provenance_registry.yaml"
 )
 
-REGISTRY: dict[str, ProvenanceRecord] = _load_registry(_DEFAULT_YAML)
+_REGISTRY_LOAD_RESULT = _load_registry(_DEFAULT_YAML)
+REGISTRY: dict[str, ProvenanceRecord] = _REGISTRY_LOAD_RESULT[0]
+REGISTRY_DEGRADED: bool = _REGISTRY_LOAD_RESULT[1]
 
 
 # ---------------------------------------------------------------------------

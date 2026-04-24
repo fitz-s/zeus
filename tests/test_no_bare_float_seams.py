@@ -3,15 +3,20 @@ import ast
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
+from src.contracts.hold_value import HoldValue, HoldValueCostDeclarationError
+from src.contracts.vig_treatment import VigTreatment
 from src.strategy.kelly import kelly_size
+from src.strategy.market_fusion import compute_posterior
 
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
 EXIT_TRIGGERS_PY = ZEUS_ROOT / "src" / "execution" / "exit_triggers.py"
+PORTFOLIO_PY = ZEUS_ROOT / "src" / "state" / "portfolio.py"
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +48,18 @@ class TestExecutionPriceConstruction:
         with pytest.raises(ValueError):
             ExecutionPrice(value=-0.01, price_type="vwmp", fee_deducted=True, currency="probability_units")
 
+    def test_nan_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("nan"), price_type="vwmp", fee_deducted=True, currency="probability_units")
+
+    def test_inf_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("inf"), price_type="ask", fee_deducted=True, currency="probability_units")
+
+    def test_neg_inf_value_raises(self):
+        with pytest.raises(ValueError, match="finite"):
+            ExecutionPrice(value=float("-inf"), price_type="bid", fee_deducted=False, currency="usd")
+
     def test_probability_units_over_one_raises(self):
         with pytest.raises(ValueError):
             ExecutionPrice(value=1.01, price_type="ask", fee_deducted=True, currency="probability_units")
@@ -56,6 +73,66 @@ class TestExecutionPriceConstruction:
             currency="probability_units",
         )
         assert ep.price_type == "implied_probability"
+
+
+class TestVigTreatmentSeam:
+    def test_compute_posterior_rejects_zero_market_vector(self):
+        with pytest.raises(ValueError, match="cannot compute vig"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([0.0, 0.0]),
+                0.5,
+            )
+
+    def test_compute_posterior_rejects_negative_market_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([-0.1, 1.1]),
+                0.5,
+            )
+
+    def test_vig_treatment_constructor_rejects_negative_raw_component(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            VigTreatment(
+                raw_market_prices=np.array([-0.1, 1.1]),
+                vig_factor=1.0,
+                clean_prices=np.array([-0.1, 1.1]),
+                applied_before_blend=True,
+            )
+
+
+class TestHoldValueSeam:
+    def test_hold_value_requires_fee_and_time_declarations(self):
+        with pytest.raises(HoldValueCostDeclarationError):
+            HoldValue(
+                gross_value=10.0,
+                fee_cost=0.0,
+                time_cost=0.0,
+                net_value=10.0,
+                costs_declared=[],
+            )
+
+    def test_hold_value_compute_declares_zero_costs_explicitly(self):
+        hold = HoldValue.compute(gross_value=10.0, fee_cost=0.0, time_cost=0.0)
+
+        assert hold.net_value == pytest.approx(10.0)
+        assert hold.costs_declared == ["fee", "time"]
+
+    def test_exit_ev_gate_uses_hold_value_contract(self):
+        portfolio_src = PORTFOLIO_PY.read_text()
+        exit_src = EXIT_TRIGGERS_PY.read_text()
+
+        assert "HoldValue.compute" in portfolio_src
+        assert "HoldValue.compute" in exit_src
+
+
+class TestTailTreatmentSeam:
+    def test_market_fusion_routes_tail_scale_through_tail_treatment(self):
+        source = (ZEUS_ROOT / "src" / "strategy" / "market_fusion.py").read_text()
+
+        assert "DEFAULT_TAIL_TREATMENT" in source
+        assert "float(alpha) * DEFAULT_TAIL_TREATMENT.scale_factor" in source
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +222,22 @@ class TestNoBareFloatAtKellyBoundary:
             "This documents the D3 systematic Kelly oversizing."
         )
 
-    def test_kelly_size_still_accepts_bare_float(self):
-        """Document current state: kelly_size accepts bare float entry_price (pre-seam wiring).
-
-        This test PASSES now (bare float accepted) and should be UPDATED to assert
-        ExecutionPriceContractError once evaluator.py is rewritten with the D3 seam.
-        """
+    def test_kelly_size_with_typed_entry_price(self):
+        """Kelly accepts typed ExecutionPrice; evaluator owns the wrapping boundary."""
+        from src.contracts.execution_price import ExecutionPrice
+        ep = ExecutionPrice(
+            value=0.40,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        )
         size = kelly_size(
             p_posterior=0.60,
-            entry_price=0.40,  # bare float — currently accepted
+            entry_price=ep,
             bankroll=1000.0,
             kelly_mult=0.25,
         )
-        assert size > 0.0, "kelly_size with bare float entry_price should still work (pre-seam)"
+        assert size > 0.0, "kelly_size with valid ExecutionPrice returns positive size"
 
 
 # ---------------------------------------------------------------------------
@@ -197,10 +277,14 @@ class TestNoBareFloatInExitTriggerThresholds:
             "P9 requires thresholds traced to ExpiringAssumption or ProvenanceRecord."
         )
 
-    def test_kelly_size_entry_price_currently_bare_float_annotation(self):
-        """Document current state: entry_price annotated as float (INV-12 violation).
+    def test_kelly_size_entry_price_requires_execution_price(self):
+        """Phase 10E DT#5 / R-BW (strict-antibody flip 2026-04-20):
+        kelly_size.entry_price annotation is now strictly `ExecutionPrice` —
+        bare float backward-compat is REMOVED. Pre-P10E this was a union
+        `float | ExecutionPrice`; P10E tightens to ExecutionPrice-only per R10.
 
-        This PASSES now. Update when evaluator.py wires ExecutionPrice at the seam.
+        Antibody shape (structural AST): parse kelly.py and assert
+        `entry_price` annotation is EXACTLY `ExecutionPrice` (no `float |`).
         """
         source = KELLY_PY.read_text()
         tree = ast.parse(source)
@@ -209,16 +293,25 @@ class TestNoBareFloatInExitTriggerThresholds:
                 for arg in node.args.args:
                     if arg.arg == "entry_price":
                         ann = arg.annotation
-                        # Current state: float annotation (the violation)
-                        if ann is not None and isinstance(ann, ast.Name) and ann.id == "float":
-                            return  # Expected current state — test passes
-                        elif ann is None:
-                            return  # No annotation — also pre-seam
-                        else:
-                            # Annotation exists and is not bare float
+                        if ann is None:
                             pytest.fail(
-                                "entry_price annotation has changed. "
-                                "Update this test to verify it's ExecutionPrice."
+                                "Phase 10E R-BW: kelly_size.entry_price has no "
+                                "annotation. Must be `ExecutionPrice` (strict)."
                             )
-                return  # entry_price param found but no annotation
+                        ann_text = ast.unparse(ann)
+                        has_bare_float_union = "float" in ann_text and "|" in ann_text
+                        has_execution_price = "ExecutionPrice" in ann_text
+                        assert has_execution_price, (
+                            f"Phase 10E R-BW: kelly_size.entry_price annotation "
+                            f"must be `ExecutionPrice` (strict); got: {ann_text!r}"
+                        )
+                        assert not has_bare_float_union, (
+                            f"Phase 10E R-BW: kelly_size.entry_price must NOT be "
+                            f"a float union — bare-float path removed in P10E; "
+                            f"got: {ann_text!r}"
+                        )
+                        return
+                pytest.fail(
+                    "Phase 10E R-BW: kelly_size signature has no entry_price param."
+                )
         pytest.skip("kelly_size not found in kelly.py")

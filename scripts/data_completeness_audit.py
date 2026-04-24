@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import state_path
-from src.state.db import get_trade_connection_with_shared as get_connection
+from src.state.db import get_trade_connection_with_world as get_connection
 
 REPLAY_REQUIRED_FIELDS = [
     "trade_id", "token_id", "market_id", "bin_label", "direction",
@@ -76,7 +76,7 @@ def run_audit():
 
         # Check tick coverage
         tick_count = conn.execute(
-            "SELECT COUNT(*) FROM shared.token_price_log WHERE token_id = ?", (token_id,)
+            "SELECT COUNT(*) FROM world.token_price_log WHERE token_id = ?", (token_id,)
         ).fetchone()[0]
 
         if tick_count == 0:
