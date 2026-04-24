@@ -157,15 +157,36 @@ class HoldValue:
                 crowding cost; default 0.0 until ExitContext carries
                 portfolio-position references.
         """
+        # T6.4-hardening (surrogate HIGH finding): reject negative correlation
+        # crowding at factory boundary. T6.4-phase2 wiring may inherit sign
+        # bugs upstream (e.g., swapped-order portfolio exposure subtraction);
+        # silently dropping negative values via `> 0.0` would hide such bugs.
+        if correlation_crowding < 0.0:
+            raise ValueError(
+                f"correlation_crowding must be >= 0 (crowding is a COST, "
+                f"not a bonus); got {correlation_crowding}"
+            )
+
         # Import locally to avoid circular dependency
         # (hold_value → execution_price → … → hold_value).
         from src.contracts.execution_price import polymarket_fee
 
         gross_value = float(shares) * float(current_p_posterior)
 
-        # Fee cost: polymarket fee formula is fee_per_share = rate * p * (1-p);
-        # scale by shares to get total fee cost of the exit order.
-        fee_per_share = polymarket_fee(float(best_bid), float(fee_rate))
+        # T6.4-hardening (surrogate HIGH finding): polymarket_fee raises on
+        # price in {0.0, 1.0}, but upstream callers (Day0 best_bid proxy at
+        # src/state/portfolio.py:512 = max(0.0, current_market_price * 0.95),
+        # buy_no current_market_price in [0,1] inclusive) can legally produce
+        # those values near settlement. Without the clamp, flag-ON exit on
+        # an extreme-priced market would raise, get caught by the cycle_runtime
+        # except-all at L760, and the position would go to "monitor_failed"
+        # state — silently eating the should_exit signal precisely when it
+        # matters most (near-settlement deep-in-the-money positions). Clamp
+        # the bid to (EPS, 1-EPS) so fee computation stays finite; the tiny
+        # clamp delta is negligible in a fee-of-fee context.
+        _BID_EPS = 1e-6
+        clamped_bid = min(max(float(best_bid), _BID_EPS), 1.0 - _BID_EPS)
+        fee_per_share = polymarket_fee(clamped_bid, float(fee_rate))
         fee_cost = float(shares) * fee_per_share
 
         # Time cost: capital locked at (shares × best_bid) for the remaining
@@ -176,7 +197,9 @@ class HoldValue:
         if hours_to_settlement is None or hours_to_settlement < 0.0:
             time_cost = 0.0
         else:
-            capital_locked = float(shares) * float(best_bid)
+            # Use clamped_bid to preserve finite-valued capital estimate when
+            # best_bid is extreme (same rationale as fee path above).
+            capital_locked = float(shares) * clamped_bid
             days = float(hours_to_settlement) / 24.0
             time_cost = capital_locked * days * float(daily_hurdle_rate)
 

@@ -265,3 +265,141 @@ class TestPortfolioExitIntegration:
                 applied=[],
             )
         assert "hold_value_exit_costs_enabled" in decision.applied_validations
+
+    def test_flag_on_buy_yes_day0_exit_records_cost_awareness(self):
+        """T6.4-hardening (surrogate HIGH finding): Day0 EV-gate site at
+        portfolio.py:545 was claimed wire-in but had zero integration test.
+        This test exercises that path to prove flag-ON routes through the
+        cost-aware factory when day0_active=True.
+        """
+        pos = self._make_position("buy_yes")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.10,  # below edge_threshold, triggers Day0 gate
+                current_p_posterior=0.55,
+                best_bid=0.50,
+                day0_active=True,
+                hours_to_settlement=12.0,
+                applied=[],
+            )
+        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        # Day0 gate path must tag day0_observation_gate breadcrumb too
+        assert "day0_observation_gate" in decision.applied_validations
+
+    def test_flag_on_buy_no_day0_exit_records_cost_awareness(self):
+        """T6.4-hardening (surrogate HIGH finding): Day0 EV-gate site at
+        portfolio.py:684 (_buy_no_exit Day0 branch) proven wired under
+        flag ON via integration path, not just factory-level assertion.
+        """
+        pos = self._make_position("buy_no")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.10,
+                current_p_posterior=0.85,
+                current_market_price=0.80,
+                hours_to_settlement=12.0,
+                day0_active=True,
+                applied=[],
+            )
+        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        assert "day0_observation_gate" in decision.applied_validations
+
+    def test_flag_on_extreme_best_bid_does_not_crash(self):
+        """T6.4-hardening (surrogate HIGH finding): pre-fix, best_bid ∈
+        {0.0, 1.0} would hit polymarket_fee ValueError and be caught by
+        the cycle_runtime except-all, silently converting should_exit=True
+        into monitor_failed state. Post-fix: factory clamps to (EPS, 1-EPS)
+        so extreme prices are handled gracefully.
+
+        This test proves the crash path is closed for both boundary values.
+        """
+        # Trigger Day0 path which has the best_bid proxy `max(0, market*0.95)`
+        # that can legally produce 0.0.
+        pos = self._make_position("buy_yes")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            # Extreme price: best_bid=0.0 previously crashed via polymarket_fee
+            decision_zero = pos._buy_yes_exit(
+                forward_edge=-0.10,
+                current_p_posterior=0.55,
+                best_bid=0.0,
+                day0_active=True,
+                hours_to_settlement=12.0,
+                applied=[],
+            )
+            # Does not crash — returns a valid ExitDecision
+            assert decision_zero is not None
+            assert "hold_value_exit_costs_enabled" in decision_zero.applied_validations
+
+        pos2 = self._make_position("buy_no")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            # Extreme upper: current_market_price=1.0 previously crashed
+            decision_one = pos2._buy_no_exit(
+                forward_edge=-0.10,
+                current_p_posterior=0.85,
+                current_market_price=1.0,
+                hours_to_settlement=12.0,
+                day0_active=True,
+                applied=[],
+            )
+            assert decision_one is not None
+            assert "hold_value_exit_costs_enabled" in decision_one.applied_validations
+
+
+class TestHardeningValidators:
+    """T6.4-hardening from surrogate review: factory-level + config
+    getter bounds validations that close silent-failure categories."""
+
+    def test_negative_correlation_crowding_raises(self):
+        """Surrogate MEDIUM finding: negative correlation_crowding was
+        silently dropped pre-hardening. T6.4-phase2 wiring may inherit
+        sign bugs upstream; reject at factory boundary."""
+        with pytest.raises(ValueError, match="correlation_crowding must be >= 0"):
+            HoldValue.compute_with_exit_costs(
+                shares=100.0,
+                current_p_posterior=0.6,
+                best_bid=0.55,
+                hours_to_settlement=24.0,
+                fee_rate=0.05,
+                daily_hurdle_rate=0.0001,
+                correlation_crowding=-0.05,
+            )
+
+    def test_zero_correlation_crowding_accepted(self):
+        """Regression: default 0.0 is still accepted (no-op phase2 hook)."""
+        hv = HoldValue.compute_with_exit_costs(
+            shares=100.0,
+            current_p_posterior=0.6,
+            best_bid=0.55,
+            hours_to_settlement=24.0,
+            fee_rate=0.05,
+            daily_hurdle_rate=0.0001,
+            correlation_crowding=0.0,
+        )
+        assert hv.extra_costs_total == 0.0
+        assert "correlation_crowding" not in hv.costs_declared
+
+    def test_exit_fee_rate_bounds_validation(self):
+        """Surrogate MEDIUM finding: operator misconfiguration catch."""
+        import copy
+        from src import config as config_mod
+
+        original = config_mod.settings["exit"]["fee_rate"]
+        try:
+            # Bogus rate outside [0, 0.1]
+            config_mod.settings["exit"]["fee_rate"] = 0.5
+            with pytest.raises(ValueError, match="exit.fee_rate"):
+                config_mod.exit_fee_rate()
+        finally:
+            config_mod.settings["exit"]["fee_rate"] = original
+
+    def test_exit_daily_hurdle_rate_bounds_validation(self):
+        """Surrogate MEDIUM finding: operator misconfiguration catch."""
+        from src import config as config_mod
+
+        original = config_mod.settings["exit"]["daily_hurdle_rate"]
+        try:
+            config_mod.settings["exit"]["daily_hurdle_rate"] = 0.1
+            with pytest.raises(ValueError, match="exit.daily_hurdle_rate"):
+                config_mod.exit_daily_hurdle_rate()
+        finally:
+            config_mod.settings["exit"]["daily_hurdle_rate"] = original

@@ -391,15 +391,43 @@ def correlation_matrix() -> dict[str, dict[str, float]]:
 def exit_fee_rate() -> float:
     """T6.4: fee_rate parameter for polymarket_fee() when computing
     HoldValue fee_cost in exit-decision path. See config/settings.json
-    exit.fee_rate for authority + calibration notes."""
-    return float(settings["exit"]["fee_rate"])
+    exit.fee_rate for authority + calibration notes.
+
+    T6.4-hardening (surrogate MEDIUM finding): bounded [0, 0.1] to
+    catch operator misconfiguration (e.g., typo 0.05 → 0.5 or 5.0)
+    which would silently trigger mass exit pressure under flag ON.
+    """
+    rate = float(settings["exit"]["fee_rate"])
+    if not (0.0 <= rate <= 0.1):
+        raise ValueError(
+            f"exit.fee_rate={rate} out of sane range [0.0, 0.1]. "
+            f"Real Polymarket fee rates are typically 0.02-0.05; values "
+            f"above 0.1 would make every trade unprofitable. Check "
+            f"config/settings.json exit.fee_rate."
+        )
+    return rate
 
 
 def exit_daily_hurdle_rate() -> float:
     """T6.4: daily opportunity-cost rate on locked capital for HoldValue
     time_cost in exit-decision path. See config/settings.json
-    exit.daily_hurdle_rate for authority + calibration notes."""
-    return float(settings["exit"]["daily_hurdle_rate"])
+    exit.daily_hurdle_rate for authority + calibration notes.
+
+    T6.4-hardening (surrogate MEDIUM finding): bounded [0, 0.01] (1%/day
+    is already an extreme hurdle ≈ 3650%/year annualized). Catches
+    operator typo (0.0001 → 0.001 or 0.01) which would systematically
+    flag most positions as below-hurdle and trigger mass exits.
+    """
+    rate = float(settings["exit"]["daily_hurdle_rate"])
+    if not (0.0 <= rate <= 0.01):
+        raise ValueError(
+            f"exit.daily_hurdle_rate={rate} out of sane range [0.0, 0.01]. "
+            f"Realistic capital-cost hurdles are ≈0.0001 (0.01%/day = "
+            f"3.65%/year); values above 0.01 imply >36.5%/year hurdle "
+            f"which would force near-immediate exits. Check "
+            f"config/settings.json exit.daily_hurdle_rate."
+        )
+    return rate
 
 
 def hold_value_exit_costs_enabled() -> bool:

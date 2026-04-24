@@ -119,6 +119,22 @@
     "closed_minimal_with_phase2_deferred": ["T6.4"],
     "blocked": ["T6.1", "T6.2"]
   },
+  "t6_4_hardening_landed_inline": {
+    "commit": "pending (this session)",
+    "scope": "Close surrogate post-edit 2 HIGH + 2 MEDIUM findings before operator flag flip.",
+    "changes": [
+      "HIGH #1: polymarket_fee(price ∈ {0.0, 1.0}) crash — factory now clamps best_bid to (EPS=1e-6, 1-EPS) so extreme prices don't propagate ValueError through cycle_runtime except-all into silent monitor_failed state. Fixed at src/contracts/hold_value.py:168-179.",
+      "HIGH #2: 2 of 4 wire-in sites lacked integration coverage — added test_flag_on_buy_yes_day0_exit_records_cost_awareness + test_flag_on_buy_no_day0_exit_records_cost_awareness + test_flag_on_extreme_best_bid_does_not_crash (3 new tests in tests/test_hold_value_exit_costs.py).",
+      "MED #3: negative correlation_crowding silently dropped — factory now raises ValueError pre-compute. src/contracts/hold_value.py:147-153.",
+      "MED #4: daily_hurdle_rate + fee_rate unbounded — getter-level bounds validation [0, 0.01] and [0, 0.1] respectively. src/config.py:exit_daily_hurdle_rate + exit_fee_rate.",
+      "Receipt claim corrected: '4 wire-in integration assertions' now materially honored (Day0 + Layer-4 × buy_yes + buy_no = 4 sites tested)."
+    ],
+    "deferred_from_surrogate_review": [
+      "MED #5 (naming ambiguity): buy_no wire-in uses current_market_price as best_bid kwarg — factor polymarket_fee is symmetric in p but naming is slightly inexact. Docstring tuned but full fix (best_bid_no threaded separately) awaits T6.4-phase2 ExitContext extension.",
+      "LOW findings: costs_declared ordering contract, frozen-but-mutable List[str], negative-hours breadcrumb — all noted for future hardening slice, none flag-ON-safety-critical."
+    ],
+    "regression": "19 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 12; +7 hardening). Broader HoldValue-keyed 19+ still green."
+  },
   "t6_4_phase2_tracked": {
     "id": "T6.4-phase2",
     "scope": "D6 correlation crowding cost — thread portfolio-position references through ExitContext so Position.evaluate_exit can compute correlation_crowding via src/strategy/correlation.py::correlated_exposure(). Required for full D6 category immunity (1.0/1.0).",
