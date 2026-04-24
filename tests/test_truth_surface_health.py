@@ -137,15 +137,29 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         """
     )
     conn.execute(
-        "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
+        """
+        CREATE TABLE observation_instants_v2 (
+            training_allowed INTEGER,
+            source_role TEXT,
+            causality_status TEXT
+        )
+        """
     )
     conn.execute(
-        "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'historical_hourly')"
+        """
+        INSERT INTO observation_instants_v2 (
+            training_allowed, source_role, causality_status
+        ) VALUES (1, 'historical_hourly', 'OK')
+        """
     )
     if seed_observations:
         conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
         conn.execute(
-            "INSERT INTO observations (authority, provenance_metadata) VALUES ('VERIFIED', '{}')"
+            """
+            INSERT INTO observations (
+                authority, provenance_metadata
+            ) VALUES ('VERIFIED', '{"source":"wu","payload_hash":"hash"}')
+            """
         )
 
 
@@ -301,7 +315,11 @@ class TestTrainingReadinessP0:
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute("DELETE FROM observation_instants_v2")
         conn.execute(
-            "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'banana')"
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'banana', 'OK')
+            """
         )
         conn.commit()
         conn.close()
@@ -310,8 +328,30 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_training_eligible_observations" in _blocker_codes(report)
-        assert "fallback_source_role" in _blocker_codes(report)
-        assert report["checks"]["observation_instants_v2.source_role_canonical"]["count"] == 1
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
+
+    def test_training_readiness_fails_when_source_role_is_settlement_truth(self, tmp_path):
+        db_path = tmp_path / "settlement-truth-source-role-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'settlement_truth', 'OK')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_training_eligible_observations" in _blocker_codes(report)
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
 
     def test_training_readiness_fails_when_observations_have_no_verified_rows(self, tmp_path):
         db_path = tmp_path / "no-verified-observations-world.db"
@@ -358,10 +398,81 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert report["ready"] is False
-        assert "empty_observation_provenance" in _blocker_codes(report)
+        assert "observations.verified_without_provenance" in _blocker_codes(report)
         check = report["checks"]["observations.provenance_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
+
+    @pytest.mark.parametrize("provenance", ["{}", "[]", " { } ", " [ ] "])
+    def test_training_readiness_fails_when_verified_provenance_is_empty_json(
+        self, tmp_path, provenance
+    ):
+        db_path = tmp_path / "empty-json-provenance-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute(
+            """
+            CREATE TABLE observations (
+                source TEXT,
+                authority TEXT,
+                provenance_metadata TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observations (
+                source, authority, provenance_metadata
+            ) VALUES ('ogimet_metar_llbg', 'VERIFIED', ?)
+            """,
+            (provenance,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observations.verified_without_provenance" in _blocker_codes(report)
+        check = report["checks"]["observations.provenance_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_reports_wu_empty_provenance_separately(self, tmp_path):
+        db_path = tmp_path / "wu-empty-provenance-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute(
+            """
+            CREATE TABLE observations (
+                source TEXT,
+                authority TEXT,
+                provenance_metadata TEXT
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO observations (
+                source, authority, provenance_metadata
+            ) VALUES (?, 'VERIFIED', ?)
+            """,
+            [
+                ("wu_icao_history", "{}"),
+                ("ogimet_metar_llbg", "{}"),
+                ("hko_daily_api", '{"source":"hko","payload_hash":"hash"}'),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "observations.verified_without_provenance" in blockers
+        assert "observations.wu_empty_provenance" in blockers
+        assert report["checks"]["observations.provenance_present"]["count"] == 2
+        assert report["checks"]["observations.wu_provenance_present"]["count"] == 1
 
     def test_training_readiness_fails_when_required_eligibility_tables_are_missing(self, tmp_path):
         db_path = tmp_path / "raw-world.db"
@@ -372,7 +483,8 @@ class TestTrainingReadinessP0:
         assert report["ready"] is False
         checks = report["checks"]
         for check_id in [
-            "observation_instants_v2.source_role_canonical",
+            "observation_instants_v2.training_role_unsafe",
+            "observation_instants_v2.causality_unsafe",
             "historical_forecasts_v2.available_at_not_reconstructed",
             "observations.provenance_present",
         ]:
@@ -459,8 +571,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "fallback_source_role" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -485,8 +597,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "fallback_source_role" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -500,8 +612,147 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "missing_source_role_columns" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
+
+    @pytest.mark.parametrize("causality_status", [None, "", "STALE", "N/A_CAUSAL_DAY_STARTED"])
+    def test_training_readiness_fails_when_causality_status_is_unsafe(
+        self, tmp_path, causality_status
+    ):
+        db_path = tmp_path / "unsafe-causality-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'historical_hourly', ?)
+            """,
+            (causality_status,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_causality_status_column_is_missing(self, tmp_path):
+        db_path = tmp_path / "missing-causality-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DROP TABLE observation_instants_v2")
+        conn.execute(
+            """
+            CREATE TABLE observation_instants_v2 (
+                training_allowed INTEGER,
+                source_role TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role
+            ) VALUES (1, 'historical_hourly')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_passes_payload_identity_when_contract_is_absent(self, tmp_path):
+        db_path = tmp_path / "no-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert "payload_identity_missing" not in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_payload_identity_contract_is_incomplete(self, tmp_path):
+        db_path = tmp_path / "incomplete-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        for column in (
+            "payload_hash",
+            "parser_version",
+            "source_file",
+            "station_registry_hash",
+        ):
+            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET payload_hash = '',
+                parser_version = 'parser-v1',
+                source_file = 'observations/raw.json',
+                station_registry_hash = 'station-registry-v1'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "payload_identity_missing" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_accepts_payload_identity_alternative_columns(self, tmp_path):
+        db_path = tmp_path / "payload-alternatives-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        for column in (
+            "payload_hash",
+            "parser_version",
+            "source_url",
+            "source_file",
+            "station_registry_version",
+            "station_registry_hash",
+        ):
+            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET payload_hash = 'payload-hash',
+                parser_version = 'parser-v1',
+                source_url = '',
+                source_file = 'observations/raw.json',
+                station_registry_version = '',
+                station_registry_hash = 'station-registry-hash'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert "payload_identity_missing" not in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
 
     @pytest.mark.parametrize("missing_column", ["issue_time", "available_at", "fetch_time"])
     def test_training_readiness_fails_when_ensemble_snapshots_v2_time_is_missing(

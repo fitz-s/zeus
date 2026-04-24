@@ -1,11 +1,12 @@
 {
-  "task": "P1.3 unsafe observation quarantine planning packet",
+  "task": "P1.3 unsafe observation quarantine implementation",
   "packet": "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md"
+    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
+    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md"
   ],
-  "packet_status": "planning_active",
+  "packet_status": "implementation_closeout",
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",
@@ -20,34 +21,13 @@
     "architecture/source_rationale.yaml",
     "architecture/script_manifest.yaml",
     "architecture/test_topology.yaml",
-    "architecture/AGENTS.md",
-    "architecture/topology.yaml",
-    "architecture/docs_registry.yaml",
-    "docs/AGENTS.md",
-    "docs/README.md",
+    "architecture/module_manifest.yaml",
     "docs/reference/modules/scripts.md",
     "docs/reference/modules/tests.md"
   ],
   "allowed_files": [
-    "docs/operations/AGENTS.md",
-    "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "architecture/topology.yaml",
-    "architecture/docs_registry.yaml",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
-  ],
-  "future_implementation_allowed_files": [
     "scripts/verify_truth_surfaces.py",
-    "tests/test_truth_surface_health.py"
-  ],
-  "future_closeout_bookkeeping_files": [
-    "docs/operations/AGENTS.md",
+    "tests/test_truth_surface_health.py",
     "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
     "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
@@ -62,29 +42,49 @@
     "src/engine/**",
     "src/execution/**",
     "docs/authority/**",
-    "architecture/** except architecture/topology.yaml and architecture/docs_registry.yaml"
-    ],
-    "changed_files": [
-        "docs/operations/AGENTS.md",
-        "docs/operations/current_state.md",
-        "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
-        "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "architecture/topology.yaml",
-    "architecture/docs_registry.yaml",
+    "architecture/**",
+    "production DBs",
+    "generated runtime JSON",
+    "graph artifacts"
+  ],
+  "changed_files": [
+    "scripts/verify_truth_surfaces.py",
+    "tests/test_truth_surface_health.py",
+    "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
     "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
     "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
   ],
-    "tests_evidence": [
-        "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md"
-    ],
-    "known_red_context": [
-        "navigation reports pre-existing global docs/source/history-lore issues",
-        "Code Review Graph is derived context and may be stale",
-        "tests/test_truth_surface_health.py has lifecycle metadata but is not registered under test_trust_policy.trusted_tests and has high-sensitivity skip debt; audit assumptions before treating it as closeout evidence",
-        "future P1.3 implementation closeout must run .venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json and record blocker codes/counts from the live read-only world DB"
-    ]
+  "implementation_semantics": [
+    "observations.verified_without_provenance treats NULL, SQL-empty, whitespace-only, '{}', and '[]' provenance as unsafe",
+    "observations.wu_empty_provenance reports WU VERIFIED rows with empty provenance separately",
+    "observation_instants_v2.training_role_unsafe blocks training_allowed rows unless source_role is historical_hourly",
+    "observation_instants_v2.causality_unsafe blocks training_allowed rows with missing, empty, or non-OK causality_status",
+    "payload_identity_missing blocks training_allowed rows only when payload hash, parser version, source URL/file, and station registry version/hash columns form a complete checkable contract"
+  ],
+  "tests_evidence": [
+    ".venv/bin/python -m py_compile scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py",
+    ".venv/bin/python -m pytest tests/test_truth_surface_health.py::TestTrainingReadinessP0 -q (34 passed)",
+    ".venv/bin/python -m pytest tests/test_truth_surface_health.py -q (known pre-existing live-health failure: missing trade_decisions table in TestGhostPositions; non-failing count 35 passed, 5 skipped)",
+    ".venv/bin/python -m pytest tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_tier_resolver.py tests/test_backfill_scripts_match_live_config.py -q (86 passed)"
+  ],
+  "live_readonly_evidence": {
+    "command": ".venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json",
+    "exit_code": 1,
+    "expected_status": "NOT_READY",
+    "observed_blockers": {
+      "observation_instants_v2.training_role_unsafe": 1813662,
+      "observations.verified_without_provenance": 39431,
+      "observations.wu_empty_provenance": 39431,
+      "observation_instants_v2.causality_unsafe": 0,
+      "payload_identity_missing": 0
+    }
+  },
+  "known_red_context": [
+    "navigation reports pre-existing global docs/source/history-lore issues and generic source modification warnings",
+    "Code Review Graph is derived context and currently stale/unavailable for authoritative proof",
+    "tests/test_truth_surface_health.py has lifecycle metadata but is not registered under test_trust_policy.trusted_tests and has high-sensitivity skip debt; this packet uses the scoped TestTrainingReadinessP0 subset as focused regression evidence",
+    "full tests/test_truth_surface_health.py run still hits pre-existing TestGhostPositions live-health gap: no trade_decisions table in the current live test DB",
+    "state/daemon-heartbeat.json and state/status_summary.json may be dirty runtime artifacts and are forbidden for this packet"
+  ]
 }
