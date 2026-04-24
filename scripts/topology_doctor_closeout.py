@@ -183,7 +183,7 @@ def run_closeout(
         "artifact_lifecycle": scoped_result(api, raw_lanes["artifact_lifecycle"], actual_changed),
         "naming_conventions": scoped_result(api, raw_lanes["naming_conventions"], actual_changed),
         "freshness_metadata": raw_lanes["freshness_metadata"],
-        "code_review_graph": raw_lanes["code_review_graph"],
+        "code_review_graph": scoped_result(api, raw_lanes["code_review_graph"], actual_changed),
     }
     if selected["docs"]:
         raw_lanes["docs"] = api.run_docs()
