@@ -99,8 +99,39 @@
   },
   "surrogate_critic_notes": {
     "con_nyx_pre_edit_review_quality": "HIGH — surfaced 3 findings the team-lead initial scope missed: (b) B086 rationale staleness, (e) test vacuity, (f) latent RED test. Adversarial 10-ask template per feedback_critic_prompt_adversarial_template.md is load-bearing for this level of architectural review.",
-    "post_edit_review": "to be dispatched after commit prep"
+    "con_nyx_post_edit_review_quality": "HIGH — verified commit 6f53ef2 post-push; 0 BLOCKERs, 4 CONDITIONALs (b/d/e/j), 5 NICE-TO-HAVE (a/c/g/h/i), 1 live-readiness gap (f). Added 2 CONDITIONALs (b + j) as inline hardening follow-up commit; 2 CONDITIONALs (d + e) + 1 live-readiness (f) deferred to T6.3-followup slices.",
+    "code_reviewer_opus_post_edit_review_quality": "HIGH — identified HIGH finding that the team-lead initial implementation missed (compute_posterior distorted-vig silent demotion); HIGH + 3 inline-cheap findings addressed before commit 6f53ef2."
   },
+  "t6_3_followup_tracked": [
+    {
+      "id": "T6.3-followup-1",
+      "source": "con-nyx post-edit finding (f)",
+      "scope": "Bootstrap CI + FDR p-value + should_trade delta audit — replay harness over frozen monitor_refresh corpus including sparse-monitor events, compare T6.3 p_cal_fallback branch vs pre-T6.3 no-impute branch (git stash) under identical seed. Report |delta| on should_trade rate per direction; gate live-readiness B3 on operator-specified tolerance or explicit acceptance.",
+      "estimated_size": 3,
+      "blocker_for": "live-readiness B3 closure",
+      "blocker_for_commit": false
+    },
+    {
+      "id": "T6.3-followup-2",
+      "source": "con-nyx post-edit finding (d)",
+      "scope": "Tail-path impute coverage test — add test_sparse_impute_at_tail_bin_respects_tail_alpha to lock both p_cal_fallback identity collapse AND a sibling_market-alternative pinning. Current gap: _non_tail_bins_3() was chosen to avoid tail-alpha complication, but tail-path impute correctness is unasserted for future sibling_market policy.",
+      "estimated_size": 1,
+      "blocker_for": "none"
+    },
+    {
+      "id": "T6.3-followup-3",
+      "source": "con-nyx post-edit finding (e)",
+      "scope": "Zero-p_cal tail cascade behavior — document OR remediate the case where p_cal[i] ≈ 0 (extreme-clear Platt output) combined with sparse p_market[i]=0 produces imputed_market[i]=0, which silently zero-dilutes the posterior despite imputation_source='p_cal_fallback' being recorded. Operator policy decision needed: raise? fallback to uniform 1/n prior? propagate NaN? Currently degenerates to implicit no-impute at those positions.",
+      "estimated_size": 2,
+      "blocker_for": "edge-case live-readiness"
+    },
+    {
+      "id": "T6.3-hardening (landed inline)",
+      "source": "con-nyx post-edit findings (b) + (j)",
+      "scope": "Validator hardening — (b) __post_init__ now enforces raw_market_prices[imputed_bins[i]] == 0.0; (j) from_raw now rejects imputation_source != 'none' when sibling_snapshot is None (caller-intent drift detection). 2 new antibody tests added. Closes two silent-failure categories surfaced by post-edit adversarial review.",
+      "status": "LANDED in T6.3-hardening follow-up commit this session"
+    }
+  ],
   "cross_references": {
     "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
     "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",

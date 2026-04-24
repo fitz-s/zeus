@@ -187,3 +187,44 @@ class TestVigTreatmentPostInitInvariants:
                 imputed_bins=(),
                 imputation_source="none",
             )
+
+    def test_imputed_bins_must_correspond_to_raw_zero_positions(self):
+        """T6.3-hardening per con-nyx post-edit finding (b):
+        direct dataclass construction cannot lie about which bins were
+        imputed. imputed_bins[k] MUST index a raw_market_prices position
+        that was zero pre-impute; otherwise the provenance record is
+        silently bogus and auditors can't trust it.
+        """
+        with pytest.raises(ValueError, match="is non-zero"):
+            VigTreatment(
+                raw_market_prices=np.array([0.45, 0.50]),  # NO zeros
+                vig_factor=1.0,
+                clean_prices=np.array([0.20, 0.60]),
+                applied_before_blend=True,
+                imputed_bins=(0,),  # claims bin 0 imputed — but raw[0]=0.45
+                imputation_source="p_cal_fallback",
+            )
+
+
+class TestVigTreatmentFromRawCallerIntegrity:
+    """T6.3-hardening per con-nyx post-edit finding (j): from_raw must
+    catch caller-intent-vs-implementation drift. A caller who passes
+    imputation_source without sibling_snapshot has a bug; silent reset
+    to "none" hides it.
+    """
+
+    def test_from_raw_rejects_source_without_sibling_snapshot(self):
+        raw = np.array([0.45, 0.50])
+        with pytest.raises(ValueError, match="sibling_snapshot is"):
+            VigTreatment.from_raw(
+                raw,
+                imputation_source="p_cal_fallback",
+                # sibling_snapshot NOT provided — caller likely forgot it
+            )
+
+    def test_from_raw_accepts_none_source_without_sibling(self):
+        """Baseline pre-T6.3 contract: from_raw(raw) with no kwargs works."""
+        raw = np.array([0.45, 0.50])
+        t = VigTreatment.from_raw(raw)
+        assert t.imputation_source == "none"
+        assert t.imputed_bins == ()
