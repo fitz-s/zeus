@@ -5,18 +5,44 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: **Midstream Remediation + Data-Readiness-Tail CONDITIONAL-ACHIEVED 2026-04-24**
+- Mainline task: **Midstream Remediation W1–W4 CLOSED 2026-04-24 — CONDITIONAL achieved; W5 substrate-blocked**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_midstream_remediation/receipt.json`
 - Post-audit handoff (zero-context cold-start doc for next session): `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Status: CONDITIONAL milestone materially reached. Midstream 36-slice
-  workbook: T1+T2+T3+T4+T5+T7+N1.2 all CLOSED or applied. Data-readiness
-  tail: S2.1/S2.2/S2.3/S2.4/S2.5/S3.1/REOPEN-1/REOPEN-2/DR-33-B all
-  shipped and live-DB-applied on 2026-04-24. Remaining open: DR-33-C
-  operator flag flip, forensic C5 (market_slug retrofit — blocked on
-  empty market_events), forensic C6 (39,431 observations empty
-  provenance — deferred to dedicated packet), TRUSTWORTHY-gate
-  substrate-deferred items (T6.1/T6.2/T6.4/N1.1/T4.2-Phase2).
+- Status: CONDITIONAL milestone materially achieved.
+  - **W1–W4**: 100% shipped — T1 + T2 + T3 + T4 + T5 + T6.3 + T6.4 +
+    T7 + N1.2 closed or retroactively accounted; T3.4-observe upstream-
+    blocked by K4.
+  - **Out-of-plan shipped this session**: **T6.4-phase2** (correlation
+    crowding via ExitContext portfolio threading → D6 category immunity
+    1.0/1.0 when `exit.correlation_crowding_rate > 0`) + **Day0-
+    canonical-event feature slice** (new `build_day0_window_entered_
+    canonical_write` builder + `DAY0_WINDOW_ENTERED` event type + legacy-
+    DB migration; closes T1.c-followup L875).
+  - **Data-readiness tail**: S2.1/S2.2/S2.3/S2.4/S2.5/S3.1/REOPEN-1/
+    REOPEN-2/DR-33-B all shipped and live-DB-applied on 2026-04-24.
+- **W5 TRUSTWORTHY-gate — cannot advance by engineering alone**:
+  - **T6.1 / T6.2 / N1.1** require live-readiness B3 + ≥ 30 realized-
+    P&L settlements corpus (`portfolio_position_count = 0` today).
+  - **T4.2-Phase2** requires 7 continuous days of Phase1 audit-clean
+    output (Phase1 landed 2026-04-23 via `0206428`; daemon currently
+    auto-paused per `state/auto_pause_failclosed.tombstone`).
+  - **T3.4** awaits upstream data-readiness K4 closure.
+  See `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md` §"Wave 5
+  remaining blockers" for structured per-slice unblock conditions.
+- **Out-of-plan deferrals tracked** (non-W5, not code-locked):
+  T6.3-followup-1 (production corpus bootstrap delta audit), T6.4
+  pre-flag-flip operator checklist, Day0-canonical-event production DB
+  migration, T1.c-followup L1536/L1569 OBSOLETE_BY_ARCHITECTURE
+  operator decision, T1.d NC-12 L70 Phase-7 v2 substrate wait, T6.4
+  surrogate MED-5 buy_no kwarg naming approximation, Day0TemporalContext
+  fixture promotion, sibling SimpleNamespace stubs in `tests/test_fdr.py`.
+  See `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md` §"Out-of-
+  plan deferrals surfaced during execution".
+- **Other open operational items**: DR-33-C operator flag flip,
+  forensic C5 (market_slug retrofit — blocked on empty market_events),
+  forensic C6 (39,431 observations empty provenance — deferred to
+  dedicated packet).
 - Authority source for the 36-slice plan: `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md`
 - **Live-DB state post-migration (2026-04-24)**: forecasts 15-col schema
   with rebuild_run_id/data_source_version; settlements UNIQUE(city,
