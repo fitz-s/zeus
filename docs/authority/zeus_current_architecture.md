@@ -116,8 +116,10 @@ time, not just by writer discipline):
 
 The `SettlementSemantics.assert_settlement_value()` gate at
 `src/contracts/settlement_semantics.py` remains the required runtime
-invocation at every settlement write boundary; the four triggers above
-are structural backstops, not replacements.
+invocation at every settlement write boundary; the three triggers above
+(`settlements_authority_monotonic` + `settlements_verified_insert_integrity`
++ `settlements_verified_update_integrity`) are structural backstops, not
+replacements.
 
 ### 4.3 Day0 Monitoring Truth
 
