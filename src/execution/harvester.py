@@ -747,7 +747,7 @@ def _write_settlement_truth(
         provenance["quarantine_reason"] = reason
 
     # INSERT OR REPLACE matches P-E's canonical DELETE+INSERT idempotency;
-    # UNIQUE(city, target_date) means this is an upsert.
+    # REOPEN-2 makes this an upsert per (city, target_date, temperature_metric).
     try:
         conn.execute(
             """

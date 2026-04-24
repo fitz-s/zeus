@@ -10,7 +10,6 @@ from src.state.projection import (
     table_columns,
     upsert_position_current,
     validate_event_projection_batch,
-    validate_event_projection_pair,
 )
 
 
@@ -158,27 +157,6 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE position_current ADD COLUMN {column} TEXT;")
     assert_canonical_transaction_schema(conn)
-
-
-def append_event_and_project(
-    conn: sqlite3.Connection, event: dict, projection: dict
-) -> None:
-    """Canonical transaction-boundary helper for target event + projection writes."""
-    assert_canonical_transaction_schema(conn)
-    require_payload_fields(event, CANONICAL_POSITION_EVENT_COLUMNS, label="event")
-    require_payload_fields(
-        projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
-    )
-    validate_event_projection_pair(event, projection)
-    with conn:
-        conn.execute(
-            f"""
-            INSERT INTO position_events ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})
-            VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_EVENT_COLUMNS))})
-            """,
-            ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
-        )
-        upsert_position_current(conn, projection)
 
 
 def append_many_and_project(

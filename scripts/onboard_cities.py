@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-02; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Operator city-onboarding workflow that scaffolds config, data, and
+# market/settlement rows.
+# Reuse: Inspect architecture/script_manifest.yaml plus
+# docs/operations/current_data_state.md before running against live DB.
 """One-click city onboarding pipeline for Zeus.
 
 Adds new cities to config and runs all backfill ETLs in dependency order,
@@ -347,48 +352,22 @@ def add_cities_to_config(cities: list[NewCity], dry_run: bool = False) -> list[s
 
 
 def scaffold_settlements(city_names: list[str], days: int = 90, dry_run: bool = False):
-    """Create empty settlement rows for new cities (target_date scaffolds)."""
-    if dry_run:
-        logger.info("  [DRY RUN] Would scaffold %d days × %d cities", days, len(city_names))
-        return
+    """Deprecated no-op: settlements require full market/source provenance.
 
-    from src.state.db import get_world_connection, init_schema
-    from src.contracts import SettlementSemantics
-    from src.config import cities_by_name
-    from datetime import date, timedelta
-
-    conn = get_world_connection()
-    init_schema(conn)
-
-    today = date.today()
-    count = 0
-    for city_name in city_names:
-        city_cfg = cities_by_name.get(city_name)
-        if city_cfg is not None:
-            sem = SettlementSemantics.for_city(city_cfg)
-        else:
-            sem = SettlementSemantics(
-                resolution_source=f"scaffold_{city_name}",
-                measurement_unit="F",
-                precision=1.0,
-                rounding_rule="wmo_half_up",
-                finalization_time="12:00:00Z",
-            )
-        # Validate settlement contract before writing scaffold rows.
-        sem.assert_settlement_value(0.0, context=f"scaffold_validate:{city_name}")
-        for d in range(days):
-            target = today - timedelta(days=d)
-            try:
-                conn.execute("""
-                    INSERT OR IGNORE INTO settlements (city, target_date)
-                    VALUES (?, ?)
-                """, (city_name, target.isoformat()))
-                count += 1
-            except Exception:
-                pass
-    conn.commit()
-    conn.close()
-    logger.info("  Scaffolded %d settlement rows for %d cities", count, len(city_names))
+    Empty city/date scaffolds were useful before INV-14 and REOPEN-2, but
+    they now create semantically incomplete rows. Settlement truth must be
+    written by the harvester or a packet-approved reconstruction path that can
+    populate metric identity, market identity, source, rounding, and
+    provenance together.
+    """
+    verb = "[DRY RUN] Would skip" if dry_run else "SKIP"
+    logger.info(
+        "  %s settlement scaffolding for %d days × %d cities; "
+        "settlements require harvester/reconstruction provenance",
+        verb,
+        days,
+        len(city_names),
+    )
 
 
 def discover_market_events(city_names: list[str], dry_run: bool = False):

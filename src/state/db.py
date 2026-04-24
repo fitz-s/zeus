@@ -16,7 +16,6 @@ from src.config import STATE_DIR, get_mode, state_path
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
     apply_architecture_kernel_schema,
-    append_event_and_project,
     append_many_and_project,
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS

@@ -138,7 +138,7 @@ def test_T4b_canonical_label_roundtrip_via_parse_temp_range():
 
 @pytest.fixture
 def scratch_db(tmp_path):
-    """Isolated SQLite DB with the full settlements schema (post-P-B) + trigger.
+    """Isolated SQLite DB with the settlements schema (post-REOPEN-2) + trigger.
 
     Per test-engineer Phase 2 P0 finding: the real DB carries the
     settlements_authority_monotonic trigger; tests MUST include it so
@@ -165,7 +165,7 @@ def scratch_db(tmp_path):
         observation_field TEXT CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
         data_version TEXT,
         provenance_json TEXT,
-        UNIQUE(city, target_date)
+        UNIQUE(city, target_date, temperature_metric)
     );
 
     CREATE TABLE observations (

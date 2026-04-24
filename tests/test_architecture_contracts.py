@@ -217,7 +217,7 @@ def _create_outcome_fact_table(conn):
 
 
 def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
-    from src.state.db import append_event_and_project
+    from src.state.db import append_many_and_project
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -227,7 +227,7 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
     event = _canonical_event()
     projection = _canonical_projection()
 
-    append_event_and_project(conn, event, projection)
+    append_many_and_project(conn, [event], projection)
 
     assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 1
     row = conn.execute(
@@ -237,7 +237,7 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
     assert row["phase"] == "pending_entry"
 
     try:
-        append_event_and_project(conn, event, projection)
+        append_many_and_project(conn, [event], projection)
     except sqlite3.IntegrityError:
         pass
     else:
@@ -253,7 +253,7 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
 
 
 def test_canonical_transaction_boundary_helper_rejects_mismatched_payloads():
-    from src.state.db import append_event_and_project
+    from src.state.db import append_many_and_project
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -265,7 +265,7 @@ def test_canonical_transaction_boundary_helper_rejects_mismatched_payloads():
     bad_projection["phase"] = "active"
 
     try:
-        append_event_and_project(conn, bad_event, bad_projection)
+        append_many_and_project(conn, [bad_event], bad_projection)
     except ValueError as exc:
         assert "phase mismatch" in str(exc)
     else:
@@ -306,13 +306,13 @@ def test_append_many_and_project_is_atomic():
 
 
 def test_transaction_boundary_helper_rejects_legacy_init_schema():
-    from src.state.db import append_event_and_project, init_schema
+    from src.state.db import append_many_and_project, init_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
 
-    append_event_and_project(conn, _canonical_event(), _canonical_projection())
+    append_many_and_project(conn, [_canonical_event()], _canonical_projection())
     event_count = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
     projection_count = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[
         0
@@ -374,7 +374,7 @@ def test_init_schema_bootstraps_additive_canonical_support_tables():
 
 
 def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
-    from src.state.db import apply_architecture_kernel_schema, append_event_and_project
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -401,7 +401,7 @@ def test_apply_architecture_kernel_schema_bootstraps_fresh_db():
         current_columns
     )
 
-    append_event_and_project(conn, _canonical_event(), _canonical_projection())
+    append_many_and_project(conn, [_canonical_event()], _canonical_projection())
     event_row = conn.execute(
         "SELECT event_id, position_id, strategy_key, event_type FROM position_events"
     ).fetchone()
@@ -574,7 +574,7 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
 
 
 def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
-    from src.state.db import append_event_and_project
+    from src.state.db import append_many_and_project
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -585,7 +585,7 @@ def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
     projection.pop("updated_at")
 
     try:
-        append_event_and_project(conn, _canonical_event(), projection)
+        append_many_and_project(conn, [_canonical_event()], projection)
     except ValueError as exc:
         assert "projection missing fields" in str(exc)
     else:
@@ -599,7 +599,8 @@ def test_db_exposes_canonical_transaction_boundary_helpers():
     from src.state import ledger as state_ledger
     from src.state import projection as state_projection
 
-    assert state_db.append_event_and_project is state_ledger.append_event_and_project
+    assert not hasattr(state_db, "append_event_and_project")
+    assert not hasattr(state_ledger, "append_event_and_project")
     assert state_db.append_many_and_project is state_ledger.append_many_and_project
     assert (
         state_db.apply_architecture_kernel_schema
@@ -3255,6 +3256,9 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
 
     class _Logger:
         def debug(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
             return None
 
     class _Deps:
