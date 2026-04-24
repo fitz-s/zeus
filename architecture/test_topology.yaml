@@ -148,6 +148,8 @@ categories:
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
+    - tests/test_harvester_metric_identity.py
+    - tests/test_ingest_grib_law5_antibody.py
     - tests/test_settlements_authority_trigger.py
     - tests/test_settlements_unique_migration.py
     - tests/test_settlements_verified_row_integrity.py

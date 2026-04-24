@@ -1,3 +1,12 @@
+# Lifecycle: created=2026-03-26; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Audited GRIB→ensemble_snapshots_v2 ingestor (Phase 4B / task #53);
+#          applies INV-14 identity spine and Law 5 causality gate before INSERT.
+# Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
+#        for the chosen --track. Contract enforcement via
+#        src/contracts/snapshot_ingest_contract.py::validate_snapshot_contract.
+#        Post-audit 2026-04-24 (M1 closure): causality is NOT defaulted — any
+#        pre-Phase-5B payload without causality fails with MISSING_CAUSALITY_FIELD.
+#        Test contract: tests/test_ingest_grib_law5_antibody.py.
 """Audited GRIB-to-ensemble_snapshots_v2 ingestor (Phase 4B, task #53).
 
 Reads pre-extracted local-calendar-day JSON files produced by
@@ -155,13 +164,16 @@ def ingest_json_file(
     # Wire contract: enrich payload with authoritative metric fields before validation
     # so the contract can cross-check temperature_metric/physical_quantity against
     # data_version without requiring the JSON to self-report redundantly.
-    # High-track payloads written before Phase 5B lack a causality field; default
-    # to {"status": "OK"} to match the pre-existing _extract_causality_status behavior.
+    # Causality is NOT defaulted — Law 5 (R-AJ) declares causality first-class and
+    # any payload missing the field must be rejected, not silently accepted as OK.
+    # Pre-Phase-5B high-track JSON that lacks causality must be quarantined or
+    # re-extracted through extract_tigge_mx2t6_localday_max (which now emits the
+    # field) before re-ingest; silent-default would let RUNTIME_ONLY_FALLBACK or
+    # N/A_CAUSAL_DAY_ALREADY_STARTED rows masquerade as clean training data.
     contract_payload = dict(payload)
     contract_payload.setdefault("temperature_metric", metric.temperature_metric)
     contract_payload.setdefault("physical_quantity", metric.physical_quantity)
     contract_payload.setdefault("members_unit", members_unit)
-    contract_payload.setdefault("causality", {"status": "OK"})
     decision = validate_snapshot_contract(contract_payload)
     if not decision.accepted:
         logger.error(

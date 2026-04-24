@@ -1,0 +1,117 @@
+{
+  "task": "T2 Midstream Adversarial Followups — M1 + C5 + C6 + H3 + M3",
+  "packet": "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/AGENTS.md",
+    "architecture/source_rationale.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "architecture/invariants.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml"
+  ],
+  "allowed_files": [
+    "scripts/ingest_grib_to_snapshots.py",
+    "src/execution/harvester.py",
+    "src/engine/monitor_refresh.py",
+    "scripts/etl_historical_forecasts.py",
+    "scripts/validate_dynamic_alpha.py",
+    "scripts/etl_forecast_skill_from_forecasts.py",
+    "scripts/semantic_linter.py",
+    "src/contracts/ensemble_snapshot_provenance.py",
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_high_calibration_v2_route.py",
+    "tests/test_semantic_linter.py",
+    "tests/test_fdr.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_phase7a_metric_cutover.py",
+    "architecture/test_topology.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/source_rationale.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json"
+  ],
+  "forbidden_files": [
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "architecture/zones.yaml",
+    "architecture/topology.yaml",
+    "architecture/kernel_manifest.yaml",
+    "architecture/module_manifest.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
+    "architecture/code_review_graph_protocol.yaml",
+    "architecture/history_lore.yaml",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/change_receipt_schema.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/city_truth_contract.yaml",
+    "architecture/runtime_modes.yaml",
+    "architecture/reference_replacement.yaml",
+    "architecture/self_check/**",
+    "architecture/2026_04_02_architecture_kernel.sql",
+    "docs/authority/**",
+    "src/state/**",
+    "src/control/**",
+    "src/supervisor_api/**",
+    ".github/workflows/**",
+    ".code-review-graph/graph.db",
+    "state/**",
+    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/**",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/**"
+  ],
+  "changed_files": [
+    "scripts/ingest_grib_to_snapshots.py",
+    "src/execution/harvester.py",
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "architecture/test_topology.yaml",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md",
+    "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json"
+  ],
+  "followups_owed": {
+    "T2-S1-followup-A": {
+      "description": "Extend Law 5 antibody to cover causality=None / {} / string / {status:None}; consider contract hardening at src/contracts/snapshot_ingest_contract.py:56-59 to require isinstance(dict)+non-empty-string status.",
+      "effort_hours_estimate": 2,
+      "scope": "tests/ + possible src/contracts/",
+      "owner": "next slice",
+      "origin": "con-nyx T2-S1 finding 4"
+    },
+    "T2-S1-followup-B": {
+      "description": "Audit src/state/db.py::init_schema for settlements-column parity with live DB (pm_bin_lo/pm_bin_hi/unit/settlement_source_type missing from fresh CREATE); decide canonicalize vs document-as-legacy.",
+      "effort_hours_estimate": 3,
+      "scope": "src/state/** — planning-lock required",
+      "owner": "dedicated slice",
+      "origin": "con-nyx T2-S1 finding 3"
+    },
+    "T2-S1-followup-M": {
+      "description": "Backfill 1,561 legacy settlement rows with canonical physical_quantity ('mx2t6_local_calendar_day_max') OR document mixed-rows state as permanent + add canonical-only WHERE-clause convention.",
+      "effort_hours_estimate": 5,
+      "scope": "src/state/** + data migration packet",
+      "owner": "dedicated slice",
+      "origin": "con-nyx T2-S1 finding 2"
+    }
+  },
+  "tests_evidence": [
+    "tests/test_ingest_grib_law5_antibody.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_high_calibration_v2_route.py",
+    "tests/test_semantic_linter.py",
+    "tests/test_fdr.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_phase7a_metric_cutover.py"
+  ]
+}
