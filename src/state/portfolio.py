@@ -16,6 +16,7 @@ from typing import Literal, Optional
 
 from src.config import (
     STATE_DIR,
+    exit_correlation_crowding_rate,
     exit_daily_hurdle_rate,
     exit_fee_rate,
     get_mode,
@@ -31,6 +32,7 @@ from src.contracts import (
 )
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.hold_value import HoldValue
+from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
     enter_admin_closed_runtime_state,
     enter_chain_quarantined_runtime_state,
@@ -97,6 +99,15 @@ class ExitContext:
     divergence_score: float = 0.0
     market_velocity_1h: float = 0.0
 
+    # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
+    # cost computation in HoldValue.compute_with_exit_costs. Threaded by
+    # cycle_runtime._build_exit_context from PortfolioState at monitor tick.
+    # Each element is (cluster, size_usd, trade_id) for OTHER held positions
+    # (self excluded). Empty tuple = no co-held positions / not threaded.
+    # bankroll: current bankroll used as the denominator for exposure %.
+    portfolio_positions: tuple = ()
+    bankroll: Optional[float] = None
+
     @staticmethod
     def _is_finite(value: Optional[float]) -> bool:
         if value is None:
@@ -123,6 +134,56 @@ class ExitContext:
         if not self.position_state:
             missing.append("position_state")
         return missing
+
+
+def _compute_exit_correlation_crowding(
+    *,
+    this_cluster: str,
+    portfolio_positions: tuple,
+    bankroll: Optional[float],
+    shares: float,
+    best_bid: float,
+    crowding_rate: float,
+) -> float:
+    """T6.4-phase2: compute the dollar-denominated correlation-crowding cost
+    for an exit decision.
+
+    Formula:
+        exposure_ratio = Σ over OTHER held positions of
+            (other.size_usd / bankroll) × get_correlation(this_cluster, other.cluster)
+        cost_usd = crowding_rate × exposure_ratio × shares × best_bid
+
+    Returns 0.0 safely when:
+        - portfolio_positions is empty (no co-held positions)
+        - bankroll is None or <= 0 (authority gap)
+        - crowding_rate is 0.0 (feature off by default)
+
+    Self-exclusion is already applied at the _build_exit_context layer
+    (trade_id filter). This function sums correlation × exposure across
+    whatever tuple it receives.
+    """
+    if crowding_rate <= 0.0:
+        return 0.0
+    if not portfolio_positions:
+        return 0.0
+    if bankroll is None or bankroll <= 0.0:
+        return 0.0
+
+    exposure_ratio = 0.0
+    for entry in portfolio_positions:
+        # entry is (cluster, size_usd, trade_id) tuple per _build_exit_context
+        try:
+            other_cluster, other_size_usd, _trade_id = entry
+        except (TypeError, ValueError):
+            continue
+        try:
+            size_pct = float(other_size_usd) / float(bankroll)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        corr = get_correlation(str(this_cluster), str(other_cluster))
+        exposure_ratio += size_pct * corr
+
+    return float(crowding_rate) * exposure_ratio * float(shares) * float(best_bid)
 
 
 # Administrative exit reasons — excluded from P&L calculations
@@ -387,6 +448,8 @@ class Position:
                     hours_to_settlement=exit_context.hours_to_settlement,
                     day0_active=True,
                     applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
                 )
             else:
                 day0_decision = self._buy_yes_exit(
@@ -396,6 +459,8 @@ class Position:
                     day0_active=True,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
                 )
             if day0_decision.should_exit:
                 return day0_decision
@@ -503,6 +568,8 @@ class Position:
                 hours_to_settlement=exit_context.hours_to_settlement,
                 day0_active=bool(exit_context.day0_active),
                 applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
             )
         else:
             best_bid = exit_context.best_bid
@@ -517,6 +584,8 @@ class Position:
                 day0_active=bool(exit_context.day0_active),
                 hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
             )
 
     def _buy_yes_exit(
@@ -527,6 +596,8 @@ class Position:
         day0_active: bool = False,
         hours_to_settlement: Optional[float] = None,
         applied: Optional[list[str]] = None,
+        portfolio_positions: tuple = (),
+        bankroll: Optional[float] = None,
     ) -> ExitDecision:
         """Standard 2-consecutive EDGE_REVERSAL with EV gate.
 
@@ -535,6 +606,13 @@ class Position:
         cost) instead of the legacy zero-cost HoldValue.compute. hours_to_
         settlement feeds the time_cost component; when None, time_cost
         collapses to 0.0 as a soft conservative default.
+
+        T6.4-phase2: portfolio_positions + bankroll thread the correlation-
+        crowding substrate through to HoldValue.compute_with_exit_costs.
+        Each element of portfolio_positions is (cluster, size_usd, trade_id)
+        for OTHER co-held positions (self-excluded at _build_exit_context
+        layer). Crowding cost defaults to 0.0 via the helper when
+        exit_correlation_crowding_rate() is 0.0 (current default).
         """
         applied = list(applied or [])
         if best_bid is None:
@@ -561,6 +639,16 @@ class Position:
                     # protection at this call site. Surface via breadcrumb
                     # so monitor summaries can count these occurrences.
                     applied.append("hold_value_hours_unknown_time_cost_zero")
+                _crowding = _compute_exit_correlation_crowding(
+                    this_cluster=self.cluster,
+                    portfolio_positions=portfolio_positions,
+                    bankroll=bankroll,
+                    shares=shares,
+                    best_bid=best_bid,
+                    crowding_rate=exit_correlation_crowding_rate(),
+                )
+                if _crowding > 0.0:
+                    applied.append("hold_value_correlation_crowding_applied")
                 hold_value = HoldValue.compute_with_exit_costs(
                     shares=shares,
                     current_p_posterior=current_p_posterior,
@@ -568,6 +656,7 @@ class Position:
                     hours_to_settlement=hours_to_settlement,
                     fee_rate=exit_fee_rate(),
                     daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    correlation_crowding=_crowding,
                 )
             else:
                 hold_value = HoldValue.compute(
@@ -619,6 +708,16 @@ class Position:
                 applied.append("hold_value_exit_costs_enabled")
                 if hours_to_settlement is None or hours_to_settlement < 0.0:
                     applied.append("hold_value_hours_unknown_time_cost_zero")
+                _crowding = _compute_exit_correlation_crowding(
+                    this_cluster=self.cluster,
+                    portfolio_positions=portfolio_positions,
+                    bankroll=bankroll,
+                    shares=shares,
+                    best_bid=best_bid,
+                    crowding_rate=exit_correlation_crowding_rate(),
+                )
+                if _crowding > 0.0:
+                    applied.append("hold_value_correlation_crowding_applied")
                 hold_value = HoldValue.compute_with_exit_costs(
                     shares=shares,
                     current_p_posterior=current_p_posterior,
@@ -626,6 +725,7 @@ class Position:
                     hours_to_settlement=hours_to_settlement,
                     fee_rate=exit_fee_rate(),
                     daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    correlation_crowding=_crowding,
                 )
             else:
                 hold_value = HoldValue.compute(
@@ -658,6 +758,8 @@ class Position:
         hours_to_settlement: Optional[float] = None,
         day0_active: bool = False,
         applied: Optional[list[str]] = None,
+        portfolio_positions: tuple = (),
+        bankroll: Optional[float] = None,
     ) -> ExitDecision:
         """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
 
@@ -667,6 +769,10 @@ class Position:
         for buy_no is current_market_price (native NO-space probability
         from the orderbook); polymarket_fee formula p*(1-p) is symmetric
         so passing current_market_price as best_bid is semantically OK.
+
+        T6.4-phase2: portfolio_positions + bankroll thread correlation-
+        crowding substrate; defaults preserve pre-phase2 behavior (cost 0.0)
+        until exit_correlation_crowding_rate() > 0.0.
         """
         applied = list(applied or [])
         evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
@@ -683,6 +789,16 @@ class Position:
                     applied.append("hold_value_exit_costs_enabled")
                     if hours_to_settlement is None or hours_to_settlement < 0.0:
                         applied.append("hold_value_hours_unknown_time_cost_zero")
+                    _crowding = _compute_exit_correlation_crowding(
+                        this_cluster=self.cluster,
+                        portfolio_positions=portfolio_positions,
+                        bankroll=bankroll,
+                        shares=shares,
+                        best_bid=current_market_price,
+                        crowding_rate=exit_correlation_crowding_rate(),
+                    )
+                    if _crowding > 0.0:
+                        applied.append("hold_value_correlation_crowding_applied")
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,
@@ -690,6 +806,7 @@ class Position:
                         hours_to_settlement=hours_to_settlement,
                         fee_rate=exit_fee_rate(),
                         daily_hurdle_rate=exit_daily_hurdle_rate(),
+                        correlation_crowding=_crowding,
                     )
                 else:
                     hold_value = HoldValue.compute(
@@ -748,6 +865,16 @@ class Position:
                     applied.append("hold_value_exit_costs_enabled")
                     if hours_to_settlement is None or hours_to_settlement < 0.0:
                         applied.append("hold_value_hours_unknown_time_cost_zero")
+                    _crowding = _compute_exit_correlation_crowding(
+                        this_cluster=self.cluster,
+                        portfolio_positions=portfolio_positions,
+                        bankroll=bankroll,
+                        shares=shares,
+                        best_bid=current_market_price,
+                        crowding_rate=exit_correlation_crowding_rate(),
+                    )
+                    if _crowding > 0.0:
+                        applied.append("hold_value_correlation_crowding_applied")
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,
@@ -755,6 +882,7 @@ class Position:
                         hours_to_settlement=hours_to_settlement,
                         fee_rate=exit_fee_rate(),
                         daily_hurdle_rate=exit_daily_hurdle_rate(),
+                        correlation_crowding=_crowding,
                     )
                 else:
                     hold_value = HoldValue.compute(

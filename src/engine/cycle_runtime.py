@@ -393,7 +393,14 @@ def _position_state_value(pos) -> str:
     return getattr(state, "value", state) or ""
 
 
-def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
+def _build_exit_context(
+    pos,
+    edge_ctx,
+    *,
+    hours_to_settlement,
+    ExitContext,
+    portfolio=None,
+):
     if False:
         _ = pos.entry_method
         _ = pos.selected_method
@@ -409,6 +416,27 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
     best_bid = getattr(pos, "last_monitor_best_bid", None)
 
     position_state = _position_state_value(pos)
+
+    # T6.4-phase2 (2026-04-24): thread portfolio context so
+    # HoldValue.compute_with_exit_costs can compute correlation-crowding
+    # cost over other held positions. Exclude self from the tuple; each
+    # element is (cluster, size_usd, trade_id). When portfolio is None,
+    # falls back to empty tuple / None bankroll — the downstream seam
+    # treats that as "no co-held positions, correlation_crowding=0".
+    portfolio_positions: tuple = ()
+    bankroll = None
+    if portfolio is not None:
+        try:
+            bankroll = float(getattr(portfolio, "bankroll", None) or 0.0) or None
+        except (TypeError, ValueError):
+            bankroll = None
+        others = getattr(portfolio, "positions", None) or ()
+        portfolio_positions = tuple(
+            (str(p.cluster), float(p.size_usd), str(p.trade_id))
+            for p in others
+            if getattr(p, "trade_id", None) != getattr(pos, "trade_id", None)
+        )
+
     return ExitContext(
         fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
@@ -424,6 +452,8 @@ def _build_exit_context(pos, edge_ctx, *, hours_to_settlement, ExitContext):
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+        portfolio_positions=portfolio_positions,
+        bankroll=bankroll,
     )
 
 
@@ -624,6 +654,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 edge_ctx,
                 hours_to_settlement=hours_to_settlement,
                 ExitContext=ExitContext,
+                portfolio=portfolio,
             )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
