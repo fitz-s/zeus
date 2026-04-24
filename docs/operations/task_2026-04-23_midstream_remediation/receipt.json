@@ -1017,6 +1017,74 @@
         ".venv/bin/python -c 'import json; d=json.load(open(\"docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json\")); print(len(d[\"t1_slices_closed\"]))' -> 6",
         "(T1.f is a doc-only artifact; regression N/A)"
       ]
+    },
+    {
+      "slice_id": "T1.c-followup",
+      "name": "t1c_followup_p9_rewrite_plus_p4_obsolete_audit",
+      "commit": "pending",
+      "date": "2026-04-24",
+      "critic_status": "self_verified_canonical_shape_rewrites_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/* only)",
+      "files_changed": [
+        "tests/test_live_safety_invariants.py (4 P9 tests REWRITTEN + PASSING; 3 remaining skips updated to OBSOLETE current-fact; new _seed_canonical_entry_baseline helper)",
+        "docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json (appended T1.c-followup entry with full disposition)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "p9_rewrites_passing": {
+        "count": 4,
+        "tests": {
+          "L214_test_chain_reconciliation_rescues_pending_tracked_fill": "seeds canonical baseline via _seed_canonical_entry_baseline helper + passes conn to reconcile; asserts in-memory pos mutations after rescue (state=entered, chain_state=synced, shares/entry_price/size_usd/cost_basis_usd/condition_id)",
+          "L268_test_chain_reconciliation_rescue_updates_trade_lifecycle_row": "asserts CHAIN_SYNCED canonical event with source_module='src.state.chain_reconciliation' and payload details (source/reason/from_state/to_state/entry_order_id/chain_state/condition_id/entry_fill_verified)",
+          "L335_test_chain_reconciliation_rescue_emits_exactly_one_stage_event": "canonical idempotency: two reconcile() calls produce exactly ONE CHAIN_SYNCED event (gated by position_current phase check + _already_logged_rescue_event check)",
+          "L1227_test_deferred_fill_logs_last_monitor_best_bid": "seeds active-phase baseline (exit_state=''; mutate to sell_pending after seeding), check_pending_exits + FILLED CLOB response emits canonical EXIT_ORDER_FILLED with best_bid+fill_price+current_market_price details"
+        }
+      },
+      "p9_obsolete_pending_feature": {
+        "count": 1,
+        "line": 875,
+        "test": "test_day0_transition_emits_durable_lifecycle_event",
+        "current_fact": "No canonical Day0 transition event exists in current code. cycle_runtime monitor_refresh updates position_current.phase + trade_decisions via update_trade_lifecycle but does NOT emit a DAY0_WINDOW_ENTERED position_events row.",
+        "disposition": "OBSOLETE_PENDING_FEATURE — restoring requires a new build_day0_window_entered_canonical_write builder in src/engine/lifecycle_events.py. Feature-level architectural slice, OUT OF T1.c-followup scope. Flagged for separate Day0-canonical-event antibody slice."
+      },
+      "p4_obsolete_by_architecture": {
+        "count": 2,
+        "lines": [1536, 1569],
+        "tests": ["test_contamination_guard_blocks_wrong_env", "test_empty_env_positions_pass_guard"],
+        "current_fact": "src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB); env is carried on each row per axiom (portfolio.py:155 'env: str = \"live\"'). JSON fallback + _load_portfolio_from_json_data contamination guard are deleted. The 'run loader in paper mode, expect RuntimeError on live position' scenario no longer exists in the DB-first canonical path.",
+        "disposition": "OBSOLETE_BY_ARCHITECTURE — no RELOCATE target because env-filtering happens at the query layer per-row rather than at a single guard choke-point. Keep OBSOLETE with marker until operator decides delete-or-document-as-antibody-inventory."
+      },
+      "skip_count_change": {
+        "before": 8,
+        "after": 4,
+        "reduction_pct": 50,
+        "remaining_4_skips": [
+          "L589 Phase2 KEEP_LEGITIMATE (paper-mode removed; documentation antibody)",
+          "L875 OBSOLETE_PENDING_FEATURE (awaits canonical Day0 event feature slice)",
+          "L1536 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)",
+          "L1569 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)"
+        ]
+      },
+      "plan_acceptance_status": {
+        "target": "--collect-only SKIPPED <= 1",
+        "achieved": "--collect-only SKIPPED == 4",
+        "gap_rationale": "3 of remaining 4 require operator decision OBSOLETE_DELETE vs KEEP; 1 (Phase2) is the single documented KEEP per plan intent. Operator decision out of T1.c-followup scope."
+      },
+      "helper_added": "_seed_canonical_entry_baseline(conn, position) in tests/test_live_safety_invariants.py — shared helper for future slices that need canonical baseline setup via build_entry_canonical_write + append_many_and_project.",
+      "regression_delta_direction_L28": {
+        "narrow_file_pre_T1_c_followup": "4 failed / 47 passed / 8 skipped",
+        "narrow_file_post_T1_c_followup": "4 failed / 51 passed / 4 skipped",
+        "delta": "+4 passes from P9 rewrites; -4 skips from rescue; 0 new failures; 4 pre-existing failures unchanged (out-of-scope)"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py --tb=no -> 4 failed, 51 passed, 4 skipped in 1.16s",
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py::test_chain_reconciliation_rescues_pending_tracked_fill -> 1 passed",
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py::test_chain_reconciliation_rescue_updates_trade_lifecycle_row -> 1 passed",
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py::test_chain_reconciliation_rescue_emits_exactly_one_stage_event -> 1 passed",
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py::test_deferred_fill_logs_last_monitor_best_bid -> 1 passed",
+        "grep -c '^@pytest.mark.skip' tests/test_live_safety_invariants.py -> 4",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_live_safety_invariants.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
+      ]
     }
   ],
   "slices_in_review": [

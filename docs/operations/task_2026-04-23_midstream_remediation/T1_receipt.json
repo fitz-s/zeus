@@ -97,17 +97,75 @@
       "commit": "pending",
       "scope": "This receipt — T1 family currency closure",
       "notes": "T1 family closure status: 5 closed + 1 skip-audited-with-followup (T1.c) = 5/6 effective + 1 fully-documented deferred. T1.a-b-d-e CLOSED in full; T1.c CLOSED as audit-ship per plan's surprise-tolerance clause with T1.c-followup flagged."
+    },
+    {
+      "slice_id": "T1.c-followup",
+      "commit": "pending",
+      "scope": "Rewrite 5 P9 tests against post-T4.1b canonical event shape + audit 2 P4 tests for RELOCATE-vs-OBSOLETE disposition",
+      "outcome": {
+        "p9_rewritten_and_passing": {
+          "count": 4,
+          "tests": [
+            "test_chain_reconciliation_rescues_pending_tracked_fill (L214 — CHAIN_SYNCED canonical event via _seed_canonical_entry_baseline helper)",
+            "test_chain_reconciliation_rescue_updates_trade_lifecycle_row (L268 — asserts canonical CHAIN_SYNCED event + POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED baseline)",
+            "test_chain_reconciliation_rescue_emits_exactly_one_stage_event (L335 — canonical idempotency via phase check + already-logged guard)",
+            "test_deferred_fill_logs_last_monitor_best_bid (L1227 — EXIT_ORDER_FILLED canonical event after active-phase baseline seed)"
+          ],
+          "pattern": "Shared _seed_canonical_entry_baseline(conn, pos) helper routes through build_entry_canonical_write + append_many_and_project to emit POSITION_OPEN_INTENT + ENTRY_ORDER_POSTED + (optionally) ENTRY_ORDER_FILLED so reconcile/check_pending_exits find the canonical baseline they now gate on."
+        },
+        "p9_obsolete_pending_feature": {
+          "count": 1,
+          "line": 875,
+          "test": "test_day0_transition_emits_durable_lifecycle_event",
+          "current_fact": "No canonical Day0 transition event exists. cycle_runtime monitor_refresh updates position_current.phase + trade_decisions via update_trade_lifecycle but does NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row.",
+          "disposition": "OBSOLETE_PENDING_FEATURE — restoring requires a new build_day0_window_entered_canonical_write builder in src/engine/lifecycle_events.py. Feature-level architectural slice, OUT OF T1.c-followup scope. Flagged for separate Day0-canonical-event slice."
+        },
+        "p4_obsolete_by_architecture": {
+          "count": 2,
+          "lines": [1536, 1569],
+          "tests": [
+            "test_contamination_guard_blocks_wrong_env",
+            "test_empty_env_positions_pass_guard"
+          ],
+          "current_fact": "src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB); env is carried on each row (portfolio.py:155 'env: str = \"live\"' axiom). JSON fallback + _load_portfolio_from_json_data contamination guard are deleted. The 'run loader in paper mode, expect RuntimeError on live position' scenario no longer exists in the DB-first canonical path.",
+          "disposition": "OBSOLETE_BY_ARCHITECTURE — no RELOCATE target because env-filtering happens at the query layer per-row rather than at a single guard choke-point. Keep OBSOLETE with marker until operator decides delete-or-document-as-antibody-inventory."
+        }
+      },
+      "skip_count_reduction": "8 -> 4 (50% reduction)",
+      "remaining_skips_disposition": [
+        "L589 Phase2 KEEP_LEGITIMATE (paper-mode removed; documentation antibody retained)",
+        "L875 OBSOLETE_PENDING_FEATURE (no canonical Day0 event)",
+        "L1536 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)",
+        "L1569 OBSOLETE_BY_ARCHITECTURE (JSON loader deleted)"
+      ],
+      "plan_acceptance_criterion_progress": {
+        "target": "--collect-only SKIPPED <= 1",
+        "achieved": "--collect-only SKIPPED == 4",
+        "gap_rationale": "Remaining 3 skips cannot be cleared within T1.c-followup scope: 1 requires NEW feature (Day0 canonical event builder); 2 are OBSOLETE_BY_ARCHITECTURE (validate dead JSON path). Operator decision needed on whether to OBSOLETE_DELETE (physically remove the 3 tests) vs keep as documentation antibodies."
+      },
+      "regression_delta": {
+        "narrow_file_post_T1_c_followup": "4 failed / 51 passed / 4 skipped",
+        "narrow_file_pre_T1_c_followup_baseline": "4 failed / 47 passed / 8 skipped",
+        "delta": "+4 passes (4 P9 rewrites) / -4 skips (4 rescued); 4 pre-existing failures unchanged (out-of-scope)"
+      },
+      "helpers_added": [
+        "_seed_canonical_entry_baseline(conn, position) — shared helper to route pending_tracked positions through build_entry_canonical_write + append_many_and_project so reconcile/check_pending_exits find the canonical baseline they gate on."
+      ],
+      "dependencies_closed": ["T4.1b (canonical entry event shape) 1d541a3"],
+      "planning_lock": "GREEN (tests/* only)"
     }
   ],
   "t1_family_effective_status": {
-    "ship_count": 6,
+    "ship_count": 7,
     "full_rewrite_count": 4,
-    "doc_only_close_count": 1,
-    "audit_with_followup_count": 1,
+    "doc_only_close_count": 2,
+    "audit_plus_followup_count": 1,
+    "followup_mostly_closed_count": 1,
     "unresolved_deferrals": 2,
     "deferral_detail": [
-      "T1.c-followup: rewrite 5 P9 tests + resolve 2 P4 RELOCATE-or-OBSOLETE (requires post-T4.1b canonical event-shape audit)",
-      "T1.d residual NC-12 L70 skip: KEEP until Phase-7 v2 substrate rebuild populates ensemble_snapshots_v2 + calibration_pairs_v2 + platt_models_v2"
+      "Day0-canonical-event feature slice: add build_day0_window_entered_canonical_write builder; re-enable L875 test",
+      "T1.d residual NC-12 L70 skip: KEEP until Phase-7 v2 substrate rebuild populates ensemble_snapshots_v2 + calibration_pairs_v2 + platt_models_v2",
+      "Operator decision required: OBSOLETE_DELETE (physically remove) vs KEEP (documentation antibody) for L875 + L1536 + L1569"
     ]
   },
   "t1_family_guardian_panel": {

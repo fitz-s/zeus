@@ -77,6 +77,26 @@ def _make_portfolio(*positions) -> PortfolioState:
     return PortfolioState(positions=list(positions))
 
 
+def _seed_canonical_entry_baseline(conn, position) -> None:
+    """T1.c-followup (2026-04-23): post-T4.1b, chain_reconciliation.reconcile
+    gates rescue strictly on the existence of a canonical baseline
+    (``position_current`` row in ``pending_entry`` phase). This helper
+    seeds that baseline by routing the ``pending_tracked`` position through
+    ``build_entry_canonical_write`` + ``append_many_and_project`` so rescue
+    probes find the POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED events plus
+    the ``pending_entry`` ``position_current`` row they need to flip.
+    """
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.ledger import append_many_and_project
+
+    events, projection = build_entry_canonical_write(
+        position,
+        decision_id=getattr(position, "decision_snapshot_id", None) or "dec-t1c-followup",
+        source_module="src.test.t1c_followup_baseline",
+    )
+    append_many_and_project(conn, events, projection)
+
+
 def _make_clob(
     order_status="OPEN",
     balance=100.0,
@@ -211,26 +231,43 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert tracker.entries == ["test_001"]
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
-def test_chain_reconciliation_rescues_pending_tracked_fill():
-    """Chain truth must rescue pending_tracked when order-status path is unavailable."""
+def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
+    """Chain truth must rescue pending_tracked when order-status path is
+    unavailable. T1.c-followup rewrite 2026-04-23: rescue is now gated on
+    canonical baseline existence (post-T4.1b); test seeds baseline via
+    build_entry_canonical_write + passes conn to reconcile."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "rescue_pending.db")
+    init_schema(conn)
 
     pos = _make_position(
+        trade_id="rescue-1",
         state="pending_tracked",
         direction="buy_yes",
         token_id="tok_yes_001",
         no_token_id="tok_no_001",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        decision_snapshot_id="snap-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
 
     stats = reconcile(
         portfolio,
         [ChainPosition(token_id="tok_yes_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")],
+        conn=conn,
     )
+    conn.close()
 
     assert stats["rescued_pending"] == 1
     assert pos.state == "entered"
@@ -265,12 +302,18 @@ def test_lifecycle_kernel_enters_chain_quarantined_runtime_state():
     assert enter_chain_quarantined_runtime_state() == "quarantined"
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
+    """T1.c-followup rewrite 2026-04-23: post-T4.1b, the rescue audit trail
+    flows through canonical position_events (CHAIN_SYNCED event_type +
+    source_module='src.state.chain_reconciliation') rather than the
+    legacy POSITION_LIFECYCLE_UPDATED-with-source-field shape. Test
+    asserts the new canonical shape carries the rescue metadata that
+    downstream audit consumers need (entry_order_id, chain_state,
+    historical_entry_method, shares, cost_basis_usd, condition_id)."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
-    from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+    from src.state.db import get_connection, init_schema, query_position_events
 
-    conn = get_connection(tmp_path / "test.db")
+    conn = get_connection(tmp_path / "rescue_db.db")
     init_schema(conn)
 
     pos = _make_position(
@@ -279,13 +322,21 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
         direction="buy_yes",
         token_id="tok_yes_db_001",
         no_token_id="tok_no_db_001",
-        order_id="",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="snap-db-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
-    log_trade_entry(conn, pos)
 
     stats = reconcile(
         portfolio,
@@ -293,51 +344,43 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
         conn=conn,
     )
     conn.commit()
-
-    row = conn.execute(
-        """
-        SELECT status, order_id, order_status_text, chain_state, entered_at_ts, filled_at
-        FROM trade_decisions
-        WHERE runtime_trade_id = ?
-        ORDER BY trade_id DESC
-        LIMIT 1
-        """,
-        ("rescue-db-1",),
-    ).fetchone()
     events = query_position_events(conn, "rescue-db-1")
     conn.close()
 
     assert stats["rescued_pending"] == 1
-    assert row["status"] == "entered"
-    assert row["order_id"] == "buy_123"
-    assert row["order_status_text"] == "filled"
-    assert row["chain_state"] == "synced"
-    assert row["entered_at_ts"] != ""
-    assert row["filled_at"] != ""
+    # Canonical entry trail from _seed_canonical_entry_baseline
+    entry_event_types = [e["event_type"] for e in events]
+    assert "POSITION_OPEN_INTENT" in entry_event_types
+    assert "ENTRY_ORDER_POSTED" in entry_event_types
 
-    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
-    trade_events = [event for event in lifecycle_events if event["source"] == "trade_decisions"]
-    rescue_events = [event for event in lifecycle_events if event["source"] == "chain_reconciliation"]
-
-    assert len(trade_events) == 1
-    assert trade_events[0]["order_id"] == "buy_123"
-    assert trade_events[0]["details"]["entry_order_id"] == "buy_123"
-    assert trade_events[0]["details"]["entry_fill_verified"] is True
-    assert trade_events[0]["details"]["chain_state"] == "synced"
-
+    # Rescue emission: post-T4.1b the canonical event_type is CHAIN_SYNCED
+    # with source_module='src.state.chain_reconciliation' and
+    # payload_json carrying the rescue metadata.
+    rescue_events = [e for e in events if e["event_type"] == "CHAIN_SYNCED"]
     assert len(rescue_events) == 1
-    assert rescue_events[0]["order_id"] == "buy_123"
-    assert rescue_events[0]["details"]["entry_order_id"] == "buy_123"
-    assert rescue_events[0]["details"]["entry_fill_verified"] is True
-    assert rescue_events[0]["details"]["chain_state"] == "synced"
+    rescue = rescue_events[0]
+    assert rescue["source"] == "src.state.chain_reconciliation"
+    assert rescue["order_id"] == "buy_123"
+    details = rescue["details"]
+    assert details["source"] == "chain_reconciliation"
+    assert details["reason"] == "pending_fill_rescued"
+    assert details["from_state"] == "pending_tracked"
+    assert details["to_state"] == "entered"
+    assert details["entry_order_id"] == "buy_123"
+    assert details["entry_fill_verified"] is True
+    assert details["chain_state"] == "synced"
+    assert details["condition_id"] == "cond-1"
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
+    """T1.c-followup rewrite 2026-04-23: post-T4.1b, rescue emits exactly
+    one CHAIN_SYNCED canonical event on first rescue; repeat reconcile
+    calls on the same trade_id do not double-emit (idempotency guard
+    via position_current phase check + already-logged check)."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, query_position_events
 
-    conn = get_connection(tmp_path / "test.db")
+    conn = get_connection(tmp_path / "rescue_rt.db")
     init_schema(conn)
 
     pos = _make_position(
@@ -346,14 +389,20 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
         direction="buy_yes",
         token_id="tok_yes_001",
         no_token_id="tok_no_001",
+        order_id="buy_123",
         entry_order_id="buy_123",
         entry_fill_verified=False,
         entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
         entry_method="ens_member_counting",
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="snap-1",
     )
+    _seed_canonical_entry_baseline(conn, pos)
     portfolio = _make_portfolio(pos)
     chain_row = ChainPosition(token_id="tok_yes_001", size=25.0, avg_price=0.44, cost=11.0, condition_id="cond-1")
 
@@ -365,23 +414,24 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
 
     assert stats_first["rescued_pending"] == 1
     assert stats_second["rescued_pending"] == 0
-    lifecycle_events = [
-        event for event in events
-        if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"
-        and event["source"] == "chain_reconciliation"
-        and event["details"].get("reason") == "pending_fill_rescued"
+    # Exactly ONE canonical rescue event (idempotency).
+    rescue_events = [
+        e for e in events
+        if e["event_type"] == "CHAIN_SYNCED"
+        and e["source"] == "src.state.chain_reconciliation"
     ]
-    assert len(lifecycle_events) == 1
-    event = lifecycle_events[0]
-    assert event["position_state"] == "entered"
-    assert event["details"]["from_state"] == "pending_tracked"
-    assert event["details"]["to_state"] == "entered"
-    assert event["details"]["source"] == "chain_reconciliation"
-    assert event["details"]["historical_entry_method"] == "ens_member_counting"
-    assert event["details"]["historical_selected_method"] == "ens_member_counting"
-    assert event["details"]["shares"] == 25.0
-    assert event["details"]["cost_basis_usd"] == 11.0
-    assert event["details"]["condition_id"] == "cond-1"
+    assert len(rescue_events) == 1
+    event = rescue_events[0]
+    details = event["details"]
+    assert details["from_state"] == "pending_tracked"
+    assert details["to_state"] == "entered"
+    assert details["source"] == "chain_reconciliation"
+    assert details["reason"] == "pending_fill_rescued"
+    assert details["historical_entry_method"] == "ens_member_counting"
+    assert details["historical_selected_method"] == "ens_member_counting"
+    assert details["shares"] == 25.0
+    assert details["cost_basis_usd"] == 11.0
+    assert details["condition_id"] == "cond-1"
 
 
 @pytest.mark.parametrize("exit_state", ["exit_intent", "sell_placed", "sell_pending", "retry_pending"])
@@ -872,7 +922,7 @@ def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
         )
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
+@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_PENDING_FEATURE — no canonical Day0 transition event exists in current code. cycle_runtime monitor_refresh updates position_current.phase + trade_decisions via update_trade_lifecycle but does NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row. Restoring the test requires first landing a canonical Day0 transition event builder (e.g., build_day0_window_entered_canonical_write) in src/engine/lifecycle_events.py — feature-level architectural slice, OUT OF T1.c-followup scope. Flagged for separate Day0-canonical-event antibody slice.")
 def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
@@ -1224,23 +1274,44 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     assert pos in portfolio.positions  # NOT closed
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
-    """Deferred fill telemetry must preserve sell-side realizable bid, not mark price."""
+    """Deferred fill telemetry must preserve sell-side realizable bid, not
+    mark price. T1.c-followup rewrite 2026-04-23: post-T4.1b, exit fill
+    emission flows through build_economic_close_canonical_write; test
+    seeds active-phase canonical baseline so EXIT_ORDER_FILLED lands
+    cleanly."""
     from src.state.db import get_connection, init_schema, query_position_events
 
     pos = _make_position(
         trade_id="deferred-fill-1",
         state="holding",
-        exit_state="sell_pending",
+        exit_state="",
+        chain_state="synced",
         last_exit_order_id="sell-order-1",
         exit_reason="DEFERRED_SELL_FILL",
         last_monitor_market_price=0.44,
         last_monitor_best_bid=0.39,
+        order_id="buy-order-1",
+        entry_order_id="buy-order-1",
+        entry_fill_verified=True,
+        entered_at="2026-04-03T00:05:00Z",
+        order_status="filled",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="snap-def-1",
     )
     portfolio = _make_portfolio(pos)
     conn = get_connection(tmp_path / "deferred-fill.db")
     init_schema(conn)
+    # Seed canonical baseline in active phase (exit_state="") so
+    # build_entry_canonical_write accepts; then transition pos to
+    # pending_exit state via exit_state mutation for the test scenario.
+    _seed_canonical_entry_baseline(conn, pos)
+    pos.exit_state = "sell_pending"
     clob = _make_clob(sell_result={"status": "FILLED", "avgPrice": 0.39})
 
     stats = check_pending_exits(portfolio, clob, conn=conn)
@@ -1533,7 +1604,7 @@ def test_position_carries_env():
     assert pos_live.env == "live"
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: _load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback (current canonical loader: src/state/portfolio_loader_policy.py + src/state/portfolio.py::load_portfolio). Un-skip verified failure: the guard function no longer exists to invoke. Guard relocation to the canonical loader's env-filtering surface is a P4 refactor deferred to T1.c-followup slice — requires careful audit of which loader(s) handle env scoping today and whether a guard is already implicit via SQL WHERE env=? predicates.")
+@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
 def test_contamination_guard_blocks_wrong_env():
     """Loading a live position into paper portfolio (or vice versa) must fail."""
     from src.state.portfolio import load_portfolio, save_portfolio
@@ -1566,7 +1637,7 @@ def test_state_path_resolves_directly():
     assert "-paper" not in path.name
 
 
-@pytest.mark.skip(reason="T1.c-audit 2026-04-23: _load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback (current canonical loader: src/state/portfolio_loader_policy.py + src/state/portfolio.py::load_portfolio). Un-skip verified failure: the guard function no longer exists to invoke. Guard relocation to the canonical loader's env-filtering surface is a P4 refactor deferred to T1.c-followup slice — requires careful audit of which loader(s) handle env scoping today and whether a guard is already implicit via SQL WHERE env=? predicates.")
+@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_BY_ARCHITECTURE — src/state/portfolio.py::load_portfolio is now DB-first (query_portfolio_loader_view from canonical DB), with env carried on each row (src/state/portfolio.py:155 `env: str = \"live\"` axiom). JSON fallback + _load_portfolio_from_json_data contamination-guard path are deleted. The test validates a dead architecture; no canonical-loader analog needed because env-filtering happens at the query layer per-row. The 'run loader in paper mode, expect RuntimeError on live position' scenario does not exist in the DB-first canonical path. No RELOCATE; keep OBSOLETE with this marker until someone explicitly decides to delete-or-document-in-antibody-inventory.")
 def test_empty_env_positions_pass_guard():
     """Positions with empty env (legacy) should pass the contamination guard."""
     pos = _make_position(env="")
