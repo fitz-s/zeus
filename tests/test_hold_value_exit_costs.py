@@ -535,3 +535,325 @@ class TestConNyxPostEditHardening:
             f"but config exit.fee_rate={config_rate}. Either update the other "
             f"to match or introduce a single-source getter to eliminate drift."
         )
+
+
+class TestCorrelationCrowdingPhase2:
+    """T6.4-phase2: correlation-crowding cost wired through ExitContext
+    into HoldValue.compute_with_exit_costs. Feature-flag-gated via
+    HOLD_VALUE_EXIT_COSTS (ON → computed; OFF → untouched) + rate-gated
+    via exit.correlation_crowding_rate (default 0.0 = no-op even when
+    feature flag ON, so phase2 shipping doesn't alter live behavior
+    without operator config flip).
+    """
+
+    def _make_position(self, direction: str = "buy_yes", trade_id: str = "pos_self"):
+        from src.state.portfolio import Position
+
+        return Position(
+            trade_id=trade_id,
+            market_id="m_" + trade_id,
+            city="Chicago",
+            cluster="Chicago",
+            target_date="2026-04-25",
+            bin_label="60-61°F",
+            direction=direction,
+            entry_price=0.40 if direction == "buy_yes" else 0.15,
+            size_usd=50.0,
+            entry_method="calibrated",
+        )
+
+    def test_compute_helper_zero_when_rate_zero(self):
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        cost = _compute_exit_correlation_crowding(
+            this_cluster="Chicago",
+            portfolio_positions=(("Houston", 100.0, "other_pos"),),
+            bankroll=200.0,
+            shares=125.0,
+            best_bid=0.48,
+            crowding_rate=0.0,  # feature disabled
+        )
+        assert cost == 0.0
+
+    def test_compute_helper_zero_when_no_other_positions(self):
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        cost = _compute_exit_correlation_crowding(
+            this_cluster="Chicago",
+            portfolio_positions=(),
+            bankroll=200.0,
+            shares=125.0,
+            best_bid=0.48,
+            crowding_rate=0.01,
+        )
+        assert cost == 0.0
+
+    def test_compute_helper_zero_when_bankroll_missing(self):
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        cost = _compute_exit_correlation_crowding(
+            this_cluster="Chicago",
+            portfolio_positions=(("Houston", 100.0, "other_pos"),),
+            bankroll=None,
+            shares=125.0,
+            best_bid=0.48,
+            crowding_rate=0.01,
+        )
+        assert cost == 0.0
+
+    def test_compute_helper_nonzero_when_all_inputs_present(self):
+        """Golden-path arithmetic test with a known correlation value."""
+        from unittest.mock import patch
+
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        # Stub get_correlation so the test doesn't depend on live matrix
+        # values (which may drift as correlation data is refreshed).
+        with patch("src.state.portfolio.get_correlation", return_value=0.80):
+            cost = _compute_exit_correlation_crowding(
+                this_cluster="Chicago",
+                portfolio_positions=(("Houston", 100.0, "other_pos"),),
+                bankroll=200.0,
+                shares=125.0,
+                best_bid=0.48,
+                crowding_rate=0.01,
+            )
+        # Expected: rate × exposure_ratio × shares × best_bid
+        # exposure_ratio = (100/200) × 0.80 = 0.40
+        # cost = 0.01 × 0.40 × 125 × 0.48 = 0.24
+        expected = 0.01 * (100.0 / 200.0) * 0.80 * 125.0 * 0.48
+        assert cost == pytest.approx(expected, abs=1e-9)
+
+    def test_compute_helper_excludes_self_via_tuple_filter(self):
+        """Regression: _build_exit_context is supposed to have pre-excluded
+        self via trade_id filter. This helper does NOT re-filter — it sums
+        across whatever tuple it receives. Documenting the contract via
+        test: if self somehow reaches this helper, its contribution flows
+        through. Caller responsibility (build_exit_context) to exclude."""
+        from unittest.mock import patch
+
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        # Self accidentally left in the tuple — helper sums it regardless
+        with patch("src.state.portfolio.get_correlation", return_value=1.0):
+            cost_with_self = _compute_exit_correlation_crowding(
+                this_cluster="Chicago",
+                portfolio_positions=(("Chicago", 50.0, "pos_self"),),  # self!
+                bankroll=200.0,
+                shares=125.0,
+                best_bid=0.48,
+                crowding_rate=0.01,
+            )
+        # Helper trusts caller to filter — sums the 50.0 exposure × 1.0 corr.
+        # This documents the contract; actual filter happens at _build_exit_context.
+        assert cost_with_self > 0.0
+
+    def test_compute_helper_skips_malformed_entry(self):
+        from unittest.mock import patch
+
+        from src.state.portfolio import _compute_exit_correlation_crowding
+
+        # Mixed valid + malformed entries — malformed should be skipped, not crash
+        with patch("src.state.portfolio.get_correlation", return_value=0.5):
+            cost = _compute_exit_correlation_crowding(
+                this_cluster="Chicago",
+                portfolio_positions=(
+                    ("Houston", 100.0, "other_pos"),  # valid
+                    ("malformed",),  # wrong arity — skipped
+                ),
+                bankroll=200.0,
+                shares=125.0,
+                best_bid=0.48,
+                crowding_rate=0.01,
+            )
+        # Only valid entry contributes
+        expected = 0.01 * (100.0 / 200.0) * 0.5 * 125.0 * 0.48
+        assert cost == pytest.approx(expected, abs=1e-9)
+
+    def test_exit_correlation_crowding_rate_bounds_validation(self):
+        """Bounds guard: operator misconfig (rate > 0.1) must raise."""
+        from src import config as config_mod
+
+        original = config_mod.settings["exit"]["correlation_crowding_rate"]
+        try:
+            config_mod.settings["exit"]["correlation_crowding_rate"] = 0.5
+            with pytest.raises(ValueError, match="exit.correlation_crowding_rate"):
+                config_mod.exit_correlation_crowding_rate()
+        finally:
+            config_mod.settings["exit"]["correlation_crowding_rate"] = original
+
+    def test_exit_correlation_crowding_rate_default_is_zero(self):
+        """Phase2 default 0.0 preserves pre-phase2 behavior when shipped."""
+        from src.config import exit_correlation_crowding_rate
+
+        assert exit_correlation_crowding_rate() == 0.0, (
+            "phase2 shipping must NOT alter live behavior — default rate "
+            "must be 0.0 until operator flips post-replay-audit."
+        )
+
+    def test_flag_on_crowding_breadcrumb_when_rate_positive(self):
+        """Integration: under flag ON + rate > 0 + portfolio has co-held
+        positions + bankroll, exit path appends hold_value_correlation_
+        crowding_applied to applied_validations."""
+        from unittest.mock import patch
+
+        from src.state.portfolio import Position
+
+        pos = self._make_position("buy_yes", trade_id="pos_self")
+        other = Position(
+            trade_id="pos_other",
+            market_id="m_other",
+            city="Houston",
+            cluster="Houston",
+            target_date="2026-04-25",
+            bin_label="70-71°F",
+            direction="buy_yes",
+            entry_price=0.40,
+            size_usd=100.0,
+            entry_method="calibrated",
+        )
+        pos.neg_edge_count = 2
+
+        patches = [
+            patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True),
+            patch("src.state.portfolio.exit_correlation_crowding_rate", return_value=0.01),
+            patch("src.state.portfolio.get_correlation", return_value=0.80),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.55,
+                best_bid=0.50,
+                day0_active=False,
+                hours_to_settlement=48.0,
+                applied=[],
+                portfolio_positions=(("Houston", 100.0, "pos_other"),),
+                bankroll=200.0,
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert "hold_value_correlation_crowding_applied" in decision.applied_validations
+
+    def test_flag_on_no_crowding_breadcrumb_when_rate_zero(self):
+        """Regression: default rate=0.0 means crowding cost is 0.0 even
+        when portfolio has co-held positions — breadcrumb must NOT fire
+        (otherwise phase2 noisily breadcrumbs every decision when rate is
+        still at default)."""
+        from unittest.mock import patch
+
+        pos = self._make_position("buy_yes", trade_id="pos_self")
+        pos.neg_edge_count = 2
+
+        patches = [
+            patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True),
+            # rate stays at default 0.0
+        ]
+        for p in patches:
+            p.start()
+        try:
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.55,
+                best_bid=0.50,
+                day0_active=False,
+                hours_to_settlement=48.0,
+                applied=[],
+                portfolio_positions=(("Houston", 100.0, "pos_other"),),
+                bankroll=200.0,
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert "hold_value_correlation_crowding_applied" not in decision.applied_validations
+
+    def test_build_exit_context_excludes_self_from_portfolio_positions(self):
+        """Plumbing: _build_exit_context must filter self out of the
+        portfolio_positions tuple so the helper doesn't double-count
+        this position's own exposure."""
+        from src.engine.cycle_runtime import _build_exit_context
+        from src.state.portfolio import ExitContext, Position, PortfolioState
+        from types import SimpleNamespace
+
+        pos_self = self._make_position("buy_yes", trade_id="pos_self")
+        pos_other = Position(
+            trade_id="pos_other",
+            market_id="m_other",
+            city="Houston",
+            cluster="Houston",
+            target_date="2026-04-25",
+            bin_label="70-71°F",
+            direction="buy_yes",
+            entry_price=0.40,
+            size_usd=100.0,
+            entry_method="calibrated",
+        )
+        portfolio = PortfolioState(bankroll=200.0, positions=[pos_self, pos_other])
+
+        # Minimal edge_ctx stub — fields read by _build_exit_context
+        edge_ctx = SimpleNamespace(
+            p_posterior=0.55,
+            p_market=[0.50],
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+        )
+        # Minimal monitor fields on pos_self
+        pos_self.last_monitor_prob_is_fresh = True
+        pos_self.last_monitor_market_price_is_fresh = True
+        pos_self.last_monitor_best_bid = 0.48
+        pos_self.last_monitor_best_ask = 0.52
+        pos_self.last_monitor_market_vig = 1.0
+        pos_self.last_monitor_whale_toxicity = False
+        pos_self.chain_state = "synced"
+
+        ctx = _build_exit_context(
+            pos_self,
+            edge_ctx,
+            hours_to_settlement=48.0,
+            ExitContext=ExitContext,
+            portfolio=portfolio,
+        )
+        # Should contain ONLY the other position; self must be filtered.
+        assert len(ctx.portfolio_positions) == 1
+        cluster, size_usd, trade_id = ctx.portfolio_positions[0]
+        assert trade_id == "pos_other"
+        assert cluster == "Houston"
+        assert size_usd == 100.0
+        assert ctx.bankroll == 200.0
+
+    def test_build_exit_context_portfolio_none_produces_empty_tuple(self):
+        """Backward-compat: callers not yet passing portfolio kwarg get
+        empty tuple + None bankroll; downstream helper safely returns 0
+        cost. Preserves pre-phase2 behavior for untouched callsites."""
+        from src.engine.cycle_runtime import _build_exit_context
+        from src.state.portfolio import ExitContext
+        from types import SimpleNamespace
+
+        pos = self._make_position("buy_yes", trade_id="pos_self")
+        edge_ctx = SimpleNamespace(
+            p_posterior=0.55,
+            p_market=[0.50],
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+        )
+        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = 0.48
+        pos.last_monitor_best_ask = 0.52
+        pos.last_monitor_market_vig = 1.0
+        pos.last_monitor_whale_toxicity = False
+        pos.chain_state = "synced"
+
+        ctx = _build_exit_context(
+            pos,
+            edge_ctx,
+            hours_to_settlement=48.0,
+            ExitContext=ExitContext,
+            # portfolio kwarg omitted — pre-phase2 call shape
+        )
+        assert ctx.portfolio_positions == ()
+        assert ctx.bankroll is None

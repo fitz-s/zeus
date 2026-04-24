@@ -430,6 +430,32 @@ def exit_daily_hurdle_rate() -> float:
     return rate
 
 
+def exit_correlation_crowding_rate() -> float:
+    """T6.4-phase2 correlation-crowding cost rate.
+
+    Cost model: crowding_cost_usd = rate × exposure_ratio × shares × best_bid
+    where exposure_ratio is the output of
+    src.strategy.correlation.correlated_exposure over OTHER held positions.
+    rate=0.01 means 1% of exit notional per unit of correlated exposure.
+
+    Default 0.0 = no-op (correlation crowding adds zero cost; feature is
+    plumbed but disabled). Operator raises after measuring should_exit
+    sensitivity via T6.3-followup-1 replay harness.
+
+    Bounds [0.0, 0.1] — values above 0.1 imply >10% of exit notional per
+    unit-exposure which would aggressively exit any correlated book.
+    """
+    rate = float(settings["exit"]["correlation_crowding_rate"])
+    if not (0.0 <= rate <= 0.1):
+        raise ValueError(
+            f"exit.correlation_crowding_rate={rate} out of sane range "
+            f"[0.0, 0.1]. Values above 0.1 would force near-immediate exit "
+            f"of any correlated book. Check config/settings.json "
+            f"exit.correlation_crowding_rate."
+        )
+    return rate
+
+
 def hold_value_exit_costs_enabled() -> bool:
     """T6.4 feature flag: when False (default), _buy_yes_exit /
     _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4

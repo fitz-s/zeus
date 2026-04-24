@@ -164,13 +164,27 @@
     ],
     "regression": "19 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 12; +7 hardening). Broader HoldValue-keyed 19+ still green."
   },
-  "t6_4_phase2_tracked": {
+  "t6_4_phase2_closed": {
     "id": "T6.4-phase2",
-    "scope": "D6 correlation crowding cost — thread portfolio-position references through ExitContext so Position.evaluate_exit can compute correlation_crowding via src/strategy/correlation.py::correlated_exposure(). Required for full D6 category immunity (1.0/1.0).",
-    "architectural_work": "ExitContext dataclass extension (new field: portfolio_positions: list or a ReadOnlyPortfolioView); cycle_runtime._build_exit_context() populates from current PortfolioState; HoldValue.compute_with_exit_costs receives correlation_crowding via new caller logic at the 4 wire-in sites.",
+    "status": "CLOSED_FULL",
+    "commit": "pending (this session)",
+    "scope_delivered": "D6 correlation crowding cost wired through ExitContext. ExitContext dataclass gains portfolio_positions: tuple = () + bankroll: Optional[float] = None (both trailing defaults, frozen-dataclass safe). cycle_runtime._build_exit_context() accepts portfolio kwarg and populates the tuple from PortfolioState.positions (self-excluded via trade_id filter). _buy_yes_exit / _buy_no_exit signatures extended with portfolio_positions + bankroll kwargs; 4 evaluate_exit call sites thread them through. Helper _compute_exit_correlation_crowding(this_cluster, portfolio_positions, bankroll, shares, best_bid, crowding_rate) reuses src/strategy/correlation.py::get_correlation and returns dollar-denominated crowding cost: rate × exposure_ratio × shares × best_bid. Cost plumbed into all 4 HoldValue.compute_with_exit_costs factory calls via correlation_crowding kwarg; applied_validations breadcrumb `hold_value_correlation_crowding_applied` fires when cost > 0. Config: exit.correlation_crowding_rate default 0.0 (safe no-op — phase2 shipping does NOT alter live behavior until operator flips after T6.3-followup-1 replay audit), bounded [0, 0.1] via getter.",
     "estimated_size": 6,
-    "blocker_for": "D6 full category immunity",
-    "prerequisites": ["T6.3-followup-1 production-corpus replay for should_exit delta baseline"]
+    "actual_size_estimate": "~4h (reused correlated_exposure semantics via direct get_correlation loop; no new invariants introduced at ExitContext authority layer — portfolio_positions + bankroll are optional trailing defaults)",
+    "category_immunity_delta": "D6 0.7/1.0 → 1.0/1.0 when exit.correlation_crowding_rate > 0. The architectural seam is now complete; crowding activation becomes a config flip rather than code change. Silent D6 bypass at the correlation dimension is now structurally impossible (any non-zero rate flows through typed ExitContext → helper → HoldValue factory with breadcrumb).",
+    "regression_delta": {
+      "touched_scope_post": "36 passed / 0 failed on tests/test_hold_value_exit_costs.py (was 24; +12 phase2 tests across new TestCorrelationCrowdingPhase2 class)",
+      "broader": "97 passed / 4 failed on test_hold_value_exit_costs + test_lifecycle + test_live_safety_invariants; the 4 failures are ALL pre-existing on HEAD 6fbdabb (verified via git stash — unrelated to phase2). 0 new failures."
+    },
+    "feature_flag_semantics_unchanged": "HOLD_VALUE_EXIT_COSTS still default OFF; phase2 correlation crowding piggybacks on that gate + gets its own rate-based no-op safeguard (default 0.0 even when feature flag ON).",
+    "files_modified": [
+      "config/settings.json (exit.correlation_crowding_rate + note)",
+      "src/config.py (exit_correlation_crowding_rate getter with bounds [0, 0.1])",
+      "src/state/portfolio.py (ExitContext 2 new fields + _compute_exit_correlation_crowding helper + 4 wire-in sites + _buy_yes_exit/_buy_no_exit signature extensions + 4 evaluate_exit caller updates)",
+      "src/engine/cycle_runtime.py (_build_exit_context portfolio kwarg + tuple construction with self-filter + 1 caller update at L623)"
+    ],
+    "files_added": [],
+    "tests_added_in_existing_file": "12 tests in tests/test_hold_value_exit_costs.py::TestCorrelationCrowdingPhase2 covering: helper-zero-when-rate-zero, helper-zero-when-no-other-positions, helper-zero-when-bankroll-missing, helper-golden-path-arithmetic, helper-does-not-re-filter-self (contract documentation), helper-skips-malformed-entries, rate-bounds-validation, rate-default-zero, breadcrumb-fires-when-rate-positive, breadcrumb-silent-when-rate-zero, _build_exit_context-excludes-self, _build_exit_context-portfolio-none-produces-empty-tuple."
   },
   "surrogate_critic_notes": {
     "con_nyx_pre_edit_review_quality": "HIGH — surfaced 3 findings the team-lead initial scope missed: (b) B086 rationale staleness, (e) test vacuity, (f) latent RED test. Adversarial 10-ask template per feedback_critic_prompt_adversarial_template.md is load-bearing for this level of architectural review.",

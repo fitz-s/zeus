@@ -120,7 +120,9 @@
     "fee_rate": 0.05,
     "_fee_rate_note": "T6.4 HoldValue fee estimate uses polymarket_fee(best_bid, fee_rate); 0.05 matches execution_price.py:130 default (calibrated against Polymarket fee schedule). HARDCODED — revisit after observed-exit-fee corpus stabilizes.",
     "daily_hurdle_rate": 0.0001,
-    "_daily_hurdle_rate_note": "T6.4 opportunity-cost rate per day of locked capital (0.01%/day ≈ 3.65%/year conservative hurdle). HARDCODED — replace with live-readiness B3 derived value once realized-return corpus exceeds 100 settlements."
+    "_daily_hurdle_rate_note": "T6.4 opportunity-cost rate per day of locked capital (0.01%/day ≈ 3.65%/year conservative hurdle). HARDCODED — replace with live-readiness B3 derived value once realized-return corpus exceeds 100 settlements.",
+    "correlation_crowding_rate": 0.0,
+    "_correlation_crowding_rate_note": "T6.4-phase2 correlation-crowding cost rate. Cost model: crowding_cost_usd = rate × correlated_exposure_ratio × shares × best_bid. rate=0.01 means 1% of exit notional per unit of correlated exposure across other held positions. Default 0.0 = no-op (safe default — feature-flag OFF preserves pre-T6.4-phase2 behavior even when HOLD_VALUE_EXIT_COSTS flips ON). Operator raises after T6.3-followup-1 replay audit measures should_exit sensitivity. HARDCODED until live-readiness B3 corpus."
   },
   "riskguard": {
     "brier_yellow": 0.25,
