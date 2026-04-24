@@ -165,6 +165,12 @@ root_governed_files:
     zone: root
     authority_role: registry
     forbidden_misread: Root operating law must be read before narrower scopes.
+  - path: "README.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    forbidden_misread: Orientation document for human/professor review; does not outrank AGENTS.md, machine manifests, or executable authority.
   - path: "workspace_map.md"
     status: active
     scope: global
@@ -413,6 +419,18 @@ state_surfaces:
     zone: state
     authority_role: runtime_support
     forbidden_misread: Auto-pause fail-closed tombstone is runtime evidence, not canonical trade truth.
+  - path: "state/README.md"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Directory placeholder explaining untracked state policy; not runtime truth.
+  - path: "state/.gitkeep"
+    status: active
+    scope: runtime
+    zone: state
+    authority_role: runtime_support
+    forbidden_misread: Git directory marker; not runtime truth.
 
 required_active_pointers:
   - path: "docs/operations/current_state.md"
