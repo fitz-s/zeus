@@ -184,68 +184,118 @@ of risk; do not copy those archive bodies into active docs.
 - do not let archive prose overrule manifests, tests, or present-tense source
   behavior
 
-## 2026-04-24 closure index — `docs/operations/` packet audit
+## 2026-04-24 closure archive — `docs/operations/` packet triage
 
 A Sonnet-driven audit on 2026-04-24 classified 21 of 23 packets in
-`docs/operations/` as CLOSED or CLOSED-with-lore-extracted.
-Lore cards have been extracted into
+`docs/operations/` as CLOSED or CLOSED-with-lore-extracted. **All 21
+were physically archived to `docs/archives/packets/` on 2026-04-24**
+(operator chose Option A — move to `docs/archives/packets/` — as the
+archive cold-storage path). Lore cards were extracted into
 `architecture/history_lore.yaml` (13 new cards: see IDs in the
-"Cards extracted 2026-04-24" section of that file). The bodies below
-are archive-ready; physical archive path (move to `docs/archives/
-packets/`, tarball, or out-of-tree cold storage) is pending operator
-ruling per `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md
-§D4`.
+"Cards extracted 2026-04-24" section of that file) BEFORE archive
+for Batch 2; the durable content rides forward in lore while the
+raw bodies consult-on-demand from the archive path.
 
-### Batch 1 — ARCHIVE_NOW (no additional lore extraction needed)
+**Text references elsewhere in the repo (src/ comments, YAML
+manifest `why:` pointers, test docstrings) that cite the OLD
+`docs/operations/task_*` paths now point to archived locations —
+readers should substitute `docs/operations/` → `docs/archives/packets/`
+for any 2026-04-13 / -14 / -16 / -19 / -20 / -21 / -22 / -23 packet
+in the list below. None of these refs are runtime-loaded (Python
+imports / file readers); they are prose/YAML `why` pointers.**
 
-Explicit closure evidence + low durable-lore density; can move without
-lore lifting:
+**Git-tracking split (per `.gitignore:11` `docs/archives/` + AGENTS.md
+§History "raw archive bodies are local historical cold storage, not
+peer authority"):**
+- Packets that were git-tracked before the move remain git-tracked
+  at the new archived path (20 of 21). `git log --follow` preserves
+  history. `gitignore` does not un-track files that were tracked
+  before the pattern was added.
+- The forensic package (`zeus_world_data_forensic_audit_package_
+  2026-04-23/`) was never git-tracked; it stays local-only under
+  the new archived path. Not visible to `git clone` readers unless
+  they reproduce the body manually from the lore cards.
 
-- `docs/operations/task_2026-04-13_topology_compiler_program.md` (4K)
-- `docs/operations/task_2026-04-23_graph_refresh_official_integration/` (12K)
-- `docs/operations/task_2026-04-16_function_naming_freshness/` (12K)
-- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/` (12K)
-- `docs/operations/task_2026-04-20_code_review_graph_online_context/` (12K)
-- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/` (12K)
-- `docs/operations/task_2026-04-22_orphan_artifact_cleanup/` (12K)
-- `docs/operations/task_2026-04-23_authority_rehydration/` (28K)
-- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/` (36K)
-- `docs/operations/task_2026-04-22_docs_truth_refresh/` (28K)
-- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/` (40K)
-- `docs/operations/task_2026-04-19_workspace_artifact_sync/` (28K)
-- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/` (32K)
-- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` (184K)
-- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/` (28K)
+This split matches the intended archive protocol: the durable content
+rides forward via `architecture/history_lore.yaml` (in-git); the raw
+bodies that were already git-tracked continue to be consultable via
+git archaeology; bodies that were never tracked stay local-only cold
+storage.
 
-**Batch 1 total**: 15 packets, ~480K.
+### Batch 1 — ARCHIVE_NOW (archived 2026-04-24; lore not extracted separately)
 
-### Batch 2 — ARCHIVE_AFTER_LORE_EXTRACT (lore cards already written)
+Explicit closure evidence + low durable-lore density. Bodies now at
+`docs/archives/packets/{name}/`:
 
-Closed packets with durable-lore density; 13 lore cards extracted into
-`architecture/history_lore.yaml` before archive. Bodies remain on disk
-pending D4 operator ruling:
+- `task_2026-04-13_topology_compiler_program.md` (4K)
+- `task_2026-04-23_graph_refresh_official_integration/` (12K)
+- `task_2026-04-16_function_naming_freshness/` (12K)
+- `task_2026-04-19_code_review_graph_topology_bridge/` (12K)
+- `task_2026-04-20_code_review_graph_online_context/` (12K)
+- `task_2026-04-20_code_impact_graph_context_pack/` (12K)
+- `task_2026-04-22_orphan_artifact_cleanup/` (12K)
+- `task_2026-04-23_authority_rehydration/` (28K)
+- `task_2026-04-23_guidance_kernel_semantic_boot/` (36K)
+- `task_2026-04-22_docs_truth_refresh/` (28K)
+- `task_2026-04-21_docs_reclassification_reference_extraction/` (40K)
+- `task_2026-04-19_workspace_artifact_sync/` (28K)
+- `task_2026-04-20_workspace_authority_reconstruction/` (32K)
+- `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` (184K)
+- `task_2026-04-23_authority_kernel_gamechanger/` (28K)
 
-- `docs/operations/task_2026-04-23_data_readiness_remediation/` (3.2M) —
+**Batch 1 total**: 15 packets archived, ~480K.
+
+### Batch 2 — ARCHIVE_AFTER_LORE_EXTRACT (archived 2026-04-24; lore cards extracted)
+
+Closed packets with durable-lore density. 13 lore cards extracted into
+`architecture/history_lore.yaml` BEFORE archive. Bodies now at
+`docs/archives/packets/{name}/`:
+
+- `task_2026-04-23_data_readiness_remediation/` (3.2M) —
   lore cards: `DB_TRIGGER_ENFORCED_AUTHORITY_MONOTONICITY`,
   `BULK_BATCH_WRITES_WITHOUT_PER_ROW_EVIDENCE_ARE_PROVENANCE_HOSTILE`,
   `INV_14_IDENTITY_SPINE_FOR_CANONICAL_ROWS`,
   `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE`
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/` (1.3M) —
+- `task_2026-04-16_dual_track_metric_spine/` (1.3M) —
   lore cards: `BUG_DISPOSITION_TAXONOMY_TERMINATES_OPEN_LISTS`,
   `PERSISTENT_CRITIC_ROTATION_PREVENTS_RUBBER_STAMPING`
-- `docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/` (272K) —
-  lore cards: `FORENSIC_DATA_AUDIT_TEMPLATE`,
-  `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE`
-- `docs/operations/task_2026-04-21_gate_f_data_backfill/` (204K) —
+- `zeus_world_data_forensic_audit_package_2026-04-23/` (272K) —
+  **local-only** (was never git-tracked; matches `.gitignore:11`
+  `docs/archives/` pattern). Body lives on local disk at
+  `docs/archives/packets/zeus_world_data_forensic_audit_package_
+  2026-04-23/`; not committed. Lore cards preserve the durable
+  content: `FORENSIC_DATA_AUDIT_TEMPLATE`,
+  `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE` (this
+  was the forensic audit that produced the lore; `data_readiness_
+  remediation` was its execution arm — they share an antipattern card)
+- `task_2026-04-21_gate_f_data_backfill/` (204K) —
   lore cards: `DATA_COLLECTION_AND_TRADING_DAEMON_ARE_INDEPENDENT`
-- `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/` (24K) —
+- `task_2026-04-23_live_harvester_enablement_dr33/` (24K) —
   lore cards: `FAIL_CLOSED_EXTERNAL_API_PARSING`,
   `FEATURE_FLAG_DEFAULT_OFF_FOR_BEHAVIOR_RISK`
-- `docs/operations/task_2026-04-14_session_backlog.md` (20K) —
+- `task_2026-04-14_session_backlog.md` (20K) —
   lore cards: `RAINSTORM_DB_MIGRATION_WIPED_171K_FORECASTS_ROWS`
 
-**Batch 2 total**: 6 packets, ~5.1M. Lore extraction complete; archive
-pending operator D4 ruling on cold-storage path.
+**Batch 2 total**: 6 packets archived, ~5.1M. Lore extraction complete;
+bodies consultable on demand from `docs/archives/packets/`.
+
+### Archive completion summary (2026-04-24)
+
+- Archive destination: `docs/archives/packets/` (operator Option A).
+- Total archived: 21 packets, ~5.5M freed from `docs/operations/`.
+- Remaining in `docs/operations/`: 4 directories — 3 active
+  (`task_2026-04-23_midstream_remediation/`,
+  `task_2026-04-23_graph_rendering_integration/`,
+  `task_2026-04-24_p0_data_audit_containment/`) + 1 NEEDS_OPERATOR_
+  DECISION (`task_2026-04-19_execution_state_truth_upgrade/`, pending
+  D3 ruling per `docs/to-do-list/zeus_operations_archive_deferrals_
+  2026-04-24.md`).
+- Plus top-level single-file docs (AGENTS.md, current_state.md,
+  known_gaps.md, current_data_state.md, current_source_validity.md,
+  data_rebuild_plan.md, runtime_artifact_inventory.md) unchanged.
+- Plus 1 NEEDS_OPERATOR_DECISION single-file doc
+  (`task_2026-04-13_remaining_repair_backlog.md`, pending D1+D2
+  ruling).
 
 ### Pending operator decisions (NEEDS_OPERATOR_DECISION)
 

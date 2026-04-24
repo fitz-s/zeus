@@ -5,11 +5,20 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: **Midstream Remediation W1–W4 CLOSED 2026-04-24 — CONDITIONAL achieved; W5 substrate-blocked**
-- Active package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-23_midstream_remediation/receipt.json`
+- Mainline task: **Post-audit P0 data containment Ralph loop — active 2026-04-24**
+- Active execution packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- Previous package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - Post-audit handoff (zero-context cold-start doc for next session): `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Status: CONDITIONAL milestone materially achieved.
+- Status: P0 containment implementation/verification in progress.
+  - P0 scope: read-only `training-readiness` evidence in
+    `scripts/verify_truth_surfaces.py`, static legacy-hourly containment in
+    `scripts/semantic_linter.py`, and targeted negative tests.
+  - P0 must not mutate `state/**`, `.code-review-graph/graph.db`, `src/**`,
+    `docs/authority/**`, or `architecture/**`.
+  - P0 closeout requires critic + verifier review before commit/push, then an
+    additional third-party critic/verifier pass before freezing P1.
+- Prior midstream status: CONDITIONAL milestone materially achieved.
   - **W1–W4**: 100% shipped — T1 + T2 + T3 + T4 + T5 + T6.3 + T6.4 +
     T7 + N1.2 closed or retroactively accounted; T3.4-observe upstream-
     blocked by K4.
@@ -85,14 +94,16 @@ boundaries with surgical diffs to avoid midstream work loss.
 - `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - `docs/operations/task_2026-04-23_midstream_remediation/work_log.md`
 - `docs/operations/task_2026-04-23_midstream_remediation/receipt.json`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
 
 ## Freeze point
 
-- Midstream Remediation packet may edit the files listed in its plan's
-  "Wave N scope" allowed_files sections. It must not mutate runtime DBs
-  (`state/**`), `.code-review-graph/graph.db`, or `docs/authority/**`
-  broad rewrites. It must not touch upstream `src/data/*` (reserved for
-  the concurrent data-readiness packet).
+- P0 containment may edit only the files listed in
+  `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`.
+  It must not mutate runtime DBs (`state/**`), `.code-review-graph/graph.db`,
+  `src/**`, `docs/authority/**`, or `architecture/**`.
 
 ## Current fact companions
 
@@ -105,34 +116,36 @@ boundaries with surgical diffs to avoid midstream work loss.
 Use `docs/operations/AGENTS.md` for registered operations-surface classes and
 non-default packet/package routing.
 
-Visible non-default packet evidence:
+Visible non-default packet evidence (post-audit trim, 2026-04-24):
 
-- `docs/operations/task_2026-04-16_dual_track_metric_spine/`
-- `docs/operations/task_2026-04-16_function_naming_freshness/`
-- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/`
-- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`
-- `docs/operations/task_2026-04-19_workspace_artifact_sync/`
-- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/`
-- `docs/operations/task_2026-04-20_code_review_graph_online_context/`
-- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/`
-- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/`
-- `docs/operations/task_2026-04-21_gate_f_data_backfill/`
-- `docs/operations/task_2026-04-22_docs_truth_refresh/`
-- `docs/operations/task_2026-04-22_orphan_artifact_cleanup/`
-- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/`
-- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/`
-- `docs/operations/task_2026-04-23_authority_rehydration/`
-- `docs/operations/task_2026-04-23_graph_refresh_official_integration/`
-- `docs/operations/task_2026-04-23_graph_rendering_integration/`
-- `docs/operations/task_2026-04-23_data_readiness_remediation/`
+Active / pending — remaining in `docs/operations/`:
+
+- `docs/operations/task_2026-04-23_midstream_remediation/` — W1–W4
+  closed; W5 substrate-blocked (see `docs/to-do-list/zeus_midstream_
+  fix_plan_2026-04-23.md §"Wave 5 remaining blockers"`).
+- `docs/operations/task_2026-04-23_graph_rendering_integration/` —
+  implementation-prep stage.
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/` —
+  active (current mainline per P0 Ralph loop).
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/` —
+  NEEDS_OPERATOR_DECISION (D3 in `docs/to-do-list/zeus_operations_
+  archive_deferrals_2026-04-24.md`). Planning-lock only; P1/P2
+  venue_commands spine never implemented.
+
+Archived 2026-04-24 (moved to `docs/archives/packets/` — 21 packets,
+~5.5M freed). Lore cards extracted into `architecture/history_lore.yaml`
+for high-density packets. See `docs/archive_registry.md §"2026-04-24
+closure archive"` for the full list + lore-card cross-references.
+
+Also `docs/operations/task_2026-04-13_remaining_repair_backlog.md`
+(NEEDS_OPERATOR_DECISION single-file — D1+D2 pending TIGGE GRIB ingest
+and source-attestation packet rulings) remains in place pending
+operator decision.
 
 ## Next action
 
-- Execute W1 of the Midstream Remediation plan: T1.a 15-file header wave,
-  T1.b provenance_registry.yaml content audit, T3.1 7-caller signature
-  drift fix, T3.3 canonical position_current schema bootstrap alignment,
-  T7.b AST guard test, T4.0 persistence design doc.
-- Each slice: critic-reviewed by con-nyx before commit; clean pull-rebase
-  on every commit to sync with concurrent upstream-data-readiness agent.
-- Preserve unrelated dirty work and the concurrent upstream agent's
-  in-flight edits.
+- Finish P0 containment: run targeted tests/topology gates, critic review,
+  verifier pass, deslop/reverification, commit, and push scoped files only.
+- After P0 close, run the required additional third-party critic/verifier pass
+  before freezing the next P1 ralplan.
+- Preserve unrelated dirty work and concurrent in-flight edits.
