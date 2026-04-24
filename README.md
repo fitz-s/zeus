@@ -4,7 +4,7 @@
 
 Zeus preserves the full causal chain from market contract semantics through source truth, forecast signal, calibrated probability, execution, monitoring, settlement, and learning — while keeping dual-track (high/low temperature) identity separated end-to-end.
 
-The system trades **discrete settlement contracts**. Everything starts with the venue contract: city, local date, temperature metric, unit, bin topology, shoulder bins, source text, rounding rule, and settlement authority. Forecast probability is meaningful only after these semantic obligations are pinned.
+The system trades **discrete settlement contracts**. Everything starts with the venue contract: city, local date, temperature metric, unit, bin topology, shoulder bins, source text, provider-specific settlement transform, and settlement authority. Forecast probability is meaningful only after these semantic obligations are pinned.
 
 ---
 
@@ -34,15 +34,17 @@ The hardest failures in this domain are **semantic category errors** — using t
 
 ## Core probability theory
 
-### Why settlement is integer, not continuous
+### Why settlement is discrete, not continuous
 
-Polymarket weather markets settle on Weather Underground's reported daily high/low. WU reports **whole degrees** (°F or °C). The physical chain is:
+Polymarket weather markets resolve according to the venue's per-market source text and source-family routing. Most WU-bound markets settle on whole-degree WU daily high/low values. NOAA-bound rows, HKO rows, and historical source-switch cases require provider-specific settlement transforms or quarantine.
+
+The physical chain is source-family-specific, but the general shape is:
 
 ```text
-atmosphere -> NWP ensemble member -> ASOS sensor (σ ≈ 0.2–0.5°F) -> METAR rounding -> WU integer
+atmosphere -> NWP ensemble member -> station/sensor observation -> provider report -> venue settlement support
 ```
 
-This means probability mass concentrates at bin boundaries in ways that mean-based continuous models miss entirely. Zeus's Monte Carlo explicitly simulates the full chain from ensemble member through sensor noise to integer display.
+Zeus therefore does not assume a universal weather rounding law. It models settlement as a source-family-specific transform from provider observation to venue bin containment. For WU-style integer markets, probability mass concentrates at bin boundaries in ways that mean-based continuous models miss entirely. Zeus's Monte Carlo explicitly simulates the chain from ensemble member through instrument noise to the venue-resolvable discrete settlement support.
 
 ### Discrete settlement support (semantic atom)
 
@@ -215,11 +217,11 @@ This distinction matters. A report may reveal a failure, but it does not become 
 
 ### 1. Contract-first reasoning
 
-Zeus does not begin with a weather model. It begins with the traded contract: city, local calendar date, temperature metric (high/low), unit (°F/°C), settlement source and station, bin topology, shoulder bins, rounding rule, and authority status. Only after that does forecast probability become economically meaningful.
+Zeus does not begin with a weather model. It begins with the traded contract: city, local calendar date, temperature metric (high/low), unit (°F/°C), settlement source and station, bin topology, shoulder bins, provider-specific settlement transform, and authority status. Only after that does forecast probability become economically meaningful.
 
 ### 2. Source provenance as runtime truth
 
-Weather APIs are not interchangeable. Zeus tracks source family, station/product, observation field, physical quantity, data version, writer, audit reference, and reconstruction method. Settlement rows are expected to be re-auditable from their provenance sidecar.
+Weather APIs are not interchangeable. Zeus tracks source family, station/product, observation field, physical quantity, data version, writer, audit reference, reconstruction method, and the settlement transform used to map provider observations into venue support. Settlement rows are expected to be re-auditable from their provenance sidecar.
 
 ### 3. Dual-track high/low identity
 
