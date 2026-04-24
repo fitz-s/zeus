@@ -21,7 +21,7 @@ workflow layer only. Zeus authority remains rooted in root `AGENTS.md`,
 2. `workspace_map.md`
 3. `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md`
 4. `docs/operations/current_state.md` when a concrete packet is involved
-5. `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+5. `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 
 If navigation is blocked by pre-existing registry issues, record that as
 workspace state and keep the handoff change narrow.
