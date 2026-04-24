@@ -216,6 +216,100 @@ def test_linter_detects_keyword_literal_hourly_observations_query(tmp_path):
     assert "P0_unsafe_table" in violations[0]
 
 
+def test_linter_detects_format_literal_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches SQL literal assembly through str.format."""
+    bad_file = tmp_path / "bad_hourly_format_literal.py"
+    bad_file.write_text(
+        'rows = conn.execute("SELECT * FROM {}".format("hourly_observations"))\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_percent_literal_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches SQL literal assembly through percent formatting."""
+    bad_file = tmp_path / "bad_hourly_percent_literal.py"
+    bad_file.write_text(
+        'rows = conn.execute("SELECT * FROM %s" % "hourly_observations")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_percent_mapping_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches percent formatting with literal mappings."""
+    bad_file = tmp_path / "bad_hourly_percent_mapping.py"
+    bad_file.write_text(
+        'rows = conn.execute("SELECT * FROM %(table)s" % {"table": "hourly_observations"})\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_variable_percent_mapping_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches percent formatting with constant mapping variables."""
+    bad_file = tmp_path / "bad_hourly_percent_mapping_variable.py"
+    bad_file.write_text(
+        'mapping = {"table": "hourly_observations"}\n'
+        'rows = conn.execute("SELECT * FROM %(table)s" % mapping)\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_variable_backed_fstring_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches f-strings backed by constant table names."""
+    bad_file = tmp_path / "bad_hourly_fstring_literal.py"
+    bad_file.write_text(
+        'table = "hourly_observations"\n'
+        'rows = conn.execute(f"SELECT * FROM {table}")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_format_unpack_mapping_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches str.format with unpacked literal mappings."""
+    bad_file = tmp_path / "bad_hourly_format_unpack_mapping.py"
+    bad_file.write_text(
+        'rows = conn.execute("SELECT * FROM {table}".format(**{"table": "hourly_observations"}))\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_detects_format_map_hourly_observations_query(tmp_path):
+    """P0_unsafe_table catches format_map with constant mapping variables."""
+    bad_file = tmp_path / "bad_hourly_format_map.py"
+    bad_file.write_text(
+        'mapping = {"table": "hourly_observations"}\n'
+        'rows = conn.execute("SELECT * FROM {table}".format_map(mapping))\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
 def test_linter_allows_evidence_hourly_view_reference(tmp_path):
     """Evidence adapters may reference an explicit evidence view name."""
     adapter_file = tmp_path / "adapter.py"

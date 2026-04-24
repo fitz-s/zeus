@@ -52,11 +52,37 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         "forecasts",
         "calibration_pairs_v2",
         "platt_models_v2",
-        "market_events_v2",
-        "market_price_history",
     ]:
         conn.execute(f"CREATE TABLE {table} (id INTEGER)")
         conn.execute(f"INSERT INTO {table} (id) VALUES (1)")
+    conn.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            market_slug TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_events_v2 (
+            market_slug, condition_id, token_id, city, target_date, temperature_metric
+        ) VALUES (
+            'market-slug', 'condition-id', 'token-id',
+            'NYC', '2026-04-23', 'high'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE market_price_history (market_slug TEXT, token_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO market_price_history (market_slug, token_id) VALUES ('market-slug', 'token-id')"
+    )
     conn.execute(
         """
         CREATE TABLE historical_forecasts_v2 (
@@ -93,8 +119,23 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         )
         """
     )
-    conn.execute("CREATE TABLE settlements_v2 (market_slug TEXT)")
-    conn.execute("INSERT INTO settlements_v2 (market_slug) VALUES ('market-slug')")
+    conn.execute(
+        """
+        CREATE TABLE settlements_v2 (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            market_slug TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO settlements_v2 (
+            city, target_date, temperature_metric, market_slug
+        ) VALUES ('NYC', '2026-04-23', 'high', 'market-slug')
+        """
+    )
     conn.execute(
         "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
     )
@@ -357,9 +398,45 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "null_market_slug" in _blocker_codes(report)
-        check = report["checks"]["settlements_v2.market_slug_not_null"]
+        check = report["checks"]["settlements_v2.market_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
+
+    def test_training_readiness_fails_when_market_identity_columns_are_missing(self, tmp_path):
+        db_path = tmp_path / "missing-market-identity-columns-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DROP TABLE market_events_v2")
+        conn.execute("CREATE TABLE market_events_v2 (id INTEGER)")
+        conn.execute("INSERT INTO market_events_v2 (id) VALUES (1)")
+        conn.execute("DROP TABLE market_price_history")
+        conn.execute("CREATE TABLE market_price_history (id INTEGER)")
+        conn.execute("INSERT INTO market_price_history (id) VALUES (1)")
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "missing_market_identity_columns" in _blocker_codes(report)
+        assert report["checks"]["market_events_v2.market_identity_present"]["status"] == "FAIL"
+        assert report["checks"]["market_price_history.market_identity_present"]["status"] == "FAIL"
+
+    def test_training_readiness_fails_when_market_identity_values_are_empty(self, tmp_path):
+        db_path = tmp_path / "empty-market-identity-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("UPDATE market_events_v2 SET condition_id=''")
+        conn.execute("UPDATE market_price_history SET token_id=NULL")
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "missing_market_identity" in _blocker_codes(report)
+        assert report["checks"]["market_events_v2.market_identity_present"]["count"] == 1
+        assert report["checks"]["market_price_history.market_identity_present"]["count"] == 1
 
     def test_training_readiness_fails_when_observation_instants_v2_source_role_is_fallback(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)

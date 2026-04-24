@@ -45,14 +45,19 @@ Summary:
   keyword-argument literal SQL strings that reference `hourly_observations`.
 - Completed scoped deslop pass by narrowing AST keyword scanning to explicit
   SQL-bearing keyword names.
+- Post-close critic found two remaining false-confidence paths. Follow-up
+  fix makes readiness fail closed when market identity columns/values are
+  missing from `market_events_v2`, `market_price_history`, or `settlements_v2`,
+  and hardens legacy-hourly lint against `.format`, `.format_map`, `%`,
+  mapping-backed `%`, and constant-backed f-string SQL assembly.
 
 Verification:
 - `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py scripts/semantic_linter.py`
   passed.
 - `.venv/bin/python -m pytest tests/test_truth_surface_health.py -k training_readiness -q`
-  passed: 18 passed, 7 deselected.
+  passed: 20 passed, 7 deselected.
 - `.venv/bin/python -m pytest tests/test_semantic_linter.py -q`
-  passed: 20 passed.
+  passed: 27 passed.
 - `.venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --json`
   exited 1 as expected with `status=NOT_READY`; blockers include empty
   `historical_forecasts_v2`, `ensemble_snapshots_v2`,
@@ -79,14 +84,16 @@ Verification:
   `NOT_READY`, targeted semantic linter, topology gates, and unstaged index.
 - Final critic pass found no blocker in the receipt-scoped diff after the
   deslop edit.
+- Post-close P0 follow-up targeted tests passed after market-identity and
+  literal-SQL bypass fixes.
 - Full `tests/test_truth_surface_health.py tests/test_semantic_linter.py`
   run is still red on existing live-DB assumption:
   `TestGhostPositions.test_no_ghost_positions` cannot find
-  `trade_decisions`; non-failing count is 39 passed, 5 skipped.
+  `trade_decisions`; non-failing count is 48 passed, 5 skipped.
 - Broad `--navigation`, `--scripts`, and `--tests` remain red on pre-existing
   registry/archive/script debt outside P0 scope; targeted receipt, planning,
   freshness, map-maintenance, and test gates passed.
 
 Next:
-- Run topology gates, targeted tests, critic/verifier review, then commit and
-  push scoped files only.
+- Run topology gates, critic/verifier review, then commit and push the scoped
+  P0 follow-up files only.

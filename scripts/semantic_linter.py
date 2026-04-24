@@ -228,23 +228,151 @@ def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
     return violations
 
 
-def _literal_string_value(node: ast.AST) -> str | None:
+def _literal_mapping_value(
+    node: ast.AST,
+    constants: dict[str, str],
+    mappings: dict[str, dict[str, str]],
+) -> dict[str, str] | None:
+    if isinstance(node, ast.Name) and node.id in mappings:
+        return mappings[node.id]
+    if not isinstance(node, ast.Dict):
+        return None
+    result = {}
+    for key, value_node in zip(node.keys, node.values):
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            return None
+        value = _literal_string_value(value_node, constants, mappings)
+        if value is None:
+            return None
+        result[key.value] = value
+    return result
+
+
+def _format_operand_value(
+    node: ast.AST,
+    constants: dict[str, str],
+    mappings: dict[str, dict[str, str]],
+) -> object | None:
+    if isinstance(node, ast.Tuple):
+        values = [_format_operand_value(item, constants, mappings) for item in node.elts]
+        if any(value is None for value in values):
+            return None
+        return tuple(values)
+    mapping = _literal_mapping_value(node, constants, mappings)
+    if mapping is not None:
+        return mapping
+    return _literal_string_value(node, constants, mappings)
+
+
+def _literal_string_value(
+    node: ast.AST,
+    constants: dict[str, str] | None = None,
+    mappings: dict[str, dict[str, str]] | None = None,
+) -> str | None:
+    constants = constants or {}
+    mappings = mappings or {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id]
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _literal_string_value(node.left)
-        right = _literal_string_value(node.right)
+        left = _literal_string_value(node.left, constants, mappings)
+        right = _literal_string_value(node.right, constants, mappings)
         if left is not None and right is not None:
             return left + right
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        left = _literal_string_value(node.left, constants, mappings)
+        right = _format_operand_value(node.right, constants, mappings)
+        if left is not None and right is not None:
+            try:
+                return left % right
+            except (TypeError, ValueError):
+                return None
     if isinstance(node, ast.JoinedStr):
         pieces = []
         for value in node.values:
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 pieces.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                rendered = _literal_string_value(value.value, constants, mappings)
+                if rendered is None:
+                    return None
+                pieces.append(rendered)
             else:
                 return None
         return "".join(pieces)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        template = _literal_string_value(node.func.value, constants, mappings)
+        if template is None:
+            return None
+        args = [_literal_string_value(arg, constants, mappings) for arg in node.args]
+        if any(arg is None for arg in args):
+            return None
+        kwargs = {}
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                mapping = _literal_mapping_value(keyword.value, constants, mappings)
+                if mapping is None:
+                    return None
+                kwargs.update(mapping)
+                continue
+            value = _literal_string_value(keyword.value, constants, mappings)
+            if value is None:
+                return None
+            kwargs[keyword.arg] = value
+        try:
+            return template.format(*args, **kwargs)
+        except (IndexError, KeyError, ValueError):
+            return None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format_map"
+    ):
+        template = _literal_string_value(node.func.value, constants, mappings)
+        if template is None or len(node.args) != 1 or node.keywords:
+            return None
+        mapping = _literal_mapping_value(node.args[0], constants, mappings)
+        if mapping is None:
+            return None
+        try:
+            return template.format_map(mapping)
+        except (KeyError, ValueError):
+            return None
     return None
+
+
+class _StringConstantCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.constants: dict[str, str] = {}
+        self.mappings: dict[str, dict[str, str]] = {}
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        mapping = _literal_mapping_value(node.value, self.constants, self.mappings)
+        if mapping is not None:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.mappings[target.id] = mapping
+        value = _literal_string_value(node.value, self.constants, self.mappings)
+        if value is not None:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.constants[target.id] = value
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            mapping = _literal_mapping_value(node.value, self.constants, self.mappings)
+            if mapping is not None:
+                self.mappings[node.target.id] = mapping
+            value = _literal_string_value(node.value, self.constants, self.mappings)
+            if value is not None:
+                self.constants[node.target.id] = value
+        self.generic_visit(node)
 
 
 def _sql_call_literal_args(content: str) -> list[tuple[int, int, str]]:
@@ -253,12 +381,16 @@ def _sql_call_literal_args(content: str) -> list[tuple[int, int, str]]:
     except SyntaxError:
         return []
 
+    collector = _StringConstantCollector()
+    collector.visit(tree)
+    constants = collector.constants
+    mappings = collector.mappings
     sql_call_names = {"execute", "executemany", "executescript", "read_sql", "read_sql_query"}
     sql_keyword_names = {"sql", "query", "statement"}
     literals = []
 
     def append_literal(arg: ast.AST) -> None:
-        value = _literal_string_value(arg)
+        value = _literal_string_value(arg, constants, mappings)
         if value is None:
             return
         literals.append(

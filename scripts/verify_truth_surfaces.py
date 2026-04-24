@@ -166,6 +166,65 @@ def _add_missing_table_check(
         report["blockers"].append(blocker)
 
 
+def _add_required_identity_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    check_id: str,
+    columns: tuple[str, ...],
+    missing_code: str = "missing_market_identity_columns",
+    empty_code: str = "missing_market_identity",
+) -> None:
+    """Fail closed unless a market table carries non-empty identity fields."""
+    if not _table_exists(cur, table):
+        _add_missing_table_check(
+            report,
+            check_id=check_id,
+            table=table,
+            detail=f"{table} table is missing",
+        )
+        return
+
+    existing_columns = _columns(cur, table)
+    missing_columns = [column for column in columns if column not in existing_columns]
+    if missing_columns:
+        report["checks"][check_id] = _check_entry(
+            check_id=check_id,
+            status=FAIL,
+            detail=(
+                f"{table} lacks required identity columns: "
+                + ", ".join(missing_columns)
+            ),
+            count=0,
+            threshold=0,
+            met=False,
+        )
+        report["blockers"].append(
+            {"code": missing_code, "table": table, "count": len(missing_columns)}
+        )
+        return
+
+    where = " OR ".join(
+        f"{column} IS NULL OR TRIM(CAST({column} AS TEXT)) = ''"
+        for column in columns
+    )
+    count = _count(cur, table, where)
+    met = count == 0
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=f"{table} rows with missing identity={count}",
+        count=count,
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append(
+            {"code": empty_code, "table": table, "count": count}
+        )
+
+
 def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
     """Return a read-only P0 training-readiness report for the world DB.
 
@@ -220,21 +279,35 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         checks = report["checks"]
         blockers = report["blockers"]
 
-        if _table_exists(cur, "settlements_v2"):
-            count = _count(cur, "settlements_v2", "market_slug IS NULL OR market_slug = ''")
-            met = count == 0
-            checks["settlements_v2.market_slug_not_null"] = _check_entry(
-                check_id="settlements_v2.market_slug_not_null",
-                status=PASS if met else FAIL,
-                detail=f"settlements_v2 rows without market_slug={count}",
-                count=count,
-                threshold=0,
-                met=met,
-            )
-            if not met:
-                blockers.append(
-                    {"code": "null_market_slug", "table": "settlements_v2", "count": count}
-                )
+        _add_required_identity_check(
+            report,
+            cur,
+            table="settlements_v2",
+            check_id="settlements_v2.market_identity_present",
+            columns=("city", "target_date", "temperature_metric", "market_slug"),
+            empty_code="null_market_slug",
+        )
+        _add_required_identity_check(
+            report,
+            cur,
+            table="market_events_v2",
+            check_id="market_events_v2.market_identity_present",
+            columns=(
+                "market_slug",
+                "condition_id",
+                "token_id",
+                "city",
+                "target_date",
+                "temperature_metric",
+            ),
+        )
+        _add_required_identity_check(
+            report,
+            cur,
+            table="market_price_history",
+            check_id="market_price_history.market_identity_present",
+            columns=("market_slug", "token_id"),
+        )
 
         if _table_exists(cur, "observation_instants_v2"):
             columns = _columns(cur, "observation_instants_v2")
