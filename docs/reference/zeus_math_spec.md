@@ -14,7 +14,7 @@ This spec covers every math/stat operation that touches a price, probability, or
 
 1. Unit handling and rounding
 2. Forecast data (X side: TIGGE ECMWF ensemble)
-3. Settlement data (Y side: WU / HKO)
+3. Settlement data (Y side: WU / HKO / NOAA; CWA is legacy-retroactive-quarantine only, see lore CWA_STATION_IS_LEGACY_QUARANTINE_PATH_NOT_DEAD_CODE)
 4. Monte Carlo simulation of the WU reporting chain (P_raw)
 5. Bins and market structure (including open-boundary bins)
 6. Extended Platt calibration (P_cal) with numerical safety

@@ -2402,3 +2402,80 @@ cards:
       4-phase sequence for hardening async execution (P0) harden
       existing - (P1) durable command truth - (P2) semantic loop
       closure - (P3) decision law. Skipping phases re-admits inference.
+
+  - id: CWA_STATION_IS_LEGACY_QUARANTINE_PATH_NOT_DEAD_CODE
+    status: active_knowledge
+    severity: medium
+    sources:
+      - src/config.py
+      - src/execution/harvester.py
+      - src/data/tier_resolver.py
+      - state/zeus-world.db (2026-04-24 probe)
+      - docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/
+    failure_mode: >
+      A future agent reads harvester._HARVESTER_LIVE_DATA_VERSION['cwa_station']
+      = 'cwa_no_collector_v0', tier_resolver.py:72 saying 'no city uses this
+      today', and 7 live cwa_no_collector_v0 rows in settlements, then
+      concludes the code path is inconsistent and either (a) deletes the
+      dispatch entry breaking historical reconstruction, or (b) promotes
+      cwa_station to tier_resolver as active source breaking the
+      Phase-0 eligibility assumption.
+    trigger_context:
+      - reading settlements with data_version = 'cwa_no_collector_v0'
+      - modifying _HARVESTER_LIVE_DATA_VERSION dispatch dict
+      - questioning whether cwa_station is active / dead / zombie
+    wrong_moves:
+      - delete _HARVESTER_LIVE_DATA_VERSION['cwa_station'] entry
+      - promote cwa_station to tier_resolver without adding collector
+      - assume the 7 live rows are a bug requiring cleanup
+      - remove cwa_no_collector_v0 from CANONICAL_SETTLEMENT_DATA_VERSIONS
+    correct_rule: >
+      cwa_station is a LEGACY RETROACTIVE path Taipei used pre-2026-04-15
+      before migrating to wu_icao. The dispatch entry remains because
+      harvester retroactive reconstruction of pre-migration dates still
+      writes via this path; every row it produces is authority='QUARANTINED'
+      because there is no accepted CWA proxy (confirmed at
+      src/execution/harvester.py:273). The 7 live cwa_no_collector_v0
+      rows in settlements are all Taipei city, target_dates 2026-03-16
+      through 2026-03-22, all QUARANTINED, all settled_at 2026-04-23T19:50:34
+      (single batch P-E reconstruction after migration). tier_resolver.py:72
+      comment is accurate (no currently-active city uses cwa_station) AND
+      the dispatch entry is needed (past QUARANTINED rows still write
+      correctly). Three-way apparent inconsistency reconciles as
+      legacy-retroactive-quarantine, not dead code.
+    antibodies:
+      docs:
+        - architecture/history_lore.yaml (this card)
+        - src/execution/harvester.py:273
+        - src/data/tier_resolver.py:72
+      pattern:
+        - sqlite3 state/zeus-world.db probe confirms 7 Taipei QUARANTINED rows
+        - CANONICAL_SETTLEMENT_DATA_VERSIONS retains cwa_no_collector_v0
+    residual_risk: >
+      If any future city is added with settlement_source_type='cwa_station',
+      it will hit the 'no accepted proxy' path and produce QUARANTINED rows.
+      Before adding such a city, a CWA collector must be implemented OR
+      the city must be configured with a different source_type. The
+      historical 7-row residue does NOT contaminate training because
+      QUARANTINED authority is filtered by every canonical reader.
+    invalidation_condition: >
+      Implementing a working CWA collector promotes cwa_station to an
+      active writer path; update tier_resolver comment and this card
+      accordingly at that time.
+    routing:
+      task_terms: [cwa, taipei, cwa_no_collector, cwa_station, taiwan CWA, settlement source type migration]
+      file_patterns:
+        - src/execution/harvester.py
+        - src/data/tier_resolver.py
+        - src/contracts/ensemble_snapshot_provenance.py
+    downstream_blast_radius:
+      - settlements retroactive reconstruction
+      - canonical settlement data_version allowlist
+      - Phase 0 tier eligibility
+    zero_context_digest: >
+      cwa_station is legacy-retroactive-QUARANTINE. 7 Taipei pre-migration
+      (2026-04-15) rows exist with data_version=cwa_no_collector_v0, all
+      QUARANTINED, all written by harvester retroactive reconstruction.
+      tier_resolver comment 'no city uses this today' is correct; harvester
+      dispatch entry is needed for historical paths. Not dead code, not
+      active writer — legacy reconstruction shell.
