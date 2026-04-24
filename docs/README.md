@@ -44,7 +44,7 @@ Historical governance files demoted from authority live under
 - `operations/current_source_validity.md` - current audited source-validity posture
 - `runbooks/live_operation.md` - day-to-day live daemon runbook
 - `operations/known_gaps.md` - active operational gap register
-- `operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/` - active P1.4 planning packet
+- `operations/task_2026-04-24_p1_eligibility_views_training_preflight/` - active P1.5 planning packet
 - `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
 - `../workspace_map.md` - repo visibility and routing guide
 
