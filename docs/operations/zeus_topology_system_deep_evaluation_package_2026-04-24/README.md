@@ -4,6 +4,15 @@ Date: 2026-04-24
 Branch under review: `data-improve`  
 Baseline commit supplied: `baae2a4a3f143a328e056dc3f400fb1752ddc128`
 
+> [!NOTE]
+> **Staleness context (2026-04-24):** The repo is 7 commits past the baseline.
+> Post-baseline changes (README rewrite, `python3` hardening, writer provenance
+> gates) do not affect the topology system diagnosis. All P0–P5 recommendations
+> remain unimplemented and valid.
+>
+> This package was relocated from `docs/operation/` (typo) to `docs/operations/`
+> and had bare `python` command references fixed to `python3` per repo policy.
+
 ## Ruling
 
 **partially sound: structurally sound as a machine-readable governance/routing kernel, but cognitively underfed and still over-coupled to broad repo-health noise.**

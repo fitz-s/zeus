@@ -79,16 +79,16 @@ When topology conflicts with source/tests/current authority, treat the conflict 
 
 ## 7. Public interfaces
 
-- `python scripts/topology_doctor.py --navigation ...`
-- `python scripts/topology_doctor.py closeout ...`
-- `python scripts/topology_doctor.py --strict`
-- `python scripts/topology_doctor.py --docs`
-- `python scripts/topology_doctor.py --source`
-- `python scripts/topology_doctor.py --tests`
-- `python scripts/topology_doctor.py --scripts`
-- `python scripts/topology_doctor.py --code-review-graph-status`
-- `python scripts/topology_doctor.py context-pack ...`
-- `python scripts/topology_doctor.py compiled-topology ...`
+- `python3 scripts/topology_doctor.py --navigation ...`
+- `python3 scripts/topology_doctor.py closeout ...`
+- `python3 scripts/topology_doctor.py --strict`
+- `python3 scripts/topology_doctor.py --docs`
+- `python3 scripts/topology_doctor.py --source`
+- `python3 scripts/topology_doctor.py --tests`
+- `python3 scripts/topology_doctor.py --scripts`
+- `python3 scripts/topology_doctor.py --code-review-graph-status`
+- `python3 scripts/topology_doctor.py context-pack ...`
+- `python3 scripts/topology_doctor.py compiled-topology ...`
 
 ## 8. Internal seams
 

@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-24_p1_writer_provenance_gates/` | Active P1.2 writer provenance gates implementation packet |
+| `task_2026-04-24_p1_unsafe_observation_quarantine/` | Active P1.3 unsafe observation quarantine planning packet |
 
 ### Packet Evidence
 
@@ -54,6 +54,9 @@ Package-input directories are source material for a packet, not universal law.
 For example:
 
 - `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/`
+- `zeus_topology_system_deep_evaluation_package_2026-04-24/` — topology system
+  assessment and P0–P5 reform roadmap; all recommendations remain unimplemented
+  and valid as of 2026-04-24
 
 For the 2026-04-23 Zeus world data forensic audit package, the canonical P1
 route is the archived path registered below. If a local
@@ -85,6 +88,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_graph_rendering_integration/` | packet evidence | Graph deep-rendering remaining-value integration packet |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
+| `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |
 | `task_2026-04-14_session_backlog.md` | packet evidence | Session backlog snapshot from calibration-refactor work |
@@ -103,7 +107,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
 | `task_2026-04-24_p0_data_audit_containment/` | packet evidence | Closed P0 post-audit containment packet for read-only training-readiness blockers and legacy-hourly static lint |
 | `task_2026-04-24_p1_source_role_registry/` | packet evidence | Closed P1.1 source-role registry packet (plan `2424264`, implementation `af7dd52`; post-close critic/verifier PASS) |
-| `task_2026-04-24_p1_writer_provenance_gates/` | active packet | P1.2 writer provenance gates implementation packet; plan freeze `e498b0d` post-close critic/verifier PASS |
+| `task_2026-04-24_p1_writer_provenance_gates/` | packet evidence | Closed P1.2 writer provenance gates packet (plan `e498b0d`, implementation `16292e2`; post-close reassessment closed the writer-local slice and corrected future P1/P3 boundaries) |
+| `task_2026-04-24_p1_unsafe_observation_quarantine/` | active packet | P1.3 planning packet for fail-closed unsafe-observation quarantine / non-training policy before eligibility-view adoption |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules

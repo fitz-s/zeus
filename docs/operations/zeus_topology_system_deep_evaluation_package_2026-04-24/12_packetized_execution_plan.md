@@ -23,13 +23,13 @@
 - `--navigation --strict-health` or equivalent remains available
 
 **Tests / verification:**
-- `python -m py_compile scripts/topology_doctor.py scripts/topology_doctor_*.py`
+- `python3 -m py_compile scripts/topology_doctor.py scripts/topology_doctor_*.py`
 - targeted pytest for navigation/closeout
 - fixture proving unrelated docs drift does not block source closeout
 
 **Closeout commands:**
-- `python scripts/topology_doctor.py --navigation --task "topology lane repair" --files scripts/topology_doctor.py --json`
-- `python scripts/topology_doctor.py closeout --changed-files scripts/topology_doctor.py tests/test_topology_doctor.py --summary-only`
+- `python3 scripts/topology_doctor.py --navigation --task "topology lane repair" --files scripts/topology_doctor.py --json`
+- `python3 scripts/topology_doctor.py closeout --changed-files scripts/topology_doctor.py tests/test_topology_doctor.py --summary-only`
 
 **Rollback:**
 Revert topology_doctor lane policy changes and restore previous navigation/closeout tests.
@@ -103,8 +103,8 @@ Keep helper validators returning legacy issue shape via compatibility factory.
 - markdown link/path sanity
 
 **Closeout commands:**
-- `python scripts/topology_doctor.py --docs --json`
-- `python scripts/topology_doctor.py context-pack --profile package_review --files docs/reference/modules/topology_system.md --json`
+- `python3 scripts/topology_doctor.py --docs --json`
+- `python3 scripts/topology_doctor.py context-pack --profile package_review --files docs/reference/modules/topology_system.md --json`
 
 **Rollback:**
 Revert added/expanded books and registry entries atomically.
@@ -181,7 +181,7 @@ Revert schema/check additions first, then manifest edits.
 - proof graph stale is advisory
 
 **Closeout commands:**
-- `python scripts/topology_doctor.py --code-review-graph-status --json`
+- `python3 scripts/topology_doctor.py --code-review-graph-status --json`
 - context-pack graph profile command
 
 **Rollback:**

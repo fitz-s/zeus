@@ -56,7 +56,7 @@ Authority docs are law only where classified. Reference docs are durable explana
 
 ## 7. Public interfaces
 
-- `python scripts/topology_doctor.py --docs --json`
+- `python3 scripts/topology_doctor.py --docs --json`
 - docs registry entries
 - docs AGENTS file registries
 - current_state active pointer
