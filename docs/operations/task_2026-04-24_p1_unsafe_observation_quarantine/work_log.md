@@ -109,3 +109,89 @@ Next:
 - Commit and push the planning packet only.
 - Future P1.3 implementation starts only after post-close review and a fresh
   phase entry rereads `AGENTS.md`, runs topology, and explores routed files.
+
+## Implementation closeout addendum
+
+Date: 2026-04-24
+Branch: `p1-unsafe-observation-quarantine`
+Task: P1.3 unsafe observation quarantine implementation
+
+Changed files:
+- `scripts/verify_truth_surfaces.py`
+- `tests/test_truth_surface_health.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+
+Summary:
+- Confirmed branch cleanup before implementation: local branches are only
+  `main` and `p1-unsafe-observation-quarantine`; remote branches are only
+  `origin/main`.
+- Reopened phase entry under the current restored `AGENTS.md`, `workspace_map`,
+  current-state, fact companions, active packet, task boot profiles, fatal
+  misreads, and topology navigation.
+- Extended `scripts/verify_truth_surfaces.py` training-readiness diagnostics
+  to fail closed for structurally empty observation provenance (`{}` / `[]`),
+  WU verified rows without provenance, unsafe training source roles,
+  missing/non-OK causality status, and missing payload identity when a complete
+  payload-identity column contract exists.
+- Tightened `observation_instants_v2` training role eligibility to
+  `historical_hourly` only. `settlement_truth` is not accepted as a training
+  source role for observation instants.
+- Added focused regressions for empty JSON provenance, WU provenance blockers,
+  `settlement_truth`/unknown/fallback/null roles, causality blockers, and
+  optional payload identity checks.
+- Kept the packet read-only against production DB/state. Runtime JSON changes
+  under `state/**` remain unrelated dirty work and must stay unstaged.
+
+Verification:
+- Reread `AGENTS.md`.
+- Reread `workspace_map.md`.
+- Read `docs/operations/current_state.md`,
+  `docs/operations/current_data_state.md`,
+  `docs/operations/current_source_validity.md`,
+  `docs/operations/known_gaps.md`, and the active P1.3 packet.
+- `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
+- `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
+- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
+  reported known global docs/source/history-lore red issues and generic source
+  modification warnings. These are derived routing debt; this implementation
+  stayed inside the active packet's read-only diagnostics/test scope.
+- `python3 scripts/topology_doctor.py --code-review-graph-status --json`
+  failed on derived graph staleness/ignore-guard hygiene. Graph output remains
+  advisory only for this packet.
+- `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py` passed.
+- `.venv/bin/python -m pytest tests/test_truth_surface_health.py::TestTrainingReadinessP0 -q`
+  passed: 34 tests.
+- `.venv/bin/python -m pytest tests/test_truth_surface_health.py -q`
+  was run for the full file and failed on the pre-existing live-health gap
+  `TestGhostPositions.test_no_ghost_positions`: the current live test DB has
+  no `trade_decisions` table. This same gap is already recorded in the P0 data
+  audit containment work log; it is outside this P1.3 diagnostic quarantine
+  slice and was not changed.
+- `.venv/bin/python -m pytest tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_tier_resolver.py tests/test_backfill_scripts_match_live_config.py -q`
+  passed: 86 tests.
+- `.venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json`
+  exited 1 as expected with `status=NOT_READY`. Current live blockers include
+  `observation_instants_v2.training_role_unsafe=1813662`,
+  `observations.verified_without_provenance=39431`, and
+  `observations.wu_empty_provenance=39431`; causality unsafe count is 0 and
+  payload identity is not checkable because the complete contract columns are
+  not present.
+- Critic review returned ITERATE for payload identity alternatives: the first
+  pass checked only the first present source/station-registry alternative. The
+  implementation now treats source URL/file and station registry version/hash
+  as alternatives, and a regression covers the case where both alternative
+  columns exist but only the second column is populated.
+- Closeout gates passed after the critic fix: JSON validation, planning-lock,
+  work-record, change-receipts, current-state receipt binding,
+  map-maintenance precommit, freshness metadata, and staged whitespace check.
+- Verifier follow-up returned PASS. Remaining risks are unrelated dirty
+  `state/**` runtime artifacts and derived topology/Code Review Graph debt
+  outside this packet.
+
+Next:
+- Commit and push this branch.
+- Future P1.4 or P1.5 work requires a fresh phase entry before planning or
+  editing.

@@ -1,10 +1,12 @@
 # P1.3 Unsafe Observation Quarantine Ralplan Packet
 
 Date: 2026-04-24
-Branch: `data-improve`
-Status: planning-only packet. No source, schema, DB, current-fact, calibration,
-replay, or live consumer change is authorized until this plan is reviewed,
-pushed, and post-close reviewed.
+Branch: `p1-unsafe-observation-quarantine`
+Status: implementation closeout packet. The planning gate has been closed and
+this packet authorized only read-only diagnostic/test changes in
+`scripts/verify_truth_surfaces.py` and `tests/test_truth_surface_health.py`
+plus closeout bookkeeping. No production DB, schema, current-fact,
+calibration, replay, or live consumer change is authorized.
 
 ## Task
 
@@ -41,6 +43,21 @@ P1.3 planning entry evidence:
   returned restored global docs/source/history-lore red issues and gate-trust
   context. Those global issues remain routing debt; they do not authorize
   skipping this packet's scoped gates.
+
+P1.3 implementation entry evidence:
+
+- Reread current root `AGENTS.md`, `workspace_map.md`,
+  `docs/operations/current_state.md`, and the active P1.3 packet.
+- Read current fact companions:
+  `docs/operations/current_data_state.md`,
+  `docs/operations/current_source_validity.md`, and
+  `docs/operations/known_gaps.md`.
+- `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
+- `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
+- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
+  returned known global docs/source/history-lore red issues and generic source
+  modification warnings. Those are derived routing debt; this packet remains
+  scoped to read-only diagnostics/tests and closeout bookkeeping.
 
 ## Decision
 
@@ -95,6 +112,15 @@ Allowed future implementation files after plan freeze and post-close review:
 
 - `scripts/verify_truth_surfaces.py`
 - `tests/test_truth_surface_health.py`
+
+Implemented files:
+
+- `scripts/verify_truth_surfaces.py`
+- `tests/test_truth_surface_health.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Optional future closeout bookkeeping:
 
@@ -195,6 +221,10 @@ Future implementation must run:
 - P1.3 plan explicitly freezes implementation until post-close review.
 - Future implementation is read-only against production DB by default.
 - Unsafe observation families are fail-closed, not retroactively promoted.
+- Implementation extends training-readiness diagnostics without mutating
+  production DB/state, schema, calibration, replay, or live consumers.
+- Live read-only closeout reports current fail-closed blockers for WU empty
+  provenance and unsafe `observation_instants_v2` training role rows.
 - P1.4, P1.5, and P3 boundaries are explicit and do not smuggle
   `settlements_v2`, market-identity backfill, schema/view DDL, or broad
   replay/live consumer rewiring into P1.3.
