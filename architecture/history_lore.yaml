@@ -1654,3 +1654,751 @@ cards:
     zero_context_digest: >
       Packet evidence and commit hygiene are not ceremony; they are the
       antibody against losing real work to interruption or scratch drift.
+
+  # ---------------------------------------------------------------
+  # Cards extracted 2026-04-24 from docs/operations/ packet audit
+  # (Sonnet-driven triage report; 21 closed packets surveyed).
+  # ---------------------------------------------------------------
+
+  - id: DB_TRIGGER_ENFORCED_AUTHORITY_MONOTONICITY
+    status: active_law
+    severity: critical
+    sources:
+      - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md
+      - src/state/db.py
+    failure_mode: >
+      Any code path — including future agents, scripts, or direct SQL —
+      can silently demote a VERIFIED row to UNVERIFIED or downgrade the
+      authority grade of a settlement. Python-layer gates cannot defend
+      against writers that bypass them.
+    trigger_context:
+      - settlement writes
+      - authority-grade transitions (VERIFIED / UNVERIFIED / QUARANTINED)
+      - data migrations that touch authority columns
+      - direct SQL ad-hoc queries on the operations DB
+    wrong_moves:
+      - rely on Python-layer SettlementSemantics.assert_settlement_value() as the sole guard
+      - trust a migration script to self-police its authority invariants
+      - assume in-code enforcement extends to all current + future writers
+    correct_rule: >
+      Authority-monotonicity invariants that must survive every writer
+      belong at the DB trigger layer, not the application layer. Python
+      guards are defense-in-depth above the trigger, not in place of it.
+    antibodies:
+      gates:
+        - settlements_authority_monotonic trigger (v2 with json_type + length checks)
+        - settlements_verified_insert_integrity trigger (S2.2)
+        - settlements_verified_update_integrity trigger (S2.2)
+      tests:
+        - tests/test_settlements_authority_trigger.py
+        - tests/test_settlements_verified_row_integrity.py
+    residual_risk: >
+      A migration that drops + recreates the settlements table without
+      re-installing the triggers would re-expose the category. Mitigation:
+      migration helpers already re-install on DROP+CREATE (REOPEN-2 pattern).
+    invalidation_condition: >
+      Only a complete replacement of SQLite with an engine whose CHECK /
+      trigger semantics differ materially supersedes this rule.
+    routing:
+      task_terms: [authority, monotonicity, settlement authority, DB trigger, VERIFIED, QUARANTINED]
+      file_patterns:
+        - src/state/db.py
+        - tests/test_settlements_*.py
+    downstream_blast_radius:
+      - src/state/portfolio.py
+      - src/engine/evaluator.py
+      - docs/operations/current_data_state.md
+    zero_context_digest: >
+      Authority invariants that must survive every writer belong in DB
+      triggers, not in application code. Re-install triggers on every
+      table rebuild.
+
+  - id: FAIL_CLOSED_EXTERNAL_API_PARSING
+    status: active_law
+    severity: high
+    sources:
+      - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+      - src/execution/harvester.py
+    failure_mode: >
+      External API responses (Polymarket Gamma, UMA votes, CLOB
+      orderbook) drift silently — fields rename, shapes change, edge
+      cases emerge — and tolerant parsers produce plausibly-wrong
+      outputs that feed authority decisions (settlements, risk actions,
+      position state).
+    trigger_context:
+      - parsing Gamma market data
+      - reading UMA resolution votes
+      - CLOB orderbook shape assumptions
+      - any external API whose output is downstream authority input
+    wrong_moves:
+      - use .get(key, default) with plausible defaults when the default would produce a wrong-but-valid downstream decision
+      - silent pass-through of unexpected shapes
+      - assume an absent field means a specific semantic
+    correct_rule: >
+      External-API parsers that feed authority decisions must fail
+      closed on any unexpected shape. Verify assumptions against real
+      response samples before coding; never accept a silent default for
+      a field whose absence changes the authority verdict.
+    antibodies:
+      code:
+        - src/execution/harvester.py _find_winning_bin (hard-raises on unexpected shape)
+      tests:
+        - tests/test_harvester_dr33_live_enablement.py
+      discipline:
+        - verify against real API payload samples before writing parser
+        - document the sample count + date in the test docstring
+    residual_risk: >
+      API providers can change response shape between verification and
+      deployment. Mitigation: dated last-verified stamps on parsers with
+      operator periodic re-verification.
+    invalidation_condition: >
+      If external APIs move to typed, versioned contracts with
+      enforceable schemas (e.g. protobuf with strict mode), the hand-
+      coded fail-closed parsing may be replaceable with codegen'd
+      strict parsers.
+    routing:
+      task_terms: [external API, Gamma, UMA, fail-closed parsing, schema drift]
+      file_patterns:
+        - src/execution/harvester.py
+        - src/data/*.py
+        - tests/test_harvester_*.py
+    downstream_blast_radius:
+      - settlements table authority grade
+      - risk actuation from settlement resolution
+      - calibration corpus downstream
+    zero_context_digest: >
+      Never accept a silent default from an external API in a path that
+      feeds authority decisions. Verify against real payloads; fail
+      closed on unexpected shapes.
+
+  - id: FEATURE_FLAG_DEFAULT_OFF_FOR_BEHAVIOR_RISK
+    status: active_law
+    severity: high
+    sources:
+      - docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
+      - config/settings.json
+      - src/config.py
+    failure_mode: >
+      Code changes that alter live trading behavior land in a deploy
+      simultaneously with their activation, so any regression surfaces
+      only after money is at risk. Rollback requires reverting code, not
+      flipping a switch.
+    trigger_context:
+      - any slice that changes exit / entry / risk actuation semantics
+      - harvester enablement (DR-33-A)
+      - HoldValue cost-aware exit (T6.4)
+      - correlation crowding (T6.4-phase2)
+    wrong_moves:
+      - ship behavior change live on deploy without a dry-run gate
+      - rely on tests + review alone to validate runtime behavior shift
+      - combine deploy + enable in a single step for load-bearing logic
+    correct_rule: >
+      Code changes with material live-trading behavior risk ship with a
+      default-OFF feature flag. Deploy lands the code; operator flips
+      the flag after shadow validation (replay audit + small-capital A/B
+      test). Rollback = flag flip, not code revert.
+    antibodies:
+      flags:
+        - ZEUS_HARVESTER_LIVE_ENABLED (DR-33-A)
+        - HOLD_VALUE_EXIT_COSTS (T6.4)
+      discipline:
+        - shadow-validation prerequisite documented in flag note
+        - bounds validators on rate parameters to catch misconfig
+    residual_risk: >
+      Operator can flip without running prerequisites. Mitigation: code
+      enforcement of replay-receipt presence (T6.4 phase-next candidate).
+    invalidation_condition: >
+      Only a full typed deployment system that separates code-deploy
+      from behavior-enable structurally (e.g. progressive rollout via
+      orchestration layer) supersedes hand-rolled flags.
+    routing:
+      task_terms: [feature flag, default off, shadow validation, flag flip, behavior risk]
+      file_patterns:
+        - config/settings.json
+        - src/config.py
+    downstream_blast_radius:
+      - every slice that changes exit / entry / risk actuation
+      - T6.3-followup-1 replay harness becomes a flag-flip prerequisite
+    zero_context_digest: >
+      Code deploy and behavior enable are separate events. Default OFF
+      + operator flip after replay audit = rollback via config, not code.
+
+  - id: CHANGED_FILES_ONLY_FRESHNESS_GATE
+    status: active_law
+    severity: medium
+    sources:
+      - docs/operations/task_2026-04-16_function_naming_freshness/work_log.md
+      - architecture/naming_conventions.yaml
+      - scripts/test_currency_audit.py
+    failure_mode: >
+      Mass-historical freshness gates block progress on unrelated work
+      because every touched file triggers a cleanup obligation across
+      the whole tree. Teams respond by disabling the gate, destroying
+      its antibody value.
+    trigger_context:
+      - adding file-header provenance rules
+      - enforcing naming conventions
+      - test currency audits
+    wrong_moves:
+      - require all files to conform before merging any file
+      - block PRs on pre-existing violations the PR did not create
+      - run the gate on the full repo instead of the diff
+    correct_rule: >
+      Freshness / convention gates enforce only on files touched in the
+      current change. Legacy files become audit-required on first
+      contact, not on a flag day. This makes first-contact audit
+      automatic without a mass cleanup obligation.
+    antibodies:
+      scripts:
+        - scripts/test_currency_audit.py
+      manifests:
+        - architecture/naming_conventions.yaml
+        - architecture/test_topology.yaml
+    residual_risk: >
+      Historical files that are never touched remain non-conforming
+      indefinitely. Acceptable — audit obligation scales with actual
+      work, not with repo size.
+    invalidation_condition: >
+      Only a proven cleanup campaign budget or a structural migration
+      (e.g. repo split) warrants a mass-historical sweep.
+    routing:
+      task_terms: [freshness, naming, changed files, gate, first-contact audit]
+      file_patterns:
+        - scripts/test_currency_audit.py
+        - architecture/naming_conventions.yaml
+    downstream_blast_radius:
+      - every script and test file once touched
+      - CI policy for file-header provenance
+    zero_context_digest: >
+      Enforce conventions on the diff, not the tree. First-contact
+      audit beats flag-day migration.
+
+  - id: TOOL_FACADE_SELECTIVE_CAPABILITY_DENIAL
+    status: active_law
+    severity: medium
+    sources:
+      - docs/operations/task_2026-04-19_code_review_graph_topology_bridge/work_log.md
+      - architecture/code_review_graph_protocol.yaml
+    failure_mode: >
+      Powerful tools (graph refactoring, schema mutation, direct DB
+      writes) bypass project topology and authority gates when agents
+      invoke them directly. Topology becomes advisory rather than
+      enforceable.
+    trigger_context:
+      - MCP tool installations
+      - agent-facing CLI wrappers
+      - any tool that can mutate source, schema, or state
+    wrong_moves:
+      - expose the full upstream tool surface to agents
+      - trust agents to voluntarily avoid destructive operations
+      - rely on documentation rather than tool-level denial
+    correct_rule: >
+      When a powerful tool is integrated, build a project-owned facade
+      that OMITS capabilities incompatible with topology authority.
+      E.g. Code Review Graph's apply_refactor_tool is structurally
+      absent from Zeus's facade so agents cannot refactor via graph.
+    antibodies:
+      code:
+        - Zeus Codex MCP facade (omits apply_refactor_tool)
+      manifests:
+        - architecture/code_review_graph_protocol.yaml
+    residual_risk: >
+      Agent with direct CLI access could bypass the facade. Mitigation:
+      require agent tool list to route through the facade.
+    invalidation_condition: >
+      Only a topology authority so tight that no refactor path can
+      bypass it (e.g. git-hook enforced) supersedes facade denial.
+    routing:
+      task_terms: [MCP facade, tool denial, refactor tool, topology authority]
+      file_patterns:
+        - architecture/code_review_graph_protocol.yaml
+    downstream_blast_radius:
+      - every future MCP integration that has destructive surfaces
+    zero_context_digest: >
+      Don't expose upstream tool surfaces wholesale. Wrap + deny the
+      capabilities that undermine topology authority.
+
+  - id: BULK_BATCH_WRITES_WITHOUT_PER_ROW_EVIDENCE_ARE_PROVENANCE_HOSTILE
+    status: active_law
+    severity: critical
+    sources:
+      - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
+      - docs/operations/task_2026-04-23_data_readiness_remediation/work_log.md
+    failure_mode: >
+      Data migration / ETL writes 1000s of rows in a single transaction
+      without per-row provenance (source, authority, decision_time_
+      snapshot_id). Downstream auditors cannot distinguish row N from
+      row M, cannot determine which row came from which snapshot, and
+      cannot verify any individual row's canonical authority grade.
+    trigger_context:
+      - data-rebuild migrations
+      - backfill scripts
+      - cross-system data imports
+      - settlement bulk ingestion
+    wrong_moves:
+      - write rows with identical provenance_json across a batch
+      - use a single shared snapshot_id for rows from different sources
+      - defer provenance to a future "cleanup pass" (never happens)
+    correct_rule: >
+      Every row in a canonical authority table carries its own
+      provenance: source, authority grade, decision_time_snapshot_id,
+      imported_at. Bulk-batch writes must carry per-row evidence, not
+      batch-wide evidence. Row-level provenance survives batch
+      boundaries; batch-wide provenance does not.
+    antibodies:
+      schema:
+        - INV-14 identity spine on settlements (4 columns)
+        - provenance_json required-keys sidecar
+      tests:
+        - tests/test_settlements_verified_row_integrity.py
+    residual_risk: >
+      39,431 legacy observation rows already carry empty provenance_
+      metadata (pre-fix). Tracked as forensic C6; does not invalidate
+      the rule for future writes.
+    invalidation_condition: >
+      Only a typed-row identity that makes provenance columns NOT NULL
+      structurally unreachable via bypass supersedes the per-row
+      discipline rule.
+    routing:
+      task_terms: [bulk batch, provenance, per-row evidence, canonical authority, migration]
+      file_patterns:
+        - src/data/*.py
+        - src/execution/harvester.py
+        - scripts/*backfill*.py
+    downstream_blast_radius:
+      - every settlement / observation / calibration row
+      - calibration corpus authority
+      - settlement-driven risk actions
+    zero_context_digest: >
+      Batch-wide provenance is non-provenance. Every row in an authority
+      table carries its own source + authority + decision_snapshot_id.
+
+  - id: VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE
+    status: active_law
+    severity: critical
+    sources:
+      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/12_major_findings.md
+      - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
+    failure_mode: >
+      42,749 WU daily observations were stamped VERIFIED but 39,431 had
+      empty provenance_metadata. Authority grade is inflated: the
+      system believes it knows things it cannot prove. Downstream
+      consumers trust VERIFIED as a semantic but it carries no
+      verifiable evidence.
+    trigger_context:
+      - authority-grade columns on bulk-imported data
+      - migrations that back-stamp historical rows
+      - VERIFIED / UNVERIFIED / QUARANTINED taxonomies
+    wrong_moves:
+      - default unknown-provenance rows to VERIFIED on migration
+      - treat absence of provenance as verified-by-proxy (nothing flagged it)
+      - conflate row-exists with row-is-verified
+    correct_rule: >
+      VERIFIED is a strong claim that requires per-row evidence. A row
+      without verifiable source + timestamp + authority chain CANNOT
+      be VERIFIED; it is UNVERIFIED or QUARANTINED. Authority inflation
+      is the canonical data provenance antipattern and the direct
+      embodiment of Fitz Constraint #4 "data provenance > code
+      correctness".
+    antibodies:
+      gates:
+        - settlements_authority_monotonic trigger + verified_insert/update_integrity triggers
+        - SettlementSemantics.assert_settlement_value() row-level gate
+      audits:
+        - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+    residual_risk: >
+      39,431 legacy rows remain in the VERIFIED-without-evidence state
+      (tracked as forensic C6). They are not retroactively demoted — but
+      new writes cannot reproduce the category.
+    invalidation_condition: >
+      Only a typed authority-grade system where VERIFIED is constructible
+      only with a proven evidence payload (compile-time or DB-trigger
+      enforced) supersedes the rule.
+    routing:
+      task_terms: [VERIFIED, authority inflation, per-row evidence, provenance, false confidence]
+      file_patterns:
+        - src/state/db.py
+        - docs/operations/known_gaps.md
+    downstream_blast_radius:
+      - every downstream consumer reading authority grade
+      - calibration corpus filter at authority boundary
+      - risk actions that depend on settlement authority
+    zero_context_digest: >
+      VERIFIED without per-row evidence is a lie the system tells
+      itself. Demote to UNVERIFIED/QUARANTINED until evidence lands.
+
+  - id: DATA_COLLECTION_AND_TRADING_DAEMON_ARE_INDEPENDENT
+    status: active_law
+    severity: high
+    sources:
+      - docs/operations/task_2026-04-21_gate_f_data_backfill/step8_data_collection_decoupling.md
+    failure_mode: >
+      Work on data pipelines (HKO ingest, TIGGE GRIB harvest, Gamma
+      harvest) gets mislabeled as daemon-live blocked because the
+      daemon is currently paused. Correct data-collection work is
+      deferred unnecessarily; the conflation treats two independent
+      subsystems as one.
+    trigger_context:
+      - daemon auto-pause states (state/auto_pause_failclosed.tombstone)
+      - backfill planning that references daemon-live as a gate
+      - data-rebuild acceptance criteria
+    wrong_moves:
+      - block data-collection work on daemon resumption
+      - wait for live trading before populating calibration substrate
+      - bundle data-pipeline ACs into trading-cycle AC lists
+    correct_rule: >
+      Data collection (HKO, TIGGE, WU ingest) and trading daemon
+      (evaluator - executor cycle) are independent subsystems. Each has
+      its own lifecycle and readiness gates. Data-collection work does
+      NOT require trading to be live; trading depends on data but the
+      dependency runs one way.
+    antibodies:
+      docs:
+        - docs/operations/task_2026-04-21_gate_f_data_backfill/step8_data_collection_decoupling.md
+      architecture:
+        - separate cron / systemd units for HKO ingest vs trading daemon
+    residual_risk: >
+      Future planning documents may re-conflate if the taxonomy is not
+      carried forward. Mitigation: this lore card.
+    invalidation_condition: >
+      Only a genuine architectural merge (e.g. unified live daemon
+      that subsumes ingest) would invalidate the separation.
+    routing:
+      task_terms: [data collection, trading daemon, decoupling, daemon-live, backfill]
+      file_patterns:
+        - scripts/etl_*.py
+        - scripts/hko_ingest_*.py
+        - docs/operations/task_*_backfill/
+    downstream_blast_radius:
+      - every future data-pipeline acceptance criterion
+      - live-readiness B3 gate scoping
+    zero_context_digest: >
+      Ingest pipelines and trading cycle are independent. Don't gate
+      ingest on live-resume. Trading depends on data, not vice versa.
+
+  - id: RAINSTORM_DB_MIGRATION_WIPED_171K_FORECASTS_ROWS
+    status: historical
+    severity: critical
+    sources:
+      - docs/operations/task_2026-04-14_session_backlog.md
+    failure_mode: >
+      A cross-repo DB migration (Rainstorm - Zeus) was executed without
+      verifying Zeus-side write-path invariants. 171K forecasts rows
+      disappeared. Rainstorm.db was subsequently rejected as a recovery
+      source because its schema did not carry Zeus's canonical identity.
+    trigger_context:
+      - cross-repo DB migrations
+      - schema deltas between source and target
+      - recovery attempts from arbitrary DB snapshots
+    wrong_moves:
+      - trust a sister-repo's DB as a drop-in recovery source
+      - migrate schema without verifying receiver's write-path invariants
+      - treat row count as the canonical did-migration-succeed metric
+    correct_rule: >
+      Cross-system DB migrations require (1) receiver write-path
+      invariant audit before migration, (2) per-row identity check that
+      the source row carries all required receiver-side fields, (3)
+      rollback plan with snapshot + hash sidecar, (4) verification via
+      both row count AND per-row invariant sampling, NOT row count
+      alone. Sister-repo DBs are NOT recovery sources unless they
+      carry the receiver's canonical identity.
+    antibodies:
+      architecture:
+        - rejection of Rainstorm.db as recovery source (2026-04-14)
+        - calibration refactored to eliminate market_events dependency
+      discipline:
+        - REOPEN-2 pattern (snapshot + md5 sidecar + dry-run + verify)
+    residual_risk: >
+      171K rows lost; forensic reconstruction considered uneconomic.
+      Calibration rebuilt from alternative sources.
+    invalidation_condition: >
+      Historical; does not invalidate. This card is a memory aid so
+      future migrations do not repeat the failure.
+    routing:
+      task_terms: [Rainstorm, DB migration, data loss, cross-repo, recovery source]
+      file_patterns:
+        - docs/operations/task_2026-04-14_session_backlog.md
+        - scripts/migrate_*.py
+    downstream_blast_radius:
+      - calibration corpus (rebuilt from alternative sources)
+      - historical_forecasts table (permanently reduced)
+    zero_context_digest: >
+      Sister-repo DBs are not recovery sources. Cross-system migrations
+      require receiver-invariant audit + per-row identity check + snapshot
+      rollback plan, not just row count.
+
+  - id: INV_14_IDENTITY_SPINE_FOR_CANONICAL_ROWS
+    status: active_law
+    severity: critical
+    sources:
+      - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
+      - src/state/db.py
+      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+    failure_mode: >
+      Without a typed identity spine, rows in canonical authority
+      tables cannot be joined safely across time, cannot be audited for
+      decision-time provenance, and cannot be distinguished when their
+      physical_quantity or observation_field differs (e.g. HIGH vs LOW
+      metric for the same city x date).
+    trigger_context:
+      - settlement rows
+      - observation rows (hourly, daily)
+      - any canonical authority table that downstream trusts
+    wrong_moves:
+      - use (city, target_date) as the canonical key
+      - assume temperature_metric can be inferred from source at join time
+      - omit decision_time_snapshot_id from row-level provenance
+    correct_rule: >
+      Canonical authority rows carry a 4-column identity spine:
+      temperature_metric + physical_quantity + observation_field +
+      data_version. Plus a provenance_json sidecar with required keys
+      including decision_time_snapshot_id. The spine makes join
+      ambiguity structurally impossible: two rows cannot share the
+      identity-key subset unless they semantically describe the same
+      observation at the same point in time.
+    antibodies:
+      schema:
+        - settlements table INV-14 columns + UNIQUE(city, target_date, temperature_metric)
+        - observation_instants_v2 32-col with INV-14 spine extension
+      tests:
+        - tests/test_settlements_unique_migration.py
+    residual_risk: >
+      Legacy rows pre-INV-14 do not carry the spine. Migration backfills
+      the spine when source+metric are derivable; otherwise row is
+      QUARANTINED.
+    invalidation_condition: >
+      Only a replacement identity scheme (e.g. content-addressable
+      hashes derived from full canonical context) supersedes the
+      four-column spine.
+    routing:
+      task_terms: [INV-14, identity spine, canonical row, temperature_metric, physical_quantity, data_version]
+      file_patterns:
+        - src/state/db.py
+        - tests/test_*_unique_migration.py
+    downstream_blast_radius:
+      - every join against settlements / observations
+      - calibration corpus identity at bucket boundary
+      - dual-track (HIGH/LOW) separation at every layer
+    zero_context_digest: >
+      Canonical authority rows carry a 4-column identity spine +
+      provenance_json. (city, target_date) alone is not safe; metric +
+      physical_quantity are required to disambiguate dual-track.
+
+  - id: BUG_DISPOSITION_TAXONOMY_TERMINATES_OPEN_LISTS
+    status: active_law
+    severity: medium
+    sources:
+      - docs/operations/task_2026-04-16_dual_track_metric_spine/work_log.md
+      - docs/to-do-list/zeus_bug100_reassessment_table.csv
+    failure_mode: >
+      Open-ended bug lists accumulate indefinitely because is-this-fixed
+      has no canonical answer. Lists grow, triage gets skipped, agents
+      face a wall of unresolved items that cannot be closed.
+    trigger_context:
+      - multi-month bug sweeps
+      - post-audit findings lists
+      - backlog triage after long work
+    wrong_moves:
+      - keep items as open until fully resolved by new code
+      - conflate not-done with still-applicable
+      - refuse to close items that were absorbed by other work
+    correct_rule: >
+      Every item in a bug sweep routes to exactly one disposition:
+      PRE_EXISTING_FIX (already fixed by earlier work), RESOLVED (fixed
+      by this sweep), ABSORBED (covered by another packet / workstream),
+      or FORWARDED (explicitly moved to a new packet with pointer). The
+      taxonomy converts an unbounded list into a closed disposition set.
+    antibodies:
+      artifacts:
+        - docs/to-do-list/zeus_bug100_reassessment_table.csv
+        - bug100 routing table in task_2026-04-16_dual_track_metric_spine
+      discipline:
+        - every sweep output MUST route each item; un-routed items block closure
+    residual_risk: >
+      Taxonomy quality depends on triage rigor. Mitigation: explicit
+      cross-references from each disposition to the packet / commit
+      that settles it.
+    invalidation_condition: >
+      Only a richer taxonomy (e.g. explicit versioning of sweep
+      generations) supersedes the four-disposition set.
+    routing:
+      task_terms: [bug taxonomy, disposition, triage, ABSORBED, FORWARDED, PRE_EXISTING_FIX]
+      file_patterns:
+        - docs/to-do-list/*reassessment*.csv
+        - docs/to-do-list/*bug_audit*.md
+    downstream_blast_radius:
+      - every future multi-item sweep
+      - backlog grooming cadence
+    zero_context_digest: >
+      PRE_EXISTING_FIX / RESOLVED / ABSORBED / FORWARDED. Every sweep
+      item routes to exactly one disposition. Un-routed items block
+      sweep closure.
+
+  - id: PERSISTENT_CRITIC_ROTATION_PREVENTS_RUBBER_STAMPING
+    status: active_law
+    severity: high
+    sources:
+      - docs/operations/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md
+      - ~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory/feedback_critic_prompt_adversarial_template.md
+    failure_mode: >
+      Long multi-phase programs use a single critic across all phases.
+      The critic loses adversarial distance as it re-reads a
+      progressively-contextualized problem; later phases get rubber-
+      stamped because the-pattern-is-proven. Prior bugs stop surfacing.
+    trigger_context:
+      - multi-month work programs
+      - multi-phase packets with 5+ sequential PASS milestones
+      - critic-opus dispatched repeatedly on adjacent scopes
+    wrong_moves:
+      - use one critic for the entire program
+      - allow self-justification language in the dispatch prompt
+      - accept APPROVE with zero findings as a valid verdict on complex slices
+    correct_rule: >
+      Rotate critics between phases. Each critic retires after a multi-
+      phase PASS. Successor critic reads the scope fresh without
+      adversarial-distance erosion. Dispatch prompts use the 10-ask
+      adversarial template — no scope-narrowing, no self-justification,
+      explicit find-what-is-wrong + zero-findings-is-probably-rubber-
+      stamping framing.
+    antibodies:
+      teams:
+        - critic rotation beth-carol-dave-eve on dual_track_metric_spine
+      templates:
+        - 10-ask adversarial dispatch (T2.d.1, T6.3, T6.4)
+      feedback:
+        - feedback_critic_prompt_adversarial_template memory card
+    residual_risk: >
+      Rotation has overhead (new critic onboarding). Mitigation:
+      packet-level handoff docs that cold-start successors quickly.
+    invalidation_condition: >
+      Only a programmatically-enforced adversarial framework (e.g.
+      critic-bot with forced scope resampling) supersedes manual
+      rotation.
+    routing:
+      task_terms: [critic rotation, adversarial review, rubber-stamping, 10-ask template, prompt degradation]
+      file_patterns:
+        - docs/operations/task_*/team_lead_handoff.md
+    downstream_blast_radius:
+      - every multi-phase packet beyond 3 phases
+      - team orchestration budget planning
+    zero_context_digest: >
+      Rotate critics between phases; single critic across long programs
+      degrades to rubber-stamping. Adversarial 10-ask template is load-
+      bearing.
+
+  - id: FORENSIC_DATA_AUDIT_TEMPLATE
+    status: active_law
+    severity: high
+    sources:
+      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/
+      - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
+    failure_mode: >
+      Inherited or migrated databases carry unknown authority gaps.
+      Ad-hoc audits miss systemic issues (DST, point-in-time, source
+      tiering, join-safety) because they probe random tables rather
+      than following a semantic sequence.
+    trigger_context:
+      - inherited DB (from another team, another repo, a merger)
+      - post-migration data-trustworthiness verification
+      - pre-live-readiness data audit
+      - cross-metric / dual-track identity surfaces
+    wrong_moves:
+      - sample a few tables and declare looks-ok
+      - trust schema conformance as evidence of semantic correctness
+      - audit without a provenance-chain traversal
+      - skip DST / timezone / point-in-time checks because code-handles-it
+    correct_rule: >
+      Forensic data audits follow a reusable sequence (1) schema audit
+      (shapes + constraints), (2) table-by-table truth audit (authority
+      grade per table), (3) source tiering (TIER_A/B/C/D with
+      authority-chain traceback), (4) time geometry + DST (London
+      2025-03-30 style pitfalls), (5) causality + point-in-time
+      (decision_time_snapshot_id presence), (6) settlement alignment
+      (row identity vs source identity join-safety), (7) provenance +
+      authority (per-row evidence presence), (8) backfill script audit
+      (what writes where with what invariants), (9) downstream usage
+      audit (who reads what and assumes what).
+    antibodies:
+      template:
+        - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+      artifacts:
+        - 10 critical findings + 10 structural fixes in 12_major_findings.md
+        - safe/unsafe use-case matrix in 11_data_readiness_ruling.md
+    residual_risk: >
+      Template is template; specific DBs may require additional steps
+      (e.g. geospatial indices, graph-data integrity). Apply as base
+      sequence, extend per-domain.
+    invalidation_condition: >
+      Only a canonical data-quality certification framework with
+      automated enforcement (e.g. Great Expectations + authority-layer
+      compilation) supersedes the manual audit template.
+    routing:
+      task_terms: [forensic audit, data trustworthiness, provenance audit, DST, point-in-time, join-safety]
+      file_patterns:
+        - docs/operations/*forensic_audit*
+        - docs/operations/task_*_data_readiness_remediation/
+    downstream_blast_radius:
+      - every future inherited-DB onboarding
+      - every pre-live-readiness data audit
+    zero_context_digest: >
+      9-step sequence schema - table-truth - source tiering - DST -
+      causality/PIT - settlement alignment - provenance - backfill -
+      downstream. Apply as base template; extend per-domain.
+
+  - id: EXECUTION_STATE_TRUTH_FOUR_PHASE_PROGRESSION
+    status: candidate
+    severity: high
+    sources:
+      - docs/operations/task_2026-04-19_execution_state_truth_upgrade/project_brief.md
+      - docs/operations/task_2026-04-19_execution_state_truth_upgrade/prd.md
+    failure_mode: >
+      Asynchronous execution systems accumulate sometimes-infers-what-
+      happened semantics orphan orders, ambiguous fill states, phantom
+      positions after restart. Ad-hoc patches add more inference without
+      ever reaching proves-what-it-knows + admits-what-it-does-not-know
+      + survives-restart-without-inventing-truth.
+    trigger_context:
+      - asynchronous order execution (CLOB, AMM, off-chain matching)
+      - multi-step transactions with external side effects
+      - restart / recovery planning
+      - position authority after crashes
+    wrong_moves:
+      - add more inference rules to resolve ambiguity
+      - treat most-likely-state as canonical state
+      - skip explicit command-event separation
+    correct_rule: >
+      Hardening asynchronous execution truth follows a 4-phase
+      progression (P0) harden current live behavior (stop the bleed);
+      (P1) introduce durable execution command truth (venue_commands +
+      venue_command_events with submit-before-side-effect discipline);
+      (P2) close the semantic loop (commands - events - position state
+      transitions with no orphan paths); (P3) may then address outer
+      decision law. Skipping phases invites re-inference.
+    antibodies:
+      docs:
+        - docs/operations/task_2026-04-19_execution_state_truth_upgrade/prd.md
+      pattern:
+        - venue_commands + venue_command_events schema
+        - submit-before-side-effect discipline
+    residual_risk: >
+      Zeus P0 is absorbed by midstream + data-readiness; P1/P2 remain
+      unimplemented. The framework is not yet vindicated by its
+      venue_commands instantiation. Status candidate until Zeus (or
+      another system) closes P1+P2.
+    invalidation_condition: >
+      Only a proven alternative sequencing (e.g. direct jump to outer
+      decision law without command-truth spine) with successful
+      implementation supersedes the 4-phase progression.
+    routing:
+      task_terms: [execution state truth, venue_commands, command truth, semantic loop, async execution]
+      file_patterns:
+        - docs/operations/task_2026-04-19_execution_state_truth_upgrade/
+    downstream_blast_radius:
+      - CLOB order lifecycle
+      - chain reconciliation
+      - exit authority
+      - restart/recovery semantics
+    zero_context_digest: >
+      4-phase sequence for hardening async execution (P0) harden
+      existing - (P1) durable command truth - (P2) semantic loop
+      closure - (P3) decision law. Skipping phases re-admits inference.

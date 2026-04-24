@@ -183,3 +183,98 @@ of risk; do not copy those archive bodies into active docs.
   authority
 - do not let archive prose overrule manifests, tests, or present-tense source
   behavior
+
+## 2026-04-24 closure index — `docs/operations/` packet audit
+
+A Sonnet-driven audit on 2026-04-24 classified 21 of 23 packets in
+`docs/operations/` as CLOSED or CLOSED-with-lore-extracted.
+Lore cards have been extracted into
+`architecture/history_lore.yaml` (13 new cards: see IDs in the
+"Cards extracted 2026-04-24" section of that file). The bodies below
+are archive-ready; physical archive path (move to `docs/archives/
+packets/`, tarball, or out-of-tree cold storage) is pending operator
+ruling per `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md
+§D4`.
+
+### Batch 1 — ARCHIVE_NOW (no additional lore extraction needed)
+
+Explicit closure evidence + low durable-lore density; can move without
+lore lifting:
+
+- `docs/operations/task_2026-04-13_topology_compiler_program.md` (4K)
+- `docs/operations/task_2026-04-23_graph_refresh_official_integration/` (12K)
+- `docs/operations/task_2026-04-16_function_naming_freshness/` (12K)
+- `docs/operations/task_2026-04-19_code_review_graph_topology_bridge/` (12K)
+- `docs/operations/task_2026-04-20_code_review_graph_online_context/` (12K)
+- `docs/operations/task_2026-04-20_code_impact_graph_context_pack/` (12K)
+- `docs/operations/task_2026-04-22_orphan_artifact_cleanup/` (12K)
+- `docs/operations/task_2026-04-23_authority_rehydration/` (28K)
+- `docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/` (36K)
+- `docs/operations/task_2026-04-22_docs_truth_refresh/` (28K)
+- `docs/operations/task_2026-04-21_docs_reclassification_reference_extraction/` (40K)
+- `docs/operations/task_2026-04-19_workspace_artifact_sync/` (28K)
+- `docs/operations/task_2026-04-20_workspace_authority_reconstruction/` (32K)
+- `docs/operations/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` (184K)
+- `docs/operations/task_2026-04-23_authority_kernel_gamechanger/` (28K)
+
+**Batch 1 total**: 15 packets, ~480K.
+
+### Batch 2 — ARCHIVE_AFTER_LORE_EXTRACT (lore cards already written)
+
+Closed packets with durable-lore density; 13 lore cards extracted into
+`architecture/history_lore.yaml` before archive. Bodies remain on disk
+pending D4 operator ruling:
+
+- `docs/operations/task_2026-04-23_data_readiness_remediation/` (3.2M) —
+  lore cards: `DB_TRIGGER_ENFORCED_AUTHORITY_MONOTONICITY`,
+  `BULK_BATCH_WRITES_WITHOUT_PER_ROW_EVIDENCE_ARE_PROVENANCE_HOSTILE`,
+  `INV_14_IDENTITY_SPINE_FOR_CANONICAL_ROWS`,
+  `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE`
+- `docs/operations/task_2026-04-16_dual_track_metric_spine/` (1.3M) —
+  lore cards: `BUG_DISPOSITION_TAXONOMY_TERMINATES_OPEN_LISTS`,
+  `PERSISTENT_CRITIC_ROTATION_PREVENTS_RUBBER_STAMPING`
+- `docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/` (272K) —
+  lore cards: `FORENSIC_DATA_AUDIT_TEMPLATE`,
+  `VERIFIED_WITHOUT_PER_ROW_EVIDENCE_IS_FALSE_CONFIDENCE`
+- `docs/operations/task_2026-04-21_gate_f_data_backfill/` (204K) —
+  lore cards: `DATA_COLLECTION_AND_TRADING_DAEMON_ARE_INDEPENDENT`
+- `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/` (24K) —
+  lore cards: `FAIL_CLOSED_EXTERNAL_API_PARSING`,
+  `FEATURE_FLAG_DEFAULT_OFF_FOR_BEHAVIOR_RISK`
+- `docs/operations/task_2026-04-14_session_backlog.md` (20K) —
+  lore cards: `RAINSTORM_DB_MIGRATION_WIPED_171K_FORECASTS_ROWS`
+
+**Batch 2 total**: 6 packets, ~5.1M. Lore extraction complete; archive
+pending operator D4 ruling on cold-storage path.
+
+### Pending operator decisions (NEEDS_OPERATOR_DECISION)
+
+Not archive-ready — require explicit ruling on forward-vs-retire-vs-
+defer. Tracked in `docs/to-do-list/zeus_operations_archive_deferrals_
+2026-04-24.md`:
+
+- `docs/operations/task_2026-04-13_remaining_repair_backlog.md` (8K) —
+  TIGGE GRIB ingest items #52/#53 + source-attestation package are
+  genuinely unresolved (D1 + D2 in operations archive deferrals doc).
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/` (76K) —
+  planning-lock only; P1/P2 venue_commands spine never implemented
+  (D3 in operations archive deferrals doc). Lore card
+  `EXECUTION_STATE_TRUTH_FOUR_PHASE_PROGRESSION` extracted as `candidate`
+  status pending P1/P2 implementation.
+
+### Active (NOT archive candidates)
+
+- `docs/operations/task_2026-04-23_midstream_remediation/` (380K) —
+  W1–W4 closed per midstream fix plan; W5 substrate-blocked (see
+  `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md §"Wave 5
+  remaining blockers"`).
+- `docs/operations/task_2026-04-23_graph_rendering_integration/` (12K) —
+  implementation-prep stage; pre-implementation, not pre-archive.
+
+### Live-docs cross-reference update owed
+
+Once Batch 1 + Batch 2 archive completes (D4 resolved), trim
+`docs/operations/current_state.md §"Other operations surfaces /
+Visible non-default packet evidence"` list to only the 2 active
+packets and redirect historical entries to this registry. Tracked as
+D5 in `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md`.
