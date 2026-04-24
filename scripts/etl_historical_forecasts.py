@@ -1,3 +1,10 @@
+# Lifecycle: created=2025-11-08; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: ETL historical forecasts + derive per-city×season×source MAE/bias
+#          into model_skill from historical_forecasts × settlements JOIN.
+# Reuse: H3 (2026-04-24) hardened the MAE JOIN to pin
+#        s.temperature_metric='high' because historical_forecasts stores
+#        forecast_high without a metric column; LOW settlements would
+#        spuriously double-match and corrupt MAE/bias statistics.
 """ETL: Historical forecasts from zeus-world.db → historical_forecasts + model_skill.
 
 Source: zeus-world.db:forecasts (migrated from legacy predecessor, 171K+ rows, 5 NWP models)
@@ -138,11 +145,18 @@ def _compute_model_skill(conn):
     # We need season — do a second pass with Python grouping
     from collections import defaultdict
 
+    # H3 (2026-04-24): pin s.temperature_metric='high' because historical_
+    # forecasts tracks only forecast_high (no temperature_metric column).
+    # Without the filter, once LOW settlements exist the JOIN produces
+    # 2× spurious rows per (city, target_date) and corrupts MAE/bias.
     detail_rows = conn.execute("""
         SELECT f.city, f.target_date, f.source,
                f.forecast_high, s.settlement_value
         FROM historical_forecasts f
-        JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date
+        JOIN settlements s
+          ON f.city = s.city
+         AND f.target_date = s.target_date
+         AND s.temperature_metric = 'high'
         WHERE f.lead_days = 1
           AND s.settlement_value IS NOT NULL
     """).fetchall()

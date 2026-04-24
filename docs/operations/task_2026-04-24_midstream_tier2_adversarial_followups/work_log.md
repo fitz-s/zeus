@@ -218,7 +218,78 @@ follow-up; not S1 commit blockers)**:
 
 ### S3 — H3 (cross-table JOIN metric filter + antibody lint)
 
-_Pending execution._
+**Status**: landed in-tree, pending con-nyx verdict before commit.
+
+**Files**:
+- `src/engine/monitor_refresh.py` — L471-479 `SELECT settlement_value
+  FROM settlements` now pins `AND temperature_metric = 'high'` (proxy
+  HIGH-track delta consumer; `predicted_high` fixes the metric axis).
+- `scripts/etl_historical_forecasts.py` — JOIN settlements now pins
+  `AND s.temperature_metric = 'high'` (historical_forecasts carries
+  `forecast_high` only). Added Lifecycle/Purpose/Reuse header.
+- `scripts/validate_dynamic_alpha.py` — forecast_skill JOIN settlements
+  now pins `AND s.temperature_metric = 'high'`. Header added.
+- `scripts/etl_forecast_skill_from_forecasts.py` — forecasts JOIN
+  settlements now pins `AND s.temperature_metric = 'high'`. Header added.
+- `scripts/semantic_linter.py` — NEW `_check_settlements_metric_filter`
+  rule (structural antibody): scans `.execute*` SQL literal args for
+  `FROM|JOIN settlements` without a `temperature_metric` token in the
+  same literal. Canonical-path rule scoped to `src/` only; `scripts/`
+  is carved out as operator-run audit/analysis tooling (same pattern
+  as K2_struct allowlist). Allowlist: `src/execution/harvester.py`
+  (writer), `src/state/db.py` (schema migration).
+- `tests/test_semantic_linter.py` — NEW 8 tests covering H3 rule:
+  bare JOIN flagged; metric-filtered JOIN passes; bare FROM flagged;
+  metric-filtered FROM passes; composite table names (e.g.
+  `settlements_authority_monotonic`) not flagged; docstring mentions
+  ignored; allowlisted writer not flagged; tests/ carve-out.
+
+**Verification**:
+- `pytest tests/test_semantic_linter.py` → 35 passed (27 pre-existing
+  + 8 new H3).
+- `pytest tests/test_harvester_high_calibration_v2_route.py
+  tests/test_harvester_metric_identity.py tests/test_ingest_grib_law5_antibody.py`
+  → 45 total antibodies pass cross-slice.
+- Adjacent regression `pytest tests/test_k1_review_fixes.py` (monitor_refresh
+  consumer) → 8 passed.
+- `python scripts/semantic_linter.py --check src/` → H3 clean (0
+  violations in canonical path).
+- `python -m py_compile` clean on all 6 changed files.
+- `topology_doctor --planning-lock --plan-evidence / --freshness-metadata /
+  --map-maintenance --map-maintenance-mode precommit` → all ok.
+
+**Design decision — scope of H3 rule**:
+First draft fired on 86 sites across src/+scripts/ because many audit
+tools (scripts/investigate_*, scripts/baseline_*, scripts/onboard_*)
+legitimately query settlements cross-metric for exploration. Narrowed
+to `src/` canonical path + explicit allowlist for writer/migration.
+scripts/ is carved out at directory level with a comment pointer for
+future training-path scripts (`rebuild_*`, `refit_*`) to be migrated
+into the rule via allowlist extension. Rationale captured inline in
+`_check_settlements_metric_filter` docstring + comment block at
+carve-out.
+
+**Residual risks**:
+1. scripts/ carve-out leaves 85 pre-existing bare-JOIN sites
+   unflagged. Most are audit/one-off analysis; a few could be
+   canonical rebuild paths (scripts/rebuild_calibration_pairs_v2.py,
+   scripts/refit_platt_v2.py). Followup needed to triage + promote
+   training-path scripts into the H3 allowlist with explicit
+   predicates, THEN fail-closed the rule on them. Tracked as
+   `T2-S3-followup-SCRIPTS`.
+2. The 4 JOIN sites in `src/engine/` and 3 scripts/ paths are
+   forward-safe for LOW emergence but **do not retroactively fix any
+   previously-miscomputed MAE/Brier/delta values**. Current live DB
+   has zero LOW settlements (C4 confirmed), so pre-fix runs were
+   accidentally correct. Post-LOW emergence, runs post-fix will also
+   be correct. Historical MAE/Brier computations on future LOW-aware
+   data will differ from their hypothetical pre-fix values; this is
+   intended.
+3. My docstring-mention guard (H3 rule excludes docstrings because
+   `_sql_call_literal_args` only extracts `.execute*` args) may fail
+   on any JOIN that uses an indirect pattern (string variable passed
+   to execute). Not observed in current code; track as
+   `T2-S3-followup-INDIRECT-SQL` if encountered.
 
 ### S4 — M3 (CANONICAL_DATA_VERSIONS rename + parallel allowlists)
 

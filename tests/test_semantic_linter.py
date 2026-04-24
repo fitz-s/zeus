@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.semantic_linter import (
     _check_calibration_pairs_select,
     _check_legacy_hourly_observations_select,
+    _check_settlements_metric_filter,
     run_linter,
 )
 
@@ -384,3 +385,167 @@ def test_linter_ignores_hourly_observations_in_comments(tmp_path):
         commented_file, commented_file.read_text()
     )
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# H3 lint rule: settlements reads must pin temperature_metric
+# ---------------------------------------------------------------------------
+
+def test_h3_flags_bare_join_settlements(tmp_path):
+    """H3 fires when `JOIN settlements` has no temperature_metric filter."""
+    bad_file = tmp_path / "bad_join.py"
+    bad_file.write_text(
+        'rows = conn.execute("""\n'
+        '    SELECT f.city, s.settlement_value\n'
+        '    FROM historical_forecasts f\n'
+        '    JOIN settlements s ON f.city = s.city AND f.target_date = s.target_date\n'
+        '""").fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1, violations
+    assert "temperature_metric" in violations[0]
+
+
+def test_h3_accepts_metric_filtered_join(tmp_path):
+    """H3 passes when the SQL literal includes temperature_metric."""
+    good_file = tmp_path / "good_join.py"
+    good_file.write_text(
+        'rows = conn.execute("""\n'
+        '    SELECT f.city, s.settlement_value\n'
+        '    FROM historical_forecasts f\n'
+        '    JOIN settlements s\n'
+        '      ON f.city = s.city\n'
+        '     AND f.target_date = s.target_date\n'
+        '     AND s.temperature_metric = \'high\'\n'
+        '""").fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        good_file, good_file.read_text()
+    )
+    assert violations == []
+
+
+def test_h3_flags_bare_from_settlements(tmp_path):
+    """H3 fires on `FROM settlements` (no JOIN) without metric filter."""
+    bad_file = tmp_path / "bad_from.py"
+    bad_file.write_text(
+        'row = conn.execute(\n'
+        '    "SELECT settlement_value FROM settlements WHERE city = ? AND target_date = ?",\n'
+        '    ("NYC", "2026-04-24"),\n'
+        ').fetchone()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1, violations
+
+
+def test_h3_accepts_from_settlements_with_metric(tmp_path):
+    """H3 passes on FROM settlements when metric filter is present."""
+    good_file = tmp_path / "good_from.py"
+    good_file.write_text(
+        'row = conn.execute(\n'
+        '    "SELECT settlement_value FROM settlements "\n'
+        '    "WHERE city = ? AND target_date = ? AND temperature_metric = \'high\'",\n'
+        '    ("NYC", "2026-04-24"),\n'
+        ').fetchone()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        good_file, good_file.read_text()
+    )
+    assert violations == []
+
+
+def test_h3_ignores_non_settlements_tables(tmp_path):
+    """H3 does not fire on tables whose name merely starts with `settlements`."""
+    ok_file = tmp_path / "non_settlements.py"
+    ok_file.write_text(
+        'row = conn.execute(\n'
+        '    "SELECT * FROM settlements_authority_monotonic WHERE id = ?",\n'
+        '    (1,),\n'
+        ').fetchone()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        ok_file, ok_file.read_text()
+    )
+    assert violations == []
+
+
+def test_h3_ignores_docstring_mentions(tmp_path):
+    """H3 must not fire on JOIN settlements mentioned in prose/docstrings."""
+    ok_file = tmp_path / "docstring_only.py"
+    ok_file.write_text(
+        '"""This function documents that it computes MAE from\n'
+        'historical_forecasts JOIN settlements — but does not execute SQL."""\n'
+        'x = 1\n'
+    )
+    violations = _check_settlements_metric_filter(
+        ok_file, ok_file.read_text()
+    )
+    assert violations == []
+
+
+def test_h3_skips_allowlisted_writer(tmp_path, monkeypatch):
+    """Allowlisted files (writers, audit tools) are exempt from H3."""
+    from scripts import semantic_linter as linter_mod
+    # Simulate harvester.py (writer path).
+    writer_file = (PROJECT_ROOT / "src/execution/harvester.py")
+    assert writer_file.exists()
+    violations = _check_settlements_metric_filter(
+        writer_file, writer_file.read_text()
+    )
+    assert violations == [], "harvester.py (allowlisted writer) should not trip H3"
+
+
+def test_h3_skips_tests_directory(tmp_path):
+    """Test files are exempt from H3."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    test_file = tests_dir / "test_sample.py"
+    test_file.write_text(
+        'rows = conn.execute(\n'
+        '    "SELECT * FROM settlements WHERE city = ?", ("NYC",)\n'
+        ').fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        test_file, test_file.read_text()
+    )
+    assert violations == []
+
+
+def test_h3_skips_migrations_directory(tmp_path):
+    """Migration files are exempt — schema changes cross all metrics."""
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    migration_file = migrations_dir / "001_rebuild_settlements.py"
+    migration_file.write_text(
+        'rows = conn.execute(\n'
+        '    "SELECT COUNT(*) FROM settlements WHERE authority IS NOT NULL",\n'
+        ').fetchone()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        migration_file, migration_file.read_text()
+    )
+    assert violations == [], "migrations/ is dir-level exempt from H3"
+
+
+def test_h3_skips_scripts_directory(tmp_path):
+    """scripts/ is dir-level carve-out per T2-S3 scope decision."""
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    audit_file = scripts_dir / "investigate_settlements.py"
+    audit_file.write_text(
+        'rows = conn.execute(\n'
+        '    "SELECT city, settlement_value FROM settlements WHERE target_date = ?",\n'
+        '    ("2026-04-24",),\n'
+        ').fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(
+        audit_file, audit_file.read_text()
+    )
+    assert violations == [], (
+        "scripts/ is carved out at directory level; canonical-path "
+        "training scripts will be promoted via T2-S3-followup-SCRIPTS"
+    )

@@ -468,9 +468,18 @@ def _check_persistence_anomaly(
         deltas = []
         for days_back in range(1, 4):
             d = (target_date - timedelta(days=days_back)).isoformat()
+            # H3 (2026-04-24): pin temperature_metric='high' explicitly.
+            # LOW callers early-return at L453-459 before reaching this query,
+            # so the HIGH filter is safe: any caller reaching this SELECT has
+            # already committed to the HIGH axis (via explicit HIGH
+            # temperature_metric kwarg, or the default pre-dual-track path).
+            # Without the filter, a future LOW settlement row for the same
+            # (city, target_date) would silently match and produce a cross-
+            # metric delta anyway.
             row = conn.execute(
                 "SELECT settlement_value FROM settlements "
-                "WHERE city = ? AND target_date = ? LIMIT 1",
+                "WHERE city = ? AND target_date = ? "
+                "AND temperature_metric = 'high' LIMIT 1",
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:

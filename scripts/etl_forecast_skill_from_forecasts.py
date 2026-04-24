@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-03-18; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Materialize forecast_skill + model_bias from local forecasts table;
+#          joins forecasts × settlements on (city, target_date) + HIGH metric.
+# Reuse: H3 (2026-04-24) hardened the JOIN to pin s.temperature_metric='high'
+#        because forecasts stores forecast_high without a metric column; LOW
+#        settlements would otherwise spuriously double-match. See packet
+#        docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/.
 """Materialize forecast_skill/model_bias from the local forecasts table.
 
 This fills the gap left by the older ladder backfill, which only covered the
@@ -99,6 +106,11 @@ def run_etl(*, dry_run: bool = False) -> dict:
     conn = get_world_connection()
     init_schema(conn)
     before = conn.execute("SELECT COUNT(*) FROM forecast_skill").fetchone()[0]
+    # H3 (2026-04-24): pin s.temperature_metric='high' because forecasts
+    # stores both forecast_high and forecast_low without a metric tag; this
+    # path selects forecast_high only, so the JOIN must restrict settlements
+    # to HIGH rows or a future LOW settlement would spuriously match and
+    # corrupt the forecast_skill row.
     rows = conn.execute(
         """
         SELECT
@@ -109,6 +121,7 @@ def run_etl(*, dry_run: bool = False) -> dict:
         JOIN settlements s
           ON s.city = f.city
          AND s.target_date = f.target_date
+         AND s.temperature_metric = 'high'
         WHERE f.forecast_high IS NOT NULL
           AND f.lead_days IS NOT NULL
           AND s.settlement_value IS NOT NULL

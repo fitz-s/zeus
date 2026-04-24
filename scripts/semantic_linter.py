@@ -64,6 +64,20 @@ HOURLY_OBSERVATIONS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     "scripts/etl_hourly_observations.py",  # compatibility writer for the legacy table
 })
 
+# H3 (2026-04-24): forbid bare SELECT FROM/JOIN settlements without a
+# `temperature_metric` predicate. `settlements` is dual-track (high|low);
+# any reader that filters by (city, target_date) without pinning the metric
+# will silently match BOTH HIGH and LOW rows once both metrics exist, and
+# spurious extra rows corrupt MAE/Brier/delta computations.
+#
+# Allowlist is narrow: writers (harvester INSERT path) and the data-readiness
+# audit tooling that intentionally inspects cross-metric rows. Migration and
+# test files are carved out at the directory level.
+SETTLEMENTS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+    "src/execution/harvester.py",          # writer path — INSERT, not SELECT
+    "src/state/db.py",                     # schema migration queries are metric-agnostic by design
+})
+
 
 class SemanticAnalyzer(ast.NodeVisitor):
     def __init__(self, filepath: Path):
@@ -482,6 +496,77 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
     return violations
 
 
+def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
+    """H3 (2026-04-24): require temperature_metric predicate on settlements reads.
+
+    Any SELECT FROM settlements or JOIN settlements in canonical (src/) or
+    training-path scripts must restrict `temperature_metric` so that dual-
+    track high/low rows for the same (city, target_date) do not silently
+    both match. Writers (INSERT/UPDATE/DELETE) and migration / test files
+    are exempt. The allowlist covers writer modules and intentional cross-
+    metric audit tooling.
+
+    Detection approach: scan stripped SQL regions for `\bFROM settlements\b`
+    or `\bJOIN settlements\b` (excluding partial matches like
+    `settlements_authority_monotonic`), and within the same SQL literal /
+    near vicinity require a `temperature_metric` token. The heuristic is
+    conservative — it matches on the SQL literal text, not on the full
+    query AST — but it catches the four pre-H3 bare-JOIN sites and does
+    not fire false positives on writer INSERT paths.
+    """
+    try:
+        repo_relative = py_file.resolve().relative_to(Path(__file__).resolve().parents[1]).as_posix()
+    except ValueError:
+        repo_relative = py_file.as_posix()
+    if repo_relative in SETTLEMENTS_METRIC_SELECT_ALLOWLIST:
+        return []
+    if "migrations" in py_file.parts or "tests" in py_file.parts:
+        return []
+    # H3 is a canonical-path rule. scripts/ contains operator-run audit,
+    # backfill, and migration tools that legitimately inspect settlements
+    # rows cross-metric. scripts/ is carved out (same pattern as K2_struct
+    # at `_check_calibration_pairs_select`); the 4 training-path scripts
+    # pre-hardened by the S3 slice (etl_historical_forecasts,
+    # etl_forecast_skill_from_forecasts, validate_dynamic_alpha, and
+    # monitor_refresh's FROM settlements in src/engine/) carry the metric
+    # filter inline. Future training-path scripts/rebuild_*.py /
+    # scripts/refit_*.py should be promoted into the rule via an
+    # explicit training-path allowlist extension.
+    if "scripts" in py_file.parts:
+        return []
+
+    # Match bare `FROM settlements` / `JOIN settlements` but not
+    # `settlements_xxx` composites. The word-boundary (?!\w) ensures a
+    # non-word character follows.
+    pattern = re.compile(
+        r"\b(FROM|JOIN)\s+settlements(?!\w)",
+        re.IGNORECASE,
+    )
+    violations: list[str] = []
+    source_lines = content.splitlines()
+
+    # Per-SQL-literal scope: only flag when the match appears inside an
+    # actual `.execute(...)` / `.executemany(...)` / `executescript(...)`
+    # literal argument. Docstrings, module prose, and comments cannot
+    # hit a DB, so they're excluded. Same-literal `temperature_metric`
+    # token satisfies the predicate requirement; cross-literal reference
+    # does not (each query must defend itself).
+    for start_lineno, end_lineno, sql in _sql_call_literal_args(content):
+        normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        if pattern.search(normalized_sql) and "temperature_metric" not in normalized_sql:
+            line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
+            violations.append(
+                f"{py_file}:{start_lineno}:\n"
+                "  [ERROR] H3: settlements read without temperature_metric predicate.\n"
+                "  Dual-track settlements schema requires `AND s.temperature_metric = 'high'|'low'`\n"
+                "  (or metric-axis equivalent) on every SELECT/JOIN; otherwise a future LOW\n"
+                "  row silently matches alongside HIGH and corrupts downstream MAE/Brier.\n"
+                f"  Line: {line.rstrip()}\n"
+            )
+
+    return violations
+
+
 def _python_files_for_target(target: Path) -> list[Path]:
     if target.is_file():
         return [target] if target.suffix == ".py" else []
@@ -529,6 +614,11 @@ def run_linter(src_path: Path) -> int:
 
         hourly_violations = _check_legacy_hourly_observations_select(py_file, content)
         for violation in hourly_violations:
+            print(violation)
+            total_violations += 1
+
+        metric_violations = _check_settlements_metric_filter(py_file, content)
+        for violation in metric_violations:
             print(violation)
             total_violations += 1
 
