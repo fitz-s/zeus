@@ -28,10 +28,13 @@ This test file pins:
    (city, target_date, metric) twice hits UNIQUE rejection.
 6. Triggers survive the rebuild: all three settlements_* triggers
    are present after migration.
+7. NULL-metric scaffold inserts are rejected before they can bypass
+   SQLite UNIQUE semantics.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -122,6 +125,31 @@ def test_fresh_db_same_metric_collision_still_rejected():
             _insert_verified_row(conn, city="paris", target_date="2026-04-23", metric="high")
     finally:
         conn.close()
+
+
+def test_fresh_db_null_metric_insert_rejected():
+    """The post-audit trigger closes SQLite's NULL-NULL UNIQUE hole."""
+    conn = _fresh()
+    try:
+        with pytest.raises(
+            sqlite3.IntegrityError, match="temperature_metric must be non-null"
+        ):
+            conn.execute(
+                """
+                INSERT INTO settlements (city, target_date, authority)
+                VALUES ('paris', '2026-04-23', 'UNVERIFIED')
+                """
+            )
+    finally:
+        conn.close()
+
+
+def test_onboard_cities_no_longer_writes_partial_settlement_scaffolds():
+    """City onboarding must not create provenance-empty settlement placeholders."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "onboard_cities.py"
+    text = script.read_text()
+    assert "INSERT OR IGNORE INTO settlements" not in text
+    assert "INSERT INTO settlements" not in text
 
 
 # ---------------------------------------------------------------------------

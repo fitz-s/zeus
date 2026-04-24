@@ -1,11 +1,9 @@
 {
-  "task": "midstream remediation \u2014 test-currency + active-failure + D3/D4 + D6 antibody wave",
+  "task": "P-1 pre-P0 post-audit cleanup \u2014 settlement scaffold removal, ledger helper deletion, harvester comment refresh",
   "packet": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
   "authority_source_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/to-do-list/zeus_midstream_trust_upgrade_checklist_2026-04-23.md",
-    "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md",
     "docs/operations/task_2026-04-23_midstream_remediation/plan.md"
   ],
   "executor": "team-lead",
@@ -17,9 +15,23 @@
     "docs/authority/zeus_current_architecture.md",
     "docs/authority/zeus_current_delivery.md",
     "architecture/invariants.yaml",
+    "architecture/source_rationale.yaml",
+    "architecture/script_manifest.yaml",
     "architecture/fatal_misreads.yaml",
     "architecture/task_boot_profiles.yaml",
     "/Users/leofitz/CLAUDE.md (file-header provenance rule)"
+  ],
+  "allowed_files": [
+    "scripts/onboard_cities.py",
+    "scripts/topology_doctor_script_checks.py",
+    "src/execution/harvester.py",
+    "src/state/db.py",
+    "src/state/ledger.py",
+    "tests/test_architecture_contracts.py",
+    "tests/test_harvester_dr33_live_enablement.py",
+    "tests/test_settlements_unique_migration.py",
+    "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
   ],
   "allowed_files_W0": [
     "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
@@ -52,12 +64,10 @@
     "src/state/ledger.py"
   ],
   "forbidden_files": [
-    "src/** (except src/state/ledger.py scoped by T3.3)",
     "state/**",
     ".code-review-graph/graph.db",
-    "docs/authority/** broad rewrites",
-    "architecture/**",
-    "other packet files"
+    "docs/authority/**",
+    "architecture/**"
   ],
   "slices_planned": {
     "W0": [
@@ -1296,6 +1306,15 @@
     "residual_disagreement_at_phaseC_close": "zero"
   },
   "changed_files": [
-    "docs/operations/current_state.md"
+    "scripts/onboard_cities.py",
+    "scripts/topology_doctor_script_checks.py",
+    "src/execution/harvester.py",
+    "src/state/db.py",
+    "src/state/ledger.py",
+    "tests/test_architecture_contracts.py",
+    "tests/test_harvester_dr33_live_enablement.py",
+    "tests/test_settlements_unique_migration.py",
+    "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
   ]
 }

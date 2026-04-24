@@ -1,5 +1,5 @@
 """Script manifest checker family for topology_doctor."""
-# Lifecycle: created=2026-04-15; last_reviewed=2026-04-16; last_reused=2026-04-16
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-24; last_reused=2026-04-24
 # Purpose: Validate top-level script lifecycle, naming, and write-target metadata.
 # Reuse: Inspect architecture/script_manifest.yaml + architecture/naming_conventions.yaml before changing script gates.
 
@@ -14,7 +14,6 @@ from typing import Any
 SQL_MUTATION_PATTERN = re.compile(r"\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)\b", re.IGNORECASE)
 FILE_WRITE_PATTERN = re.compile(r"(\.write_text\(|open\([^)]*['\"]w|json\.dump\()", re.IGNORECASE)
 CANONICAL_WRITE_HELPERS = (
-    "append_event_and_project",
     "append_many_and_project",
     "log_trade_entry",
     "log_settlement_event",
