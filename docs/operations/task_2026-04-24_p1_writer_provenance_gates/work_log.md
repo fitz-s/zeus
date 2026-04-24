@@ -111,5 +111,26 @@ Verification:
   consistency, green tests, topology gates, and derived-red graph recording.
 
 Next:
-- Commit and push scoped implementation files only.
-- Run post-close third-party critic/verifier before freezing the next packet.
+- P1.2 is closed at implementation commit `16292e2`.
+- Before every future phase, reread root `AGENTS.md`, run topology navigation
+  for that phase's candidate files, and explore the important files routed by
+  topology before implementation.
+- Open the next P1 packet with a fresh ralplan. The corrected future sequence
+  is P1.3 quarantine/mark unsafe observation families, P1.4 settlement
+  market-identity/evidence-only policy, and P1.5 eligibility views/adapters
+  plus calibration/training-preflight cutover.
+
+Post-close reassessment:
+- Reread current root `AGENTS.md`, `workspace_map.md`,
+  `docs/operations/AGENTS.md`, `docs/operations/current_state.md`, and the
+  restored topology/source/test-trust surfaces after commit `4933b80`.
+- `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
+- `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
+- `python3 scripts/topology_doctor.py --navigation --task "P1.2 writer provenance gates post-close control surface repair" --files <P1.2 closeout files> --json`
+  returned known global docs/source/history-lore red issues and gate-trust
+  context; these are recorded as restored-topology routing debt, not P1.2
+  writer-code blockers.
+- Architect review of the restored law returned ITERATE for future phase
+  boundaries: P1 cannot end at producer-side labels/views only. Calibration /
+  training-preflight cutover must move into a later P1 slice, while broad
+  replay/live rewiring remains P3.

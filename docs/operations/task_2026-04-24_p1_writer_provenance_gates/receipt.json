@@ -6,7 +6,10 @@
     "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md"
   ],
   "planning_commit": "e498b0dc7f1adf184e94b952bea9a441a8ab7c20",
+  "implementation_commit": "16292e289e445ef46fa5b57439cbc8c28b2cb1b8",
   "post_close_review": "planning commit received critic/verifier PASS before implementation",
+  "packet_status": "closed",
+  "restored_law_reassessment": "After AGENTS/topology/source-rationale/test-trust restoration at 4933b80, P1.2 remains closed as a writer-local slice. Future P1/P3 boundaries are corrected: quarantine unsafe observations and settlement evidence policy precede eligibility-view/adapters plus calibration/training-preflight cutover in P1; broad replay/live rewiring remains P3.",
   "required_law": [
     "AGENTS.md",
     "workspace_map.md",

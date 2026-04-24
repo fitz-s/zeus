@@ -5,12 +5,13 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: **Post-audit P1.2 writer provenance gates implementation — active 2026-04-24**
-- Active package source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
-- Status: implementation active inside plan freeze `e498b0d`; P1.1 is closed
-  and P1.2 planning received post-close critic/verifier PASS.
+- Mainline task: **Post-audit P1.3 unsafe observation quarantine planning — active 2026-04-24**
+- Active package source: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- Status: P1.2 writer provenance gates are closed at implementation commit
+  `16292e2`. P1.3 is a planning-only packet; implementation must not start
+  until this plan is reviewed, pushed, and post-close critic/verifier pass.
 
 ## Required evidence
 
@@ -20,10 +21,11 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Current freeze: P1.2 implementation may change only the writer-local code,
-  scoped writer tests, and active-packet closeout bookkeeping listed in the
-  receipt. Schema, DB rows, source registry, caller constructors/scripts,
-  calibration/replay consumers, authority docs, and architecture remain frozen.
+- Current freeze: P1.3 planning may change only the active packet files,
+  operations routing, required docs/topology registry companions, and P1.2
+  closeout bookkeeping listed in the P1.3 receipt. No source, schema, DB,
+  current-fact, calibration, replay, or live consumer changes are authorized by
+  this planning packet.
 
 ## Current fact companions
 
@@ -38,7 +40,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Commit and push scoped P1.2 implementation files only.
-- After push, run the required third-party post-close critic/verifier before
-  closing P1.2 or freezing the next packet.
+- Architect, critic, and verifier reviews completed with required fixes
+  applied. Commit and push the planning packet only. Future P1.3
+  implementation starts only after post-close review.
 - Preserve unrelated dirty work and concurrent in-flight edits.

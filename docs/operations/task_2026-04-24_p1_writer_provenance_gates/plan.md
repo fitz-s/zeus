@@ -2,8 +2,9 @@
 
 Date: 2026-04-24
 Branch: `data-improve`
-Status: implementation active after planning freeze `e498b0d` received
-post-close critic/verifier PASS
+Status: closed. Planning freeze `e498b0d`; implementation commit `16292e2`.
+Post-close reassessment after restored topology/law context kept the P1.2
+writer-local slice closed and corrected the future P1/P3 phase boundary.
 
 ## Task
 
@@ -216,3 +217,23 @@ Future P1.2 implementation must run at minimum:
   audit.
 - If source-role registry semantics need changes, stop and create a P1.1
   follow-up instead of editing `tier_resolver.py` inside P1.2.
+
+## Closeout
+
+P1.2 is closed as a writer-local implementation. It explicitly did not solve
+existing-row quarantine, settlement market identity, eligibility view adoption,
+or calibration/replay/live consumer gating.
+
+After `AGENTS.md`, topology, source rationale, and test trust policy were
+restored at `4933b80`, the full post-audit mainline was reassessed. The
+forensic P0→P4 spine remains valid, but future P1 slicing must change:
+
+- P1.3: quarantine or mark unsafe existing observation families, especially
+  empty-provenance WU rows and fallback evidence.
+- P1.4: keep legacy settlement rows evidence-only until market identity and
+  finalization policy are proven.
+- P1.5: build eligibility views/adapters and make calibration/training
+  preflight consume them before P1 closes.
+
+Broad replay/live rewiring remains P3; the first calibration/training preflight
+cutover belongs at the end of P1 so P1 semantics are not inert.

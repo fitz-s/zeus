@@ -475,7 +475,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-23_midstream_remediation/plan.md
+    - docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
@@ -1141,4 +1141,3 @@ digest_profiles:
     reference_reads:
       - "docs/reference/zeus_market_settlement_reference.md"
       - "docs/reference/zeus_domain_model.md"
-
