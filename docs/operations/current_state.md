@@ -5,26 +5,23 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: **Post-audit P1.1 source-role registry implementation — active 2026-04-24**
-- Active package source: `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
-- Status: implementation closeout in progress; source/test verification is
-  passing and critic/verifier review is next.
+- Mainline task: **Post-audit P1.2 writer provenance gates ralplan — active 2026-04-24**
+- Active package source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- Status: planning-only; P1.1 is closed and post-close reviewed.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 
 ## Freeze point
 
-- Current freeze: P1.1 implementation may change only
-  `src/data/tier_resolver.py`, `tests/test_tier_resolver.py`, and
-  verification-closeout bookkeeping in the active packet. Writer, schema,
-  DB, settlement, calibration, authority, and architecture changes remain
-  blocked for later P1 slices.
+- Current freeze: P1.2 is planning-only until architect/critic/verifier review
+  closes, the plan packet is committed and pushed, and post-close review
+  passes. Runtime/source implementation starts only after that freeze.
 
 ## Current fact companions
 
@@ -39,8 +36,8 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Finish P1.1 implementation closeout: complete critic/verifier review,
-  apply fixes if any, then commit and push scoped implementation files only.
+- Finish P1.2 ralplan: complete critic/verifier review, apply fixes if any,
+  then commit and push scoped planning files only.
 - After push, run the required third-party critic/verifier pass before
-  treating P1.1 as closed and freezing the next P1.2 ralplan.
+  treating P1.2 as frozen for implementation.
 - Preserve unrelated dirty work and concurrent in-flight edits.
