@@ -140,5 +140,27 @@ Verification:
   P1.4 regression and remains a known full-file health-test gap.
 
 Next:
-- Wait for post-fix critic result, then run closeout gates, commit, and push
-  the P1.4 implementation packet.
+- P1.4 is closed at implementation commit `df9ece5`.
+- Next mainline step is a fresh P1.5 planning packet for eligibility
+  views/adapters plus calibration/training-preflight cutover.
+
+## Post-close process note
+
+What worked:
+- Contract correction after critic review produced a narrower, defensible
+  implementation: `market_slug` only for legacy market identity, no
+  `settled_at` finalization proof, VERIFIED-only value completeness, and a
+  negative test for synthetic finalization aliases.
+- Runtime `state/**` artifacts remained excluded from commit scope.
+
+What did not work:
+- The initial implementation started before the finalization/value contract was
+  locked, causing avoidable rework.
+- The first pushed closeout left repo-facing control surfaces saying
+  "pending commit" after `df9ece5` was already pushed.
+
+Process change:
+- Future packets must lock schema/field/row-class contracts before code edits.
+- After every commit/push, update and verify `current_state.md`,
+  `docs/operations/AGENTS.md`, packet `plan.md`, `work_log.md`, and
+  `receipt.json` before opening the next packet.
