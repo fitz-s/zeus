@@ -117,8 +117,10 @@
           "count": 1,
           "line": 875,
           "test": "test_day0_transition_emits_durable_lifecycle_event",
-          "current_fact": "No canonical Day0 transition event exists. cycle_runtime monitor_refresh updates position_current.phase + trade_decisions via update_trade_lifecycle but does NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row.",
-          "disposition": "OBSOLETE_PENDING_FEATURE — restoring requires a new build_day0_window_entered_canonical_write builder in src/engine/lifecycle_events.py. Feature-level architectural slice, OUT OF T1.c-followup scope. Flagged for separate Day0-canonical-event slice."
+          "current_fact_pre_closure": "No canonical Day0 transition event existed. cycle_runtime monitor_refresh updated position_current.phase + trade_decisions via update_trade_lifecycle but did NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row.",
+          "disposition_original": "OBSOLETE_PENDING_FEATURE — restoring required a new build_day0_window_entered_canonical_write builder in src/engine/lifecycle_events.py. Feature-level architectural slice.",
+          "status": "CLOSED 2026-04-24 via Day0-canonical-event feature slice",
+          "closure_details": "Added build_day0_window_entered_canonical_write() in src/engine/lifecycle_events.py (single-event builder, sequence_no is caller-supplied). Added DAY0_WINDOW_ENTERED to position_events.event_type CHECK constraint in architecture/2026_04_02_architecture_kernel.sql. Added _ensure_day0_window_entered_event_type() legacy-DB migration in src/state/ledger.py that rebuilds the table with the expanded CHECK. Wired _emit_day0_window_entered_canonical_if_available() helper into src/engine/cycle_runtime.py at the day0 transition site (L625+). Rewrote the L875 test to assert the new canonical event type + phase_before/after + day0_entered_at payload. xfail / skip markers removed; test passes end-to-end via fresh-DB init_schema."
         },
         "p4_obsolete_by_architecture": {
           "count": 2,
