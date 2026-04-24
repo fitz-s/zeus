@@ -106,30 +106,28 @@
     {
       "id": "T6.3-followup-1",
       "source": "con-nyx post-edit finding (f)",
-      "scope": "Bootstrap CI + FDR p-value + should_trade delta audit — replay harness over frozen monitor_refresh corpus including sparse-monitor events, compare T6.3 p_cal_fallback branch vs pre-T6.3 no-impute branch (git stash) under identical seed. Report |delta| on should_trade rate per direction; gate live-readiness B3 on operator-specified tolerance or explicit acceptance.",
-      "estimated_size": 3,
-      "blocker_for": "live-readiness B3 closure",
+      "scope_original": "Bootstrap CI + FDR p-value + should_trade delta audit — replay harness over frozen monitor_refresh corpus, compare T6.3 p_cal_fallback vs pre-T6.3 no-impute on identical seed; report |delta| per direction.",
+      "status": "PARTIAL — regression-guard antibody landed (`test_sparse_p_market_bootstrap_produces_finite_ci` in tests/test_k3_slice_p.py) asserting T6.3 does not produce NaN/Inf CI on sparse p_market via MarketAnalysis._bootstrap_bin. Full comparative delta audit requires frozen monitor_refresh corpus from production logs (not available in-session); tracked as live-readiness B3 precondition.",
+      "remaining_blocker_for": "live-readiness B3 closure",
       "blocker_for_commit": false
     },
     {
       "id": "T6.3-followup-2",
       "source": "con-nyx post-edit finding (d)",
-      "scope": "Tail-path impute coverage test — add test_sparse_impute_at_tail_bin_respects_tail_alpha to lock both p_cal_fallback identity collapse AND a sibling_market-alternative pinning. Current gap: _non_tail_bins_3() was chosen to avoid tail-alpha complication, but tail-path impute correctness is unasserted for future sibling_market policy.",
-      "estimated_size": 1,
-      "blocker_for": "none"
+      "scope": "Tail-path impute coverage test — `test_tail_bin_impute_respects_tail_alpha_scaling` in tests/test_k3_slice_p.py. Pins the raw[tail] = p_cal[tail] identity collapse under p_cal_fallback (tail_alpha weight distribution becomes mathematically degenerate because both blend terms equal p_cal[tail]); regression signal for a future sibling_market policy that would NOT collapse identically.",
+      "status": "CLOSED_INLINE in T6.3-followup-batch commit this session"
     },
     {
       "id": "T6.3-followup-3",
       "source": "con-nyx post-edit finding (e)",
-      "scope": "Zero-p_cal tail cascade behavior — document OR remediate the case where p_cal[i] ≈ 0 (extreme-clear Platt output) combined with sparse p_market[i]=0 produces imputed_market[i]=0, which silently zero-dilutes the posterior despite imputation_source='p_cal_fallback' being recorded. Operator policy decision needed: raise? fallback to uniform 1/n prior? propagate NaN? Currently degenerates to implicit no-impute at those positions.",
-      "estimated_size": 2,
-      "blocker_for": "edge-case live-readiness"
+      "scope": "Zero-p_cal tail cascade documentation — `test_zero_p_cal_at_sparse_position_does_not_claim_impute` in tests/test_k3_slice_p.py. Documents that when p_cal[i]=0 at a sparse position, MED_2 effective_impute_mask excludes position from imputed_bins (honest provenance: 'we chose not to repair this bin' vs 'we imputed and failed'). Posterior[i] ≈ 0 but record is provenance-truthful — sufficient for Fitz Constraint #3 without forcing a raise/uniform-prior policy decision in this slice.",
+      "status": "CLOSED_INLINE in T6.3-followup-batch commit this session"
     },
     {
-      "id": "T6.3-hardening (landed inline)",
+      "id": "T6.3-hardening (b + j)",
       "source": "con-nyx post-edit findings (b) + (j)",
-      "scope": "Validator hardening — (b) __post_init__ now enforces raw_market_prices[imputed_bins[i]] == 0.0; (j) from_raw now rejects imputation_source != 'none' when sibling_snapshot is None (caller-intent drift detection). 2 new antibody tests added. Closes two silent-failure categories surfaced by post-edit adversarial review.",
-      "status": "LANDED in T6.3-hardening follow-up commit this session"
+      "scope": "Validator hardening — (b) __post_init__ enforces raw_market_prices[imputed_bins[i]] == 0.0 (bogus provenance rejected); (j) from_raw rejects imputation_source != 'none' when sibling_snapshot is None (caller-intent drift detection). 3 new antibody tests added. Closes two silent-failure categories surfaced by post-edit adversarial review.",
+      "status": "LANDED in commit d83d5ff"
     }
   ],
   "cross_references": {

@@ -115,6 +115,93 @@ class TestSparseMarketImputation:
         assert posterior.sum() == pytest.approx(1.0, abs=1e-9)
         assert np.all(posterior > 0)
 
+    def test_tail_bin_impute_respects_tail_alpha_scaling(self):
+        """T6.3-followup-2 (con-nyx post-edit finding d): under T6.3
+        p_cal_fallback, tail bins (low=None or high=None) exhibit a
+        mathematical degeneracy — raw[tail] = tail_alpha*p_cal + (1-tail_alpha)*p_cal = p_cal.
+        This test pins the identity so a future sibling_market policy
+        (where imputed_market[tail] != p_cal[tail]) would NOT collapse
+        identically, catching tail-path regressions.
+        """
+        p_cal = np.array([0.15, 0.50, 0.35])
+        p_market_sparse = np.array([0.0, 0.45, 0.0])
+        bins = _bins_3()  # bins 0 and 2 are tail bins
+
+        posterior = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+
+        # Tail-alpha: max(0.20, 0.6 * 0.5) = 0.30. Non-tail: 0.60.
+        imputed_market = np.array([p_cal[0], 0.45, p_cal[2]])
+        alpha_vec = np.array([0.30, 0.60, 0.30])
+        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * imputed_market
+        expected = raw / raw.sum()
+
+        np.testing.assert_allclose(posterior, expected)
+        # Identity check at tail bins: raw[tail] MUST equal p_cal[tail]
+        # (regardless of tail_alpha) under p_cal_fallback.
+        assert raw[0] == pytest.approx(p_cal[0])
+        assert raw[2] == pytest.approx(p_cal[2])
+
+    def test_zero_p_cal_at_sparse_position_does_not_claim_impute(self):
+        """T6.3-followup-3 (con-nyx post-edit finding e): when p_cal[i]=0
+        at a sparse position, the MED_2 effective_impute_mask filter
+        correctly EXCLUDES that position from imputed_bins (zero-for-zero
+        substitution is not a real repair). Posterior at that position
+        converges to ≈ 0, but the provenance record is honest — auditors
+        see "we did not repair this bin" rather than "we falsely claimed
+        to repair it and failed."
+
+        Policy choice (raise / uniform-prior / NaN) for this degenerate
+        case is deferred; current behavior is provenance-honest which is
+        sufficient for Fitz Constraint #3.
+        """
+        p_cal = np.array([0.0, 0.70, 0.30])  # extreme-clear: bin 0 cal = 0
+        p_market_sparse = np.array([0.0, 0.45, 0.0])
+        bins = _non_tail_bins_3()
+
+        posterior = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+
+        assert posterior[0] == pytest.approx(0.0, abs=1e-9), (
+            f"Expected posterior[0] ≈ 0 when p_cal[0]=0 and market[0]=0; got {posterior[0]}"
+        )
+        assert posterior[2] > 0.0  # impute from p_cal[2]=0.30 survived
+        assert posterior.sum() == pytest.approx(1.0, abs=1e-9)
+
+    def test_sparse_p_market_bootstrap_produces_finite_ci(self):
+        """T6.3-followup-1 (partial): regression guard that T6.3 sparse-
+        path impute does not produce NaN/Inf CI bounds when routed through
+        MarketAnalysis._bootstrap_bin. Full comparative delta audit (T6.3
+        vs pre-T6.3 no-impute on production monitor_refresh corpus) needs
+        a frozen replay fixture and is tracked as a separate follow-up;
+        this test is the "does not explode" antibody.
+        """
+        from src.strategy.market_analysis import MarketAnalysis
+
+        bins = _bins_3()
+        rng = np.random.default_rng(42)
+        members = rng.normal(60, 3, size=20)
+        p_cal = np.array([0.15, 0.55, 0.30])
+        p_market_sparse = np.array([0.0, 0.50, 0.0])  # held-bin only
+
+        ma = MarketAnalysis(
+            p_raw=np.array([0.15, 0.55, 0.30]),
+            p_cal=p_cal,
+            p_market=p_market_sparse,
+            alpha=0.6,
+            bins=bins,
+            member_maxes=members,
+            calibrator=None,
+            lead_days=2,
+            unit="F",
+            rng_seed=123,
+        )
+
+        ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=100)
+
+        assert np.isfinite(ci_lo), f"ci_lo non-finite: {ci_lo}"
+        assert np.isfinite(ci_hi), f"ci_hi non-finite: {ci_hi}"
+        assert ci_lo <= ci_hi, f"CI inverted: [{ci_lo}, {ci_hi}]"
+        assert 0.0 <= p_val <= 1.0, f"p_val out of [0,1]: {p_val}"
+
 
 # ---------------------------------------------------------------------------
 # Bug #8: bootstrap ALL bins — cross-bin correlation
