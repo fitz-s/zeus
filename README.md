@@ -13,7 +13,7 @@ Zeus trades **discrete settlement contracts** on daily high/low temperatures. Th
 ```text
 contract semantics
   → source truth (settlement provider, station, observation field)
-  → ensemble forecast signal (51 ECMWF ENS members)
+  → ensemble forecast signal (51 ENS members)
   → Monte Carlo sensor-noise + rounding simulation → P_raw
   → Extended Platt calibration (temporal-decay aware) → P_cal
   → α-weighted model-market fusion → P_posterior
