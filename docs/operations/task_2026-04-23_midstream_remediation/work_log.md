@@ -1030,4 +1030,136 @@ docs/operations/task_2026-04-24_dr33b_atomicity_refactor/
 Plan-evidence anchor for planning-lock should point at the new packet's
 `plan.md`, not this stub. Stub is an index / memory aid, not the
 execution plan.
+
+## REOPEN-2 packet stub — settlements UNIQUE migration for dual-track (2026-04-23)
+
+**Status**: DEFERRED — HIGH-risk schema-rebuild migration scoped to its
+own future packet, NOT executed in this session. This stub captures
+the approach + pre-apply safety gates + rollback protocol.
+
+**Authority basis**: critic-opus P0.2 forensic triage CONFIRMED
+findings C3 + C4 (capital-risk):
+- C3: `settlements` is high-metric-only (all 1,561 rows have
+  `temperature_metric='high'`); no LOW rows exist because...
+- C4: schema `UNIQUE(city, target_date)` (verbatim) structurally blocks
+  inserting a LOW row for any (city, target_date) where a HIGH row
+  already exists.
+
+This is a **pre-flip BLOCKER for DR-33-C** (harvester live-write flag
+flip). Without it, the first low-metric market settlement attempt will
+UNIQUE-collide with the same-day high row, silently drop the settlement,
+and break the learning chain for the low track.
+
+### Target-schema migration
+
+```sql
+-- New settlements unique constraint (replace UNIQUE(city, target_date)):
+UNIQUE(city, target_date, temperature_metric)
+```
+
+### Migration approach (SQLite cannot ALTER UNIQUE constraints; table rebuild required)
+
+```sql
+BEGIN;
+  -- 1. Create new table with target schema
+  CREATE TABLE settlements_migrated (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      city TEXT NOT NULL,
+      target_date TEXT NOT NULL,
+      market_slug TEXT,
+      winning_bin TEXT,
+      settlement_value REAL,
+      settlement_source TEXT,
+      settled_at TEXT,
+      authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
+      pm_bin_lo REAL,
+      pm_bin_hi REAL,
+      unit TEXT,
+      settlement_source_type TEXT,
+      temperature_metric TEXT,
+      physical_quantity TEXT,
+      observation_field TEXT,
+      data_version TEXT,
+      provenance_json TEXT,
+      UNIQUE(city, target_date, temperature_metric)  -- NEW
+  );
+
+  -- 2. Copy all rows (preserves id auto-increment)
+  INSERT INTO settlements_migrated SELECT * FROM settlements;
+
+  -- 3. Drop old table (destroys old indexes + triggers on settlements)
+  DROP TABLE settlements;
+
+  -- 4. Rename new table
+  ALTER TABLE settlements_migrated RENAME TO settlements;
+COMMIT;
+```
+
+After the transaction, init_schema's trigger re-creation blocks
+(S2.1 authority-monotonic + S2.2 verified-row-integrity + index
+`idx_settlements_city_date`) re-install naturally on the new table.
+No trigger re-definition code is needed in the migration itself.
+
+### Pre-apply safety gates (ALL must pass before migration runs)
+
+1. **Row-count pin**: `SELECT COUNT(*) FROM settlements == 1561` before.
+   After migration, must still equal 1561. Any delta = rollback.
+2. **Column equality**: for every column in the copy set, assert
+   `COUNT(*) WHERE old.col IS NULL` equals
+   `COUNT(*) WHERE new.col IS NULL`. No value drift.
+3. **Trigger reinstall gate**: after DROP + RENAME, confirm
+   `sqlite_master` lists `settlements_authority_monotonic` +
+   `settlements_verified_insert_integrity` +
+   `settlements_verified_update_integrity` — or the migration is
+   incomplete.
+4. **SHA-256 pre-snapshot**: `scripts/snapshot_checksum.py --compute
+   state/zeus-world.db.pre-reopen2_YYYY-MM-DD` before transaction;
+   sidecar committed for rollback verification.
+5. **Dry-run on scratch DB**: migration MUST run cleanly against a
+   copy of the live DB in /tmp before touching production.
+
+### Idempotency
+
+Check whether `PRAGMA index_list(settlements)` shows the new UNIQUE
+on 3 columns before running. If yes, skip — migration already applied.
+
+### Out of scope
+
+- DR-33-C flag flip (separate operator review)
+- DR-33-B atomicity refactor (separate packet per S6.1 stub)
+- Any schema changes on the other 14 columns
+
+### Recommended next-session packet path
+
+```
+docs/operations/task_2026-04-24_reopen2_settlements_unique_migration/
+├── plan.md (scope + allowed_files + pre-apply gates + critic protocol)
+├── work_log.md (slice rows + safety-gate evidence)
+├── receipt.json (pre/post row counts + column-equality probes + sha256 sidecars)
+└── evidence/
+    ├── pre_row_count.txt
+    ├── post_row_count.txt
+    ├── pre_schema.txt
+    ├── post_schema.txt
+    └── scratch_db_dry_run.log
+```
+
+Plan-evidence anchor for planning-lock should point at that new
+packet's `plan.md`, not this stub.
+
+### Why defer (explicitly, for the next session)
+
+- Table rebuild on a 1.8GB production DB is a distinct class of risk
+  from ALTER TABLE ADD COLUMN (which is what T3.3 / REOPEN-1 / S2.1 /
+  S2.2 require). Reversibility differs: ADD COLUMN is trivially
+  reversible via DROP COLUMN; full table rebuild has a larger blast
+  radius.
+- Migration correctness depends on the trigger reinstall sequence in
+  init_schema. Any bug there leaves the live DB without the S2.1/S2.2
+  protections — silent corruption surface.
+- Operator should review the sql/ subfolder of the forensic audit
+  package at
+  `docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/`
+  for any additional constraints I may have missed before dispatching
+  the packet.
 | T2.c + T2.g T2 family closure | closed | pending | 2 file edits (tests/test_market_analysis.py T2.c + tests/test_fdr.py T2.g) + T2_receipt.json new. **T2.c**: xfail(strict=True) sparse_monitor test pinning desired sibling-price-imputation behavior; clears when T6.3 VigTreatment.from_raw (size 10h) lands. **T2.g**: new test `test_evaluate_candidate_exercises_real_day0_router_on_fixture_db` with xfail(strict=False); runs evaluate_candidate WITHOUT Day0Router.route monkeypatch so real Day0HighSignal constructs/computes p_vector; currently xfail because Day0TemporalContext fixture stub lacks solar_day etc.; future fixture-builder slice removes the marker. Delta (L28 stash): pre 2F/40P → post 1F/40P/2xfailed (-1 failure = T2.c xfailed; `zero_size_fallback` pre-existing unrelated failure unchanged); planning-lock GREEN. **T2 family closed**: 5 full (T2.a/b/d/e/f) + 2 xfail antibody (T2.c/g) = 7/7; 2 clearance triggers documented (T6.3 lands → T2.c; Day0TemporalContext fixture builder → T2.g) | 2026-04-24 |
