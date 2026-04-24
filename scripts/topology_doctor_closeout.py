@@ -69,6 +69,15 @@ def lane_summary(api: Any, result: Any) -> dict[str, Any]:
     }
 
 
+def global_health_summary(result: Any) -> dict[str, Any]:
+    return {
+        "ok": result.ok,
+        "issue_count": len(result.issues),
+        "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
+        "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
+    }
+
+
 def normalized_issue_path(path: str) -> str:
     if path.startswith("<"):
         return path
@@ -156,7 +165,7 @@ def run_closeout(
 ) -> dict[str, Any]:
     actual_changed = effective_changed_files(api, changed_files, receipt_path=receipt_path)
     selected = selected_lanes(api, actual_changed)
-    lanes: dict[str, Any] = {
+    raw_lanes: dict[str, Any] = {
         "planning_lock": api.run_planning_lock(actual_changed, plan_evidence),
         "work_record": api.run_work_record(actual_changed, work_record_path),
         "change_receipts": api.run_change_receipts(actual_changed, receipt_path),
@@ -166,21 +175,37 @@ def run_closeout(
         "freshness_metadata": api.run_freshness_metadata(actual_changed),
         "code_review_graph": api.run_code_review_graph_status(actual_changed),
     }
+    lanes: dict[str, Any] = {
+        "planning_lock": raw_lanes["planning_lock"],
+        "work_record": raw_lanes["work_record"],
+        "change_receipts": raw_lanes["change_receipts"],
+        "map_maintenance": raw_lanes["map_maintenance"],
+        "artifact_lifecycle": scoped_result(api, raw_lanes["artifact_lifecycle"], actual_changed),
+        "naming_conventions": scoped_result(api, raw_lanes["naming_conventions"], actual_changed),
+        "freshness_metadata": raw_lanes["freshness_metadata"],
+        "code_review_graph": raw_lanes["code_review_graph"],
+    }
     if selected["docs"]:
-        lanes["docs"] = scoped_result(api, api.run_docs(), actual_changed)
+        raw_lanes["docs"] = api.run_docs()
+        lanes["docs"] = scoped_result(api, raw_lanes["docs"], actual_changed)
     if selected["source"]:
-        lanes["source"] = scoped_result(api, api.run_source(), actual_changed)
+        raw_lanes["source"] = api.run_source()
+        lanes["source"] = scoped_result(api, raw_lanes["source"], actual_changed)
     if selected["tests"]:
-        lanes["tests"] = scoped_result(api, api.run_tests(), actual_changed)
+        raw_lanes["tests"] = api.run_tests()
+        lanes["tests"] = scoped_result(api, raw_lanes["tests"], actual_changed)
     if selected["scripts"]:
-        lanes["scripts"] = scoped_result(api, api.run_scripts(), actual_changed)
+        raw_lanes["scripts"] = api.run_scripts()
+        lanes["scripts"] = scoped_result(api, raw_lanes["scripts"], actual_changed)
     if selected["data_rebuild"]:
-        lanes["data_rebuild"] = scoped_result(api, api.run_data_rebuild(), actual_changed)
+        raw_lanes["data_rebuild"] = api.run_data_rebuild()
+        lanes["data_rebuild"] = scoped_result(api, raw_lanes["data_rebuild"], actual_changed)
     if selected["context_budget"]:
+        raw_lanes["context_budget"] = api.run_context_budget()
         if "architecture/context_budget.yaml" in actual_changed:
-            lanes["context_budget"] = api.run_context_budget()
+            lanes["context_budget"] = raw_lanes["context_budget"]
         else:
-            lanes["context_budget"] = scoped_result(api, api.run_context_budget(), actual_changed)
+            lanes["context_budget"] = scoped_result(api, raw_lanes["context_budget"], actual_changed)
 
     blocking_issues = [
         {"lane": lane, **api.asdict(issue)}
@@ -202,6 +227,7 @@ def run_closeout(
         "changed_files": actual_changed,
         "selected_lanes": selected,
         "lanes": {lane: lane_summary(api, result) for lane, result in lanes.items()},
+        "global_health": {lane: global_health_summary(result) for lane, result in raw_lanes.items()},
         "telemetry": telemetry,
         "blocking_issues": blocking_issues,
         "warning_issues": warning_issues,

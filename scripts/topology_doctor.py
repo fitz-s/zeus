@@ -76,6 +76,14 @@ class TopologyIssue:
     severity: str = "error"
 
 
+_NAVIGATION_MODE_POLICY = {
+    "navigation": "requested_file_scoped",
+    "navigation_strict_health": "all_errors_block",
+    "strict_full_repo": "all_errors_block",
+    "global_health": "advisory_counts",
+}
+
+
 @dataclass(frozen=True)
 class StrictResult:
     ok: bool
@@ -1081,7 +1089,46 @@ def build_digest(task: str, files: list[str] | None = None) -> dict[str, Any]:
     return _digest_checks().build_digest(sys.modules[__name__], task, files)
 
 
-def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
+def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str]) -> bool:
+    if not requested_paths:
+        return False
+    if issue_path.startswith("<"):
+        return True
+    normalized = issue_path.split(":", 1)[0].rstrip("/")
+    for requested in requested_paths:
+        scoped = requested.rstrip("/")
+        if normalized == scoped:
+            return True
+        if issue_path.startswith(f"{scoped}:"):
+            return True
+        if scoped.startswith(f"{normalized}/"):
+            return True
+        if normalized.startswith(f"{scoped}/"):
+            return True
+    return False
+
+
+def _navigation_direct_blockers(issues: list[dict[str, Any]], requested_paths: list[str]) -> list[dict[str, Any]]:
+    return [
+        issue
+        for issue in issues
+        if issue.get("severity") == "error"
+        and _navigation_issue_path_in_scope(str(issue.get("path", "")), requested_paths)
+    ]
+
+
+def _global_health_counts(checks: dict[str, StrictResult]) -> dict[str, dict[str, int]]:
+    return {
+        lane: {
+            "issue_count": len(result.issues),
+            "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
+            "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
+        }
+        for lane, result in checks.items()
+    }
+
+
+def run_navigation(task: str, files: list[str] | None = None, *, strict_health: bool = False) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
         "docs": run_docs(),
@@ -1093,15 +1140,27 @@ def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
         "runtime_modes": run_runtime_modes(),
         "reference_replacement": run_reference_replacement(),
     }
-    digest = build_digest(task, files or [])
+    requested_paths = files or []
+    digest = build_digest(task, requested_paths)
     issues = [
         {"lane": lane, **asdict(issue)}
         for lane, result in checks.items()
         for issue in result.issues
     ]
-    blocking = [issue for issue in issues if issue.get("severity") == "error"]
+    direct_blockers = _navigation_direct_blockers(issues, requested_paths)
+    repo_health_warnings = [issue for issue in issues if issue not in direct_blockers]
+    legacy_blocking = [issue for issue in issues if issue.get("severity") == "error"]
+    route_context = {
+        "mode": "navigation_strict_health" if strict_health else "navigation",
+        "policy": _NAVIGATION_MODE_POLICY["navigation_strict_health" if strict_health else "navigation"],
+        "requested_files": requested_paths,
+        "allowed_files": digest.get("allowed_files", []),
+        "forbidden_files": digest.get("forbidden_files", []),
+        "gates": digest.get("gates", []),
+        "stop_conditions": digest.get("stop_conditions", []),
+    }
     return {
-        "ok": not blocking,
+        "ok": not legacy_blocking if strict_health else not direct_blockers,
         "task": task,
         "digest": digest,
         "context_assumption": digest.get("context_assumption", {}),
@@ -1115,6 +1174,10 @@ def run_navigation(task: str, files: list[str] | None = None) -> dict[str, Any]:
             for lane, result in checks.items()
         },
         "issues": issues,
+        "direct_blockers": legacy_blocking if strict_health else direct_blockers,
+        "route_context": route_context,
+        "repo_health_warnings": [] if strict_health else repo_health_warnings,
+        "global_health_counts": _global_health_counts(checks),
         "excluded_lanes": {
             "strict": "strict includes transient root/state artifact classification; run explicitly when workspace is quiescent",
             "scripts": "script manifest can be blocked by active package scripts; run explicitly for script work",
