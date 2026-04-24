@@ -211,7 +211,7 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert tracker.entries == ["test_001"]
 
 
-@pytest.mark.skip(reason="P9: requires canonical write path setup (position_current); log_trade_entry no longer writes position_events")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_chain_reconciliation_rescues_pending_tracked_fill():
     """Chain truth must rescue pending_tracked when order-status path is unavailable."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -265,7 +265,7 @@ def test_lifecycle_kernel_enters_chain_quarantined_runtime_state():
     assert enter_chain_quarantined_runtime_state() == "quarantined"
 
 
-@pytest.mark.skip(reason="P9: requires canonical write path setup (position_current); log_trade_entry no longer writes position_events")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
@@ -332,7 +332,7 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
     assert rescue_events[0]["details"]["chain_state"] == "synced"
 
 
-@pytest.mark.skip(reason="P9: requires canonical write path setup (position_current); log_trade_entry no longer writes position_events")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, query_position_events
@@ -586,7 +586,7 @@ def test_backoff_exhausted_holds_to_settlement():
 
 # ---- Test 6: Paper exit does not use sell order ----
 
-@pytest.mark.skip(reason="Phase2: paper mode removed")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: KEEP_LEGITIMATE — paper-mode was removed in Phase2 (canonical-only execution). This test validates deprecated paper-path behavior; retained as documentation antibody of the removed contract. Un-skip verified failure as expected (cannot exercise removed code path). Do not un-skip; promote to OBSOLETE_DELETE if plan ever decides retire the documentation antibody.")
 def test_paper_exit_does_not_use_sell_order():
     """Paper mode: direct close_position, no CLOB interaction."""
     pos = _make_position(state="holding")
@@ -872,7 +872,7 @@ def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
         )
 
 
-@pytest.mark.skip(reason="P9: requires canonical write path setup (position_current); log_trade_entry no longer writes position_events")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
@@ -1224,7 +1224,7 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     assert pos in portfolio.positions  # NOT closed
 
 
-@pytest.mark.skip(reason="P9: requires canonical write path setup (position_current); log_trade_entry no longer writes position_events")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED via log_trade_entry->position_events; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Un-skip verified failure: rescue semantics intact (in-memory) but canonical event shape is POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not POSITION_LIFECYCLE_UPDATED with source=chain_reconciliation). Rewrite against new canonical shape deferred to T1.c-followup slice.")
 def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     """Deferred fill telemetry must preserve sell-side realizable bid, not mark price."""
     from src.state.db import get_connection, init_schema, query_position_events
@@ -1533,7 +1533,7 @@ def test_position_carries_env():
     assert pos_live.env == "live"
 
 
-@pytest.mark.skip(reason="P4: contamination guard was in _load_portfolio_from_json_data (now deleted); needs relocation to canonical load path")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: _load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback (current canonical loader: src/state/portfolio_loader_policy.py + src/state/portfolio.py::load_portfolio). Un-skip verified failure: the guard function no longer exists to invoke. Guard relocation to the canonical loader's env-filtering surface is a P4 refactor deferred to T1.c-followup slice — requires careful audit of which loader(s) handle env scoping today and whether a guard is already implicit via SQL WHERE env=? predicates.")
 def test_contamination_guard_blocks_wrong_env():
     """Loading a live position into paper portfolio (or vice versa) must fail."""
     from src.state.portfolio import load_portfolio, save_portfolio
@@ -1566,7 +1566,7 @@ def test_state_path_resolves_directly():
     assert "-paper" not in path.name
 
 
-@pytest.mark.skip(reason="P4: contamination guard was in _load_portfolio_from_json_data (now deleted); needs relocation to canonical load path")
+@pytest.mark.skip(reason="T1.c-audit 2026-04-23: _load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback (current canonical loader: src/state/portfolio_loader_policy.py + src/state/portfolio.py::load_portfolio). Un-skip verified failure: the guard function no longer exists to invoke. Guard relocation to the canonical loader's env-filtering surface is a P4 refactor deferred to T1.c-followup slice — requires careful audit of which loader(s) handle env scoping today and whether a guard is already implicit via SQL WHERE env=? predicates.")
 def test_empty_env_positions_pass_guard():
     """Positions with empty env (legacy) should pass the contamination guard."""
     pos = _make_position(env="")

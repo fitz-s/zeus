@@ -688,7 +688,7 @@
     {
       "slice_id": "T5.d",
       "name": "realized_fill_plus_slippage_bps_typed_contracts",
-      "commit": "pending",
+      "commit": "782d2af",
       "date": "2026-04-23",
       "critic_status": "self_verified_contract_shell_pattern_proven_in_T5a_T5b_con_nyx_dispatched",
       "planning_lock": "GREEN on 3 files (src/contracts/slippage_bps.py + src/contracts/realized_fill.py + tests/test_realized_fill.py)",
@@ -786,6 +786,111 @@
         ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files scripts/snapshot_checksum.py architecture/script_manifest.yaml .gitignore state/zeus-world.db.pre-pe_2026-04-23.sha256 --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok:true, issues:[]}"
       ],
       "category_immunity_fitz_k_lt_n_score": "LOW-severity category (crypto hash upgrade). Score 0.7/1.0: makes MD5-collision-based sidecar tampering structurally impossible going forward (attacker would need SHA-256 preimage). Remaining 0.3: does not prevent a malicious actor from overwriting BOTH the snapshot AND the sidecar atomically (addressed by immutable storage, not by this tool). The real K<<N value is precedent: establishes the crypto pattern for any future packet's rollback chain."
+    },
+    {
+      "slice_id": "T1.c",
+      "name": "live_safety_invariants_8_skip_audit_with_followup_flag",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_batch_unskip_probe_plus_current_fact_rewrite_con_nyx_dispatched",
+      "planning_lock": "GREEN (tests/* only, skip-reason text edit zero-behavior)",
+      "files_changed": [
+        "tests/test_live_safety_invariants.py (8 @pytest.mark.skip reason strings updated to current-fact + T1.c-followup references; ZERO behavior change)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "plan_premise_correction_thirteen": "Fix plan T1.c row cited 8 skip marker lines (L211/265/332/586/872/1224/1533/1566). Grep-verified actual lines L214/268/335/589/875/1227/1536/1569 — uniform +3 offset caused by T1.a's 3-line provenance header prepend. Not a material error; tests + reasons remain as described.",
+      "batch_unskip_probe": {
+        "method": "regex-removed all 8 plan-cited skip decorators at once, ran pytest tests/test_live_safety_invariants.py, then reverted via git checkout",
+        "result": "12 failed / 47 passed. Of 12 failures, 8 correspond to my un-skips + 4 pre-existing failures on other tests (test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only_quarantine + test_monitoring_transitions_holding_position_into_day0_window + test_same_cycle_day0_crossing_refreshes_through_day0_semantics + test_day0_refresh_fallback_keeps_probability_stale — these are NOT in T1.c scope).",
+        "zero_natural_pass_removals": "All 8 cited tests fail after un-skip under current production reality. Zero candidates for clean skip removal.",
+        "baseline_preserved": "Final file state (with updated reasons) still shows 4 failed / 47 passed / 8 skipped — identical to pre-T1.c baseline except skip reasons are now current-fact."
+      },
+      "classification_and_disposition": {
+        "phase2_KEEP_LEGITIMATE": {
+          "count": 1,
+          "line": 589,
+          "test": "test_paper_exit_does_not_use_sell_order",
+          "disposition": "KEEP with updated reason; test validates deprecated paper-mode behavior removed in Phase2; retained as documentation antibody."
+        },
+        "P9_pending_rewrite_T1_c_followup": {
+          "count": 5,
+          "lines": [214, 268, 335, 875, 1227],
+          "tests": [
+            "test_chain_reconciliation_rescues_pending_tracked_fill",
+            "test_chain_reconciliation_rescue_updates_trade_lifecycle_row",
+            "test_chain_reconciliation_rescue_emits_exactly_one_stage_event",
+            "test_day0_transition_emits_durable_lifecycle_event",
+            "test_deferred_fill_logs_last_monitor_best_bid"
+          ],
+          "current_fact": "reconcile/entry-path no longer emits POSITION_LIFECYCLE_UPDATED events via legacy log_trade_entry->position_events path; canonical emission moved to build_entry_canonical_write + append_many_and_project post-T4.1b. Rescue semantics intact in-memory; canonical event shape is now POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED (not legacy POSITION_LIFECYCLE_UPDATED-with-source shape).",
+          "disposition": "KEEP with T1.c-followup reference; rewrite deferred."
+        },
+        "P4_pending_relocation_or_obsolete_T1_c_followup": {
+          "count": 2,
+          "lines": [1536, 1569],
+          "tests": [
+            "test_contamination_guard_blocks_wrong_env",
+            "test_empty_env_positions_pass_guard"
+          ],
+          "current_fact": "_load_portfolio_from_json_data contamination guard path was deleted when canonical loader replaced JSON fallback. Current canonical loader is src/state/portfolio.py::load_portfolio + src/state/portfolio_loader_policy.py. Env-scoping may be implicit via SQL WHERE env=? predicates — audit needed to determine RELOCATE vs OBSOLETE.",
+          "disposition": "KEEP with T1.c-followup reference; RELOCATE-or-OBSOLETE decision deferred."
+        }
+      },
+      "plan_acceptance_outcome": {
+        "target": "--collect-only SKIPPED <= 1 (plan line 56)",
+        "actual": "--collect-only SKIPPED == 8 (1 Phase2 KEEP + 5 P9 pending + 2 P4 pending)",
+        "gap_rationale": "Plan L164-168 pre-authored surprise-tolerance clause: 'T1.c rewrites surface latent production defects. Rewriting 7 as its own micro-slice; do not let surprises gate T1.c.' Surprise surfaced: the 5 P9 tests were written against the legacy canonical event shape (POSITION_LIFECYCLE_UPDATED-with-source) which was replaced post-T4.1b. Honest rewrite requires redesign against the new POSITION_OPEN_INTENT/ENTRY_ORDER_POSTED shape — out of T1.c scope per plan's explicit guidance."
+      },
+      "t1_c_followup_slice_spec": {
+        "scope": "Rewrite 5 P9 tests against canonical event shape + decide P4 RELOCATE-vs-OBSOLETE for 2 contamination guard tests",
+        "estimated_size_hours": 4,
+        "dependencies_closed": ["T4.1b (canonical entry event shape)"],
+        "acceptance": "--collect-only SKIPPED <= 1 (Phase2 KEEP only)",
+        "prerequisite_reads": [
+          "src/state/chain_reconciliation.py::reconcile (canonical-aware rescue at L460-509)",
+          "src/engine/lifecycle_events.py::build_entry_canonical_write (T4.1b write path)",
+          "src/state/db.py::query_position_events (canonical read path)",
+          "src/state/portfolio.py::load_portfolio + src/state/portfolio_loader_policy.py (P4 contamination-guard audit)"
+        ]
+      },
+      "regression_delta_direction_L28": {
+        "narrow_file_post_T1_c": "pytest tests/test_live_safety_invariants.py --tb=no -> 4 failed / 47 passed / 8 skipped",
+        "narrow_file_pre_T1_c_baseline": "4 failed / 47 passed / 8 skipped (identical)",
+        "delta": "ZERO — skip-reason edits are text-only, no behavior change"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_live_safety_invariants.py --tb=no -> 4 failed, 47 passed, 8 skipped in 0.86s",
+        "grep -c '^@pytest.mark.skip' tests/test_live_safety_invariants.py -> 8 (preserved)",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_live_safety_invariants.py docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> {ok: true, issues: []}"
+      ]
+    },
+    {
+      "slice_id": "T1.f",
+      "name": "t1_family_currency_receipt",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_doc_only_cross_reference_receipt_con_nyx_dispatched",
+      "planning_lock": "GREEN (doc-only)",
+      "files_changed": [
+        "docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json (NEW)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "purpose": "Closing receipt for the T1 family. Aggregates T1.a through T1.f disposition into a single machine-readable artifact that downstream consumers (test_currency_audit.py, future CI gates, next-session handoff) can reference without needing to re-parse the full work_log.",
+      "t1_family_effective_status": {
+        "closed_full_rewrite": ["T1.a", "T1.b", "T1.d", "T1.e"],
+        "closed_doc_only": ["T1.f"],
+        "closed_audit_with_followup": ["T1.c"],
+        "unresolved_deferrals": [
+          "T1.c-followup: rewrite 5 P9 tests + P4 RELOCATE-or-OBSOLETE decision (4h, deps closed)",
+          "T1.d residual NC-12 L70 skip: KEEP until Phase-7 v2 substrate rebuild populates ensemble_snapshots_v2 etc."
+        ]
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -c 'import json; d=json.load(open(\"docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json\")); print(len(d[\"t1_slices_closed\"]))' -> 6",
+        "(T1.f is a doc-only artifact; regression N/A)"
+      ]
     }
   ],
   "slices_in_review": [
