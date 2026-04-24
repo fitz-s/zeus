@@ -857,3 +857,91 @@ ADOPT. `DecisionEvidence.to_json` emits
    `decision_evidence_persistence.py`?
 3. Does `query_position_events` accept `runtime_trade_id` or
    `position_id`?
+
+## Schema migration runbook — pending live-DB catch-up (2026-04-23)
+
+Three slices landed `init_schema()`-requiring changes that are in code
+but NOT YET APPLIED to running `state/zeus-world.db`. Per critic-opus
+META finding 2026-04-23: accumulation of live-DB migration debt should
+be discharged atomically, not carried slice-by-slice.
+
+### Pending migrations
+
+| Commit | Slice | What the live DB is missing until applied |
+|---|---|---|
+| `36f0189` | T3.3 position_current canonical-column ALTER | Legacy rows lack the full 31-column canonical tuple (notably `temperature_metric`); `src/state/ledger.py::apply_architecture_kernel_schema` ALTER loop is idempotent |
+| `69520ba` | S2.1 settlements_authority_monotonic trigger v2 | Live DB still carries pre-S2.1 v1 trigger (`IS NULL` only); 5 presence-only bypass shapes (false / 0 / empty-string / object / array) remain exploitable |
+| `619b278` | REOPEN-1 forecasts schema ALTER | Live forecasts has 13 cols; writer expects 14 (`rebuild_run_id` + `data_source_version` missing). `k2_forecasts_daily` cron FAILED every 30 min since 2026-04-23T13:30Z |
+
+All three migrations are idempotent — calling `init_schema(conn)` on
+the live world connection applies them safely. The three shipped
+antibody tests cover idempotency.
+
+### Canonical migration command — either option discharges ALL three
+
+**Option A (preferred)** — daemon restart. `src/main.py:496` already
+calls `init_schema(conn)` unconditionally on startup. Restart the
+supervisor and all pending migrations apply on the next boot with zero
+extra steps.
+
+**Option B** — one-off `init_schema` call without daemon restart:
+
+```bash
+cd /Users/leofitz/.openclaw/workspace-venus/zeus
+.venv/bin/python -c "
+from src.state.db import init_schema, get_world_connection
+conn = get_world_connection()
+try:
+    init_schema(conn)
+    conn.commit()
+finally:
+    conn.close()
+print('init_schema applied')
+"
+```
+
+Daemon connections are re-opened per cycle (per `get_world_connection`
+at `src/main.py:177`), so live cycles pick up the new schema on the
+next tick without restart.
+
+### Post-apply verification
+
+```bash
+# forecasts: confirm 2 new cols exist
+sqlite3 -readonly state/zeus-world.db "PRAGMA table_info(forecasts);" \
+  | grep -E "rebuild_run_id|data_source_version"
+
+# trigger: confirm v2 (contains json_type check)
+sqlite3 -readonly state/zeus-world.db \
+  "SELECT sql FROM sqlite_master WHERE name='settlements_authority_monotonic';" \
+  | grep -c "json_type"
+# expect 1
+
+# position_current: confirm all 31 canonical cols present
+sqlite3 -readonly state/zeus-world.db \
+  "SELECT COUNT(*) FROM pragma_table_info('position_current');"
+# expect 31
+
+# scheduler: wait for next 07:30 UTC k2_forecasts_daily tick, then
+cat state/scheduler_jobs_health.json | python3 -c \
+  "import sys, json; print(json.load(sys.stdin).get('k2_forecasts_daily', {}).get('status'))"
+# expect OK (flips from FAILED)
+```
+
+### NOT covered by this runbook (separate review gates)
+
+- **DR-33-C flag flip** (`ZEUS_HARVESTER_LIVE_ENABLED=1`): operator-
+  authored review required per data-readiness closure.
+- **REOPEN-2 settlements UNIQUE migration** (if operator pursues):
+  HIGH-risk — SQLite cannot ALTER unique constraints; requires table
+  recreation with pre-flight snapshot.
+- **S2.2 BEFORE INSERT trigger on settlements** (if operator pursues):
+  HIGH-risk — may reject legitimate historical writes; requires
+  read-only dry-run probe first.
+
+### Runbook maintenance
+
+When a future slice lands an `init_schema`-requiring change, append a
+row to the pending-migrations table above with commit hash + one-line
+description. Remove the row after the operator confirms the migration
+applied.
