@@ -184,7 +184,35 @@ def append_event_and_project(
 def append_many_and_project(
     conn: sqlite3.Connection, events: list[dict], projection: dict
 ) -> None:
-    """Batch canonical event append with a single final projection update."""
+    """Batch canonical event append with a single final projection update.
+
+    Atomicity (DR-33-B, 2026-04-24): uses an explicit SAVEPOINT (not
+    `with conn:`) so callers that already hold an outer SAVEPOINT can
+    invoke this function without the Python `with conn:` idiom silently
+    releasing their outer SAVEPOINT. Per memory rule L30 (`with conn:`
+    inside SAVEPOINT atomicity collision): Python sqlite3's `with conn:`
+    commits + releases the innermost active SAVEPOINT on clean exit,
+    which — when this function was invoked inside a caller's SAVEPOINT —
+    broke the caller's ROLLBACK path on subsequent errors. Explicit
+    SAVEPOINT nesting avoids the collision: nested SAVEPOINTs are
+    released independently in SQLite, so the caller's outer SAVEPOINT
+    survives a clean release of this function's inner SAVEPOINT.
+
+    Torn-state closure: the pre-DR-33-B `cycle_runtime.py:1246-1252`
+    pattern explicitly placed `_dual_write_canonical_entry_if_available`
+    OUTSIDE the `sp_candidate_*` SAVEPOINT guard because the `with conn:`
+    in this function would have released sp_candidate_* on commit. With
+    DR-33-B, the dual-write can run INSIDE sp_candidate_* — if the
+    dual-write fails, ROLLBACK TO sp_candidate_* correctly rolls back
+    both the trade_decisions writes and the position_events writes.
+
+    Callers outside any SAVEPOINT (top-level): SQLite opens an implicit
+    transaction at the first SAVEPOINT, and clean RELEASE at the
+    outermost level commits. Existing top-level callers continue to
+    work unchanged.
+    """
+    import secrets
+
     assert_canonical_transaction_schema(conn)
     require_payload_fields(
         projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
@@ -194,7 +222,9 @@ def append_many_and_project(
             event, CANONICAL_POSITION_EVENT_COLUMNS, label=f"event[{idx}]"
         )
     validate_event_projection_batch(events, projection)
-    with conn:
+    sp_name = f"sp_ampp_{secrets.token_hex(6)}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
         for event in events:
             conn.execute(
                 f"""
@@ -204,3 +234,8 @@ def append_many_and_project(
                 ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
             )
         upsert_position_current(conn, projection)
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
