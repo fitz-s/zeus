@@ -1,6 +1,12 @@
+# Created: 2026-04-12
+# Last reused/audited: 2026-04-24
+# Authority basis: K3 Slice P math fixes + T6.3 sparse impute policy (midstream fix plan 2026-04-23)
 """Tests for K3 Slice P: math semantics fixes.
 
-Bug #7  — compute_posterior sparse-vector imputation
+Bug #7  — compute_posterior sparse-vector imputation (policy history:
+          original B086 removed p_cal impute; T6.3 2026-04-24 restored
+          it as an explicit fallback with imputation_source provenance
+          recorded on the VigTreatment record).
 Bug #8  — bootstrap ALL bins (cross-bin correlation)
 Bug #9  — buy-NO math verification (confirmed correct)
 Bug #64 — p_market[0] exit context (confirmed correct — single-element)
@@ -26,30 +32,65 @@ def _bins_3() -> list[Bin]:
     ]
 
 
+def _non_tail_bins_3() -> list[Bin]:
+    """Interior bins only — no tail-alpha scaling, so alpha applies uniformly."""
+    return [
+        Bin(low=60, high=61, unit="F", label="60-61°F"),
+        Bin(low=62, high=63, unit="F", label="62-63°F"),
+        Bin(low=64, high=65, unit="F", label="64-65°F"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Bug #7: sparse p_market imputation in compute_posterior
+# (policy restored by T6.3; provenance is typed on VigTreatment)
 # ---------------------------------------------------------------------------
 
 class TestSparseMarketImputation:
     """When monitor refreshes a single held bin, p_market is sparse
-    (zeros for non-held bins). Before fix, normalization diluted the
-    held bin upward because zeros dragged the denominator down."""
+    (zeros for non-held bins). Under T6.3, the zero positions are
+    imputed from p_cal as a fallback reference, and the final
+    compute_posterior normalization produces posterior values that
+    reflect both the p_cal prior AND the impute-driven market term at
+    non-held bins — distinct from both pre-B086 impute behavior
+    (implicit) and post-B086 no-impute behavior (zero dilution).
+    """
 
-    def test_sparse_vector_does_not_zero_dilute(self):
-        """Sparse p_market should impute p_cal for missing entries."""
+    def test_sparse_vector_matches_p_cal_fallback_impute(self):
+        """Post-T6.3 discriminating test: sparse p_market[zero] bins are
+        filled from p_cal before blending, and the resulting posterior
+        is distinguishable from the no-impute path.
+        """
         p_cal = np.array([0.2, 0.5, 0.3])
-        # Sparse: only bin 1 has a market price
         p_market_sparse = np.array([0.0, 0.45, 0.0])
-        bins = _bins_3()
+        bins = _non_tail_bins_3()  # no tail scaling — alpha_vec == alpha
+        alpha = 0.6
 
-        posterior = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+        posterior = compute_posterior(p_cal, p_market_sparse, alpha=alpha, bins=bins)
 
-        # All posterior values must be positive (no zero from sparse entries)
-        assert np.all(posterior > 0), f"Sparse imputation failed: {posterior}"
+        # Expected under T6.3 impute: zeros → p_cal at same positions
+        imputed_market = np.array([p_cal[0], 0.45, p_cal[2]])
+        raw_impute = alpha * p_cal + (1 - alpha) * imputed_market
+        expected_impute = raw_impute / raw_impute.sum()
+
+        # Pre-T6.3 (B086) no-impute alternative — blend raw zeros
+        raw_no_impute = alpha * p_cal + (1 - alpha) * p_market_sparse
+        expected_no_impute = raw_no_impute / raw_no_impute.sum()
+
+        np.testing.assert_allclose(posterior, expected_impute)
+        assert not np.allclose(posterior, expected_no_impute), (
+            "Posterior matches no-impute path; T6.3 p_cal fallback impute not active"
+        )
+        # Sanity: normalization and positivity invariants still hold
         assert posterior.sum() == pytest.approx(1.0, abs=1e-9)
+        assert np.all(posterior > 0)
 
     def test_sparse_vs_complete_held_bin_stability(self):
-        """Held bin posterior should be similar whether market is sparse or complete."""
+        """Post-T6.3: impute closes the gap between sparse and complete
+        held-bin posterior. Under pre-T6.3 no-impute, this test was RED
+        (|sparse - complete| ratio > 0.6 in master); under T6.3 impute,
+        the ratio returns to within the 15% tolerance band.
+        """
         p_cal = np.array([0.2, 0.5, 0.3])
         p_market_complete = np.array([0.22, 0.45, 0.33])
         # Sparse: only held bin (1) has real price
@@ -59,12 +100,11 @@ class TestSparseMarketImputation:
         post_complete = compute_posterior(p_cal, p_market_complete, alpha=0.6, bins=bins)
         post_sparse = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
 
-        # Imputed sparse should produce similar held-bin posterior
-        # (within 10% relative — imputation uses p_cal not actual market)
+        # Under T6.3 impute, sparse posterior should be within 15% of complete.
         assert abs(post_sparse[1] - post_complete[1]) / post_complete[1] < 0.15
 
     def test_complete_market_unchanged(self):
-        """Complete market vectors should not be affected by the fix."""
+        """Complete market vectors should not be affected by T6.3."""
         p_cal = np.array([0.2, 0.5, 0.3])
         # Complete market with typical vig (~0.95)
         p_market = np.array([0.18, 0.48, 0.29])

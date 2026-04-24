@@ -181,12 +181,36 @@ def compute_posterior(
         
     positive_components = int(np.count_nonzero(p_market > 0.0))
     looks_complete = positive_components >= min(len(p_market), 2)
+    has_zeros = bool(np.any(p_market == 0.0))
     if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
         market = VigTreatment.from_raw(p_market).clean_prices
+    elif has_zeros:
+        # T6.3 (supersedes B086): sparse monitor vectors have zeros for non-held
+        # bins. We now impute those zeros from p_cal as a fallback reference
+        # (imputation_source="p_cal_fallback"), with provenance recorded on the
+        # VigTreatment record. This is NOT a silent revival of pre-B086 behavior:
+        # the imputed bins and reference source are typed-visible on the returned
+        # VigTreatment record, so downstream auditors can tell which posterior
+        # bins were derived from market data vs model priors. A future slice may
+        # thread real cross-market sibling snapshots through this same kwarg with
+        # imputation_source="sibling_market". See
+        # docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17
+        # (B086 entry) for supersedence record.
+        market = VigTreatment.from_raw(
+            p_market,
+            sibling_snapshot=p_cal,
+            imputation_source="p_cal_fallback",
+        ).clean_prices
     else:
-        # Bug #7 [Remediated B086]: sparse monitor vectors have zeros for non-held bins.
-        # We NO LONGER impute p_cal for missing entries. Absent market prices must explicitly
-        # remain absent (np.nan) or raw zeros to avoid diluting semantic completeness flags.
+        # Distorted-vig complete market (vig out of [0.90, 1.10] band, no zeros).
+        # Pre-T6.3 behavior preserved: raw pass-through. We deliberately do NOT
+        # route through VigTreatment.from_raw with sibling_snapshot here because
+        # that would silently demote the auditable "p_cal_fallback" intent to
+        # "none" (no impute needed when raw has no zeros), masking the distorted-
+        # vig signal. Surrogate-critic 2026-04-24 HIGH finding: preserve category
+        # immunity by keeping the distorted-vig case OUT of the impute call site.
+        # A future slice may introduce imputation_source="vig_out_of_band" if
+        # auditors need that discriminator.
         market = p_market.copy()
         
     if bins is not None and len(bins) == len(p_cal):

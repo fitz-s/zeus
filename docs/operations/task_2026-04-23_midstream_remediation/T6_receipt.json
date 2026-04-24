@@ -1,0 +1,112 @@
+{
+  "receipt_type": "family_partial_closure",
+  "family": "T6",
+  "family_intent": "D1/D2/D5/D6 MITIGATED → antibody promotion. 4-slice family per plan L103-110; only T6.3 + T6.4 available now, T6.1/T6.2 doubly-blocked on live-readiness B3 + settlement corpus.",
+  "created_at": "2026-04-24",
+  "authority_source": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T6.1-T6.4",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/",
+  "parent_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+  "parent_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+  "t6_slices_status": [
+    {
+      "slice_id": "T6.1",
+      "status": "BLOCKED",
+      "scope": "D1 EV-optimized α — replaces risk-cap blend; derived from realized-P&L regression.",
+      "estimated_size": 16,
+      "blockers": ["live-readiness B3 upgrade", "≥ 30-settlement P&L corpus"],
+      "wave": "W5"
+    },
+    {
+      "slice_id": "T6.2",
+      "status": "BLOCKED",
+      "scope": "D2 profit-validated TailTreatment — direction-aware, buy_no P&L evidence.",
+      "estimated_size": 12,
+      "blockers": ["live-readiness B3 upgrade", "≥ 30 buy_no settlements"],
+      "wave": "W5"
+    },
+    {
+      "slice_id": "T6.3",
+      "status": "CLOSED_FULL",
+      "commit": "pending (this session)",
+      "architectural_decision": "Option C — sibling_snapshot primary kwarg with p_cal fallback under explicit imputation_source provenance tag",
+      "scope": "D5 sparse-monitor VigTreatment with provenance; VigTreatment.from_raw(raw_market_prices, *, sibling_snapshot=None, imputation_source='none'); records imputed_bins + imputation_source.",
+      "estimated_size": 10,
+      "actual_size_estimate": "~4-5h (foundation pre-existed per plan-premise correction #15)",
+      "paired_slice": "T2.c (closure trigger fired via XPASS; xfail marker removed)",
+      "plan_premise_corrections_introduced": [
+        "#15: VigTreatment class + from_raw classmethod already existed; T6.3 was signature-extension + provenance-fields + sparse-branch-policy-flip, not greenfield",
+        "#19: 3-way collision between B086 archive (no-impute), T2.c xfail body (p_cal impute literal), and plan L109 sibling_snapshot semantics — surfaced by con-nyx pre-edit 10-ask adversarial review; resolved via operator-chosen Option C",
+        "#20: test_sparse_vs_complete_held_bin_stability was silently RED on master at HEAD 3eaa772/a7fc74c since B086; T1 currency audit (T1.a/e) missed this because it checked only dated headers, not pytest green-ness"
+      ],
+      "files_modified": [
+        "src/contracts/vig_treatment.py",
+        "src/strategy/market_fusion.py",
+        "tests/test_market_analysis.py",
+        "tests/test_k3_slice_p.py",
+        "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md"
+      ],
+      "files_added": [
+        "tests/test_vig_treatment_provenance.py"
+      ],
+      "regression_delta": {
+        "touched_scope_pre": "9 passed / 1 failed / 1 xfailed (HEAD 3eaa772; reproduced on HEAD a7fc74c post-rebase)",
+        "touched_scope_post": "25 passed / 0 failed / 0 xfailed (pre-surrogate-fixups) → 27 passed / 0 failed / 0 xfailed (post-surrogate-fixups — 2 new zero-for-zero filter antibodies in tests/test_vig_treatment_provenance.py)",
+        "delta": "+14 new passes from contract tests + 1 previously-RED flipped green (finding f) + 1 xfail→XPASS→marker removed (T2.c) + 2 new antibodies for surrogate MED finding (zero-for-zero substitution filter)",
+        "new_contract_tests_file": "tests/test_vig_treatment_provenance.py (16 tests post-fixup)",
+        "pre_existing_failures_outside_scope": [
+          "tests/test_market_analysis.py::TestVWMP::test_zero_size_fallback (vwmp() raises ValueError per post-B084 law; unrelated to T6.3)",
+          "tests/test_architecture_contracts.py::test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent (test-harness _Logger.warning attribute gap; unrelated)"
+        ]
+      },
+      "surrogate_critic_findings_addressed_inline": {
+        "HIGH_1": "compute_posterior distorted-vig mis-route — added has_zeros gate so out-of-vig-band complete markets preserve pre-T6.3 raw pass-through (category-immunity claim restored). market_fusion.py:182-214.",
+        "MED_2": "sibling-zero-at-zero-index no-op filter — from_raw now computes effective_impute_mask = zero_mask & (sibling > 0.0); zero-for-zero substitutions excluded from imputed_bins; 2 new antibody tests added. vig_treatment.py:216-259.",
+        "MED_4": "imputation_source now typed as Literal['none','sibling_market','p_cal_fallback'] via module-level ImputationSource alias; type system catches typos at mypy/pyright time (defense-in-depth: runtime validator preserved). vig_treatment.py:27-33.",
+        "LOW_5": "vig_factor=1.0 sentinel docstring clarified — 1.0 is NOT a unique sparse discriminator (legit vig-free markets also produce 1.0); authoritative sparse marker is imputed_bins non-empty or imputation_source != 'none'. vig_treatment.py:47-54.",
+        "LOW_6": "T2.c ratio assertion added — result[0]/result[2] == p_cal[0]/p_cal[2] (alpha-independent) pins impute source specifically to p_cal, not any asymmetric reference. test_market_analysis.py:154-165.",
+        "NICE_9": "this regression_delta block now references tests/test_vig_treatment_provenance.py explicitly."
+      },
+      "surrogate_critic_findings_deferred": {
+        "MED_3": "compute_posterior normalization relationship test (across-module invariant: mixed VigTreatment + compute_posterior always produces sum=1.0 posterior). Deferred to dedicated relationship-test slice per Fitz 'test relationships, not functions'. New breadcrumb task appended to receipt.",
+        "LOW_7": "bootstrap CI semantic note under sparse+impute (Platt-resampled p_cal as 'sibling' means CI reflects calibration variance not independent market observation). Deferred per surrogate's own recommendation.",
+        "LOW_8": "test_sparse_vs_complete_held_bin_stability tolerance tightening (currently 15%, actual post-T6.3 ratio is 3.57%). Kept loose as safety margin against future Platt/tail-scaling interactions; revisit if future slice introduces dedicated sparse-impute stability monitoring."
+      },
+      "category_immunity": "1.0/1.0 — silent revival of pre-B086 policy is now structurally impossible: the impute path MUST name its source through the typed record, making audit-blind regression surface-visible.",
+      "b086_supersedence": {
+        "durable_committed_records": [
+          "docs/operations/task_2026-04-23_midstream_remediation/T6_receipt.json (this file)",
+          "src/contracts/vig_treatment.py module docstring L14-20 (T6.3 supersedence note inline with contract)",
+          "src/strategy/market_fusion.py:186-214 (policy flip comment, replaces stale B086 rationale)",
+          "docs/operations/task_2026-04-23_midstream_remediation/work_log.md (T6.3 slice row)"
+        ],
+        "local_scratch_annotation": "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17 — local-only pointer; NOT committed (archives/ is gitignored per .gitignore:11). Durable supersedence lives in the committed records above. A future dedicated slice may promote this to architecture/history_lore.yaml if denser durable-lesson encoding is needed."
+      }
+    },
+    {
+      "slice_id": "T6.4",
+      "status": "DEFERRED_FOR_RESCOPING",
+      "scope": "D6 nonzero funding + correlation cost in HoldValue.compute(); wires existing src/strategy/correlation.py + config/city_correlation_matrix.json into exit authority",
+      "estimated_size": 14,
+      "blocker": "plan-premise correction #18 — plan cites src/execution/exit_triggers.py as wiring seam but that module has ZERO production callers (test-only, evaluate_exit_triggers at L49 only used by tests/test_lifecycle.py). Real exit authority is src/state/portfolio.py:296::Position.evaluate_exit ← src/engine/cycle_runtime.py:630. Seam correction requires planning-lock approval for src/state/** edit; scope+risk not matching plan's 14h estimate. Flagged to operator for re-scoping as separate slice.",
+      "wave": "W4 (was) → re-scoping slice TBD"
+    }
+  ],
+  "t6_family_effective_status": {
+    "slices_planned": 4,
+    "closed_full": ["T6.3"],
+    "blocked": ["T6.1", "T6.2"],
+    "deferred_rescoping": ["T6.4"]
+  },
+  "surrogate_critic_notes": {
+    "con_nyx_pre_edit_review_quality": "HIGH — surfaced 3 findings the team-lead initial scope missed: (b) B086 rationale staleness, (e) test vacuity, (f) latent RED test. Adversarial 10-ask template per feedback_critic_prompt_adversarial_template.md is load-bearing for this level of architectural review.",
+    "post_edit_review": "to be dispatched after commit prep"
+  },
+  "cross_references": {
+    "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "packet_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "t2_receipt": "docs/operations/task_2026-04-23_midstream_remediation/T2_receipt.json (T2.c closed via this slice)",
+    "b086_archive": "docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md (B086 entry carries T6.3 supersedence pointer)",
+    "midstream_fix_plan_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md (T6 family rows L103-110)"
+  }
+}

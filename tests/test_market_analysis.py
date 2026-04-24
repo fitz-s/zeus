@@ -119,33 +119,48 @@ class TestComputePosterior:
         np.testing.assert_allclose(result, expected)
         assert not np.allclose(result, legacy_post_blend)
 
-    @pytest.mark.xfail(
-        reason="T2.c boundary antibody — awaits T6.3 VigTreatment.from_raw "
-               "sparse-monitor imputation. Plan pairs T2.c (red boundary) "
-               "with T6.3 (implementation, size 10h). When T6.3 lands and "
-               "compute_posterior routes through VigTreatment that imputes "
-               "missing sibling prices with p_cal, this xfail flips to "
-               "passing and the marker must be removed.",
-        strict=True,
-    )
     def test_sparse_monitor_market_vector_imputes_missing_sibling_prices(self):
-        """T2.c 2026-04-24: expected behavior per D5 — when p_market has
-        zero entries (missing sibling prices from sparse monitor snapshot),
-        impute with p_cal before vig-normalization and alpha blend. Current
-        compute_posterior de-vigs the entire p_market as-is, which treats
-        0.0 entries as certainty-of-non-resolution rather than missing
-        data. Test pins the DESIRED behavior; T6.3 flips the marker."""
-        p_cal = np.array([0.30, 0.40, 0.30])
+        """T2.c (closed by T6.3, 2026-04-24): when p_market has zero entries
+        (missing sibling prices from sparse monitor snapshot), compute_posterior
+        imputes those zeros from p_cal as a fallback reference before the
+        alpha blend. The imputation source is recorded on the VigTreatment
+        record (imputation_source='p_cal_fallback').
+
+        The p_cal fixture is intentionally asymmetric (0.20 vs 0.30 at the
+        zero-filled positions) so the test discriminates between genuine
+        p_cal impute and any symmetric sibling-snapshot behavior that would
+        coincidentally produce equal values at positions 0 and 2.
+        """
+        p_cal = np.array([0.20, 0.50, 0.30])  # asymmetric — kills silent-sibling-equivalence ambiguity
         p_market = np.array([0.00, 0.95, 0.00])
 
         result = compute_posterior(p_cal, p_market, 0.5)
-        imputed_market = np.array([0.30, 0.95, 0.30])
+        imputed_market = np.array([0.20, 0.95, 0.30])  # zeros replaced by p_cal at same positions
         raw = 0.5 * p_cal + 0.5 * imputed_market
         expected = raw / raw.sum()
-        incorrectly_devigged = 0.5 * p_cal + 0.5 * np.array([0.0, 1.0, 0.0])
+        # Pre-T6.3 no-impute path: blend raw sparse [0,0.95,0] directly
+        incorrectly_zero_filled = 0.5 * p_cal + 0.5 * np.array([0.0, 0.95, 0.0])
+        incorrectly_zero_filled = incorrectly_zero_filled / incorrectly_zero_filled.sum()
 
         np.testing.assert_allclose(result, expected)
-        assert not np.allclose(result, incorrectly_devigged)
+        # Discriminate from pre-T6.3 no-impute behavior
+        assert not np.allclose(result, incorrectly_zero_filled)
+        # Assert asymmetry survives the blend — proves p_cal was the reference
+        # (symmetric sibling_snapshot would have produced result[0] == result[2])
+        assert result[0] != pytest.approx(result[2]), (
+            f"Expected asymmetric posterior (p_cal was asymmetric); got {result}. "
+            "Symmetric result implies impute source was not p_cal."
+        )
+        # Strong discriminator: under p_cal impute at zero-filled positions,
+        # raw[i] = alpha*p_cal[i] + (1-alpha)*p_cal[i] = p_cal[i], so the
+        # ratio result[0]/result[2] == p_cal[0]/p_cal[2] survives normalization
+        # (alpha-independent). A different impute source (e.g. a real sibling
+        # market snapshot) would produce a different ratio even if asymmetric.
+        assert result[0] / result[2] == pytest.approx(p_cal[0] / p_cal[2], abs=0.01), (
+            f"Expected result[0]/result[2] = p_cal[0]/p_cal[2] = "
+            f"{p_cal[0]/p_cal[2]:.4f}; got {result[0]/result[2]:.4f}. "
+            "A different sibling source would produce a different ratio."
+        )
 
     def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
         bins = [
