@@ -22,7 +22,7 @@ from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair, add_calibration_pair_v2
-from src.types.metric_identity import LOW_LOCALDAY_MIN
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import SettlementSemantics, round_wmo_half_up_value
 from src.contracts.exceptions import SettlementPrecisionError
@@ -763,7 +763,16 @@ def _write_settlement_truth(
                 city.name, target_date, event_slug or None, winning_bin, settlement_value,
                 city.settlement_source, settled_at, authority,
                 pm_bin_lo, pm_bin_hi, city.settlement_unit, db_source_type,
-                "high", "daily_maximum_air_temperature", "high_temp",
+                # C6 (2026-04-24): source canonical INV-14 identity from
+                # HIGH_LOCALDAY_MAX so settlements align with ensemble/observation
+                # rows on physical_quantity. Previously hardcoded
+                # "daily_maximum_air_temperature" diverged from canonical
+                # "mx2t6_local_calendar_day_max"; any future JOIN that filters on
+                # canonical physical_quantity would have silently dropped 100%
+                # of harvester-written rows.
+                HIGH_LOCALDAY_MAX.temperature_metric,
+                HIGH_LOCALDAY_MAX.physical_quantity,
+                HIGH_LOCALDAY_MAX.observation_field,
                 data_version, json.dumps(provenance, sort_keys=True, default=str),
             ),
         )
