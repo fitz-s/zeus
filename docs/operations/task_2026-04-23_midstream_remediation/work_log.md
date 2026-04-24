@@ -947,3 +947,81 @@ When a future slice lands an `init_schema`-requiring change, append a
 row to the pending-migrations table above with commit hash + one-line
 description. Remove the row after the operator confirms the migration
 applied.
+
+## DR-33-B packet stub — `append_many_and_project` atomicity refactor (2026-04-23)
+
+**Status**: DEFERRED — scoped to its own future packet, not executed in
+this session. This stub captures scope + pre-work + rollback so the next
+session can open the packet cleanly without re-discovering context.
+
+**Authority basis**: data-readiness workstream closure-banner item 1
+(`DR-33-B: atomicity refactor for append_many_and_project callers (P-H
+equivalent)`) + memory rule L30 (`with conn:` inside SAVEPOINT atomicity
+collision — Python sqlite3 `with conn:` commits + releases SAVEPOINTs;
+nested usage is a latent atomicity loss).
+
+### Scope
+
+Wrap every `append_many_and_project(...)` caller in an explicit
+SAVEPOINT so torn-state windows between `trade_decisions` INSERT (inside
+a SAVEPOINT sp_candidate_*) and `position_events` append (inside its
+own `with conn:`) are closed. Current state documented in T4.0 design
+doc rev2 critic finding F3 (HIGH).
+
+### Pre-work required before opening the packet
+
+1. **Caller inventory**: `grep -rn 'append_many_and_project' src/ scripts/ tests/`.
+   Expected count is between 6 and 14 sites per memory rule L28 ("caller
+   counts are routinely off by 2-3 due to topology flake"). Grep-verify
+   each site within 10 minutes of edit (memory rule L20).
+2. **`with conn:` audit**: for each caller site, check whether the caller is
+   already inside a `with conn:` block. If yes, wrapping with SAVEPOINT
+   introduces the L30 collision — caller must be refactored to use
+   explicit `conn.execute("SAVEPOINT ...")` / `RELEASE` instead of
+   `with conn:`.
+3. **Transaction boundary diagram**: sketch out the full cycle_runtime
+   canonical-entry path and verify the SAVEPOINT nests cleanly (or doesn't
+   nest at all) relative to any outer transaction.
+
+### Rollback / safety
+
+- Pre-slice DB snapshot: `state/zeus-world.db.pre-dr33b_<date>` + SHA-256
+  sidecar via `scripts/snapshot_checksum.py --compute` (slice S2.3
+  landed the tool).
+- Rollback-chain index entry in the new packet's work_log.
+- Two-stage critic: (a) critic-opus via `SendMessage` (durable team) +
+  (b) surrogate `Agent(subagent_type=code-reviewer, model=opus)` for
+  independent pre-commit review (per REOPEN-1 + S2.1 + S2.4 pattern
+  that proved effective this session).
+
+### HIGH-risk markers
+
+- Caller grep inventory is the FIRST pass/fail gate. If inventory
+  returns different count than prior memory rule L30 estimate (~6-14),
+  stop and re-read L30 before proceeding.
+- SAVEPOINT nesting wrong-direction = silent data loss on rollback.
+  This is NOT a dev-quality bug; it is a correctness invariant.
+- Torn-state window CLOSE depends on precise boundary placement. A
+  SAVEPOINT that wraps only the INSERT but not the projection, or
+  vice versa, leaves the window open.
+
+### Out of scope
+
+- DR-33-C flag flip (separate operator-approval gate)
+- REOPEN-2 settlements UNIQUE migration (separate high-risk schema
+  change; see critic-opus P0.2 finding C4 for rationale)
+- S2.2 BEFORE INSERT trigger on settlements (separate high-risk
+  trigger install)
+
+### Recommended next-session packet path
+
+```
+docs/operations/task_2026-04-24_dr33b_atomicity_refactor/
+├── plan.md (scope + allowed/forbidden files + critic protocol)
+├── work_log.md (per-caller slice rows)
+└── receipt.json (slices_closed + caller inventory grep evidence)
+```
+
+Plan-evidence anchor for planning-lock should point at the new packet's
+`plan.md`, not this stub. Stub is an index / memory aid, not the
+execution plan.
