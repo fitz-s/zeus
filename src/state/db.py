@@ -882,6 +882,54 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # S2.2 (2026-04-23, data-readiness-tail): Structural AP-2 prevention.
+    # SettlementSemantics.assert_settlement_value() is a SOCIAL gate (runtime
+    # only — any writer that bypasses the function bypasses the check). These
+    # two triggers enforce the minimum VERIFIED-row invariants structurally at
+    # DB-write time: a row with authority='VERIFIED' must carry non-null
+    # settlement_value AND non-empty winning_bin. QUARANTINED rows may have
+    # NULL settlement_value (that is the quarantine semantic — row is excluded
+    # from the authoritative set until reactivation).
+    #
+    # Pre-apply probe against live DB (1,469 VERIFIED + 92 QUARANTINED rows):
+    #   VERIFIED: 0 with null settlement_value / 0 with null winning_bin → none rejected
+    #   QUARANTINED: 49 with null settlement_value / 92 with null winning_bin → trigger does not fire (WHEN gates on authority='VERIFIED')
+    # So no legitimate historical rows are rejected by this trigger.
+    #
+    # DROP + CREATE (not CREATE IF NOT EXISTS) so a future refactor that
+    # tightens the predicate propagates to all legacy DBs on next init_schema.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_verified_insert_integrity")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_verified_insert_integrity
+            BEFORE INSERT ON settlements
+            WHEN NEW.authority = 'VERIFIED'
+              AND (NEW.settlement_value IS NULL
+                   OR NEW.winning_bin IS NULL
+                   OR NEW.winning_bin = '')
+            BEGIN
+                SELECT RAISE(ABORT, 'VERIFIED settlement INSERT requires non-null settlement_value + non-empty winning_bin');
+            END;
+            """
+        )
+        conn.execute("DROP TRIGGER IF EXISTS settlements_verified_update_integrity")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_verified_update_integrity
+            BEFORE UPDATE OF authority, settlement_value, winning_bin ON settlements
+            WHEN NEW.authority = 'VERIFIED'
+              AND (NEW.settlement_value IS NULL
+                   OR NEW.winning_bin IS NULL
+                   OR NEW.winning_bin = '')
+            BEGIN
+                SELECT RAISE(ABORT, 'VERIFIED settlement UPDATE requires non-null settlement_value + non-empty winning_bin');
+            END;
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_decision_group ON calibration_pairs(decision_group_id)"
     )

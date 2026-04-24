@@ -734,9 +734,75 @@
       ]
     },
     {
+      "slice_id": "S2.2",
+      "name": "data_readiness_tail_structural_ap2_prevention_settlements_triggers",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_12_of_12_pass_plus_23_of_23_cross_trigger_regression_critic_dispatch_pending",
+      "planning_lock": "GREEN on 3 files (src/state/db.py + tests/test_settlements_verified_row_integrity.py + architecture/test_topology.yaml) via midstream plan.md plan-evidence",
+      "authority_basis": "data-readiness workstream closure — AP-2 structural prevention was deferred as a 'future antibody' at closure; this slice closes it with a BEFORE INSERT + BEFORE UPDATE trigger pair on settlements",
+      "pre_s22_vulnerability_class": "SettlementSemantics.assert_settlement_value() is a SOCIAL/runtime gate — any writer that imports from a different module or bypasses the function can INSERT authority='VERIFIED' rows with NULL settlement_value and empty winning_bin. The live DB would accept the corruption silently.",
+      "post_s22_structural_contract": "Trigger pair rejects VERIFIED-row INSERTs/UPDATEs missing settlement_value or winning_bin. QUARANTINED/UNVERIFIED rows remain permissive (quarantine is the legitimate semantic for 'unable to determine canonical value').",
+      "pre_apply_probe_live_db": {
+        "verified_rows": 1469,
+        "verified_null_settlement_value": 0,
+        "verified_null_or_empty_winning_bin": 0,
+        "quarantined_rows": 92,
+        "quarantined_null_settlement_value": 49,
+        "quarantined_null_or_empty_winning_bin": 92,
+        "conclusion": "Zero legitimate historical rows would be rejected by the trigger (gate is authority='VERIFIED' only; all 1469 VERIFIED rows pass). Quarantine rows naturally exempt."
+      },
+      "files_changed": [
+        "src/state/db.py (append trigger pair after settlements_authority_monotonic, L881+; ~25 LOC)",
+        "tests/test_settlements_verified_row_integrity.py (NEW — 12 antibodies across 5 classes)",
+        "architecture/test_topology.yaml (registered via isolate-and-restore; zero co-tenant scope bleed)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "antibody_tests": {
+        "insert_path_rejections": [
+          "test_verified_insert_with_null_settlement_value_rejected",
+          "test_verified_insert_with_null_winning_bin_rejected",
+          "test_verified_insert_with_empty_winning_bin_rejected"
+        ],
+        "insert_path_acceptance": [
+          "test_verified_insert_with_all_required_fields_accepted"
+        ],
+        "insert_path_non_regression_on_non_verified": [
+          "test_quarantined_insert_with_null_settlement_value_accepted",
+          "test_quarantined_insert_with_all_nulls_accepted",
+          "test_unverified_insert_with_null_settlement_value_accepted"
+        ],
+        "update_path_rejections": [
+          "test_update_quarantined_to_verified_without_settlement_value_rejected",
+          "test_update_verified_settlement_value_to_null_rejected",
+          "test_update_verified_winning_bin_to_empty_rejected"
+        ],
+        "idempotency_and_structural_presence": [
+          "test_triggers_idempotent_on_repeat_init_schema",
+          "test_both_triggers_installed_after_init_schema"
+        ]
+      },
+      "category_immunity_fitz_k_lt_n_score": "1.0/1.0 on AP-2 structural-prevention category — a VERIFIED-row write missing settlement_value or winning_bin is now structurally impossible at DB boundary, regardless of whether the writer respected SettlementSemantics.assert_settlement_value(). This is exactly the 'make the category impossible' pattern: we did not patch 15 call sites, we added one trigger predicate the DB enforces unconditionally.",
+      "cross_trigger_coexistence_verified": "S2.1 settlements_authority_monotonic + S2.2 verified_row_integrity triggers run together without interference — 23/23 tests pass when both suites run combined. UPDATE-path test `test_update_quarantined_to_verified_without_settlement_value_rejected` accepts either rejection path (S2.1's reactivated_by gate OR S2.2's integrity gate) since both are correct — order-of-firing is SQLite-implementation-defined and not load-bearing.",
+      "live_db_migration_required_but_out_of_slice": "Trigger install runs on next init_schema call. Runbook entry appended to midstream work_log 'Schema migration runbook' section — operator discharges all 4 pending migrations (T3.3 position_current ALTER, S2.1 trigger v2, REOPEN-1 forecasts ALTER, S2.2 trigger pair install) with one daemon restart OR one init_schema one-off.",
+      "regression_evidence_L28": {
+        "narrow": "pytest -q tests/test_settlements_verified_row_integrity.py -> 12 passed in 0.11s",
+        "cross_suite": "pytest -q tests/test_settlements_authority_trigger.py tests/test_settlements_verified_row_integrity.py -> 23 passed in 0.19s",
+        "delta": "+12 passes from new test file; S2.1 trigger suite unaffected; zero new failures"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_settlements_verified_row_integrity.py -> 12 passed",
+        ".venv/bin/python -m pytest -q tests/test_settlements_authority_trigger.py tests/test_settlements_verified_row_integrity.py -> 23 passed",
+        "sqlite3 -readonly state/zeus-world.db 'SELECT authority, COUNT(*), SUM(CASE WHEN settlement_value IS NULL THEN 1 ELSE 0 END), SUM(CASE WHEN winning_bin IS NULL OR winning_bin=\"\" THEN 1 ELSE 0 END) FROM settlements GROUP BY authority' -> VERIFIED|1469|0|0 / QUARANTINED|92|49|92",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files src/state/db.py tests/test_settlements_verified_row_integrity.py architecture/test_topology.yaml --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> GREEN",
+        ".venv/bin/python scripts/topology_doctor.py --map-maintenance --changed-files src/state/db.py tests/test_settlements_verified_row_integrity.py architecture/test_topology.yaml --map-maintenance-mode precommit --json -> GREEN"
+      ]
+    },
+    {
       "slice_id": "S2.5",
       "name": "data_readiness_tail_harvester_winning_bin_format_unification_nh_e2",
-      "commit": "pending",
+      "commit": "c7784ec",
       "date": "2026-04-23",
       "critic_status": "self_verified_27_of_27_pass_ast_antibody_closes_reintroduction_category",
       "planning_lock": "GREEN on 1 file (tests/test_harvester_dr33_live_enablement.py — already registered)",

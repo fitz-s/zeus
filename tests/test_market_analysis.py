@@ -119,7 +119,22 @@ class TestComputePosterior:
         np.testing.assert_allclose(result, expected)
         assert not np.allclose(result, legacy_post_blend)
 
+    @pytest.mark.xfail(
+        reason="T2.c boundary antibody — awaits T6.3 VigTreatment.from_raw "
+               "sparse-monitor imputation. Plan pairs T2.c (red boundary) "
+               "with T6.3 (implementation, size 10h). When T6.3 lands and "
+               "compute_posterior routes through VigTreatment that imputes "
+               "missing sibling prices with p_cal, this xfail flips to "
+               "passing and the marker must be removed.",
+        strict=True,
+    )
     def test_sparse_monitor_market_vector_imputes_missing_sibling_prices(self):
+        """T2.c 2026-04-24: expected behavior per D5 — when p_market has
+        zero entries (missing sibling prices from sparse monitor snapshot),
+        impute with p_cal before vig-normalization and alpha blend. Current
+        compute_posterior de-vigs the entire p_market as-is, which treats
+        0.0 entries as certainty-of-non-resolution rather than missing
+        data. Test pins the DESIRED behavior; T6.3 flips the marker."""
         p_cal = np.array([0.30, 0.40, 0.30])
         p_market = np.array([0.00, 0.95, 0.00])
 

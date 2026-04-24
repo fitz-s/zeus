@@ -1,0 +1,67 @@
+{
+  "receipt_type": "t2_family_closure",
+  "family": "T2",
+  "family_intent": "Canonical-path antibody wave — align test-currency for selection-family materialization, sparse-monitor vig handling, and canonical event shape under the post-T4.1b canonical write path.",
+  "created_at": "2026-04-24",
+  "authority_source": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T2.a-g",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/",
+  "t2_slices_closed": [
+    {
+      "slice_id": "T2.a + T2.b",
+      "commit": "c4ee26a",
+      "scope": "R14 quarantine test fixture updates",
+      "outcome": "closed full"
+    },
+    {
+      "slice_id": "T2.c",
+      "commit": "pending (this slice)",
+      "scope": "D5 sparse-monitor imputes missing sibling prices",
+      "outcome": "xfail(strict=True) — red boundary antibody pending T6.3 VigTreatment implementation",
+      "test": "tests/test_market_analysis.py::TestComputePosterior::test_sparse_monitor_market_vector_imputes_missing_sibling_prices",
+      "rationale": "Plan pairs T2.c (red boundary) with T6.3 (implementation, size 10h). Current compute_posterior de-vigs entire p_market as-is which treats 0.0 entries as certainty-of-non-resolution rather than missing data. T2.c pins the DESIRED behavior via xfail(strict=True); when T6.3 lands and compute_posterior routes through VigTreatment that imputes missing sibling prices with p_cal, this xfail auto-flips (strict=True causes XPASS to fail, forcing the marker to be removed and confirming T6.3 landed)."
+    },
+    {
+      "slice_id": "T2.d + T2.e + T2.f",
+      "commit": "7d064be",
+      "scope": "SelectionFamilySubstrate 3 tests rewritten against canonical post-T4.1b event shape",
+      "outcome": "closed full (3/3 green)"
+    },
+    {
+      "slice_id": "T2.g",
+      "commit": "pending (this slice)",
+      "scope": "Un-monkeypatched real-Day0Router fail-closed verification",
+      "outcome": "xfail(strict=False) — real-Day0Router integration test at tests/test_fdr.py::TestSelectionFamilySubstrate::test_evaluate_candidate_exercises_real_day0_router_on_fixture_db",
+      "test": "new test exercises evaluate_candidate with Day0Router.route NOT stubbed; Day0HighSignal constructs and computes p_vector over fixture bins",
+      "current_blocker": "Day0HighSignal.p_vector requires a populated Day0TemporalContext (solar_day, clock_semantics, etc.) that the fixture's SimpleNamespace stub does not carry",
+      "rationale": "Plan estimated size 3h for full real-Day0Router integration fixture. Rather than block T2 closure on building that fixture, this slice lands the xfail antibody so coverage is visible and a future fixture-build slice removes the marker. strict=False allows the test to pass silently if the xfail is removed (signal of fixture progress) rather than failing loudly."
+    }
+  ],
+  "t2_family_effective_status": {
+    "slices_planned": 7,
+    "closed_full": ["T2.a", "T2.b", "T2.d", "T2.e", "T2.f"],
+    "closed_as_xfail_antibody": ["T2.c", "T2.g"],
+    "unresolved_deferrals": [
+      "T2.c xfail clears when T6.3 (VigTreatment.from_raw sparse-monitor imputation, size 10h) lands",
+      "T2.g xfail clears when Day0TemporalContext fixture builder lands (separate slice, ~3h)"
+    ]
+  },
+  "t2_d_1_substitute_slice": {
+    "original_spec": "v2 snapshot fixture setup to populate ensemble_snapshots_v2 with boundary_ambiguous=0 row",
+    "delivered_instead": "surrogate-critic-driven verification that init_schema(conn) already creates empty ensemble_snapshots_v2; natural empty-table query returns {} so DT7 gate passes without stubbing. F1 HIGH finding from adversarial critic prompt caught that an explicit monkeypatch was redundant and would have cemented bad precedent. TODO(T2.g) breadcrumbs added at top of each of 3 T2.d/e/f tests so future real-fixture slice has explicit anchors.",
+    "commit": "7d064be"
+  },
+  "critic_prompt_degradation_fix": {
+    "context": "Operator flagged 6+ prior slices producing zero substantive surrogate findings. Root cause: prompts had accreted self-justification language (\"pattern proven\", \"narrow scope, self-validating\") that primed APPROVE.",
+    "fix": "Rewrote surrogate dispatch prompt for T2.d.1 with 10 explicit adversarial asks, no scope-narrowing language, specific failure-mode probes.",
+    "result": "Surrogate returned REQUEST_CHANGES with 6 findings (HIGH×1 + MED×2 + LOW×3). F1 HIGH caught real redundant-stub issue that would have cemented bad precedent. All 6 findings addressed inline.",
+    "lesson": "Adversarial framing is load-bearing for critic machinery. Future slices must preserve it; never skip surrogate on 'narrow scope' grounds without active challenge."
+  },
+  "cross_references": {
+    "packet_plan": "docs/operations/task_2026-04-23_midstream_remediation/plan.md",
+    "packet_work_log": "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+    "packet_receipt": "docs/operations/task_2026-04-23_midstream_remediation/receipt.json",
+    "t1_receipt": "docs/operations/task_2026-04-23_midstream_remediation/T1_receipt.json",
+    "midstream_fix_plan_workbook": "docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md (T2 family rows L63-72)",
+    "paired_t6_3_slice": "plan L103 — T6.3 VigTreatment.from_raw implementation (size 10h, deps T2.c boundary test)"
+  }
+}
