@@ -172,18 +172,9 @@ state/                Runtime databases and projections (local, not committed)
 
 ---
 
-## For contributors and agents
+## For agents
 
-This repository is maintained by AI coding agents with a structured change-control layer. Before making changes:
+This repository is maintained by AI coding agents with a structured change-control layer. 
 
-1. Read `AGENTS.md` for operating law and navigation protocol
-2. Read `workspace_map.md` for directory routing
-3. Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
-
-See `docs/reference/zeus_domain_model.md` for the complete domain model with worked examples.
-
----
-
-## Disclaimer
-
-Zeus is not financial advice and does not guarantee profitability. Runtime state, credentials, raw vendor data, and derived caches are excluded from the repository by design.
+MUST READ `AGENTS.md` and `workspace_map.md` 
+Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
