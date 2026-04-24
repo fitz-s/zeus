@@ -1234,22 +1234,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         try:
                             log_trade_entry(conn, pos)
                             log_execution_report(conn, pos, result, decision_id=d.decision_id)
+                            # Post-audit fix #2 (2026-04-24): dual-write moved
+                            # INSIDE sp_candidate_* — DR-33-B (commit 2a62623)
+                            # replaced with-conn inside append_many_and_project
+                            # with explicit nested SAVEPOINT, so placing the
+                            # dual-write here no longer releases sp_candidate_*
+                            # on commit. Closes torn-state window per T4.0 F3.
+                            _dual_write_canonical_entry_if_available(
+                                conn,
+                                pos,
+                                decision_id=d.decision_id,
+                                deps=deps,
+                                decision_evidence=getattr(d, "decision_evidence", None),
+                            )
                             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                         except Exception:
                             conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                             raise
-                        # Dual-write runs outside the SAVEPOINT guard because it uses
-                        # `with conn:` internally (commits its own sub-transaction).
-                        # Placing it inside would release the SAVEPOINT on commit,
-                        # breaking the ROLLBACK path on subsequent errors.
-                        _dual_write_canonical_entry_if_available(
-                            conn,
-                            pos,
-                            decision_id=d.decision_id,
-                            deps=deps,
-                            decision_evidence=getattr(d, "decision_evidence", None),
-                        )
                         portfolio_dirty = True
                         if result.status == "filled":
                             tracker.record_entry(pos)

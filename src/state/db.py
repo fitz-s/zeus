@@ -975,6 +975,41 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # POST-AUDIT FIX #1 (2026-04-24, adversarial-audit follow-up):
+    # Close the NULL-NULL UNIQUE hole on settlements.
+    #
+    # REOPEN-2 (earlier today) installed UNIQUE(city, target_date,
+    # temperature_metric). CHECK constraint at
+    # `temperature_metric TEXT CHECK (temperature_metric IS NULL OR
+    # temperature_metric IN ('high','low'))` intentionally tolerates NULL
+    # so legacy-schema ALTER-added rows could pre-exist; SQLite UNIQUE
+    # treats NULL as DISTINCT, so the new UNIQUE does NOT prevent
+    # duplicate (city, target_date, NULL) rows. Subagent-4 adversarial
+    # audit (2026-04-24) DEMONSTRATED this on the live DB: two
+    # INSERTs with (TESTCITY, '2099-01-01', NULL, 'UNVERIFIED') both
+    # succeeded. `scripts/onboard_cities.py:383` is the writer that
+    # currently emits NULL-metric scaffold rows.
+    #
+    # Structural fix: a BEFORE INSERT trigger that rejects NULL metric
+    # on ALL rows (not just VERIFIED — the NULL-metric scaffold path
+    # bypasses the verified-integrity trigger by inserting as
+    # UNVERIFIED). DROP + CREATE for v2 propagation. Live DB has 0 NULL
+    # metric rows as of the audit — no existing row rejected.
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS settlements_non_null_metric")
+        conn.execute(
+            """
+            CREATE TRIGGER settlements_non_null_metric
+            BEFORE INSERT ON settlements
+            WHEN NEW.temperature_metric IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'settlements.temperature_metric must be non-null (high or low); REOPEN-2 post-audit fix closes the NULL-NULL UNIQUE hole');
+            END;
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # S2.2 (2026-04-23, data-readiness-tail): Structural AP-2 prevention.
     # SettlementSemantics.assert_settlement_value() is a SOCIAL gate (runtime
     # only — any writer that bypasses the function bypasses the check). These
