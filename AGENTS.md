@@ -1,10 +1,11 @@
 # Zeus AGENTS
 
-Zeus is two coupled systems:
+Zeus is a trading runtime with an agentic change-control layer.
 
-1. a live weather-probability trading runtime on Polymarket; and
-2. an agentic coding workspace that needs thin boot surfaces, machine-routable
-   law, derived context engines, and compressed history.
+The primary system is a live weather-probability trading runtime on Polymarket.
+The agentic workspace exists to preserve semantic integrity, source provenance,
+runtime authority, safe change control, and compressed history across a complex
+codebase.
 
 Read this file first. Use it to get the repo's current shape, then route into
 the narrower manifest, packet, or code surface that actually governs the task.
