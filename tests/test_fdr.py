@@ -1000,3 +1000,179 @@ class TestSelectionFamilySubstrate:
         assert decisions[0].fdr_family_size == 0
         assert decisions[0].n_edges_found == 1
         assert decisions[0].n_edges_after_fdr == 0
+
+    @pytest.mark.xfail(
+        reason="T2.g 2026-04-24: un-monkeypatched real Day0Router integration. "
+               "Runs evaluate_candidate with Day0Router.route NOT stubbed so "
+               "real Day0HighSignal (from src/signal/day0_high_signal.py) "
+               "constructs and computes p_vector over the fixture bins. "
+               "Currently xfail because Day0HighSignal.p_vector requires a "
+               "populated Day0TemporalContext (solar_day, clock_semantics, "
+               "etc.) that the fixture's SimpleNamespace stub does not "
+               "carry. Full integration setup is plan-estimated size 3h; "
+               "this xfail marks the real-Day0Router coverage target so a "
+               "future slice can remove the marker when the temporal_context "
+               "fixture is built out. Paired with T2.d/e/f (monkeypatched "
+               "coverage of the same assertions).",
+        strict=False,
+    )
+    def test_evaluate_candidate_exercises_real_day0_router_on_fixture_db(self, tmp_path, monkeypatch):
+        """T2.g — same scenario as test_evaluate_candidate_materializes_selection_facts
+        but without the Day0Router.route monkeypatch. Verifies the real
+        Day0Router dispatch path doesn't raise on a fixture DB with synthesized
+        HIGH-metric inputs. When Day0HighSignal's temporal_context requirements
+        are met by the fixture, this xfail flips and the marker must be
+        removed; that transition is the antibody signal.
+        """
+        conn = get_connection(tmp_path / "t2g_real_day0.db")
+        init_schema(conn)
+        now = datetime.now(timezone.utc)
+
+        class FakeEns:
+            def __init__(self, *args, **kwargs):
+                self.member_maxes = np.array([70.0, 71.0, 72.0, 73.0])
+                self.member_extrema = np.array([70.0, 71.0, 72.0, 73.0])
+                self.bias_corrected = False
+
+            def spread(self):
+                return evaluator_module.TemperatureDelta(1.0, "F")
+
+            def spread_float(self):
+                return 1.0
+
+            def is_bimodal(self):
+                return False
+
+        class FakeAnalysis:
+            def __init__(self, **kwargs):
+                # Kwargs from production dropped; fabricate 1-bin-positive-edge.
+                self.bins = kwargs["bins"]
+                self.p_raw = kwargs["p_raw"]
+                self.p_cal = kwargs["p_cal"]
+                n_bins = len(self.bins)
+                self.p_market = np.full(n_bins, 0.2)
+                self.p_market[0] = 0.1
+                self.p_posterior = np.full(n_bins, 0.15)
+                self.p_posterior[0] = 1.0 - float(self.p_posterior[1:].sum())
+
+            def forecast_context(self):
+                return {"uncertainty": {}, "location": {}}
+
+            def find_edges(self, n_bootstrap=None):
+                return [
+                    BinEdge(
+                        bin=self.bins[0],
+                        direction="buy_yes",
+                        edge=0.1,
+                        ci_lower=0.02,
+                        ci_upper=0.2,
+                        p_model=0.2,
+                        p_market=0.1,
+                        p_posterior=0.2,
+                        entry_price=0.1,
+                        p_value=0.001,
+                        vwmp=0.1,
+                        forward_edge=0.1,
+                    )
+                ]
+
+            def _bootstrap_bin(self, idx, n):
+                return (0.02, 0.2, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
+
+            def _bootstrap_bin_no(self, idx, n):
+                return (-0.2, -0.01, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
+
+        class FakeClob:
+            paper_mode = True
+
+            def get_best_bid_ask(self, token_id):
+                return (0.1, 0.2, 10.0, 10.0)
+
+        monkeypatch.setattr(
+            evaluator_module,
+            "fetch_ensemble",
+            lambda city, forecast_days, **kwargs: {
+                "members_hourly": np.ones((51, 2)) * 72.0,
+                "times": [now, now],
+                "fetch_time": now,
+                "issue_time": now,
+                "first_valid_time": now,
+                "model": "ecmwf_ifs025",
+            },
+        )
+        monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
+        monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
+        # T2.g: Day0Router.route NOT monkeypatched — real dispatch path.
+        monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
+        monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_ens_snapshot",
+            lambda conn, city, target_date, ens, ens_result: "snap-t2g-test",
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_snapshot_p_raw",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_get_day0_temporal_context",
+            lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=now),
+        )
+        from src.signal.day0_extrema import RemainingMemberExtrema as _REM
+        monkeypatch.setattr(
+            evaluator_module,
+            "remaining_member_extrema_for_day0",
+            lambda *args, **kwargs: (_REM(maxes=np.array([70.0, 71.0, 72.0, 73.0]), mins=None), 2.0),
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "resolve_strategy_policy",
+            lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
+                strategy_key=strategy_key,
+                gated=False,
+                allocation_multiplier=1.0,
+                threshold_multiplier=1.0,
+                exit_only=False,
+                sources=[],
+            ),
+        )
+
+        candidate = evaluator_module.MarketCandidate(
+            city=cities_by_name["Dallas"],
+            target_date="2026-04-12",
+            outcomes=[
+                {"title": "67°F or lower", "range_low": None, "range_high": 67, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
+                {"title": "68-69°F", "range_low": 68, "range_high": 69, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+                {"title": "70-71°F", "range_low": 70, "range_high": 71, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
+                {"title": "72°F or higher", "range_low": 72, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
+            ],
+            hours_since_open=2.0,
+            hours_to_resolution=12.0,
+            event_id="event-t2g",
+            discovery_mode="day0_capture",
+            observation=types.SimpleNamespace(
+                high_so_far=70,
+                low_so_far=None,
+                current_temp=69,
+                source="test",
+                observation_time=now.isoformat(),
+            ),
+        )
+
+        decisions = evaluator_module.evaluate_candidate(
+            candidate,
+            conn,
+            PortfolioState(bankroll=150.0, positions=[]),
+            FakeClob(),
+            RiskLimits(min_order_usd=999999.0),
+            entry_bankroll=150.0,
+            decision_time=now,
+        )
+        conn.close()
+
+        # If the real Day0Router reaches this assertion, the fixture is
+        # complete enough for real integration. SIZING_TOO_SMALL is the
+        # expected terminal rejection (same as T2.d monkeypatched variant).
+        assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
