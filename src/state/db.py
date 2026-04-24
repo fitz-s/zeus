@@ -165,7 +165,21 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_source TEXT,
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            UNIQUE(city, target_date)
+            -- REOPEN-2 inline: INV-14 identity spine is part of the fresh-DB
+            -- schema so UNIQUE(city, target_date, temperature_metric) can
+            -- reference temperature_metric without a second migration pass.
+            -- Legacy DBs that predate these columns get them via the ALTER
+            -- loop below, and their UNIQUE constraint is upgraded via the
+            -- REOPEN-2 table-rebuild migration that runs between the ALTERs
+            -- and the trigger reinstall.
+            temperature_metric TEXT
+                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT
+                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+            data_version TEXT,
+            provenance_json TEXT,
+            UNIQUE(city, target_date, temperature_metric)
         );
 
         -- Inherited: IEM ASOS, NOAA GHCND, Meteostat, WU PWS
@@ -852,6 +866,85 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             conn.execute(ddl)
         except sqlite3.OperationalError:
             pass
+
+    # REOPEN-2 (2026-04-24, data-readiness-tail): settlements UNIQUE migration.
+    # Pre-REOPEN-2 schema: UNIQUE(city, target_date) — structurally blocks
+    # dual-track (a HIGH row for city+date makes a LOW row for the same
+    # city+date UNIQUE-collide). Per critic-opus P0.2 forensic-triage C3+C4,
+    # this is a pre-flip BLOCKER for DR-33-C — first low-market settlement
+    # attempt on flag-flip would silently drop the row and break the learning
+    # chain for the LOW track.
+    #
+    # SQLite cannot ALTER a UNIQUE constraint; the only path is table
+    # recreation. Idempotent: detect whether current table already has the
+    # new UNIQUE(city, target_date, temperature_metric) via sqlite_master
+    # SQL inspection; skip if yes.
+    #
+    # Safety: scratch-DB dry-run verified (2026-04-24) that the rebuild is
+    # lossless on 1,561 rows + preserves authority groups (1469 VERIFIED + 92
+    # QUARANTINED) + unlocks dual-track. Migration runs BEFORE trigger DROP+
+    # CREATE blocks below so triggers install against the rebuilt table.
+    try:
+        settlements_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
+        ).fetchone()
+        settlements_sql = settlements_sql_row[0] if settlements_sql_row else ""
+        needs_migration = (
+            settlements_sql
+            and "UNIQUE(city, target_date, temperature_metric)" not in settlements_sql
+            and "UNIQUE (city, target_date, temperature_metric)" not in settlements_sql
+        )
+        if needs_migration:
+            # Dynamic column-list copy (preserves schema even if future ALTERs
+            # add more columns beyond the current set).
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(settlements)")]
+            col_list = ", ".join(cols)
+            pre_count = conn.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
+            conn.execute(
+                """
+                CREATE TABLE settlements_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    city TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    market_slug TEXT,
+                    winning_bin TEXT,
+                    settlement_value REAL,
+                    settlement_source TEXT,
+                    settled_at TEXT,
+                    authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
+                    pm_bin_lo REAL,
+                    pm_bin_hi REAL,
+                    unit TEXT,
+                    settlement_source_type TEXT,
+                    temperature_metric TEXT
+                        CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+                    physical_quantity TEXT,
+                    observation_field TEXT
+                        CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+                    data_version TEXT,
+                    provenance_json TEXT,
+                    UNIQUE(city, target_date, temperature_metric)
+                )
+                """
+            )
+            conn.execute(
+                f"INSERT INTO settlements_migrated ({col_list}) SELECT {col_list} FROM settlements"
+            )
+            post_count = conn.execute(
+                "SELECT COUNT(*) FROM settlements_migrated"
+            ).fetchone()[0]
+            if post_count != pre_count:
+                raise RuntimeError(
+                    f"REOPEN-2 row-count drift: pre={pre_count} post={post_count} — "
+                    "ABORT migration to prevent data loss"
+                )
+            conn.execute("DROP TABLE settlements")
+            conn.execute("ALTER TABLE settlements_migrated RENAME TO settlements")
+    except sqlite3.OperationalError:
+        # Fresh DBs where settlements doesn't exist yet fall through to
+        # CREATE TABLE IF NOT EXISTS above (which now declares new UNIQUE).
+        # No action needed.
+        pass
 
     # P-B authority-monotonic trigger (INV-FP-5 enforcement).
     # Reactivation contract: QUARANTINED->VERIFIED requires a top-level JSON key
