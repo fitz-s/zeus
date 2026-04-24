@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-23_graph_rendering_integration/` | Active graph deep-rendering integration packet |
+| `task_2026-04-24_p0_data_audit_containment/` | Active P0 post-audit containment packet |
 
 ### Packet Evidence
 
@@ -77,7 +77,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_authority_kernel_gamechanger/` | packet evidence | Closed authority-kernel gamechanger packet |
 | `task_2026-04-23_authority_rehydration/` | packet evidence | Closed dense module reference / manifest rehydration packet |
 | `task_2026-04-23_graph_refresh_official_integration/` | packet evidence | Closed official-first graph refresh verification and usage-integration packet |
-| `task_2026-04-23_graph_rendering_integration/` | active packet | Graph deep-rendering remaining-value integration packet |
+| `task_2026-04-23_graph_rendering_integration/` | packet evidence | Graph deep-rendering remaining-value integration packet |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
@@ -96,7 +96,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation packet (test-currency + D3/D4/D6 antibody wave + data-readiness-tail follow-ups); includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
 | `task_2026-04-23_live_harvester_enablement_dr33/` | packet evidence | DR-33-A live-harvester enablement packet (code-only scaffold behind ZEUS_HARVESTER_LIVE_ENABLED default OFF) |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
-| `zeus_world_data_forensic_audit_package_2026-04-23/` | package input | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
+| `task_2026-04-24_p0_data_audit_containment/` | active packet | P0 post-audit containment packet for read-only training-readiness blockers and legacy-hourly static lint |
+| `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
 

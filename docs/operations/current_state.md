@@ -6,6 +6,7 @@ Role: single live control pointer for the repo.
 
 - Branch: `data-improve`
 - Mainline task: **Post-audit P0 data containment Ralph loop — active 2026-04-24**
+- Active package source: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
 - Active execution packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
 - Previous package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
@@ -125,6 +126,8 @@ Active / pending — remaining in `docs/operations/`:
   fix_plan_2026-04-23.md §"Wave 5 remaining blockers"`).
 - `docs/operations/task_2026-04-23_graph_rendering_integration/` —
   implementation-prep stage.
+- `docs/operations/task_2026-04-23_graph_rendering_integration/plan.md`
+  remains indexed for the existing topology active-anchor requirement.
 - `docs/operations/task_2026-04-24_p0_data_audit_containment/` —
   active (current mainline per P0 Ralph loop).
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/` —

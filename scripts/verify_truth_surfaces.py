@@ -8,9 +8,13 @@ NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 Usage:
     python scripts/verify_truth_surfaces.py
 """
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Diagnose truth-surface integrity and P0 training-readiness blockers.
+# Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import sys
@@ -35,6 +39,13 @@ PASS = "PASS"
 FAIL = "FAIL"
 WARN = "WARN"
 
+READY = "READY"
+NOT_READY = "NOT_READY"
+ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
+    "settlement_truth",
+    "historical_hourly",
+})
+
 
 def _scalar(cur, sql, *params):
     cur.execute(sql, params)
@@ -45,6 +56,445 @@ def _scalar(cur, sql, *params):
 def _row(cur, sql, *params):
     cur.execute(sql, params)
     return cur.fetchone()
+
+
+def _table_exists(cur: sqlite3.Cursor, table: str) -> bool:
+    return (
+        _scalar(
+            cur,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+            table,
+        )
+        or 0
+    ) > 0
+
+
+def _columns(cur: sqlite3.Cursor, table: str) -> set[str]:
+    try:
+        return {row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def _count(cur: sqlite3.Cursor, table: str, where: str | None = None) -> int:
+    sql = f"SELECT COUNT(*) FROM {table}"
+    if where:
+        sql += f" WHERE {where}"
+    return int(_scalar(cur, sql) or 0)
+
+
+def _check_entry(
+    *,
+    check_id: str,
+    status: str,
+    detail: str,
+    count: int | None = None,
+    threshold: int | None = None,
+    met: bool | None = None,
+) -> dict:
+    entry: dict[str, object] = {
+        "id": check_id,
+        "status": status,
+        "detail": detail,
+    }
+    if count is not None:
+        entry["count"] = count
+    if threshold is not None:
+        entry["threshold"] = threshold
+    if met is not None:
+        entry["met"] = met
+    return entry
+
+
+def _add_count_min_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    threshold: int = 1,
+    empty_code: str = "empty_v2_table",
+) -> None:
+    check_id = table
+    if not _table_exists(cur, table):
+        report["checks"][check_id] = _check_entry(
+            check_id=check_id,
+            status=FAIL,
+            detail=f"{table} table is missing",
+            count=0,
+            threshold=threshold,
+            met=False,
+        )
+        report["blockers"].append(
+            {"code": "missing_table", "table": table, "count": 0}
+        )
+        return
+
+    count = _count(cur, table)
+    met = count >= threshold
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=f"{table} rows={count}, required>={threshold}",
+        count=count,
+        threshold=threshold,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append(
+            {"code": empty_code, "table": table, "count": count}
+        )
+
+
+def _add_missing_table_check(
+    report: dict,
+    *,
+    check_id: str,
+    table: str,
+    detail: str,
+    code: str = "missing_table",
+) -> None:
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=FAIL,
+        detail=detail,
+        count=0,
+        threshold=0,
+        met=False,
+    )
+    blocker = {"code": code, "table": table, "count": 0}
+    if blocker not in report["blockers"]:
+        report["blockers"].append(blocker)
+
+
+def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
+    """Return a read-only P0 training-readiness report for the world DB.
+
+    P0 intentionally fails closed. This command proves the canonical data spine
+    is populated and eligible before any later calibration/replay phase may
+    claim readiness.
+    """
+    report: dict[str, object] = {
+        "mode": "training-readiness",
+        "database": str(world_db),
+        "status": NOT_READY,
+        "ready": False,
+        "checks": {},
+        "blockers": [],
+    }
+
+    if not world_db.exists():
+        report["checks"]["database_exists"] = _check_entry(
+            check_id="database_exists",
+            status=FAIL,
+            detail=f"{world_db} not found",
+            met=False,
+        )
+        report["blockers"].append(
+            {"code": "missing_database", "table": None, "count": 0}
+        )
+        return report
+
+    uri = f"file:{world_db}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    cur = conn.cursor()
+    try:
+        for table in (
+            "forecasts",
+            "historical_forecasts_v2",
+            "ensemble_snapshots_v2",
+            "calibration_pairs_v2",
+            "platt_models_v2",
+            "market_events_v2",
+            "market_price_history",
+            "settlements_v2",
+        ):
+            _add_count_min_check(report, cur, table=table)
+        for table in ("observation_instants_v2", "observations"):
+            _add_count_min_check(
+                report,
+                cur,
+                table=table,
+                empty_code="empty_required_table",
+            )
+
+        checks = report["checks"]
+        blockers = report["blockers"]
+
+        if _table_exists(cur, "settlements_v2"):
+            count = _count(cur, "settlements_v2", "market_slug IS NULL OR market_slug = ''")
+            met = count == 0
+            checks["settlements_v2.market_slug_not_null"] = _check_entry(
+                check_id="settlements_v2.market_slug_not_null",
+                status=PASS if met else FAIL,
+                detail=f"settlements_v2 rows without market_slug={count}",
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {"code": "null_market_slug", "table": "settlements_v2", "count": count}
+                )
+
+        if _table_exists(cur, "observation_instants_v2"):
+            columns = _columns(cur, "observation_instants_v2")
+            if {"training_allowed", "source_role"}.issubset(columns):
+                quoted_roles = ", ".join(
+                    f"'{role}'" for role in sorted(ELIGIBLE_OBSERVATION_SOURCE_ROLES)
+                )
+                eligible_count = _count(
+                    cur,
+                    "observation_instants_v2",
+                    f"""
+                    COALESCE(training_allowed, 0) = 1
+                    AND source_role IN ({quoted_roles})
+                    """,
+                )
+                eligible_met = eligible_count >= 1
+                checks["observation_instants_v2.training_eligible_present"] = _check_entry(
+                    check_id="observation_instants_v2.training_eligible_present",
+                    status=PASS if eligible_met else FAIL,
+                    detail=(
+                        "training-eligible observation_instants_v2 rows="
+                        f"{eligible_count}, required>=1"
+                    ),
+                    count=eligible_count,
+                    threshold=1,
+                    met=eligible_met,
+                )
+                if not eligible_met:
+                    blockers.append(
+                        {
+                            "code": "empty_training_eligible_observations",
+                            "table": "observation_instants_v2",
+                            "count": eligible_count,
+                        }
+                    )
+                count = _count(
+                    cur,
+                    "observation_instants_v2",
+                    f"""
+                    COALESCE(training_allowed, 0) = 1
+                    AND (
+                        source_role IS NULL
+                        OR source_role = ''
+                        OR source_role NOT IN ({quoted_roles})
+                    )
+                    """,
+                )
+                detail = (
+                    "training-allowed observation_instants_v2 rows without an "
+                    f"eligible source_role={count}"
+                )
+                code = "fallback_source_role"
+            else:
+                count = -1
+                detail = "observation_instants_v2 lacks training_allowed/source_role columns"
+                code = "missing_source_role_columns"
+                checks["observation_instants_v2.training_eligible_present"] = _check_entry(
+                    check_id="observation_instants_v2.training_eligible_present",
+                    status=FAIL,
+                    detail=detail,
+                    count=0,
+                    threshold=1,
+                    met=False,
+                )
+                blockers.append(
+                    {
+                        "code": "empty_training_eligible_observations",
+                        "table": "observation_instants_v2",
+                        "count": 0,
+                    }
+                )
+            met = count == 0
+            checks["observation_instants_v2.source_role_canonical"] = _check_entry(
+                check_id="observation_instants_v2.source_role_canonical",
+                status=PASS if met else FAIL,
+                detail=detail,
+                count=max(count, 0),
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {
+                        "code": code,
+                        "table": "observation_instants_v2",
+                        "count": max(count, 0),
+                    }
+                )
+        else:
+            _add_missing_table_check(
+                report,
+                check_id="observation_instants_v2.source_role_canonical",
+                table="observation_instants_v2",
+                detail="observation_instants_v2 table is missing",
+            )
+
+        if _table_exists(cur, "ensemble_snapshots_v2"):
+            columns = _columns(cur, "ensemble_snapshots_v2")
+            missing_time_predicates = []
+            for column in ("issue_time", "available_at", "fetch_time"):
+                if column in columns:
+                    missing_time_predicates.append(f"{column} IS NULL OR {column} = ''")
+                else:
+                    missing_time_predicates.append("1=1")
+            count = _count(cur, "ensemble_snapshots_v2", " OR ".join(missing_time_predicates))
+            met = count == 0
+            checks["ensemble_snapshots_v2.issue_time_present"] = _check_entry(
+                check_id="ensemble_snapshots_v2.issue_time_present",
+                status=PASS if met else FAIL,
+                detail=f"ensemble_snapshots_v2 rows missing issue/available/fetch time={count}",
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {
+                        "code": "missing_issue_time",
+                        "table": "ensemble_snapshots_v2",
+                        "count": count,
+                    }
+                )
+        else:
+            _add_missing_table_check(
+                report,
+                check_id="ensemble_snapshots_v2.issue_time_present",
+                table="ensemble_snapshots_v2",
+                detail="ensemble_snapshots_v2 table is missing",
+            )
+
+        if _table_exists(cur, "historical_forecasts_v2"):
+            columns = _columns(cur, "historical_forecasts_v2")
+            predicates = []
+            if "data_version" in columns:
+                predicates.append("LOWER(COALESCE(data_version, '')) LIKE '%reconstruct%'")
+            if "provenance_json" in columns:
+                predicates.append("LOWER(COALESCE(provenance_json, '')) LIKE '%reconstruct%'")
+            if "available_at" in columns:
+                predicates.append("available_at IS NULL OR available_at = ''")
+            where = " OR ".join(predicates) if predicates else "1=1"
+            count = _count(cur, "historical_forecasts_v2", where)
+            met = count == 0
+            checks["historical_forecasts_v2.available_at_not_reconstructed"] = _check_entry(
+                check_id="historical_forecasts_v2.available_at_not_reconstructed",
+                status=PASS if met else FAIL,
+                detail=f"historical_forecasts_v2 rows with missing/reconstructed available_at={count}",
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {
+                        "code": "reconstructed_available_at",
+                        "table": "historical_forecasts_v2",
+                        "count": count,
+                    }
+                )
+        else:
+            _add_missing_table_check(
+                report,
+                check_id="historical_forecasts_v2.available_at_not_reconstructed",
+                table="historical_forecasts_v2",
+                detail="historical_forecasts_v2 table is missing",
+            )
+
+        if _table_exists(cur, "observations"):
+            columns = _columns(cur, "observations")
+            if "authority" in columns:
+                verified_count = _count(cur, "observations", "authority = 'VERIFIED'")
+                verified_met = verified_count >= 1
+                verified_detail = f"VERIFIED observations rows={verified_count}, required>=1"
+                verified_code = "empty_verified_observations"
+            else:
+                verified_count = 0
+                verified_met = False
+                verified_detail = "observations lacks authority column"
+                verified_code = "missing_observation_authority_column"
+            checks["observations.verified_present"] = _check_entry(
+                check_id="observations.verified_present",
+                status=PASS if verified_met else FAIL,
+                detail=verified_detail,
+                count=verified_count,
+                threshold=1,
+                met=verified_met,
+            )
+            if not verified_met:
+                blockers.append(
+                    {
+                        "code": verified_code,
+                        "table": "observations",
+                        "count": verified_count,
+                    }
+                )
+
+            if "authority" in columns and "provenance_metadata" in columns:
+                where = "authority = 'VERIFIED' AND COALESCE(provenance_metadata, '') = ''"
+                missing_provenance_columns = False
+            elif "authority" in columns and {"high_provenance_metadata", "low_provenance_metadata"}.issubset(columns):
+                where = """
+                    authority = 'VERIFIED'
+                    AND (
+                        COALESCE(high_provenance_metadata, '') = ''
+                        OR COALESCE(low_provenance_metadata, '') = ''
+                    )
+                """
+                missing_provenance_columns = False
+            else:
+                where = "1 = 0"
+                missing_provenance_columns = True
+            count = _count(cur, "observations", where)
+            met = count == 0 and not missing_provenance_columns
+            detail = f"VERIFIED observations without provenance={count}"
+            code = "empty_observation_provenance"
+            if missing_provenance_columns:
+                detail = "observations lacks provenance metadata columns"
+                code = "missing_observation_provenance_columns"
+            checks["observations.provenance_present"] = _check_entry(
+                check_id="observations.provenance_present",
+                status=PASS if met else FAIL,
+                detail=detail,
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {
+                        "code": code,
+                        "table": "observations",
+                        "count": count,
+                    }
+                )
+        else:
+            _add_missing_table_check(
+                report,
+                check_id="observations.provenance_present",
+                table="observations",
+                detail="observations table is missing",
+            )
+    finally:
+        conn.close()
+
+    ready = not report["blockers"]
+    report["ready"] = ready
+    report["status"] = READY if ready else NOT_READY
+    return report
+
+
+def run_training_readiness(*, world_db: Path = SHARED_DB, json_output: bool = False) -> int:
+    report = build_training_readiness_report(world_db)
+    if json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("Training readiness:")
+        for check_id, check in report["checks"].items():
+            print(f"  [{check['status']}] {check_id}: {check['detail']}")
+        print()
+        print(f"RESULT: {report['status']}")
+    return 0 if report["ready"] else 1
 
 
 # ---------------------------------------------------------------------------
@@ -314,4 +764,26 @@ def run_checks() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=("truth-surfaces", "training-readiness"),
+        default="truth-surfaces",
+        help="Diagnostic mode to run.",
+    )
+    parser.add_argument(
+        "--world-db",
+        type=Path,
+        default=SHARED_DB,
+        help="World DB path for training-readiness mode.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON where supported.",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "training-readiness":
+        sys.exit(run_training_readiness(world_db=args.world_db, json_output=args.json))
     sys.exit(run_checks())

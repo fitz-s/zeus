@@ -1,0 +1,54 @@
+{
+  "task": "P0 post-audit data containment readiness gates",
+  "packet": "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/AGENTS.md",
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md"
+  ],
+  "allowed_files": [
+    "scripts/verify_truth_surfaces.py",
+    "scripts/semantic_linter.py",
+    "tests/test_truth_surface_health.py",
+    "tests/test_semantic_linter.py",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".code-review-graph/graph.db",
+    "src/**",
+    "docs/authority/**",
+    "architecture/**"
+  ],
+  "changed_files": [
+    "scripts/verify_truth_surfaces.py",
+    "scripts/semantic_linter.py",
+    "tests/test_truth_surface_health.py",
+    "tests/test_semantic_linter.py",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/runtime_artifact_inventory.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md",
+    "docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json"
+  ],
+  "tests_evidence": [
+    "tests/test_truth_surface_health.py",
+    "tests/test_semantic_linter.py"
+  ]
+}

@@ -7,6 +7,9 @@ without ALSO reading its provenance context (like the entry method).
 
 Also enforces K3 cluster collapse: no regional cluster literal strings in src/.
 """
+# Lifecycle: created=2026-03-31; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Enforce static semantic/provenance containment rules for Zeus code.
+# Reuse: Inspect architecture/script_manifest.yaml and current packet allowlists before relying on new lint coverage.
 
 import argparse
 import ast
@@ -55,6 +58,10 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     "store.py",              # src/calibration/store.py — canonical query layer
     "blocked_oos.py",       # src/calibration/blocked_oos.py — K2_struct approved, has authority_filter
     "effective_sample_size.py",  # src/calibration/effective_sample_size.py — K2_struct approved
+})
+
+HOURLY_OBSERVATIONS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+    "scripts/etl_hourly_observations.py",  # compatibility writer for the legacy table
 })
 
 
@@ -221,6 +228,128 @@ def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
     return violations
 
 
+def _literal_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string_value(node.left)
+        right = _literal_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        pieces = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                pieces.append(value.value)
+            else:
+                return None
+        return "".join(pieces)
+    return None
+
+
+def _sql_call_literal_args(content: str) -> list[tuple[int, int, str]]:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return []
+
+    sql_call_names = {"execute", "executemany", "executescript", "read_sql", "read_sql_query"}
+    sql_keyword_names = {"sql", "query", "statement"}
+    literals = []
+
+    def append_literal(arg: ast.AST) -> None:
+        value = _literal_string_value(arg)
+        if value is None:
+            return
+        literals.append(
+            (
+                getattr(arg, "lineno", 1),
+                getattr(arg, "end_lineno", getattr(arg, "lineno", 1)),
+                value,
+            )
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            call_name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            call_name = node.func.id
+        else:
+            continue
+        if call_name not in sql_call_names:
+            continue
+        for arg in node.args:
+            append_literal(arg)
+        for keyword in node.keywords:
+            if keyword.arg not in sql_keyword_names:
+                continue
+            append_literal(keyword.value)
+    return literals
+
+
+def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> list[str]:
+    """P0 containment: forbid bare canonical reads from hourly_observations.
+
+    `hourly_observations` is a lossy compatibility table. Canonical training,
+    replay, and live paths must use v2/evidence adapters instead.
+    """
+    try:
+        repo_relative = py_file.resolve().relative_to(Path(__file__).resolve().parents[1]).as_posix()
+    except ValueError:
+        repo_relative = py_file.as_posix()
+    if repo_relative in HOURLY_OBSERVATIONS_SELECT_ALLOWLIST:
+        return []
+    if "migrations" in py_file.parts or "tests" in py_file.parts:
+        return []
+
+    stripped_lines = [line.split("#")[0].split("--")[0] for line in content.splitlines()]
+    stripped_content = "\n".join(stripped_lines)
+    stripped_content = re.sub(
+        r"/\*.*?\*/",
+        lambda match: "\n" * match.group(0).count("\n") + " ",
+        stripped_content,
+        flags=re.DOTALL,
+    )
+    sql_identifier = r'(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|`[^`]+`|\[[^\]]+\])'
+    optional_schema = rf"(?:{sql_identifier}\s*\.\s*)?"
+    table_ref = r'(?:"hourly_observations"|`hourly_observations`|\[hourly_observations\]|hourly_observations)'
+    pattern = re.compile(
+        rf"\b(FROM|JOIN)\s+{optional_schema}{table_ref}(?=\W|$)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    violations = []
+    violation_lines: set[int] = set()
+    source_lines = content.splitlines()
+    for match in pattern.finditer(stripped_content):
+        lineno = stripped_content[:match.start()].count("\n") + 1
+        line = source_lines[lineno - 1] if lineno <= len(source_lines) else ""
+        violations.append(
+            f"{py_file}:{lineno}:\n"
+            "  [ERROR] P0_unsafe_table: bare read from legacy hourly_observations.\n"
+            "  Use a v2 eligibility surface or an explicit evidence adapter instead.\n"
+            f"  Line: {line.rstrip()}\n"
+        )
+        violation_lines.add(lineno)
+
+    for start_lineno, end_lineno, sql in _sql_call_literal_args(content):
+        if any(start_lineno <= line <= end_lineno for line in violation_lines):
+            continue
+        normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        if not pattern.search(normalized_sql):
+            continue
+        line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
+        violations.append(
+            f"{py_file}:{start_lineno}:\n"
+            "  [ERROR] P0_unsafe_table: bare read from legacy hourly_observations.\n"
+            "  Use a v2 eligibility surface or an explicit evidence adapter instead.\n"
+            f"  Line: {line.rstrip()}\n"
+        )
+        violation_lines.add(start_lineno)
+    return violations
+
+
 def _python_files_for_target(target: Path) -> list[Path]:
     if target.is_file():
         return [target] if target.suffix == ".py" else []
@@ -263,6 +392,11 @@ def run_linter(src_path: Path) -> int:
         # K2_struct: check for bare FROM calibration_pairs outside allowlist
         cp_violations = _check_calibration_pairs_select(py_file, content)
         for violation in cp_violations:
+            print(violation)
+            total_violations += 1
+
+        hourly_violations = _check_legacy_hourly_observations_select(py_file, content)
+        for violation in hourly_violations:
             print(violation)
             total_violations += 1
 

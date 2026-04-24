@@ -4,13 +4,20 @@ These tests verify cross-surface invariants that Venus detected as broken.
 They run against the live Zeus database, not test fixtures, because the
 invariants they check are about production state integrity.
 """
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Protect canonical truth surfaces and P0 training-readiness fail-closed checks.
+# Reuse: Inspect high-sensitivity skip metadata and live-DB assumptions before treating full-file results as closeout evidence.
 
 import re
+import sqlite3
 from datetime import date, datetime, timezone
 
 import pytest
 
 from src.state.db import get_connection, init_schema, query_portfolio_loader_view
+from src.state.schema.v2_schema import apply_v2_schema
+from scripts import verify_truth_surfaces as truth_surfaces
+from scripts.verify_truth_surfaces import build_training_readiness_report
 
 
 def _now_utc() -> datetime:
@@ -24,6 +31,478 @@ def _parse_iso(s: str) -> datetime | None:
         return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+
+
+def _fresh_training_readiness_world_db(tmp_path):
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    init_schema(conn)
+    apply_v2_schema(conn)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _blocker_codes(report):
+    return {item["code"] for item in report["blockers"]}
+
+
+def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
+    for table in [
+        "forecasts",
+        "calibration_pairs_v2",
+        "platt_models_v2",
+        "market_events_v2",
+        "market_price_history",
+    ]:
+        conn.execute(f"CREATE TABLE {table} (id INTEGER)")
+        conn.execute(f"INSERT INTO {table} (id) VALUES (1)")
+    conn.execute(
+        """
+        CREATE TABLE historical_forecasts_v2 (
+            data_version TEXT,
+            provenance_json TEXT,
+            available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO historical_forecasts_v2 (
+            data_version, provenance_json, available_at
+        ) VALUES ('source_v1', '{}', '2026-04-22T12:00:00Z')
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots_v2 (
+            issue_time TEXT,
+            available_at TEXT,
+            fetch_time TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 (
+            issue_time, available_at, fetch_time
+        ) VALUES (
+            '2026-04-22T12:00:00Z',
+            '2026-04-22T12:00:00Z',
+            '2026-04-22T12:05:00Z'
+        )
+        """
+    )
+    conn.execute("CREATE TABLE settlements_v2 (market_slug TEXT)")
+    conn.execute("INSERT INTO settlements_v2 (market_slug) VALUES ('market-slug')")
+    conn.execute(
+        "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'historical_hourly')"
+    )
+    if seed_observations:
+        conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
+        conn.execute(
+            "INSERT INTO observations (authority, provenance_metadata) VALUES ('VERIFIED', '{}')"
+        )
+
+
+class TestTrainingReadinessP0:
+    """P0: forensic data-readiness checks are read-only and fail closed."""
+
+    def test_training_readiness_opens_world_db_read_only(self, tmp_path, monkeypatch):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        calls = []
+        real_connect = truth_surfaces.sqlite3.connect
+
+        def capture_connect(database, *args, **kwargs):
+            calls.append((database, kwargs))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(truth_surfaces.sqlite3, "connect", capture_connect)
+
+        build_training_readiness_report(db_path)
+
+        assert calls
+        database, kwargs = calls[0]
+        assert str(database).startswith(f"file:{db_path}")
+        assert "mode=ro" in str(database)
+        assert kwargs.get("uri") is True
+
+    def test_training_readiness_fails_when_required_v2_tables_are_empty(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert report["status"] == "NOT_READY"
+        checks = report["checks"]
+        for table in [
+            "forecasts",
+            "historical_forecasts_v2",
+            "ensemble_snapshots_v2",
+            "calibration_pairs_v2",
+            "platt_models_v2",
+            "market_events_v2",
+            "market_price_history",
+            "settlements_v2",
+            "observation_instants_v2",
+            "observations",
+        ]:
+            assert checks[table]["status"] == "FAIL"
+            assert checks[table]["count"] == 0
+
+    def test_training_readiness_fails_when_required_truth_surfaces_are_empty(self, tmp_path):
+        db_path = tmp_path / "sparse-world.db"
+        conn = sqlite3.connect(db_path)
+        for table in [
+            "forecasts",
+            "calibration_pairs_v2",
+            "platt_models_v2",
+            "market_events_v2",
+            "market_price_history",
+        ]:
+            conn.execute(f"CREATE TABLE {table} (id INTEGER)")
+            conn.execute(f"INSERT INTO {table} (id) VALUES (1)")
+        conn.execute(
+            """
+            CREATE TABLE historical_forecasts_v2 (
+                data_version TEXT,
+                provenance_json TEXT,
+                available_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO historical_forecasts_v2 (
+                data_version, provenance_json, available_at
+            ) VALUES ('source_v1', '{}', '2026-04-22T12:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE ensemble_snapshots_v2 (
+                issue_time TEXT,
+                available_at TEXT,
+                fetch_time TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2 (
+                issue_time, available_at, fetch_time
+            ) VALUES (
+                '2026-04-22T12:00:00Z',
+                '2026-04-22T12:00:00Z',
+                '2026-04-22T12:05:00Z'
+            )
+            """
+        )
+        conn.execute("CREATE TABLE settlements_v2 (market_slug TEXT)")
+        conn.execute("INSERT INTO settlements_v2 (market_slug) VALUES ('market-slug')")
+        conn.execute(
+            "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
+        )
+        conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert report["checks"]["observation_instants_v2"]["status"] == "FAIL"
+        assert report["checks"]["observations"]["status"] == "FAIL"
+        blockers = {(item["code"], item["table"]) for item in report["blockers"]}
+        assert ("empty_required_table", "observation_instants_v2") in blockers
+        assert ("empty_required_table", "observations") in blockers
+
+    def test_training_readiness_fails_when_observations_lack_provenance_columns(self, tmp_path):
+        db_path = tmp_path / "no-provenance-columns-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute("CREATE TABLE observations (authority TEXT)")
+        conn.execute("INSERT INTO observations (authority) VALUES ('UNVERIFIED')")
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "missing_observation_provenance_columns" in _blocker_codes(report)
+        check = report["checks"]["observations.provenance_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_no_training_eligible_observation_instants_exist(self, tmp_path):
+        db_path = tmp_path / "no-training-eligible-observations-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (0, 'historical_hourly')"
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_training_eligible_observations" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.training_eligible_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_source_role_is_unknown(self, tmp_path):
+        db_path = tmp_path / "unknown-source-role-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'banana')"
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_training_eligible_observations" in _blocker_codes(report)
+        assert "fallback_source_role" in _blocker_codes(report)
+        assert report["checks"]["observation_instants_v2.source_role_canonical"]["count"] == 1
+
+    def test_training_readiness_fails_when_observations_have_no_verified_rows(self, tmp_path):
+        db_path = tmp_path / "no-verified-observations-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
+        conn.execute(
+            "INSERT INTO observations (authority, provenance_metadata) VALUES ('UNVERIFIED', '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_verified_observations" in _blocker_codes(report)
+        check = report["checks"]["observations.verified_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_split_observation_provenance_is_partial(self, tmp_path):
+        db_path = tmp_path / "partial-split-provenance-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute(
+            """
+            CREATE TABLE observations (
+                authority TEXT,
+                high_provenance_metadata TEXT,
+                low_provenance_metadata TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observations (
+                authority, high_provenance_metadata, low_provenance_metadata
+            ) VALUES ('VERIFIED', '', '{"source":"wu"}')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_observation_provenance" in _blocker_codes(report)
+        check = report["checks"]["observations.provenance_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_required_eligibility_tables_are_missing(self, tmp_path):
+        db_path = tmp_path / "raw-world.db"
+        sqlite3.connect(db_path).close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        checks = report["checks"]
+        for check_id in [
+            "observation_instants_v2.source_role_canonical",
+            "historical_forecasts_v2.available_at_not_reconstructed",
+            "observations.provenance_present",
+        ]:
+            assert checks[check_id]["status"] == "FAIL"
+        blockers = {(item["code"], item["table"]) for item in report["blockers"]}
+        assert ("missing_table", "observation_instants_v2") in blockers
+        assert ("missing_table", "historical_forecasts_v2") in blockers
+        assert ("missing_table", "observations") in blockers
+
+    def test_training_readiness_fails_when_settlements_v2_market_slug_is_null(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO settlements_v2 (
+                city, target_date, temperature_metric, market_slug, authority
+            ) VALUES ('NYC', '2026-04-23', 'high', NULL, 'VERIFIED')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "null_market_slug" in _blocker_codes(report)
+        check = report["checks"]["settlements_v2.market_slug_not_null"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_observation_instants_v2_source_role_is_fallback(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                city, target_date, source, timezone_name, local_timestamp,
+                utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
+                imported_at, training_allowed, source_role
+            ) VALUES (
+                'NYC', '2026-04-23', 'openmeteo', 'America/New_York',
+                '2026-04-23T10:00:00-04:00', '2026-04-23T14:00:00Z',
+                -240, 'hourly', 'F', '2026-04-23T14:05:00Z', 1, 'fallback'
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "fallback_source_role" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_observation_instants_v2_source_role_is_null(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                city, target_date, source, timezone_name, local_timestamp,
+                utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
+                imported_at, training_allowed, source_role
+            ) VALUES (
+                'NYC', '2026-04-23', 'openmeteo', 'America/New_York',
+                '2026-04-23T10:00:00-04:00', '2026-04-23T14:00:00Z',
+                -240, 'hourly', 'F', '2026-04-23T14:05:00Z', 1, NULL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "fallback_source_role" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_observation_instants_v2_lacks_source_role_columns(self, tmp_path):
+        db_path = tmp_path / "legacy-world.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE observation_instants_v2 (city TEXT)")
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "missing_source_role_columns" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert check["status"] == "FAIL"
+
+    @pytest.mark.parametrize("missing_column", ["issue_time", "available_at", "fetch_time"])
+    def test_training_readiness_fails_when_ensemble_snapshots_v2_time_is_missing(
+        self, tmp_path, missing_column
+    ):
+        db_path = tmp_path / "legacy-ensemble-world.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE ensemble_snapshots_v2 (
+                issue_time TEXT,
+                available_at TEXT,
+                fetch_time TEXT
+            )
+            """
+        )
+        values = {
+            "issue_time": "'2026-04-22T12:00:00Z'",
+            "available_at": "'2026-04-22T12:00:00Z'",
+            "fetch_time": "'2026-04-22T12:05:00Z'",
+        }
+        values[missing_column] = "NULL"
+        conn.execute(
+            f"""
+            INSERT INTO ensemble_snapshots_v2 (
+                issue_time, available_at, fetch_time
+            ) VALUES ({values["issue_time"]}, {values["available_at"]}, {values["fetch_time"]})
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "missing_issue_time" in _blocker_codes(report)
+        check = report["checks"]["ensemble_snapshots_v2.issue_time_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_historical_forecasts_v2_available_at_is_reconstructed(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO historical_forecasts_v2 (
+                city, target_date, source, temperature_metric, forecast_value,
+                temp_unit, lead_days, available_at, authority, data_version,
+                provenance_json
+            ) VALUES (
+                'NYC', '2026-04-23', 'openmeteo', 'high', 70.0,
+                'F', 1, '2026-04-22T12:00:00Z', 'VERIFIED',
+                'reconstructed_available_at_v1',
+                '{"available_at": "reconstructed"}'
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "reconstructed_available_at" in _blocker_codes(report)
+        check = report["checks"]["historical_forecasts_v2.available_at_not_reconstructed"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_reports_all_blockers_in_json_shape(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        report = build_training_readiness_report(db_path)
+
+        assert set(report) >= {"mode", "database", "status", "ready", "checks", "blockers"}
+        assert report["mode"] == "training-readiness"
+        assert report["ready"] is False
+        assert isinstance(report["checks"], dict)
+        assert isinstance(report["blockers"], list)
+        assert "empty_v2_table" in _blocker_codes(report)
+        for check in report["checks"].values():
+            assert set(check) >= {"id", "status", "detail"}
 
 
 class TestPortfolioTruthSource:
