@@ -664,6 +664,8 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             temp_unit TEXT DEFAULT 'F',
             retrieved_at TEXT,
             imported_at TEXT,
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
             UNIQUE(city, target_date, source, forecast_basis_date)
         );
         CREATE INDEX IF NOT EXISTS idx_forecasts_city_date
@@ -748,6 +750,19 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
         try:
             conn.execute(f"ALTER TABLE trade_decisions ADD COLUMN {col} REAL DEFAULT 0.0;")
+        except sqlite3.OperationalError:
+            pass
+
+    # REOPEN-1 (2026-04-23): forecasts writer at src/data/forecasts_append.py:256-262
+    # inserts rebuild_run_id + data_source_version; legacy DBs predate the CREATE
+    # TABLE declaration of these two columns, so CREATE TABLE IF NOT EXISTS no-ops
+    # and the writer fails at runtime with "table forecasts has no column named
+    # rebuild_run_id" (observed: k2_forecasts_daily FAILED every 30 min per
+    # state/scheduler_jobs_health.json). ALTER path catches legacy DBs without
+    # disturbing fresh DBs (OperationalError on duplicate-column is swallowed).
+    for col in ["rebuild_run_id", "data_source_version"]:
+        try:
+            conn.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT;")
         except sqlite3.OperationalError:
             pass
 
