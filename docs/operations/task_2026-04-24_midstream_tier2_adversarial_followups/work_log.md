@@ -137,7 +137,84 @@ follow-up; not S1 commit blockers)**:
 
 ### S2 — C5 (HIGH calibration-pair route to v2)
 
-_Pending execution._
+**Status**: landed in-tree, pending con-nyx verdict before commit.
+
+**Files**:
+- `src/execution/harvester.py` — collapsed the `harvest_settlement` LOW/HIGH
+  branch split (previously L1075-1100) into a single `add_calibration_pair_v2`
+  call. Both tracks now carry canonical `metric_identity` (LOW_LOCALDAY_MIN
+  or HIGH_LOCALDAY_MAX) and `data_version` from the identity object.
+  Removed legacy `add_calibration_pair` import at L24; removed
+  `round_wmo_half_up_value` import at L27 (v2 internally applies
+  `SettlementSemantics.for_city(city_obj).round_values`, which correctly
+  handles HKO oracle_truncate — the legacy path's naive half-up rounding
+  was HKO-unaware and was a latent bug surfaced by this fix). Comment
+  block at L1076-1086 narrates the split-brain closure.
+- `tests/test_harvester_high_calibration_v2_route.py` — NEW 5-test
+  antibody pinning HIGH pairs land in `calibration_pairs_v2` with
+  HIGH_LOCALDAY_MAX identity + training_allowed=1; NOT in legacy
+  `calibration_pairs`; LOW branch still routes to v2 (symmetry
+  regression); structural guard that harvester's `calibration.store`
+  import line no longer references the legacy writer; INV-15
+  training_allowed=True resolution via data_version "tigge_*" prefix.
+- `tests/test_phase10c_dt_seam_followup.py` — `test_r_cs_2_high_
+  settlement_stays_legacy` renamed to `test_r_cs_2_high_settlement_
+  routes_to_v2_after_c5` with inverted assertions. Pre-C5 this test
+  LOCKED IN the split-brain as expected behavior; post-C5 the expected
+  behavior is the opposite. Per L21 (Activate vs Extend), the rename +
+  reworded assertions replace the stale lock-in with the new contract.
+- `tests/test_lifecycle.py` — `test_harvest_creates_pairs` now applies
+  `v2_schema` to the fixture and reads from `calibration_pairs_v2`
+  (previously read legacy `calibration_pairs`). Added Lifecycle /
+  Purpose / Reuse header.
+- `tests/test_calibration_manager.py` — `_get_test_conn` helper now
+  applies `v2_schema`; `test_bias_corrected_persisted_through_harvest`
+  (2 queries) + `test_bias_corrected_fallback_reads_settings` (1 query)
+  now read `calibration_pairs_v2`. Added Lifecycle / Purpose / Reuse
+  header.
+- `architecture/test_topology.yaml` — registered
+  `test_harvester_high_calibration_v2_route.py` (alphabetic insert
+  above the harvester_metric_identity + ingest_grib_law5 entries from
+  S1).
+
+**Verification**:
+- `pytest` on S1 antibodies + S2 antibodies + all 3 updated regression
+  test files (TestHarvester, TestStoreRoundTrip, TestRCSHarvesterLowRouting)
+  → 19 passed, 0 failed.
+- Broader regression
+  `pytest test_lifecycle test_calibration_manager test_phase10c_dt_seam_followup
+   test_harvester_metric_identity test_harvester_high_calibration_v2_route
+   test_ingest_grib_law5_antibody test_settlements_unique_migration
+   test_settlements_authority_trigger` → 85 passed.
+- `python -m py_compile src/execution/harvester.py` → clean.
+- `topology_doctor --planning-lock --plan-evidence / --freshness-metadata /
+  --map-maintenance --map-maintenance-mode precommit` → all ok.
+
+**Residual risks (surfaced to critic for S2 dispatch)**:
+1. Semantic shift in HIGH settlement rounding: legacy path used
+   `round_wmo_half_up_value` (naive WMO half-up); v2 uses
+   `SettlementSemantics.for_city(city_obj).round_values` which applies
+   HKO oracle_truncate for HKO cities. HKO settlement values post-C5
+   may differ by ±0.5°F from pre-C5 for boundary cases. Latent bug
+   closure (HKO was previously getting WMO rounding), but behavior
+   change worth acknowledging.
+2. `test_r_cs_2_high_settlement_routes_to_v2_after_c5` used to assert
+   `len(rows_legacy) > 0` AND `len(rows_v2) == 0`; post-fix asserts
+   the opposite. The rename documents the contract flip; reviewers
+   verifying the test history should grep both names.
+3. Pre-existing flake bar: `test_lifecycle.py::TestHarvester` and
+   `test_calibration_manager.py::TestStoreRoundTrip` now depend on
+   `apply_v2_schema` being importable + idempotent. If a future
+   v2_schema refactor makes this import side-effect-free in a way that
+   doesn't create the table, these tests fail first — which is the
+   desired signal.
+4. `test_v2_pair_training_allowed_respects_inv15` asserts INV-15's
+   passthrough when `source=""` is implicit. If a future contributor
+   adds `source="..."` to the v2 call and the value isn't in the
+   whitelist (`{"tigge", "ecmwf_ens"}`), training_allowed silently
+   downgrades to 0. The test would catch the training_allowed
+   downgrade but not narrate "why"; reviewers should watch for source
+   additions.
 
 ### S3 — H3 (cross-table JOIN metric filter + antibody lint)
 
