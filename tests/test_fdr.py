@@ -46,6 +46,47 @@ def _make_edge(p_value: float, *, low: float = 40, high: float = 41) -> BinEdge:
     )
 
 
+def _seed_ensemble_snapshots_v2_row(
+    conn, *, city: str, target_date: str, metric: str = "high",
+    boundary_ambiguous: int = 0, causality_status: str = "OK",
+) -> None:
+    """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots_v2 row.
+
+    Closes the "natural-empty-v2 bypass" in T2.d/e/f tests — when v2 is
+    empty, `_read_v2_snapshot_metadata` returns {} and
+    `boundary_ambiguous_refuses_signal({})` returns False (no refusal).
+    The DT7 gate passes but via dormant path. Post-T2.g, the gate runs
+    against a REAL populated row and its boundary_ambiguous=0 is
+    explicitly read — exercising the production schema path.
+
+    The row uses canonical HIGH-track identity (temperature_metric='high',
+    physical_quantity='mx2t6_local_calendar_day_max',
+    observation_field='high_temp',
+    data_version='tigge_mx2t6_local_calendar_day_max_v1') per INV-14
+    identity spine + CANONICAL_DATA_VERSIONS allowlist at
+    src/contracts/ensemble_snapshot_provenance.py. Members are a plain
+    4-member array matching the test's FakeEns.member_maxes shape.
+    """
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, available_at, fetch_time, lead_hours,
+            members_json, model_version, data_version,
+            boundary_ambiguous, causality_status
+        ) VALUES (
+            ?, ?, ?, 'mx2t6_local_calendar_day_max',
+            'high_temp', '2026-04-12T06:00:00Z', '2026-04-12T06:00:00Z', 12.0,
+            '[70.0, 71.0, 72.0, 73.0]', 'test_model_v1',
+            'tigge_mx2t6_local_calendar_day_max_v1',
+            ?, ?
+        )
+        """,
+        (city, target_date, metric, boundary_ambiguous, causality_status),
+    )
+    conn.commit()
+
+
 class TestFDRFilter:
     def test_known_p_values(self):
         """Standard BH test with 10 edges at known p-values.
@@ -91,6 +132,59 @@ class TestFDRFilter:
         """Single edge with p=0.15, fdr=0.10 → fails (0.15 > 0.10)."""
         result = fdr_filter([_make_edge(0.15)], fdr_alpha=0.10)
         assert len(result) == 0
+
+
+class TestDT7ScemaPathActuallyRuns:
+    """S1.3 / T2.g antibody — the DT7 gate `boundary_ambiguous_refuses_signal`
+    actually fires against REAL ensemble_snapshots_v2 rows, not just via the
+    trivial empty-table short-circuit.
+
+    Without these two tests, a future refactor that silently breaks
+    `_read_v2_snapshot_metadata` (wrong column name, wrong WHERE clause,
+    swapped temperature_metric comparison) would leave the TestSelection-
+    FamilySubstrate suite green because they all pass via the legacy
+    empty-v2 bypass. These tests exercise the real schema path end-to-end
+    and will fail-fast on any upstream schema/query drift."""
+
+    def test_T2g_read_metadata_returns_boundary_ambiguous_zero_from_real_row(self, tmp_path):
+        """Seed a row with boundary_ambiguous=0 and verify
+        `_read_v2_snapshot_metadata` returns the correct dict against the
+        real schema path (not via the fall-through empty-row branch)."""
+        from src.engine.evaluator import _read_v2_snapshot_metadata
+        conn = get_connection(tmp_path / "t2g_bambig_zero.db")
+        init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+            boundary_ambiguous=0,
+        )
+        meta = _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high")
+        assert meta, "meta must be non-empty — schema path must read the real row"
+        assert meta.get("boundary_ambiguous") == 0
+        assert meta.get("causality_status") == "OK"
+        from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
+        assert boundary_ambiguous_refuses_signal(meta) is False, (
+            "boundary_ambiguous=0 must NOT refuse signal"
+        )
+
+    def test_T2g_read_metadata_returns_boundary_ambiguous_one_and_gate_fires(self, tmp_path):
+        """Seed a row with boundary_ambiguous=1 (and causality_status=
+        REJECTED_BOUNDARY_AMBIGUOUS per the CHECK constraint on that column)
+        and verify the refusal-gate actually fires. This is the positive
+        proof that DT7 is wired — not just dormant."""
+        from src.engine.evaluator import _read_v2_snapshot_metadata
+        conn = get_connection(tmp_path / "t2g_bambig_one.db")
+        init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+            boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
+        )
+        meta = _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high")
+        assert meta.get("boundary_ambiguous") == 1
+        from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
+        assert boundary_ambiguous_refuses_signal(meta) is True, (
+            "boundary_ambiguous=1 MUST refuse signal — DT7 gate is the core "
+            "of the boundary-day-leakage invariant"
+        )
 
 
 class TestSelectionFamilySubstrate:
@@ -356,12 +450,17 @@ class TestSelectionFamilySubstrate:
         }
 
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
-        # TODO(T2.g): this test bypasses DT7 via empty-v2 natural behavior
-        # (no explicit monkeypatch). T2.g plan row requires populating
-        # ensemble_snapshots_v2 with a real boundary_ambiguous=0 fixture
-        # row to exercise DT7 against the actual schema path.
+        # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots_v2 fixture row
+        # with boundary_ambiguous=0 replaces the prior natural-empty-v2
+        # bypass. DT7 gate now runs against the real populated schema path
+        # (reads the row, sees boundary_ambiguous=0, correctly returns False
+        # — no refusal). Proves the code actually executes under production-
+        # shaped state, not just via a trivial short-circuit on empty table.
         conn = get_connection(tmp_path / "selection_eval_path.db")
         init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+        )
         now = datetime.now(timezone.utc)
 
         class FakeEns:
@@ -581,10 +680,13 @@ class TestSelectionFamilySubstrate:
         assert meta["active_fdr_selected"] == 1
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
-        # TODO(T2.g): DT7 gate passes via natural empty-v2 behavior; T2.g
-        # follow-up should replace with real boundary_ambiguous=0 fixture.
+        # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
+        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
         conn = get_connection(tmp_path / "selection_fail_closed.db")
         init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+        )
         now = datetime.now(timezone.utc)
 
         class FakeEns:
@@ -793,10 +895,13 @@ class TestSelectionFamilySubstrate:
         The evaluator must NOT fall back to legacy fdr_filter; it must fail closed
         and set fdr_fallback_fired=True so observability surfaces the anomaly.
         """
-        # TODO(T2.g): DT7 gate passes via natural empty-v2 behavior; T2.g
-        # follow-up should replace with real boundary_ambiguous=0 fixture.
+        # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
+        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
         conn = get_connection(tmp_path / "selection_empty_family.db")
         init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+        )
         now = datetime.now(timezone.utc)
 
         class FakeEns:

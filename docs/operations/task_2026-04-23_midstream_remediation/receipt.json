@@ -734,9 +734,38 @@
       ]
     },
     {
+      "slice_id": "S1.3_T2g",
+      "name": "un_monkeypatched_dt7_fail_closed_verification_via_real_v2_fixture",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_12_pass_1_xfailed_critic_dispatch_pending",
+      "planning_lock": "GREEN on 1 file (tests/test_fdr.py — already registered in test_topology.yaml)",
+      "authority_basis": "midstream fix plan T2.g row — un-monkeypatched fail-closed verification against real Day0Router + real ensemble_snapshots_v2 schema path",
+      "scope": "Close the natural-empty-v2 bypass that let all 3 TestSelectionFamilySubstrate tests pass via dormant short-circuit rather than real schema read",
+      "mechanism": "NEW module-level helper `_seed_ensemble_snapshots_v2_row` inserts a minimal valid v2 row with canonical INV-14 identity. 3 existing T2.d/e/f tests now call helper with boundary_ambiguous=0 instead of relying on empty-table fall-through. NEW TestDT7ScemaPathActuallyRuns class with 2 antibody tests (positive + negative) proves the gate is wired by seeding boundary_ambiguous=1 and asserting the refusal fires.",
+      "files_changed": [
+        "tests/test_fdr.py (+1 helper function + 3 test updates + 1 new test class with 2 tests)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "antibody_coverage_new": {
+        "positive_path": "boundary_ambiguous=0 row → _read_v2_snapshot_metadata returns non-empty dict → boundary_ambiguous_refuses_signal returns False → no refusal (correct)",
+        "negative_path": "boundary_ambiguous=1 row (+ causality_status=REJECTED_BOUNDARY_AMBIGUOUS per CHECK constraint) → gate returns True → refusal fires (correct)"
+      },
+      "category_immunity_fitz_k_lt_n_score": "0.8/1.0 — the DT7 gate is now proven wired via positive + negative antibody. Makes upstream `_read_v2_snapshot_metadata` schema/query drift detectable at CI (if column name, WHERE clause, or temperature_metric comparison breaks, both antibody tests flip red). 0.2 gap: the existing 3 TestSelectionFamilySubstrate tests still pass regardless of DT7 behavior (they use explicit v2 rows but don't assert DT7-specific behavior); if someone DISABLES the gate entirely by short-circuiting `boundary_ambiguous_refuses_signal`, the positive antibody still passes but the negative one flips — still catches the deactivation.",
+      "regression_evidence_L28": {
+        "narrow": "pytest -q tests/test_fdr.py::TestDT7ScemaPathActuallyRuns tests/test_fdr.py::TestSelectionFamilySubstrate -> 12 passed, 1 xfailed in 1.44s",
+        "delta": "+2 passes from new antibody class; 3 existing tests unaffected (still pass with explicit fixture instead of empty-v2 bypass)"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_fdr.py::TestDT7ScemaPathActuallyRuns tests/test_fdr.py::TestSelectionFamilySubstrate -> 12 passed, 1 xfailed",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_fdr.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> GREEN"
+      ]
+    },
+    {
       "slice_id": "S3.1",
       "name": "data_readiness_tail_zeus_current_architecture_inv14_provenance_refresh",
-      "commit": "pending",
+      "commit": "092d263",
       "date": "2026-04-23",
       "critic_status": "self_verified_doc_only_slice_isolate_and_restore_pattern_critic_dispatch_pending",
       "planning_lock": "GREEN on 1 file (docs/authority/zeus_current_architecture.md) using midstream plan.md as plan-evidence",
