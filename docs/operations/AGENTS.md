@@ -36,7 +36,7 @@ law or implementation permission.
 
 | Path | Purpose |
 |------|---------|
-| `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | Active P1.4 planning-only packet for legacy settlement evidence-only / finalization policy |
+| `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | Active P1.4 implementation closeout packet for legacy settlement evidence-only / finalization policy |
 
 ### Packet Evidence
 
@@ -109,7 +109,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-24_p1_source_role_registry/` | packet evidence | Closed P1.1 source-role registry packet (plan `2424264`, implementation `af7dd52`; post-close critic/verifier PASS) |
 | `task_2026-04-24_p1_writer_provenance_gates/` | packet evidence | Closed P1.2 writer provenance gates packet (plan `e498b0d`, implementation `16292e2`; post-close reassessment closed the writer-local slice and corrected future P1/P3 boundaries) |
 | `task_2026-04-24_p1_unsafe_observation_quarantine/` | packet evidence | Closed P1.3 unsafe-observation quarantine diagnostics packet (implementation `7a3524e`; read-only training-readiness blockers for unsafe observation rows) |
-| `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | active packet | P1.4 planning-only packet for legacy settlement evidence-only / finalization policy before eligibility-view adoption and v2 population |
+| `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | active packet | P1.4 implementation closeout packet for read-only legacy settlement evidence-only / finalization policy blockers before eligibility-view adoption and v2 population |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules

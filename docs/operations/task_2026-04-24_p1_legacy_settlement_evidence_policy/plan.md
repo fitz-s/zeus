@@ -2,9 +2,10 @@
 
 Date: 2026-04-24
 Branch: `post-audit-remediation-mainline`
-Status: planning-only packet. No source, schema, DB, current-fact,
-calibration, replay, live consumer, or `settlements_v2` population change is
-authorized until this plan is reviewed, pushed, and post-close reviewed.
+Status: implementation closeout pending commit. The planning packet was pushed
+at `da1662f`; this follow-up implements only the read-only diagnostic/test
+files named below. No schema, DB, current-fact, calibration, replay, live
+consumer, or `settlements_v2` population change is authorized.
 
 ## Task
 
@@ -105,7 +106,7 @@ Planning commit may change:
 - `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
 - `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
 
-Allowed future implementation files after plan freeze and post-close review:
+Implementation files after plan freeze and post-close review:
 
 - `scripts/verify_truth_surfaces.py`
 - `tests/test_truth_surface_health.py`

@@ -44,6 +44,27 @@ NOT_READY = "NOT_READY"
 ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
     "historical_hourly",
 })
+LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS = (
+    "market_slug",
+)
+LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS = (
+    "settlement_source",
+    "settlement_source_type",
+    "provenance_json",
+)
+LEGACY_SETTLEMENT_VALUE_COLUMNS = (
+    "settlement_value",
+    "winning_bin",
+    "temperature_metric",
+    "unit",
+    "provenance_json",
+)
+SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS = (
+    "city",
+    "target_date",
+    "temperature_metric",
+    "market_slug",
+)
 
 
 def _scalar(cur, sql, *params):
@@ -310,6 +331,220 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
         )
 
 
+def _add_legacy_settlement_check_result(
+    report: dict,
+    *,
+    check_id: str,
+    code: str,
+    count: int,
+    detail: str,
+    table: str = "settlements",
+) -> None:
+    met = count == 0
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=detail,
+        count=count,
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append({"code": code, "table": table, "count": count})
+
+
+def _settlements_v2_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]:
+    table = "settlements_v2"
+    if not _table_exists(cur, table):
+        return True, "settlements_v2 table is missing"
+
+    row_count = _count(cur, table)
+    if row_count == 0:
+        return True, "settlements_v2 rows=0"
+
+    columns = _columns(cur, table)
+    missing_columns = [
+        column
+        for column in SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS
+        if column not in columns
+    ]
+    if missing_columns:
+        return (
+            True,
+            "settlements_v2 lacks identity columns: " + ", ".join(missing_columns),
+        )
+
+    missing_identity = _count(
+        cur,
+        table,
+        _any_blank_sql(SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS),
+    )
+    if missing_identity:
+        return (
+            True,
+            f"settlements_v2 rows with incomplete market identity={missing_identity}",
+        )
+
+    return False, f"settlements_v2 market identity rows={row_count}"
+
+
+def _add_legacy_settlement_evidence_checks(
+    report: dict,
+    cur: sqlite3.Cursor,
+) -> None:
+    table = "settlements"
+    checks = report["checks"]
+
+    if not _table_exists(cur, table):
+        detail = "legacy settlements table is absent; no legacy rows to classify"
+        for check_id in (
+            "settlements.legacy_market_identity_present",
+            "settlements.legacy_finalization_policy_present",
+            "settlements.legacy_value_complete",
+            "settlements.legacy_evidence_only",
+        ):
+            checks[check_id] = _check_entry(
+                check_id=check_id,
+                status=PASS,
+                detail=detail,
+                count=0,
+                threshold=0,
+                met=True,
+            )
+        return
+
+    row_count = _count(cur, table)
+    if row_count == 0:
+        detail = "legacy settlements rows=0"
+        for check_id in (
+            "settlements.legacy_market_identity_present",
+            "settlements.legacy_finalization_policy_present",
+            "settlements.legacy_value_complete",
+            "settlements.legacy_evidence_only",
+        ):
+            checks[check_id] = _check_entry(
+                check_id=check_id,
+                status=PASS,
+                detail=detail,
+                count=0,
+                threshold=0,
+                met=True,
+            )
+        return
+
+    columns = _columns(cur, table)
+
+    identity_columns = tuple(
+        column
+        for column in LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS
+        if column in columns
+    )
+    if identity_columns:
+        market_identity_missing = _count(cur, table, _all_blank_sql(identity_columns))
+        market_detail = (
+            "legacy settlements rows with no accepted market identity="
+            f"{market_identity_missing}; accepted columns="
+            + ", ".join(identity_columns)
+        )
+    else:
+        market_identity_missing = row_count
+        market_detail = (
+            "legacy settlements has rows but lacks accepted market identity "
+            "columns: " + ", ".join(LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS)
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_market_identity_present",
+        code="settlements.legacy_market_identity_missing",
+        count=market_identity_missing,
+        detail=market_detail,
+    )
+
+    missing_source_columns = [
+        column
+        for column in LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS
+        if column not in columns
+    ]
+    if missing_source_columns:
+        source_evidence_missing = row_count
+    else:
+        source_evidence_missing = _count(
+            cur,
+            table,
+            " OR ".join(
+                (
+                    _any_blank_sql(LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS),
+                    "json_extract(provenance_json, '$.rounding_rule') IS NULL",
+                    "TRIM(CAST(json_extract(provenance_json, '$.rounding_rule') AS TEXT)) = ''",
+                )
+            ),
+        )
+    finalization_detail = (
+        "legacy settlements lacks explicit source-finalization timestamp, "
+        "revision/finalization policy, and market-rule version; settled_at is "
+        "a local write timestamp and is not accepted as source finalization "
+        f"proof; current source/rounding evidence missing rows={source_evidence_missing}"
+    )
+    if missing_source_columns:
+        finalization_detail += (
+            "; missing current evidence columns=" + ", ".join(missing_source_columns)
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_finalization_policy_present",
+        code="settlements.legacy_finalization_policy_missing",
+        count=row_count,
+        detail=finalization_detail,
+    )
+
+    missing_value_columns = [
+        column for column in LEGACY_SETTLEMENT_VALUE_COLUMNS if column not in columns
+    ]
+    if missing_value_columns:
+        value_incomplete = (
+            _count(cur, table, "authority = 'VERIFIED'")
+            if "authority" in columns
+            else row_count
+        )
+        value_detail = (
+            "legacy settlements table shape lacks value evidence columns: "
+            + ", ".join(missing_value_columns)
+            + "; value completeness only gates VERIFIED rows"
+        )
+    else:
+        value_where = _any_blank_sql(LEGACY_SETTLEMENT_VALUE_COLUMNS)
+        authority_where = (
+            "authority = 'VERIFIED'"
+            if "authority" in columns
+            else "1 = 1"
+        )
+        value_incomplete = _count(cur, table, f"{authority_where} AND ({value_where})")
+        value_detail = (
+            "VERIFIED legacy settlements rows missing settlement value, bin, metric, unit, "
+            f"or provenance={value_incomplete}"
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_value_complete",
+        code="settlements.legacy_value_incomplete",
+        count=value_incomplete,
+        detail=value_detail,
+    )
+
+    v2_incomplete, v2_detail = _settlements_v2_identity_incomplete(cur)
+    evidence_only_count = row_count if v2_incomplete else 0
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_evidence_only",
+        code="settlements.legacy_evidence_only",
+        count=evidence_only_count,
+        detail=(
+            f"legacy settlements rows={row_count}; {v2_detail}; "
+            "legacy rows are evidence-only until canonical v2 market identity is ready"
+        ),
+    )
+
+
 def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
     """Return a read-only P0 training-readiness report for the world DB.
 
@@ -393,6 +628,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             check_id="market_price_history.market_identity_present",
             columns=("market_slug", "token_id"),
         )
+        _add_legacy_settlement_evidence_checks(report, cur)
 
         if _table_exists(cur, "observation_instants_v2"):
             columns = _columns(cur, "observation_instants_v2")
