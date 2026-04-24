@@ -1,3 +1,10 @@
+# Lifecycle: created=2025-10-10; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Calibration manager unit tests — covers bucket routing, maturity
+#          gate, fallback behavior, TestStoreRoundTrip end-to-end harvester
+#          path (HIGH→v2 after C5 2026-04-24), and decision-group accounting.
+# Reuse: Referenced by regression suite; last touched 2026-04-24 for C5
+#        (harvester HIGH default now writes calibration_pairs_v2, not
+#        legacy table). _get_test_conn applies v2 schema to support this.
 """Tests for calibration manager: bucket routing, maturity gate, fallback.
 
 Covers:
@@ -121,9 +128,15 @@ class TestMaturityLevel:
 
 class TestStoreRoundTrip:
     def _get_test_conn(self, tmp_path):
+        """Post-C5 (2026-04-24): apply v2 schema so harvester's HIGH→v2
+        route lands rows in calibration_pairs_v2 (previously the HIGH
+        branch wrote to legacy calibration_pairs)."""
+        from src.state.schema.v2_schema import apply_v2_schema
+
         db_path = tmp_path / "test_cal.db"
         conn = get_connection(db_path)
         init_schema(conn)
+        apply_v2_schema(conn)
         return conn
 
     def test_save_and_load_model(self, tmp_path):
@@ -203,8 +216,9 @@ class TestStoreRoundTrip:
         _ensure_auth_verified(conn)
 
         assert n == 11
+        # Post-C5 (2026-04-24): HIGH default now routes to v2.
         rows = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
+            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-15'"
         ).fetchall()
         assert len(rows) == 11
         assert all(row["bias_corrected"] == 1 for row in rows), \
@@ -212,7 +226,7 @@ class TestStoreRoundTrip:
 
         # Verify decision_group_id was set on all pairs
         group_rows = conn.execute(
-            "SELECT decision_group_id FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
+            "SELECT decision_group_id FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-15'"
         ).fetchall()
         assert all(row["decision_group_id"] is not None and row["decision_group_id"] != "" for row in group_rows), \
             "All pairs must have decision_group_id set at insert time"
@@ -232,7 +246,7 @@ class TestStoreRoundTrip:
         conn.commit()
 
         rows2 = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-16'"
+            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-16'"
         ).fetchall()
         assert len(rows2) == 11
         assert all(row["bias_corrected"] == 0 for row in rows2), \
@@ -263,7 +277,7 @@ class TestStoreRoundTrip:
         conn.commit()
 
         rows = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-02-01'"
+            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-02-01'"
         ).fetchall()
         assert len(rows) == 3
         assert all(row["bias_corrected"] == 1 for row in rows), \

@@ -21,10 +21,10 @@ import httpx
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
-from src.calibration.store import add_calibration_pair, add_calibration_pair_v2
+from src.calibration.store import add_calibration_pair_v2
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 from src.config import City, cities_by_name, get_mode
-from src.contracts.settlement_semantics import SettlementSemantics, round_wmo_half_up_value
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.exceptions import SettlementPrecisionError
 from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
 from src.state.chronicler import log_event
@@ -1072,32 +1072,35 @@ def harvest_settlement(
             issue_time,
             source_model_version or "",
         )
+        # C5 (2026-04-24): route both tracks through add_calibration_pair_v2
+        # with canonical MetricIdentity. Legacy add_calibration_pair for the
+        # HIGH branch wrote to calibration_pairs (no INV-14, no metric identity)
+        # — refit_platt_v2 reads only calibration_pairs_v2, so HIGH training
+        # pairs silently never reached the v2 trainer. Mirror the LOW pattern
+        # exactly for HIGH but with HIGH_LOCALDAY_MAX identity. Side effect:
+        # settlement rounding shifts from explicit round_wmo_half_up_value
+        # (HKO-unaware naive half-up) to v2's internal
+        # SettlementSemantics.for_city(city_obj).round_values which applies
+        # HKO oracle_truncate where applicable. Passes no `source=` so INV-15's
+        # two-signal check reduces to the data_version prefix gate (both
+        # tigge_mx2t6_... and tigge_mn2t6_... start with "tigge" → whitelist ok).
         if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low":
-            add_calibration_pair_v2(
-                conn, city=city.name, target_date=target_date,
-                range_label=label, p_raw=p_raw, outcome=outcome,
-                lead_days=lead_days, season=season, cluster=city.cluster,
-                forecast_available_at=now,
-                settlement_value=settlement_value,
-                decision_group_id=dgid,
-                bias_corrected=bool(bias_corrected),
-                city_obj=city,
-                metric_identity=LOW_LOCALDAY_MIN,
-                data_version=LOW_LOCALDAY_MIN.data_version,
-                training_allowed=True,
-            )
+            metric_identity = LOW_LOCALDAY_MIN
         else:
-            add_calibration_pair(
-                conn, city=city.name, target_date=target_date,
-                range_label=label, p_raw=p_raw, outcome=outcome,
-                lead_days=lead_days, season=season, cluster=city.cluster,
-                forecast_available_at=now,
-                settlement_value=(round_wmo_half_up_value(float(settlement_value))
-                                  if settlement_value is not None else None),
-                decision_group_id=dgid,
-                bias_corrected=bool(bias_corrected),
-                city_obj=city,
-            )
+            metric_identity = HIGH_LOCALDAY_MAX
+        add_calibration_pair_v2(
+            conn, city=city.name, target_date=target_date,
+            range_label=label, p_raw=p_raw, outcome=outcome,
+            lead_days=lead_days, season=season, cluster=city.cluster,
+            forecast_available_at=now,
+            settlement_value=settlement_value,
+            decision_group_id=dgid,
+            bias_corrected=bool(bias_corrected),
+            city_obj=city,
+            metric_identity=metric_identity,
+            data_version=metric_identity.data_version,
+            training_allowed=True,
+        )
         count += 1
 
     logger.info("Harvested %d pairs for %s %s (winner: %s)",

@@ -1,5 +1,8 @@
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
+# Lifecycle: created=2026-04-19; last_reviewed=2026-04-24; last_reused=2026-04-24
 # Purpose: Phase 10C "LOW-lane Tail + HKO Injection + DT#1 SAVEPOINT" antibodies (R-CQ..R-CX).
+# Reuse: Referenced by regression suite; R-CS-2 updated 2026-04-24 for C5
+#        (HIGH settlement routes through calibration_pairs_v2 post-fix;
+#        test formerly locked in pre-C5 legacy-routing).
 # Authority basis: phase10c_contract.md v2
 
 from __future__ import annotations
@@ -293,8 +296,22 @@ class TestRCSHarvesterLowRouting:
             f"R-CS.1: expected metric='low', got {rows_v2[0]['temperature_metric']!r}"
         )
 
-    def test_r_cs_2_high_settlement_stays_legacy(self):
-        """R-CS.2: HIGH settlement → legacy calibration_pairs (back-compat)."""
+    def test_r_cs_2_high_settlement_routes_to_v2_after_c5(self):
+        """R-CS.2 (post-C5 2026-04-24): HIGH settlement routes to
+        calibration_pairs_v2 with canonical HIGH_LOCALDAY_MAX identity.
+
+        Pre-C5 behavior (documented in POST_AUDIT_HANDOFF_2026-04-24.md
+        §3.1 C5): HIGH branch of harvest_settlement wrote to legacy
+        `calibration_pairs` while LOW branch wrote to v2. Because
+        `refit_platt_v2` reads only `calibration_pairs_v2`, HIGH pairs
+        silently never reached the trainer. C5 wires HIGH through
+        `add_calibration_pair_v2(metric_identity=HIGH_LOCALDAY_MAX)` to
+        close this split-brain.
+
+        This test (formerly `test_r_cs_2_high_settlement_stays_legacy`)
+        used to lock in the pre-C5 split behavior as expected; post-C5
+        the assertions are inverted.
+        """
         conn = _make_calibration_db()
         city = _make_wu_city()
 
@@ -324,9 +341,20 @@ class TestRCSHarvesterLowRouting:
 
         rows_legacy = conn.execute("SELECT * FROM calibration_pairs").fetchall()
         rows_v2 = conn.execute("SELECT * FROM calibration_pairs_v2").fetchall()
-        assert len(rows_legacy) > 0, "R-CS.2: HIGH settlement must write to calibration_pairs"
-        assert len(rows_v2) == 0, (
-            f"R-CS.2: HIGH settlement must NOT write to calibration_pairs_v2, found {len(rows_v2)}"
+        assert len(rows_v2) > 0, (
+            "R-CS.2 post-C5: HIGH settlement must write to calibration_pairs_v2"
+        )
+        assert rows_v2[0]["temperature_metric"] == "high", (
+            f"R-CS.2 post-C5: expected metric='high', got "
+            f"{rows_v2[0]['temperature_metric']!r}"
+        )
+        assert rows_v2[0]["data_version"] == "tigge_mx2t6_local_calendar_day_max_v1", (
+            f"R-CS.2 post-C5: expected canonical HIGH data_version; got "
+            f"{rows_v2[0]['data_version']!r}"
+        )
+        assert len(rows_legacy) == 0, (
+            f"R-CS.2 post-C5: HIGH settlement must NOT leak into legacy "
+            f"calibration_pairs; found {len(rows_legacy)} rows"
         )
 
 
