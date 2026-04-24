@@ -200,3 +200,9 @@ liminal_artifacts:
     authority_behavior: "Dated local/cloud TIGGE wiring snapshot; evidence only and not a durable runbook."
     canonical_owner: architecture/docs_registry.yaml
     guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance; do not route VM/project-specific details as default procedure."
+  - path: docs/artifacts/tigge_data_training_handoff_2026-04-23.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "Dated TIGGE data/training handoff; evidence only and not a durable runbook or authority surface."
+    canonical_owner: architecture/docs_registry.yaml
+    guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance and docs/authority/** for binding data/runtime law."

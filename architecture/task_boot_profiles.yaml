@@ -82,8 +82,8 @@ profiles:
       use_for: [impacted files, callers, tests, blast radius]
       not_for: [settlement truth, source validity, city/date authority]
     verification_gates:
-      - python scripts/topology_doctor.py --task-boot-profiles --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
 
   - id: settlement_semantics
     purpose: >
@@ -130,8 +130,8 @@ profiles:
       use_for: [callers, tests, blast radius]
       not_for: [rounding law, city source truth]
     verification_gates:
-      - python scripts/topology_doctor.py --core-claims --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --core-claims --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
 
   - id: hourly_observation_ingest
     purpose: >
@@ -177,8 +177,8 @@ profiles:
       use_for: [writer/client/backfill callers, tests]
       not_for: [source family truth, data freshness]
     verification_gates:
-      - python scripts/topology_doctor.py --source --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --source --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
 
   - id: day0_monitoring
     purpose: >
@@ -224,8 +224,8 @@ profiles:
       use_for: [callers, tests, impacted monitor paths]
       not_for: [live source validity, data freshness]
     verification_gates:
-      - python scripts/topology_doctor.py --task-boot-profiles --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
 
   - id: calibration
     purpose: >
@@ -273,8 +273,8 @@ profiles:
       use_for: [calibration callers, replay/test blast radius]
       not_for: [training truth, settlement truth]
     verification_gates:
-      - python scripts/topology_doctor.py --core-claims --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --core-claims --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
 
   - id: docs_authority
     purpose: >
@@ -316,8 +316,8 @@ profiles:
       use_for: []
       not_for: [authority classification, current packet truth]
     verification_gates:
-      - python scripts/topology_doctor.py --docs --json
-      - python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --json
+      - python3 scripts/topology_doctor.py --docs --json
+      - python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --json
 
   - id: graph_review
     purpose: >
@@ -356,5 +356,5 @@ profiles:
       use_for: [impacted files, callers, tests, review order]
       not_for: [semantic truth, source validity, packet authority]
     verification_gates:
-      - python scripts/topology_doctor.py --code-review-graph-status --json
-      - python scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --code-review-graph-status --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json

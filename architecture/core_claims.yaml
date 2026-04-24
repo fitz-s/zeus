@@ -134,7 +134,7 @@ claims:
         path: architecture/history_lore.yaml
         locator: ORACLE_TRUNCATION_BIAS
     gates:
-      - python scripts/topology_doctor.py --history-lore
+      - python3 scripts/topology_doctor.py --history-lore
     invalidation_condition: "Only a settlement semantics packet may alter source-specific rounding law."
     applicable_profiles: [probability-chain]
 
@@ -153,7 +153,7 @@ claims:
         path: architecture/history_lore.yaml
         locator: ORACLE_TRUNCATION_BIAS
     gates:
-      - python scripts/topology_doctor.py --history-lore
+      - python3 scripts/topology_doctor.py --history-lore
     invalidation_condition: "Only an oracle-penalty packet may change oracle error thresholds."
     applicable_profiles: [probability-chain]
 
@@ -175,9 +175,9 @@ claims:
         path: architecture/fatal_misreads.yaml
         locator: daily_day0_hourly_forecast_sources_are_not_interchangeable
     gates:
-      - python scripts/topology_doctor.py --city-truth-contract --json
-      - python scripts/topology_doctor.py --task-boot-profiles --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     invalidation_condition: "Only a source-contract packet with city/date evidence may collapse source roles for a bounded scope."
     applicable_profiles: [semantic-boot]
 
@@ -199,8 +199,8 @@ claims:
         path: config/cities.json
         locator: "\"name\": \"Hong Kong\""
     gates:
-      - python scripts/topology_doctor.py --city-truth-contract --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     invalidation_condition: "Only a fresh Hong Kong audit receipt may change this caution path."
     applicable_profiles: [semantic-boot]
 
@@ -222,8 +222,8 @@ claims:
         path: architecture/task_boot_profiles.yaml
         locator: hourly_source_and_extrema
     gates:
-      - python scripts/topology_doctor.py --city-truth-contract --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --city-truth-contract --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     invalidation_condition: "Only a metric-specific ingest contract may replace extrema preservation."
     applicable_profiles: [semantic-boot]
 
@@ -245,7 +245,7 @@ claims:
         path: architecture/task_boot_profiles.yaml
         locator: graph_review
     gates:
-      - python scripts/topology_doctor.py --task-boot-profiles --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     invalidation_condition: "Only a graph-authority packet with source/date proof integration may change graph's derived-only rank."
     applicable_profiles: [semantic-boot]

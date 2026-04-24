@@ -7,34 +7,30 @@ Scope: runtime semantic law, truth ownership, source/data role boundaries, risk/
 
 ## 1. Purpose
 
-This file answers two questions:
+This file defines the **physical and semantic laws of the Zeus trading machine**. It covers settlement contract geometry, truth plane separation, data feed roles, dual-track identity, lifecycle grammar, risk actuation, and execution boundaries.
 
-1. How Zeus operates as a live trading machine.
-2. Which semantic mistakes can cause real loss or corrupt runtime truth.
+These laws are not advisory. Violation of any law in this document — passing untyped floats through pricing, collapsing discrete geometry into continuous math, misidentifying truth planes — will silently corrupt the money path.
 
-If an agent reads only one human authority file before touching runtime,
-source, settlement, Day0, calibration, or truth ownership, it should read this
-file.
+This document supersedes all delivery protocols, governance documentation, and generated mesh graphs.
 
 ---
 
 ## 2. What Zeus Is
 
-Zeus is a **live-only weather settlement-contract trading runtime**.
+Zeus is a **live weather settlement-contract trading runtime**.
 
-It is not:
+### Typed Boundaries & Contract Execution
+Code correctly written in native Python types can still catastrophically fail if the financial/semantic properties are not preserved. Thus, Zeus uses strict bounding contracts:
 
-- a general weather research repository
-- a generic forecasting dashboard
-- a paper-mode simulator
-- a system whose primary object is continuous temperature prediction
+1. **`ExecutionPrice` Boundary (DT#5 / INV-21)**: No pricing logic (such as `kelly_size`) may accept bare floats. `ExecutionPrice.assert_kelly_safe()` is unconditionally executed to prove a price is physically tradable before sizing.
+2. **`SettlementSemantics` as a Semantic Atom**: Settlement data is integer-bound based on physical venue behavior (e.g., WU Fahrenheit uses `wmo_half_up` asymmetry, HKO uses `oracle_truncate`). Continuous-temperature intuition violates the discrete geometry of the tradable bins.
+3. **`TemperatureDelta` Unit Defense**: Alpha weight scaling and edge decay (`SPREAD_TIGHT`, `SPREAD_WIDE`) rely on `TemperatureDelta` to prevent mixing °C and °F scalar limits.
+4. **Risk Enforces Action (INV-05)**: `RED` risk demands active programmatic sweep: it cancels all pending orders and issues exit/sweep for all active positions.
 
 Zeus trades **discrete settlement contracts**. Its primary chain is:
-
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-Any reasoning that skips contract semantics or source truth is not valid Zeus
-reasoning.
+Any reasoning that bypasses contract semantics or abstracts away discrete settlement sources is invalid.
 
 ---
 
@@ -85,41 +81,6 @@ Contract truth decides what the position is economically about.
 Defines which daily observation source resolves the contract. Settlement truth
 is not inferred from endpoint availability, nearby airport station, or a
 generic weather-data source family.
-
-**Canonical settlement row invariants** (enforced structurally at DB-write
-time, not just by writer discipline):
-
-- **INV-14 identity spine**: every `settlements` row carries the four
-  identity columns `temperature_metric` (high/low), `physical_quantity`
-  (e.g. `daily_maximum_air_temperature`), `observation_field` (e.g.
-  `high_temp`), and `data_version` (e.g. `wu_icao_history_v1`). These
-  four together are the only durable basis for cross-source comparison
-  and cross-session reproducibility. They must not be inferred post-hoc
-  from `settlement_source` or `temp_unit`.
-- **Provenance sidecar**: every row carries `provenance_json` with at
-  minimum `writer`, `source_family`, `obs_source`, `obs_id`,
-  `decision_time_snapshot_id`, `rounding_rule`,
-  `reconstruction_method`, and `audit_ref`. The sidecar is not optional
-  and is not a derived artifact — it is canonical context that makes
-  the row re-auditable from source.
-- **Authority-monotonic trigger**: `settlements_authority_monotonic`
-  blocks `VERIFIED -> UNVERIFIED` transitions and blocks
-  `QUARANTINED -> VERIFIED` unless `provenance_json.reactivated_by` is a
-  non-empty text value (the operator / procedure responsible for the
-  reactivation). Presence-only bypasses (`false`, `0`, `""`, `{}`, `[]`)
-  are rejected by `json_type='text' AND length>0` predicate.
-- **Structural integrity triggers**: `settlements_verified_insert_integrity`
-  and `settlements_verified_update_integrity` reject any row with
-  `authority='VERIFIED'` that has NULL `settlement_value` or empty
-  `winning_bin`. QUARANTINED rows are permissive — quarantine is the
-  legitimate semantic for "unable to determine canonical value".
-
-The `SettlementSemantics.assert_settlement_value()` gate at
-`src/contracts/settlement_semantics.py` remains the required runtime
-invocation at every settlement write boundary; the three triggers above
-(`settlements_authority_monotonic` + `settlements_verified_insert_integrity`
-+ `settlements_verified_update_integrity`) are structural backstops, not
-replacements.
 
 ### 4.3 Day0 Monitoring Truth
 
@@ -177,7 +138,7 @@ canonical DB/event truth.
 
 ## 7. Dual-Track Law
 
-Zeus is not a single-track daily-high system.
+Zeus is dual-track.
 
 High and low temperature tracks may share local-calendar-day geometry. They do
 not share:
@@ -437,10 +398,10 @@ Forbidden workflow shortcuts:
 
 ---
 
-## 14. What Every Agent Must State Before Editing
+## 14. Operational Checklist For Pipeline-Impacting Work
 
-For any source, data, settlement, monitoring, calibration, runtime, or truth
-ownership task, state:
+For any work touching source, data, settlement, monitoring, calibration,
+runtime, or truth ownership, the following must be established:
 
 1. What truth Zeus is trading or protecting in this task.
 2. Which feed/surface determines the money path.
@@ -449,7 +410,7 @@ ownership task, state:
 5. Which fatal misread is most likely.
 6. Where to stop if current facts are stale or missing.
 
-If these cannot be answered, do not implement.
+If these cannot be established, do not implement.
 
 ---
 

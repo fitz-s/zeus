@@ -388,8 +388,8 @@ def run_self_check_coherence(api: Any) -> Any:
     required_root_refs = [
         "architecture/self_check/authority_index.md",
         "architecture/self_check/zero_context_entry.md",
-        "Default Navigation",
-        "What To Read By Task",
+        "Navigation & Task Routing",
+        "What to read by task",
     ]
     for needle in required_root_refs:
         if needle not in root_text:
@@ -411,7 +411,7 @@ def run_self_check_coherence(api: Any) -> Any:
             issues.append(api._issue("self_check_required_read_missing", "architecture/self_check/zero_context_entry.md", f"missing {needle}"))
     if "§9" in self_agents or "What to read next" in self_agents:
         issues.append(api._issue("self_check_stale_cross_reference", "architecture/self_check/AGENTS.md", "stale root AGENTS section reference"))
-    if "Default Navigation" not in self_agents or "What To Read By Task" not in self_agents:
+    if "Navigation & Task Routing" not in self_agents or "What to read by task" not in self_agents:
         issues.append(api._issue("self_check_stale_cross_reference", "architecture/self_check/AGENTS.md", "missing current root section names"))
     return api.StrictResult(ok=not issues, issues=issues)
 

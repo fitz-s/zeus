@@ -38,7 +38,7 @@ misreads:
       Only a fresh source-audit packet may alter current settlement routing or
       relax source evidence requirements.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [source_routing]
 
   - id: airport_station_not_city_settlement_station
@@ -56,7 +56,7 @@ misreads:
       Only audited market-description evidence may promote an airport station
       to settlement authority for a city/date.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [source_routing, settlement_semantics]
 
   - id: daily_day0_hourly_forecast_sources_are_not_interchangeable
@@ -76,8 +76,8 @@ misreads:
       Only a source-contract packet with city/date evidence may collapse two
       source roles for a bounded scope.
     tests:
-      - python scripts/topology_doctor.py --task-boot-profiles --json
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [settlement_semantics, hourly_observation_ingest, day0_monitoring, calibration]
 
   - id: wu_website_daily_summary_not_wu_api_hourly_max
@@ -94,7 +94,7 @@ misreads:
       A dated audit may prove equivalence for a specific city/date range; absent
       that audit, keep the products separate.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [source_routing, hourly_observation_ingest, calibration]
 
   - id: hourly_downsample_preserves_extrema
@@ -112,7 +112,7 @@ misreads:
       Only a metric-specific ingest contract may replace extrema preservation,
       and it must name the target physical quantity.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [hourly_observation_ingest, day0_monitoring]
 
   - id: hong_kong_hko_explicit_caution_path
@@ -130,7 +130,7 @@ misreads:
       Only a fresh Hong Kong audit receipt may change this caution status or
       route around HKO-specific evidence.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
     task_classes: [source_routing, settlement_semantics, hourly_observation_ingest]
 
   - id: code_review_graph_answers_where_not_what_settles
@@ -148,6 +148,6 @@ misreads:
       This can change only if graph output becomes backed by the same
       source/date/current-fact proofs as semantic boot manifests.
     tests:
-      - python scripts/topology_doctor.py --fatal-misreads --json
-      - python scripts/topology_doctor.py --code-review-graph-status --json
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+      - python3 scripts/topology_doctor.py --code-review-graph-status --json
     task_classes: [source_routing, docs_authority, graph_review]

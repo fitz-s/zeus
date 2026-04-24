@@ -14,7 +14,7 @@ Read these directly.
 
 Then run:
 
-`python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+`python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 
 If navigation routes this task into K0/K1/schema/governance/control/truth, keep
 following this overlay before reading code.

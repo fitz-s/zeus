@@ -1032,6 +1032,42 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: code_and_manifest
+- path: docs/reference/zeus_execution_lifecycle_reference.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: lifecycle state machine, chain reconciliation, executor, exit triggers, settlement harvest
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
+- path: docs/reference/zeus_risk_strategy_reference.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: risk levels, strategy taxonomy, Kelly sizing, edge decay
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
 - path: docs/reference/zeus_math_spec.md
   doc_class: reference
   default_read: false
@@ -1335,6 +1371,26 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: n/a
+- path: docs/artifacts/tigge_data_training_handoff_2026-04-23.md
+  doc_class: artifact
+  default_read: false
+  direct_reference_allowed: false
+  current_role: dated TIGGE data/training handoff snapshot; evidence only
+  canonical_replaced_by:
+  - docs/runbooks/tigge_cloud_download.md
+  - docs/authority/zeus_dual_track_architecture.md
+  next_action: retain_as_evidence
+  lifecycle_state: transitional
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: artifact_evidence
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
 - path: docs/to-do-list/

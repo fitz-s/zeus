@@ -1,24 +1,34 @@
 # Zeus AGENTS
 
-Zeus is a trading runtime with an agentic change-control layer.
+Zeus is a **live quantitative trading engine** operating in Polymarket weather derivatives.
 
-The primary system is a live weather-probability trading runtime on Polymarket.
-The agentic workspace exists to preserve semantic integrity, source provenance,
-runtime authority, safe change control, and compressed history across a complex
-codebase.
+It converts atmospheric data into sized limit orders with positive expectation, bound by market settlement mechanics and dynamic risk limits.
 
-Read this file first. Use it to get the repo's current shape, then route into
-the narrower manifest, packet, or code surface that actually governs the task.
+**THE MONEY PATH (Your Primary Mental Model):**
+The pipeline is causal and linear. Every component evaluates against this chain:
+`contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-## Runtime machine
+**THE PROBABILITY CHAIN (How We Trade):**
+The mathematical construction of an edge:
+`51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
+
+**TOPOLOGY NAVIGATION:**
+Before modifying code, run the topology doctor. It returns which files you may
+change, which you must not touch, what tests must pass, and when to stop — scope
+that grep cannot provide:
+`python3 scripts/topology_doctor.py --navigation --task "<your task>" --files <files>`
+
+For pipeline-impacting tasks (pricing, data, risk, settlement), also load the
+boot profile and answer the proof questions before modifying code:
+`python3 scripts/topology_doctor.py --task-boot-profiles`
+
+Read this file first to establish the money path, then route directly to the specific execution module or manifest governing your task.
+
+## 1. The Trading Machine
 
 Zeus turns weather forecasts and settlement observations into calibrated market
 probabilities, sized positions, execution decisions, monitoring, exits, and
 settlement follow-through.
-
-The live cycle is:
-
-`fetch data -> compute probability -> compare market -> select edge -> size -> execute -> monitor -> exit/settle -> report`
 
 The runtime entry points are:
 
@@ -36,12 +46,106 @@ The truth path is:
 
 Zeus is dual-track. High and low temperature families share local-calendar-day
 geometry and do not share physical quantity, observation field, Day0 causality,
-or calibration family. Do not describe Zeus as a single-track daily-high system.
+or calibration family.
 
-## Workspace machine
+### Settlement mechanics
 
-The repo is also a change-control system. A cold-start agent should be able to
-answer four questions quickly:
+Polymarket weather markets settle on integer temperatures reported by Weather
+Underground. Settlement is discrete, not continuous. A real temperature of
+74.45°F → sensor reads 74.2°F → METAR rounds → WU displays 74°F.
+
+`SettlementSemantics.assert_settlement_value()` gates every DB write. Three bin
+types exist:
+
+| Type | Example | Cardinality |
+|------|---------|-------------|
+| `point` | 10°C resolves on {10} | 1 |
+| `finite_range` | 50-51°F resolves on {50, 51} | 2 |
+| `open_shoulder` | 75°F+ (unbounded) | unbounded |
+
+Shoulder bins are not symmetric bounded ranges. Do not infer bin semantics from
+label punctuation or continuous-interval intuition.
+
+**Key file**: `src/contracts/settlement_semantics.py`
+
+### Risk levels
+
+Risk levels change runtime behavior. Advisory-only risk is forbidden (INV-05).
+
+| Level | Behavior |
+|-------|----------|
+| GREEN | Normal operation |
+| YELLOW | No new entries, continue monitoring |
+| ORANGE | No new entries, exit at favorable prices |
+| RED | Cancel all pending, sweep all active positions |
+
+Overall level = max of all individual levels. Computation error or broken truth
+input → RED. Fail-closed.
+
+**Key file**: `src/riskguard/risk_level.py`
+
+### Position lifecycle
+
+9 states in `LifecyclePhase` enum:
+
+`pending_entry → active → day0_window → pending_exit → economically_closed → settled`
+
+Terminal states: `voided`, `quarantined`, `admin_closed`.
+
+Exit intent is not closure. Settlement is not exit. No code may invent phase
+strings outside the enum.
+
+**Key file**: `src/state/lifecycle_manager.py`
+
+### Chain reconciliation
+
+Every cycle reconciles local state against on-chain truth:
+
+`Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`
+
+| Condition | Action |
+|-----------|--------|
+| Local + chain match | SYNCED |
+| Local exists, NOT on chain | VOID immediately (local state is a hallucination) |
+| Chain exists, NOT local | QUARANTINE 48h (unknown asset, forced exit eval) |
+
+**Key file**: `src/state/chain_reconciliation.py`
+
+### Strategy families
+
+Zeus operates four independent strategy families with distinct alpha profiles:
+
+| Strategy | Edge source | Alpha decay |
+|----------|-------------|-------------|
+| Settlement Capture | Observed fact post-peak | Very slow (observation speed) |
+| Shoulder Bin Sell | Retail cognitive bias | Moderate (competition narrows) |
+| Center Bin Buy | Model accuracy vs market | Fast (easily competed away) |
+| Opening Inertia | New market mispricing | Fastest (bot scanning) |
+
+`strategy_key` is the sole governance identity for attribution, risk policy,
+and performance slicing.
+
+### Durable trading rules
+
+- Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
+- Live may act. Backtest may evaluate. Shadow is observe-only.
+- Settlement values flow through `SettlementSemantics`.
+- High and low rows must not mix in calibration, Platt fitting, replay bin
+  lookup, or settlement rebuild identity.
+- DB commits must precede derived JSON export writes.
+- `RED` risk must cancel pending orders and sweep active positions.
+- Authority-loss must degrade monitor/exit lanes to read-only, not kill
+  the cycle.
+
+For the complete mathematical specification — worked examples, formula
+derivations, strategy taxonomy, and failure case studies — read
+`docs/reference/zeus_domain_model.md`.
+
+## 2. Platform Operations & Change Control
+
+The repository utilizes a change-control layer to ensure trading logic remains
+isolated and explicitly versioned. A cold-start agent must answer four
+operational questions before pushing changes:
 
 1. What is current law?
 2. What is active right now?
@@ -60,162 +164,133 @@ The durable workspace kernel is:
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
 
-## Default Navigation
+## 3. Navigation & Task Routing
 
-For high-risk zero-context work, also use:
+**Step 1 — Run the topology digest for your task.** This is not optional. The
+digest returns your scoped change set, forbidden files, safety gates, and stop
+conditions — information that grep cannot provide.
 
+```
+python3 scripts/topology_doctor.py --navigation --task "<your task>" --files <files>
+```
+
+The output contains:
+- `required_law` — invariants you must not violate
+- `allowed_files` — the files you may change
+- `forbidden_files` — do not touch
+- `gates` — tests/checks that must pass before merge
+- `downstream` — files affected by your change
+- `stop_conditions` — scope boundaries that trigger "stop and plan"
+- `source_rationale` — per-file zone, hazards, and write routes
+- `history_lore` — relevant historical failure lessons
+
+**Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
+contain domain rules, common mistakes, and hazard classifications specific to
+that package.
+
+**Step 3 — Read reference docs only when the task requires pipeline knowledge.**
+Do not default-read all references. The digest profile tells you which laws
+apply; read the reference that explains those laws:
+- `docs/reference/zeus_domain_model.md` — domain model, worked examples, strategy taxonomy
+- `docs/reference/zeus_math_spec.md` — probability chain formulas, calibration math
+- `docs/reference/zeus_market_settlement_reference.md` — bin topology, settlement semantics, sensor physics
+- `docs/reference/zeus_execution_lifecycle_reference.md` — lifecycle state machine, chain reconciliation, executor
+- `docs/reference/zeus_risk_strategy_reference.md` — risk levels, Kelly sizing, edge decay
+- `docs/reference/zeus_data_and_replay_reference.md` — database topology, data ingestion, dual-track identity
+- `docs/reference/zeus_failure_modes_reference.md` — code-grounded failure modes with invariant anchors
+
+### Digest profiles
+
+The digest engine matches your task description against configured profiles.
+Named profiles: `change settlement rounding`, `edit replay fidelity`,
+`add a data backfill`, `add or change script`, `extract historical lore`,
+`reference artifact extraction`. Unmatched tasks get a generic profile.
+
+For a task-only digest without health checks:
+```
+python3 scripts/topology_doctor.py digest --task "<task>" --files <files>
+```
+
+### Semantic boot (pipeline-impacting tasks)
+
+For settlement, source, observation, Day0, or calibration work, the digest alone
+is not enough. Run the boot profile check:
+```
+python3 scripts/topology_doctor.py --task-boot-profiles
+```
+
+Answer the profile's proof questions before treating code structure as sufficient
+context. The profile names required current-fact surfaces — read them:
+- `docs/operations/current_source_validity.md`
+- `docs/operations/current_data_state.md`
+- `architecture/task_boot_profiles.yaml`
+- `architecture/fatal_misreads.yaml`
+
+`architecture/city_truth_contract.yaml` defines the stable source-role schema;
+it is not a current per-city truth table.
+
+### Additional topology commands
+
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files>` — check if changes require planning evidence
+- `python3 scripts/topology_doctor.py --map-maintenance --changed-files <files>` — check companion registry updates
+- `python3 scripts/topology_doctor.py --code-review-graph-status --json` — Code Review Graph freshness
+- `python3 scripts/topology_doctor.py impact --files <files>` — source impact summary
+- `python3 scripts/topology_doctor.py context-pack --task "<task>" --files <files>` — full agent context packet
+
+### Code Review Graph
+
+Follows `architecture/code_review_graph_protocol.yaml`: Stage 1 is semantic
+boot; Stage 2 is graph context. Prefer official upstream graph operations
+(`code-review-graph status/update/watch`) over repo-local inventions. Graph
+output is derived context — never authority.
+
+### High-risk zero-context work
+
+When touching K0/K1, schema, governance, control, lifecycle, or DB authority,
+add these reads after the topology digest:
 - `architecture/self_check/zero_context_entry.md`
 - `architecture/self_check/authority_index.md`
 
 The runtime mode manifest is `architecture/runtime_modes.yaml`; the supported
 discovery modes are `opening_hunt`, `update_reaction`, and `day0_capture`.
 
-1. `AGENTS.md`
-2. `workspace_map.md`
-3. scoped `AGENTS.md` for the directory you will touch
-4. relevant machine manifests
-5. `architecture/module_manifest.yaml` and the routed module book when the task
-   is module-sensitive
-6. `docs/operations/current_state.md`
-7. active packet docs if the task is live
-8. derived context engines as needed
-9. historical evidence only by explicit need
+## 4. Operational Reference
 
-If the read set grows beyond the budget in `architecture/context_budget.yaml`,
-narrow with `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
-or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`.
+### Authority classification
 
-## Task-Based Semantic Boot
+**Authority** — surfaces that grant permission, define truth, or enforce
+behavior: system/developer/user instructions, machine-checkable manifests and
+tests, active packet control surfaces, executable source and canonical DB truth.
 
-For source, settlement, hourly observation ingest, Day0 monitoring, calibration,
-docs-authority, or graph-review work, classify the task before reading code.
-Use `architecture/task_boot_profiles.yaml` to select the task class and
-`architecture/fatal_misreads.yaml` to load the forbidden semantic shortcuts.
+**Derived context** — helps routing and review but never outranks authority:
+`topology_doctor` digests, `architecture/source_rationale.yaml`,
+`architecture/history_lore.yaml`, `architecture/code_review_graph_protocol.yaml`,
+`.code-review-graph/graph.db`.
 
-The required proof questions in the selected profile must be answered before an
-agent treats code structure, endpoint behavior, or graph output as sufficient
-context. Current fact surfaces named by the profile, especially
-`docs/operations/current_source_validity.md` and
-`docs/operations/current_data_state.md`, are task-required reads when listed
-even though they are not default-read docs.
-`architecture/city_truth_contract.yaml` defines the stable source-role schema;
-it is not a current per-city truth table.
+**History** — visible interface (`docs/archive_registry.md`) and dense lessons
+(`architecture/history_lore.yaml`). Archive bodies are cold storage, not
+default-read. Label archive-derived claims as `[Archive evidence]`.
 
-## Topology and graph workflow
+### Planning lock
 
-Use derived routing proactively, but keep authority order intact:
-
-- For semantic-risk tasks, run the task boot profile first, then use topology
-  and graph for file discovery and blast radius.
-- Code Review Graph follows `architecture/code_review_graph_protocol.yaml`:
-  Stage 1 is semantic boot; Stage 2 is graph context. For review/debug, provide
-  explicit changed files and treat graph stale/unavailable states as a fallback
-  trigger, not as permission to skip proof gates.
-- Prefer official upstream graph operations over repo-local inventions:
-  - freshness probe: `code-review-graph status --repo <repo-root>`
-  - one-shot refresh: `code-review-graph update --repo <repo-root>`
-  - continuous refresh: official platform auto-update from
-    `code-review-graph install`, then `code-review-graph watch`, then
-    `code-review-graph daemon start`
-- Do not add custom refresh scripts, cron wrappers, or skill mutations just to
-  keep graph freshness. Zeus should integrate official graph behavior, not
-  replace it.
-- For source, test, script, governance, or review work, run
-  `python scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
-  or `python scripts/topology_doctor.py digest --task "<task>" --files <files>`
-  before widening the read set.
-- For code-impact or review work, also run
-  `python scripts/topology_doctor.py --code-review-graph-status --json` when
-  `.code-review-graph/graph.db` is present. Use Code Review Graph to guide file
-  discovery, blast-radius checks, and review order.
-- Graph output is derived context only. If graph status is stale, partial, or
-  mismatched, keep going with topology, manifests, source rationale, and tests;
-  do not treat graph warnings as authority or as permission to skip gates.
-
-## Authority vs context vs history
-
-### Authority
-
-Authority means the surfaces that grant permission, define truth, or enforce
-behavior:
-
-- system / developer / user instructions
-- machine-checkable manifests and tests
-- active packet control surfaces
-- executable source and canonical DB truth for present-tense behavior
-
-### Derived context
-
-Derived context helps routing and review but never outranks authority:
-
-- `topology_doctor` digests, context packs, and core maps
-- `architecture/source_rationale.yaml`
-- `architecture/history_lore.yaml`
-- `architecture/code_review_graph_protocol.yaml`
-- `.code-review-graph/graph.db`
-
-Code Review Graph is tracked derived context, not authority. It may guide file
-discovery, blast-radius analysis, or review order. It never waives planning
-lock, manifests, receipts, tests, or canonical truth rules.
-
-### History
-
-History is a visible protocol plus cold storage:
-
-- visible interface: `docs/archive_registry.md`
-- dense durable lessons: `architecture/history_lore.yaml`
-- raw archive bodies and bundles: local historical cold storage, not
-  default-read, not peer authority
-
-Do not read archive bodies by default. When archive material matters, label
-archive-derived claims as `[Archive evidence]`.
-
-## Durable rules
-
-- Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks, and
-  archives.
-- Live may act. Backtest may evaluate. Shadow is observe-only instrumentation.
-- Settlement values flow through `SettlementSemantics`.
-- `strategy_key` is the sole governance identity.
-- Lifecycle transitions belong to lifecycle authority; do not invent phase
-  strings.
-- High and low rows must not mix in calibration, Platt fitting, replay bin
-  lookup, or settlement rebuild identity.
-- DB commits must precede derived JSON export writes.
-- `RED` risk must cancel pending orders and sweep active positions.
-- Authority-loss must degrade monitor / exit lanes to read-only rather than
-  kill the cycle.
-- Do not widen workspace-authority packets into runtime, DB, source, tests, or
-  archive-body rewrites unless the packet explicitly authorizes that scope.
-
-## Planning lock
-
-Stop and plan before touching:
-
-- `architecture/**`
-- `docs/authority/**`
-- `.github/workflows/**`
-- `src/state/**` truth ownership, schema, projection, or lifecycle write paths
-- `src/control/**`
-- `src/supervisor_api/**`
-- cross-zone changes
-- more than 4 changed files
-- anything described as canonical truth, lifecycle, governance, control, or DB
-  authority
+Stop and plan before touching: `architecture/**`, `docs/authority/**`,
+`.github/workflows/**`, `src/state/**` truth ownership / schema / projection /
+lifecycle write paths, `src/control/**`, `src/supervisor_api/**`, cross-zone
+changes, more than 4 changed files, anything described as canonical truth /
+lifecycle / governance / control / DB authority.
 
 Machine check:
+`python3 scripts/topology_doctor.py --planning-lock --changed-files <files...> --plan-evidence <plan file>`
 
-`python scripts/topology_doctor.py --planning-lock --changed-files <files...> --plan-evidence <plan file>`
+### Change classification
 
-## Change classification
-
-- Math: stays inside existing semantic contracts
-- Architecture: changes canonical read/write paths, lifecycle grammar, truth
+- **Math**: stays inside existing semantic contracts
+- **Architecture**: changes canonical read/write paths, lifecycle grammar, truth
   ownership, DB/schema, point-in-time semantics, or zone boundaries
-- Governance: changes manifests, AGENTS, packets, constitutions, routing, or
+- **Governance**: changes manifests, AGENTS, packets, constitutions, routing, or
   control surfaces
 
-## Mesh maintenance
+### Mesh maintenance
 
 When adding, renaming, or deleting a file:
 
@@ -226,40 +301,34 @@ When adding, renaming, or deleting a file:
 
 Unregistered files are invisible to future agents.
 
-Registry route reminders:
-
-- `src/**` -> `architecture/source_rationale.yaml`
-- `scripts/*` -> `architecture/script_manifest.yaml`
-- `tests/test_*.py` -> `architecture/test_topology.yaml`
-- `docs/reference/*` -> `docs/reference/AGENTS.md` and
-  `architecture/reference_replacement.yaml`
+Registry routes: `src/**` → `architecture/source_rationale.yaml`,
+`scripts/*` → `architecture/script_manifest.yaml`,
+`tests/test_*.py` → `architecture/test_topology.yaml`,
+`docs/reference/*` → `docs/reference/AGENTS.md` and
+`architecture/reference_replacement.yaml`.
 
 Check:
+`python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`
 
-`python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory|precommit|closeout`
+### What to read by task
 
-## What To Read By Task
+Always start with the topology digest (§3 Step 1). The digest gives you
+`allowed_files`, `gates`, and `stop_conditions` for your task. The list below
+adds supplemental reads the digest cannot provide:
 
-- Semantic-risk tasks: `architecture/task_boot_profiles.yaml`,
-  `architecture/fatal_misreads.yaml`, the profile's current fact surfaces, then
-  topology/graph and code
-- Source edits: scoped `src/**/AGENTS.md`, topology navigation/digest,
-  `architecture/source_rationale.yaml`, `architecture/module_manifest.yaml`,
-  routed module book when present, Code Review Graph status when present,
-  targeted code, targeted tests
-- Module understanding / zero-context module review: scoped `AGENTS.md`,
-  `architecture/module_manifest.yaml`, `docs/reference/modules/AGENTS.md`, then
-  the specific module book
-- K0/K1 truth or lifecycle work: `docs/authority/zeus_current_architecture.md`,
-  `architecture/kernel_manifest.yaml`, targeted rationale entries
-- Dual-track work: `docs/authority/zeus_current_architecture.md`
-- Delivery/governance work: `docs/authority/zeus_current_delivery.md`,
-  `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, active
-  packet docs
-- Historical failure context: `architecture/history_lore.yaml` first, archive
-  bodies only if explicitly needed
+- Pipeline-impacting work: add `docs/reference/zeus_domain_model.md` and the
+  targeted module book after the digest
+- Source edits: add scoped `src/**/AGENTS.md` and
+  `architecture/module_manifest.yaml` after the digest
+- K0/K1 truth or lifecycle: add `docs/authority/zeus_current_architecture.md`
+  and `architecture/kernel_manifest.yaml` after the digest
+- Delivery/governance: add `docs/authority/zeus_current_delivery.md`,
+  `docs/operations/current_state.md`, and active packet docs
+- Historical failure context: `architecture/history_lore.yaml` (the digest
+  includes matched lore cards; read the full file only when investigating
+  failure patterns)
 
-## Git safety
+### Git safety
 
 Never run destructive git commands or overwrite unrelated dirty work without
 explicit human approval. Preserve untracked local inputs, runtime artifacts, and

@@ -212,6 +212,92 @@ with the original broad `a3` date range, but the downloader uses `overwrite=0`
 and skips files with existing `.grib.ok` markers when a queued task reaches an
 already-completed target.
 
+## 2026-04-22 Raw Download Complete
+
+The cloud raw download completed on 2026-04-22. Main lane status:
+
+```text
+mx2t6 a1..a5: complete, 224/224 each, missing=0
+mn2t6 a1..a5: complete, 224/224 each, missing=0
+```
+
+Current-plan raw file count after duplicate-window quarantine:
+
+```text
+mx2t6: 2,240 .grib + 2,240 .grib.ok
+mn2t6: 2,240 .grib + 2,240 .grib.ok
+combined current plan: 4,480 .grib + 4,480 .grib.ok
+```
+
+Plan-external duplicate windows were moved, not deleted:
+
+```text
+/data/tigge/trash/tigge_extra_windows_20260422T083237Z
+```
+
+Quarantine report:
+
+```text
+/data/tigge/trash/tigge_extra_windows_20260422T083237Z/cleanup_report.json
+```
+
+Duplicate-window quarantine summary:
+
+```text
+extra .ok markers moved: 1,104
+files moved including .grib + .ok: 2,208
+GRIB bytes moved: ~170 GiB
+```
+
+After quarantine, current-plan verification still reported:
+
+```text
+mx2t6 done=2240 missing=0 extra_after=0
+mn2t6 done=2240 missing=0 extra_after=0
+```
+
+The VM-side download watchdog and self-monitor cron were stopped after raw
+completion so they do not recreate download/progress sessions.
+
+## 2026-04-22 Duplicate Pruning Executed
+
+After full GRIB integrity passed for both tracks, duplicate and retired raw data
+were removed.
+
+Integrity gate before deletion:
+
+```text
+tmp/tigge_mx2t6_grib_integrity_full_latest.json  ok=true  files_checked=2240  failures=0
+tmp/tigge_mn2t6_grib_integrity_full_latest.json  ok=true  files_checked=2240  failures=0
+```
+
+Cloud duplicate quarantine deleted:
+
+```text
+/data/tigge/trash/tigge_extra_windows_20260422T083237Z
+```
+
+Cloud disk after deletion:
+
+```text
+/data used: 703G
+/data available: 1.2T
+current clean raw: 703G
+```
+
+Local retired raw directories deleted:
+
+```text
+/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mx2t6
+/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mn2t6
+```
+
+Local raw directory after deletion:
+
+```text
+/Users/leofitz/.openclaw/workspace-venus/51 source data/raw = 1.1G
+```
+
 ## Stall Triage
 
 Do not restart a lane merely because the one-line progress bar has not changed.

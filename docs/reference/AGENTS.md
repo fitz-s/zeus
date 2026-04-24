@@ -11,6 +11,10 @@ machine manifests, tests, and executable source.
 
 **Conditional reads** (load only when the task directly requires them):
 - `zeus_architecture_reference.md` for architecture orientation
+- `zeus_execution_lifecycle_reference.md` for execution, lifecycle, chain
+  reconciliation, exit triggers, and settlement harvest
+- `zeus_risk_strategy_reference.md` for risk levels, strategy taxonomy,
+  Kelly sizing dynamics, and edge decay monitoring
 - `zeus_market_settlement_reference.md` for settlement/market concepts
 - `zeus_data_and_replay_reference.md` for data/replay concepts
 - `zeus_failure_modes_reference.md` for failure-class reviews
@@ -43,9 +47,11 @@ which module reference matters.
 |------|---------|
 | `zeus_domain_model.md` | Short domain model and first conceptual reference |
 | `zeus_architecture_reference.md` | Durable descriptive architecture reference |
-| `zeus_market_settlement_reference.md` | Durable market/settlement concepts and source-risk taxonomy |
-| `zeus_data_and_replay_reference.md` | Durable data/replay concepts and current-fact routing |
-| `zeus_failure_modes_reference.md` | Durable failure-mode and mitigation reference |
+| `zeus_execution_lifecycle_reference.md` | Lifecycle state machine (10 phases, fold table), chain reconciliation (3-state classifier, 3 rules), order execution (share quantization, mode timeouts), exit triggers (8-layer evaluation), monitor refresh (2 signal paths), settlement harvest (3-layer dedup, P&L, redemption) |
+| `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), 6 risk inputs to tick(), trailing loss computation, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
+| `zeus_market_settlement_reference.md` | Market structure (event/market/bin hierarchy, token swap guard, VWMP), bin topology (3 types, width normalization), settlement semantics (rounding rules, for_city routing), sensor physics (ASOS σ, per-city overrides), Monte Carlo P_raw, probability chain (Platt, alpha, bootstrap CI) |
+| `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay diagnostic status |
+| `zeus_failure_modes_reference.md` | Code-grounded failure modes with invariant anchors: settlement/rounding, probability chain, lifecycle/state, data ingestion, execution — each with exact failure mechanism, preventing contract, and code anchor |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
 | `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |

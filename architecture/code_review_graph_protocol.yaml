@@ -18,12 +18,12 @@ stages:
   - id: semantic_boot
     order: 1
     required: true
-    command: python scripts/topology_doctor.py semantic-bootstrap --task-class <class> --task "<task>" --files <files> --json
+    command: python3 scripts/topology_doctor.py semantic-bootstrap --task-class <class> --task "<task>" --files <files> --json
     purpose: "Lock task class, current facts, fatal misreads, and required proof questions before graph use."
   - id: graph_context
     order: 2
     required: false
-    command: python scripts/topology_doctor.py --code-review-graph-status --changed-files <files> --json
+    command: python3 scripts/topology_doctor.py --code-review-graph-status --changed-files <files> --json
     purpose: "Use graph only for file discovery, callers, impacted tests, blast radius, and review order."
 
 invocation_rules:
@@ -57,6 +57,6 @@ forbidden_uses:
   - receipt or manifest waiver
 
 verification_gates:
-  - python scripts/topology_doctor.py --code-review-graph-protocol --json
-  - python scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json
+  - python3 scripts/topology_doctor.py --code-review-graph-protocol --json
+  - python3 scripts/topology_doctor.py semantic-bootstrap --task-class graph_review --task "graph review" --files scripts/topology_doctor.py --json
   - code-review-graph status --repo <repo-root>

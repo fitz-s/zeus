@@ -7,6 +7,64 @@ metadata:
     regressions, transitional/advisory checks, diagnostics, stale/obsolete
     tests, or reverse-antibodies. It does not delete tests.
 
+test_trust_policy:
+  rule: >
+    Tests are untrusted by default. A test is trusted only when its source
+    file contains both a Created date and a Last reused/audited date in
+    YYYY-MM-DD format within the first 15 lines. Tests without these lifecycle
+    headers are classified as audit_required — an agent must review the test
+    for correctness and currency before running it. Running an untrusted test
+    without prior audit is forbidden.
+  header_formats:
+    - "# Created: YYYY-MM-DD"
+    - "# Last reused/audited: YYYY-MM-DD"
+    - "# Lifecycle: created=YYYY-MM-DD; last_reviewed=YYYY-MM-DD; last_reused=YYYY-MM-DD"
+  classification:
+    trusted: "Both Created and Last reused dates present with real YYYY-MM-DD values"
+    reviewed_only: "Has Created and last_reviewed but last_reused=never"
+    audit_required: "No lifecycle header or missing required dates"
+  enforcement: "topology_doctor test_trust check + digest gate output"
+
+  # Machine-readable registry: 36 tests with valid lifecycle headers.
+  # Tests not in this list require audit before running.
+  trusted_tests:
+    tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
+    tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
+    tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
+    tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_decision_evidence_entry_emission.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_decision_evidence_persistence.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_diurnal_curves_empty_hk_handled.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_dt1_savepoint_integration.py: {created: "2026-04-20", last_used: "2026-04-20"}
+    tests/test_dual_track_law_stubs.py: {created: "2026-04-16", last_used: "2026-04-23"}
+    tests/test_ensemble_signal.py: {created: "2026-03-30", last_used: "2026-04-23"}
+    tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_etl_forecasts_v2_from_legacy.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-23"}
+    tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-23"}
+    tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
+    tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-23"}
+    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
+    tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_phase4_5_extractor.py: {created: "2026-04-16", last_used: "2026-04-16"}
+    tests/test_phase5_gate_d_low_purity.py: {created: "2026-04-17", last_used: "2026-04-17"}
+    tests/test_phase5c_replay_metric_identity.py: {created: "2026-04-17", last_used: "2026-04-17"}
+    tests/test_platt.py: {created: "2026-03-30", last_used: "2026-04-23"}
+    tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-21"}
+
 categories:
   core_law_antibody:
     - tests/test_architecture_contracts.py
@@ -80,10 +138,15 @@ categories:
     - tests/test_phase6_causality_status.py
     - tests/test_phase7a_metric_cutover.py
     - tests/test_schema_v2_gate_a.py
+    - tests/test_append_many_and_project_nested_savepoint.py
+    - tests/test_canonical_data_versions_namespace.py
+    - tests/test_harvester_high_calibration_v2_route.py
+    - tests/test_harvester_metric_identity.py
+    - tests/test_ingest_grib_law5_antibody.py
+    - tests/test_settlements_unique_migration.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
-    - tests/test_append_many_and_project_nested_savepoint.py
     - tests/test_auto_pause_entries.py
     - tests/test_b063_rescue_events_v2.py
     - tests/test_backfill_openmeteo_previous_runs.py
@@ -135,7 +198,6 @@ categories:
     - tests/test_phase4_6_cities_drift.py
     - tests/test_phase4_foundation.py
     - tests/test_phase4_ingest.py
-    - tests/test_parse_canonical_bin_label.py
     - tests/test_phase4_platt_v2.py
     - tests/test_phase4_rebuild.py
     - tests/test_phase5_fixpack.py
@@ -148,13 +210,6 @@ categories:
     - tests/test_rebuild_pipeline.py
     - tests/test_riskguard.py
     - tests/test_semantic_snapshot_backfill.py
-    - tests/test_canonical_data_versions_namespace.py
-    - tests/test_harvester_high_calibration_v2_route.py
-    - tests/test_harvester_metric_identity.py
-    - tests/test_ingest_grib_law5_antibody.py
-    - tests/test_settlements_authority_trigger.py
-    - tests/test_settlements_unique_migration.py
-    - tests/test_settlements_verified_row_integrity.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
     - tests/test_shadow_boundary.py
@@ -162,7 +217,6 @@ categories:
     - tests/test_dt1_commit_ordering.py
     - tests/test_dt1_savepoint_integration.py
     - tests/test_dt4_chain_three_state.py
-    - tests/test_harvester_dr33_live_enablement.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py

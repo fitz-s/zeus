@@ -16,7 +16,7 @@ Use `architecture/test_topology.yaml` for:
 - reverse-antibody status
 - test-to-law routing
 
-Use `python scripts/topology_doctor.py --tests --json` to check that active
+Use `python3 scripts/topology_doctor.py --tests --json` to check that active
 `tests/test_*.py` files are classified.
 
 ## Local Registry
@@ -28,6 +28,37 @@ Use `python scripts/topology_doctor.py --tests --json` to check that active
 
 Top-level `test_*.py` files are intentionally not duplicated here. Query
 `architecture/test_topology.yaml` instead of hand-maintaining another file list.
+
+## Test Trust Policy
+
+Tests are **untrusted by default**. Only 36/162 tests have lifecycle headers
+and are trusted to run without prior audit. The machine-readable registry is:
+
+`architecture/test_topology.yaml` → `test_trust_policy.trusted_tests`
+
+### Trust classification
+
+| Class | Criteria | Agent action |
+|-------|----------|-------------|
+| **trusted** | Has `# Created: YYYY-MM-DD` + `# Last reused/audited: YYYY-MM-DD` | May run directly |
+| **reviewed_only** | Has Created + last_reviewed but `last_reused=never` | Audit required before running |
+| **audit_required** | No lifecycle header | Audit required before running |
+
+### Before running an untrusted test
+
+1. Read the test source — verify it tests current code contracts, not deleted APIs
+2. Check `architecture/test_topology.yaml` for category and skip status
+3. If the test is valid, add lifecycle headers and register in `trusted_tests`
+4. Only then run it
+
+### When creating or reusing a test
+
+Every test file must have these headers in the first 15 lines:
+```python
+# Created: YYYY-MM-DD
+# Last reused/audited: YYYY-MM-DD
+# Authority basis: <packet or task that created/validated this test>
+```
 
 ## Core Rules
 
@@ -53,7 +84,7 @@ Top-level `test_*.py` files are intentionally not duplicated here. Query
 
 | Task | Start With |
 |------|------------|
-| Find tests for a law/invariant | `python scripts/topology_doctor.py --tests --json` |
+| Find tests for a law/invariant | `python3 scripts/topology_doctor.py --tests --json` |
 | Find cross-module validation manifests | `tests/contracts/spec_validation_manifest.py` |
 | Edit source behavior | digest task + `architecture/source_rationale.yaml` + targeted tests |
 | Edit test topology | `architecture/test_topology.yaml` + `tests/test_topology_doctor.py` |

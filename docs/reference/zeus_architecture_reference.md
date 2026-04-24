@@ -1,33 +1,25 @@
 # Zeus Architecture Reference
 
-Purpose: durable descriptive map of Zeus as a runtime machine and an agentic
-workspace. This file sits below `docs/authority/**` and `architecture/**`; it
-does not create law.
+Purpose: durable descriptive map of the Zeus trading engine. This file sits
+below `docs/authority/**` and `architecture/**`; it does not create law.
 
 Authority relationship: executable source, tests, machine manifests, and
 authority docs win on disagreement. Use this file to orient reading, not to
 override current architecture law.
 
-Extracted from: `docs/artifacts/zeus_architecture_deep_map_2026-04-16.md`,
-`docs/reports/zeus_system_constitution_2026-04-16.md`,
-`docs/reports/zeus_refactor_plan_2026-04-16.md`, and
-`docs/reports/legacy_reference_repo_overview.md`.
+## What Zeus Is (Runtime Systems Map)
 
-## What Zeus Is
+Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 
-Zeus is a live-only weather-probability trading runtime for Polymarket. It
-collects forecast and observation data, computes calibrated probabilities,
-selects edges, sizes and executes limit orders, monitors open positions, records
-exits and settlement, and exposes typed state outward to Venus/OpenClaw.
+**The Money Path:**
+`contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-Zeus is also a workspace change-control system. The repo has a boot surface,
-machine-checkable manifests, active operations packets, derived context engines,
-and historical cold storage. The current workspace law is in `architecture/**`,
-`AGENTS.md`, `workspace_map.md`, scoped `AGENTS.md` files, and
-`docs/operations/current_state.md`.
+**The Probability Chain:**
+`51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
-The workspace exists to answer five questions quickly:
+### Platform Configuration & Change Control
 
+Zeus employs standard operational and configuration systems (manifests, packets, context engines). These routines enforce the boundaries defining the trading machine. They codify the answers to:
 1. what is law
 2. what is current
 3. what is durable reference
@@ -97,37 +89,43 @@ surfaces:
 - `docs/reference/modules/engine.md`
 - `docs/reference/modules/data.md`
 
-## Derived Context Engines
+## Pipeline Data Flow
 
-`topology_doctor` is the repo-native routing and governance checker. Use it for
-navigation, docs checks, registry drift, map maintenance, planning lock, and
-closeout discipline.
+How the trading pipeline stages connect through the codebase:
 
-Code Review Graph is a first-class derived structural context engine. Use it
-for blast radius, review order, structural discovery, and minimal context. Do
-not use it as authority or as a substitute for current factual docs, manifests,
-tests, or source.
+```
+data ingestion (src/data/**)         → observations, forecasts, market book
+        ↓
+signal generation (src/signal/**)    → P_raw per bin (Monte Carlo over ENS)
+        ↓
+calibration (src/calibration/**)     → P_cal (Extended Platt with lead_days)
+        ↓
+strategy (src/strategy/**)           → P_posterior (α-weighted fusion), edge,
+                                       bootstrap CI, FDR filter, Kelly sizing
+        ↓
+engine (src/engine/**)               → evaluator decisions, cycle orchestration,
+                                       monitor refresh
+        ↓
+execution (src/execution/**)         → limit orders on CLOB, fill tracking,
+                                       exit triggers, settlement harvest
+        ↓
+state (src/state/**)                 → lifecycle transitions, event log,
+                                       projections, chain reconciliation
+        ↓
+riskguard (src/riskguard/**)         → policy emission that changes evaluator/
+                                       sizing/execution behavior
+        ↓
+observability (src/observability/**) → derived operator summaries (read-only)
+supervisor_api (src/supervisor_api/**) → typed boundary for Venus/OpenClaw
+```
 
-## Docs Trust Layers
-
-The tracked docs mesh is:
-
-- `docs/authority/`: law
-- `docs/reference/`: canonical durable understanding
-- `docs/operations/`: live current facts and packets
-- `docs/runbooks/`: procedures
-- `docs/reports/`: dated analytical evidence
-- `docs/artifacts/`: snapshot/workbook evidence
-- `docs/to-do-list/`: checklist evidence
-- `docs/archive_registry.md`: visible historical interface
-
-Current facts should route through operations current-fact surfaces. Dated
-evidence should route through reports or artifacts. Neither belongs in
-canonical reference.
+Risk policy flows laterally: RiskGuard emits policy consumed by engine,
+evaluator, and executor. Control plane (`src/control/**`) bridges operator
+intent into typed runtime behavior changes.
 
 ## Dual-Track Architecture
 
-Zeus is not a single-track daily-high system. The dual-track spine separates:
+Zeus is dual-track. The dual-track spine separates:
 
 - high track: `temperature_metric=high`,
   `physical_quantity=mx2t6_local_calendar_day_max`,

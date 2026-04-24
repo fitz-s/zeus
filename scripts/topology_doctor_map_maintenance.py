@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import glob
+import fnmatch
 import re
 from typing import Any
 
@@ -63,7 +63,24 @@ def map_maintenance_changes(api: Any, changed_files: list[str]) -> dict[str, str
 
 
 def path_glob_matches(path: str, pattern: str) -> bool:
-    return re.match(glob.translate(pattern, recursive=True, include_hidden=True, seps="/"), path) is not None
+    if "**" in pattern:
+        parts = pattern.split("**")
+        if len(parts) == 2:
+            prefix = parts[0].rstrip("/")
+            suffix = parts[1].lstrip("/")
+            if not prefix:
+                return fnmatch.fnmatch(path.split("/")[-1], suffix) if suffix else True
+            prefix_depth = prefix.count("/") + 1
+            path_parts = path.split("/")
+            if len(path_parts) < prefix_depth:
+                return False
+            dir_part = "/".join(path_parts[:prefix_depth])
+            if not fnmatch.fnmatch(dir_part, prefix):
+                return False
+            if suffix:
+                return fnmatch.fnmatch(path_parts[-1], suffix)
+            return len(path_parts) > prefix_depth
+    return fnmatch.fnmatch(path, pattern)
 
 
 def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: str = "advisory") -> Any:

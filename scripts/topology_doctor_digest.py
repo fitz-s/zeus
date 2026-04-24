@@ -89,12 +89,29 @@ def matched_history_lore(api: Any, task: str, files: list[str]) -> list[dict[str
 def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[str, Any]:
     topology = api.load_topology()
     task_l = task.lower()
+    selected = None
+
+    # Step 1: Match by task description text
     for profile in topology.get("digest_profiles", []):
         matches = [str(item).lower() for item in profile.get("match", [])]
         if any(match in task_l for match in matches):
             selected = profile
             break
-    else:
+
+    # Step 2: If no text match, try file-pattern matching
+    if selected is None and files:
+        for profile in topology.get("digest_profiles", []):
+            file_patterns = profile.get("file_patterns", [])
+            if file_patterns and any(
+                fnmatch(f, pattern)
+                for f in files
+                for pattern in file_patterns
+            ):
+                selected = profile
+                break
+
+    # Step 3: Generic fallback
+    if selected is None:
         selected = {
             "id": "generic",
             "required_law": ["Read root AGENTS.md and scoped AGENTS.md before editing."],
@@ -121,6 +138,31 @@ def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[st
         "downstream": selected.get("downstream", []),
         "stop_conditions": selected.get("stop_conditions", []),
     }
+    if selected.get("reference_reads"):
+        payload["reference_reads"] = selected["reference_reads"]
+
+    # Annotate gates with test trust status
+    test_topology = api.load_test_topology()
+    trust_policy = test_topology.get("test_trust_policy", {})
+    trusted_tests = set((trust_policy.get("trusted_tests") or {}).keys())
+    gate_trust = []
+    for gate in selected.get("gates", []):
+        if gate.startswith("pytest"):
+            # Extract test file paths from pytest command
+            parts = gate.split()
+            test_files = [p for p in parts if p.startswith("tests/")]
+            untrusted = [t for t in test_files if t not in trusted_tests]
+            if untrusted:
+                gate_trust.append({
+                    "gate": gate,
+                    "status": "audit_required",
+                    "untrusted_tests": untrusted,
+                })
+            else:
+                gate_trust.append({"gate": gate, "status": "trusted"})
+    if gate_trust:
+        payload["gate_trust"] = gate_trust
+
     source_entries = api._source_rationale_for(source_files)
     payload["source_rationale"] = source_entries
     payload["context_assumption"] = api.build_context_assumption(
@@ -134,3 +176,4 @@ def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[st
         payload["script_lifecycle"] = script_lifecycle_digest(api)
     payload["history_lore"] = matched_history_lore(api, task, files or [])
     return payload
+
