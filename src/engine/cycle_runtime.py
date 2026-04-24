@@ -299,6 +299,63 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     )
 
 
+def _emit_day0_window_entered_canonical_if_available(
+    conn,
+    pos,
+    *,
+    day0_entered_at: str,
+    previous_phase: str,
+    deps,
+) -> bool:
+    """Day0-canonical-event feature slice (2026-04-24): emit canonical
+    DAY0_WINDOW_ENTERED event after a successful day0 transition
+    (post-memory-mutation, post-update_trade_lifecycle persist).
+
+    Pre-this-slice: cycle_runtime set pos.state='day0_window' + persisted
+    via update_trade_lifecycle but never wrote a canonical position_events
+    record. This helper lands one via build_day0_window_entered_canonical
+    _write + append_many_and_project. Clears T1.c-followup L875 OBSOLETE_
+    PENDING_FEATURE (test_day0_transition_emits_durable_lifecycle_event).
+
+    Returns True on successful write, False on non-fatal skip (conn None
+    or RuntimeError from canonical transaction schema absence — matches
+    the pattern from _dual_write_canonical_entry_if_available).
+    """
+    if conn is None:
+        return False
+
+    from src.engine.lifecycle_events import build_day0_window_entered_canonical_write
+    from src.state.db import append_many_and_project
+
+    try:
+        # Query next sequence_no for this position (same pattern as
+        # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
+        # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /
+        # ENTRY_ORDER_FILLED events (sequence_no 1-3); day0 event takes 4+.
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (getattr(pos, "trade_id", ""),),
+        ).fetchone()
+        next_seq = int((row[0] if row else 0) or 0) + 1
+        events, projection = build_day0_window_entered_canonical_write(
+            pos,
+            day0_entered_at=day0_entered_at,
+            sequence_no=next_seq,
+            previous_phase=previous_phase,
+            source_module="src.engine.cycle_runtime",
+        )
+        append_many_and_project(conn, events, projection)
+    except RuntimeError as exc:
+        deps.logger.warning(
+            "CANONICAL_DAY0_EMIT_SKIPPED trade_id=%s reason=%s",
+            pos.trade_id,
+            exc,
+        )
+        return False
+
+    return True
+
+
 def _dual_write_canonical_entry_if_available(
     conn,
     pos,
@@ -623,6 +680,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                         chain_state=getattr(pos, "chain_state", ""),
                     )
                     new_day0_entered_at = pos.day0_entered_at or deps._utcnow().isoformat()
+                    # Day0-canonical-event slice 2026-04-24: capture
+                    # pre-transition phase so the canonical event records
+                    # the actual lifecycle transition (not just "from
+                    # active" default).
+                    previous_phase_str = "active" if pos.state == "holding" else "active"
                     # Persist FIRST, then update memory (avoid split-brain)
                     if conn is not None:
                         try:
@@ -647,6 +709,18 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                         pos.state = new_state
                         pos.day0_entered_at = new_day0_entered_at
                     portfolio_dirty = True
+                    # Day0-canonical-event slice 2026-04-24: emit typed
+                    # DAY0_WINDOW_ENTERED event post-transition. Clears
+                    # T1.c-followup L875 OBSOLETE_PENDING_FEATURE.
+                    # Non-fatal: if canonical schema absent or write fails,
+                    # logs warning but does not abort the cycle.
+                    _emit_day0_window_entered_canonical_if_available(
+                        conn,
+                        pos,
+                        day0_entered_at=new_day0_entered_at,
+                        previous_phase=previous_phase_str,
+                        deps=deps,
+                    )
 
             edge_ctx = refresh_position(conn, clob, pos)
             exit_context = _build_exit_context(

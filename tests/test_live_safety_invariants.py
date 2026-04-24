@@ -922,11 +922,21 @@ def test_lifecycle_kernel_rejects_day0_window_from_pending_exit():
         )
 
 
-@pytest.mark.skip(reason="T1.c-followup 2026-04-23: OBSOLETE_PENDING_FEATURE — no canonical Day0 transition event exists in current code. cycle_runtime monitor_refresh updates position_current.phase + trade_decisions via update_trade_lifecycle but does NOT emit a DAY0_WINDOW_ENTERED or similar canonical position_events row. Restoring the test requires first landing a canonical Day0 transition event builder (e.g., build_day0_window_entered_canonical_write) in src/engine/lifecycle_events.py — feature-level architectural slice, OUT OF T1.c-followup scope. Flagged for separate Day0-canonical-event antibody slice.")
 def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
+    """T1.c-followup L875 closure via Day0-canonical-event feature slice
+    (2026-04-24): after the transition, a canonical DAY0_WINDOW_ENTERED
+    position_events row exists with phase_before=active, phase_after=
+    day0_window, and payload carrying day0_entered_at. Pre-slice, this
+    test was skipped OBSOLETE_PENDING_FEATURE because cycle_runtime did
+    not emit a canonical event — only updated position_current.phase.
+    Post-slice: canonical emission is wired via
+    _emit_day0_window_entered_canonical_if_available in cycle_runtime.
+    """
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
     from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project
 
     conn = get_connection(tmp_path / "day0.db")
     init_schema(conn)
@@ -941,8 +951,19 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
         entry_fill_verified=True,
         entered_at="2026-04-01T04:00:00Z",
         order_status="filled",
+        strategy_key="center_buy",
+        bin_label="50-51°F",
     )
     log_trade_entry(conn, pos)
+    # Seed canonical entry baseline so the Day0 canonical emission is not
+    # the first canonical event for this trade_id (matches production
+    # reality — entries always precede day0 transitions).
+    events, projection = build_entry_canonical_write(
+        pos,
+        decision_id="decision-day0-seed",
+        source_module="tests/test_day0_transition_emits_durable",
+    )
+    append_many_and_project(conn, events, projection)
     portfolio = _make_portfolio(pos)
 
     class PaperClob:
@@ -984,7 +1005,9 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
             "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
             "logger": logging.getLogger("test_day0_transition_db"),
             "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
-            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            # _utcnow set to within day0 window (≤6h before Chicago target
+            # date close at 2026-04-02 05:00 UTC) so the day0 gate fires.
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 2, 2, 0, tzinfo=timezone.utc)),
         },
     )
     artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: None})()
@@ -1002,12 +1025,22 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
 
     events = query_position_events(conn, "day0-db-1")
     conn.close()
-    lifecycle_events = [event for event in events if event["event_type"] == "POSITION_LIFECYCLE_UPDATED"]
-    assert any(event["position_state"] == "day0_window" for event in lifecycle_events)
-    day0_event = next(event for event in lifecycle_events if event["position_state"] == "day0_window")
-    assert day0_event["details"]["status"] == "day0_window"
-    assert day0_event["details"]["day0_entered_at"] == "2026-04-01T05:30:00+00:00"
-    assert day0_event["timestamp"] == "2026-04-01T05:30:00+00:00"
+    # Day0-canonical-event slice assertion: a canonical DAY0_WINDOW_ENTERED
+    # row was emitted by _emit_day0_window_entered_canonical_if_available.
+    day0_events = [e for e in events if e["event_type"] == "DAY0_WINDOW_ENTERED"]
+    assert day0_events, (
+        f"Expected DAY0_WINDOW_ENTERED canonical event after day0 "
+        f"transition; got event_types={[e['event_type'] for e in events]}"
+    )
+    day0_event = day0_events[0]
+    # query_position_events returns the payload under `details` (decoded
+    # from payload_json); phase_before/after live in the payload because
+    # query_position_events doesn't surface the DB columns separately.
+    details = day0_event.get("details") or {}
+    assert details.get("phase_before") == "active"
+    assert details.get("phase_after") == "day0_window"
+    assert details.get("day0_entered_at") == "2026-04-02T02:00:00+00:00"
+    assert day0_event["timestamp"] == "2026-04-02T02:00:00+00:00"
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):

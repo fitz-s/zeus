@@ -113,6 +113,51 @@ def _ensure_token_suppression_reason_schema(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
+    """Day0-canonical-event feature slice (2026-04-24): add DAY0_WINDOW_
+    ENTERED to position_events.event_type CHECK constraint.
+
+    Fresh DBs created by `CREATE TABLE IF NOT EXISTS` in the kernel SQL
+    get the new CHECK automatically. Legacy DBs have the pre-slice CHECK
+    (missing DAY0_WINDOW_ENTERED), which would reject writes of the new
+    typed event. SQLite doesn't support ALTER CHECK, so rebuild pattern:
+    create new table with updated CHECK, copy rows, drop old, rename.
+
+    Idempotent: detects presence of 'DAY0_WINDOW_ENTERED' in the existing
+    CREATE TABLE sql and skips rebuild if already migrated.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
+    ).fetchone()
+    if row is None:
+        # Table not yet created (kernel script did the creation above);
+        # nothing to migrate.
+        return
+    create_sql = str(row[0] if row and row[0] else "")
+    if not create_sql or "DAY0_WINDOW_ENTERED" in create_sql:
+        return  # already has the new type
+
+    # Rebuild path: copy rows through an identical-schema-plus-new-event-
+    # type table, preserving PRIMARY KEY + all columns.
+    with conn:
+        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_day0_v1")
+        # Re-executing the kernel SQL recreates position_events with the
+        # new CHECK (because the renamed-old table no longer collides).
+        conn.executescript(load_architecture_kernel_sql())
+        old_columns = table_columns(conn, "position_events_pre_day0_v1")
+        new_columns = table_columns(conn, "position_events")
+        shared_columns = [c for c in new_columns if c in old_columns]
+        if shared_columns:
+            conn.execute(
+                f"""
+                INSERT INTO position_events ({", ".join(shared_columns)})
+                SELECT {", ".join(shared_columns)}
+                FROM position_events_pre_day0_v1
+                """
+            )
+        conn.execute("DROP TABLE position_events_pre_day0_v1")
+
+
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     """Apply the canonical architecture schema only when no legacy collision exists."""
     event_columns = table_columns(conn, "position_events")
@@ -143,6 +188,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
 
     conn.executescript(load_architecture_kernel_sql())
     _ensure_token_suppression_reason_schema(conn)
+    _ensure_day0_window_entered_event_type(conn)
     # Legacy-DB column reconciliation: `CREATE TABLE IF NOT EXISTS` in the
     # kernel SQL no-ops when position_current exists from a pre-kernel
     # schema. Backfill every canonical column that the legacy table is
