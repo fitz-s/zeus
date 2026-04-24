@@ -129,7 +129,7 @@ A cold-start agent arriving at this repo follows a deterministic boot path:
 5. Task boot profile    → architecture/task_boot_profiles.yaml classifies the
                           task and loads required proof questions + current fact
                           surfaces before the agent reads any code
-6. Topology Doctor      → python scripts/topology_doctor.py --navigation
+6. Topology Doctor      → python3 scripts/topology_doctor.py --navigation
                           --task "<task>" --files <files>
                           produces a targeted context pack: which files matter,
                           what law applies, what downstream surfaces are affected
@@ -333,23 +333,23 @@ migrations/           SQL migrations defining canonical DB schema (kernel author
 This repository is Python-based. Tests and static checks are the preferred public reproducibility surface.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest tests/
+python3 -m pytest tests/
 ```
 
 Topology verification (machine-checkable integrity):
 
 ```bash
-python scripts/topology_doctor.py --strict          # Registry parity, schema, zone coverage
-python scripts/topology_doctor.py --source           # Source rationale checks
-python scripts/topology_doctor.py --tests            # Test topology audit
-python scripts/topology_doctor.py --scripts          # Script manifest audit
-python scripts/topology_doctor.py --history-lore     # Antibody reference checks
-python scripts/topology_doctor.py --fatal-misreads   # Forbidden shortcut checks
-python scripts/topology_doctor.py --planning-lock --changed-files <files...>  # Planning gate
-python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory  # Registry sync
+python3 scripts/topology_doctor.py --strict          # Registry parity, schema, zone coverage
+python3 scripts/topology_doctor.py --source           # Source rationale checks
+python3 scripts/topology_doctor.py --tests            # Test topology audit
+python3 scripts/topology_doctor.py --scripts          # Script manifest audit
+python3 scripts/topology_doctor.py --history-lore     # Antibody reference checks
+python3 scripts/topology_doctor.py --fatal-misreads   # Forbidden shortcut checks
+python3 scripts/topology_doctor.py --planning-lock --changed-files <files...>  # Planning gate
+python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory  # Registry sync
 ```
 
 Some runtime paths require local databases, venue credentials, provider data, or operator configuration that are intentionally not committed. Data-dependent or live-dependent tests should either use fixtures or clearly fail/skip when local state is absent.
