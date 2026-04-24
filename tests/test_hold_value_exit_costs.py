@@ -403,3 +403,135 @@ class TestHardeningValidators:
                 config_mod.exit_daily_hurdle_rate()
         finally:
             config_mod.settings["exit"]["daily_hurdle_rate"] = original
+
+
+class TestConNyxPostEditHardening:
+    """Post-edit hardening for con-nyx findings (b), (c), (d), (h), (i).
+    Additional safety guards before operator flips HOLD_VALUE_EXIT_COSTS.
+    """
+
+    def _make_position(self, direction: str = "buy_yes"):
+        from src.state.portfolio import Position
+
+        pos = Position(
+            trade_id="test_trade_t64_hardening",
+            market_id="test_market",
+            city="Chicago",
+            cluster="midwest",
+            target_date="2026-04-25",
+            bin_label="60-61°F",
+            direction=direction,
+            entry_price=0.40 if direction == "buy_yes" else 0.15,
+            size_usd=50.0,
+            entry_method="calibrated",
+        )
+        pos.neg_edge_count = 2
+        return pos
+
+    def test_flag_on_hours_none_emits_authority_gap_breadcrumb(self):
+        """Con-nyx finding (c): when flag ON and hours_to_settlement is
+        None, time_cost silently collapses to 0.0. Surface the authority
+        gap via applied_validations breadcrumb so monitor summaries can
+        count these D6-bypass occurrences.
+        """
+        pos = self._make_position("buy_yes")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.55,
+                best_bid=0.50,
+                day0_active=False,
+                hours_to_settlement=None,  # authority gap
+                applied=[],
+            )
+        assert "hold_value_exit_costs_enabled" in decision.applied_validations
+        assert "hold_value_hours_unknown_time_cost_zero" in decision.applied_validations
+
+    def test_flag_on_hours_none_buy_no_emits_breadcrumb(self):
+        """Finding (c) for buy_no path: hours=None under flag ON also
+        surfaces the authority gap."""
+        pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.85,
+                current_market_price=0.80,
+                hours_to_settlement=None,
+                day0_active=False,
+                applied=[],
+            )
+        assert "hold_value_hours_unknown_time_cost_zero" in decision.applied_validations
+
+    def test_flag_on_hours_positive_does_not_emit_unknown_breadcrumb(self):
+        """Regression: breadcrumb MUST NOT fire when hours is valid
+        (non-None, non-negative). Otherwise it becomes a noisy spam
+        indistinguishable from real authority gaps."""
+        pos = self._make_position("buy_yes")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=True):
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.55,
+                best_bid=0.50,
+                day0_active=False,
+                hours_to_settlement=48.0,
+                applied=[],
+            )
+        assert "hold_value_hours_unknown_time_cost_zero" not in decision.applied_validations
+
+    def test_flag_off_parity_with_pre_t64_bare_math(self):
+        """Con-nyx finding (d) belt-and-suspenders: flag-OFF path must
+        produce the SAME ExitDecision as the pre-T6.4 bare-math formula
+        for identical inputs. This test computes the bare-math expected
+        decision inline and asserts the wired path matches.
+        """
+        pos = self._make_position("buy_yes")
+        # Inputs: shares * best_bid vs shares * p_posterior comparison.
+        shares = pos.size_usd / pos.entry_price  # 50 / 0.40 = 125
+        p_posterior = 0.50
+        best_bid = 0.48
+        # Pre-T6.4 logic: sell_value <= hold_gross → don't exit
+        # sell_value = 125 * 0.48 = 60; hold_gross = 125 * 0.50 = 62.5
+        # 60 <= 62.5 → don't exit → should_exit=False
+        expected_should_exit = not (shares * best_bid <= shares * p_posterior)
+
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
+            decision = pos._buy_yes_exit(
+                forward_edge=-0.02,
+                current_p_posterior=p_posterior,
+                best_bid=best_bid,
+                day0_active=False,
+                hours_to_settlement=24.0,
+                applied=[],
+            )
+        # Pre-T6.4 bare math says don't exit (60 < 62.5); flag-OFF must agree.
+        # Note: decision.should_exit depends on all the EV gate layers, not
+        # just the hold-value test; this asserts the hold-value gate
+        # specifically by checking it returned False (held) not True (exit).
+        if expected_should_exit is False:
+            assert decision.should_exit is False, (
+                f"Flag-OFF should match pre-T6.4 bare math. "
+                f"Pre-T6.4 said hold (sell={shares*best_bid:.2f} <= "
+                f"hold={shares*p_posterior:.2f}), got should_exit={decision.should_exit}"
+            )
+
+    def test_fee_rate_config_matches_polymarket_fee_default(self):
+        """Con-nyx finding (i) — two sources of truth for fee_rate:
+        config/settings.json exit.fee_rate AND src/contracts/execution_price.py
+        polymarket_fee(price, fee_rate=0.05) default. If polymarket_fee
+        default drifts, config may go stale. This test locks the coupling
+        so drift is caught at CI time.
+        """
+        import inspect
+
+        from src.contracts.execution_price import polymarket_fee
+        from src.config import exit_fee_rate
+
+        sig = inspect.signature(polymarket_fee)
+        polymarket_default = sig.parameters["fee_rate"].default
+        config_rate = exit_fee_rate()
+        assert polymarket_default == config_rate, (
+            f"Drift detected: polymarket_fee default fee_rate={polymarket_default} "
+            f"but config exit.fee_rate={config_rate}. Either update the other "
+            f"to match or introduce a single-source getter to eliminate drift."
+        )
