@@ -523,3 +523,87 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
         f"harvest_settlement unexpectedly called ({len(harvest_calls)}) with stage2_ready=False"
     )
     assert result.get("disabled_by_flag") is not True
+
+
+# ---- S2.5 format-unification structural antibody ----
+
+
+def test_S25_format_range_function_never_reappears():
+    """AST-level antibody: src/execution/harvester.py must NOT define a
+    function named `_format_range` (or any variant) and must NOT emit
+    unicode ≥/≤ shoulders in source code.
+
+    DR-33-A (commit 9026192) removed the pre-P-D `_format_range` function
+    and replaced it with text-form `_canonical_bin_label`. Data-readiness
+    closure rule 15 (NH-E2 in the closure banner) requires that future
+    refactors not silently re-introduce the unicode shoulder format OR
+    the legacy range formatter. This test AST-walks the harvester source
+    and asserts both the function-name absence and the unicode-emission
+    absence. Category immunity via CI — wrong reintroduction fails the
+    gate before merge.
+    """
+    import ast
+    from pathlib import Path
+
+    harvester_path = Path(__file__).resolve().parents[1] / "src" / "execution" / "harvester.py"
+    source = harvester_path.read_text()
+
+    # 1. AST gate: no FunctionDef with name `_format_range` (or common variants)
+    tree = ast.parse(source, filename=str(harvester_path))
+    forbidden_names = {"_format_range", "format_range", "_format_bin_range"}
+    defined_names = {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    collisions = forbidden_names & defined_names
+    assert not collisions, (
+        f"harvester.py re-introduced forbidden format-range function(s): {collisions}. "
+        "DR-33-A retired _format_range; canonical label emission goes via "
+        "_canonical_bin_label only. See S2.5 / closure-banner NH-E2."
+    )
+
+    # 2. Source gate: no unicode ≥ / ≤ at the START of any string literal.
+    #    Checking startswith (not `in`) cleanly distinguishes actual label
+    #    emissions (e.g. literal "≥21°C" — bad) from explanatory prose / docstrings
+    #    that reference the unicode form as a negative example (e.g. "…because
+    #    '≥21°C' would silently misparse…" — fine).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            stripped = node.value.lstrip()
+            assert not stripped.startswith("≥"), (
+                f"harvester.py string literal at line {node.lineno} starts "
+                f"with unicode ≥ — text form 'or higher' required (S2.5 / NH-E2)"
+            )
+            assert not stripped.startswith("≤"), (
+                f"harvester.py string literal at line {node.lineno} starts "
+                f"with unicode ≤ — text form 'or below' required (S2.5 / NH-E2)"
+            )
+
+
+def test_S25_every_canonical_label_passes_strict_parser():
+    """Every _canonical_bin_label output must round-trip through the S2.4
+    strict parser `_parse_canonical_bin_label` (non-None return).
+
+    Distinct from T4b which round-trips through the tolerant
+    `_parse_temp_range`. This gate specifically pins the STRICT parser
+    vs. STRICT emitter: wrong output from either side flips the
+    test red at CI time."""
+    from src.data.market_scanner import _parse_canonical_bin_label
+
+    cases = [
+        # point bins
+        (17.0, 17.0, "C"), (75.0, 75.0, "F"),
+        (-5.0, -5.0, "C"), (0.0, 0.0, "F"),
+        # finite ranges
+        (15.0, 16.0, "C"), (74.0, 76.0, "F"), (-10.0, -5.0, "C"),
+        # shoulders
+        (None, 15.0, "C"), (None, 50.0, "F"),
+        (21.0, None, "C"), (90.0, None, "F"),
+    ]
+    for lo, hi, unit in cases:
+        label = _canonical_bin_label(lo, hi, unit)
+        parsed = _parse_canonical_bin_label(label)
+        assert parsed is not None, (
+            f"S2.5 gate: canonical label {label!r} from ({lo}, {hi}, {unit}) "
+            f"was REJECTED by strict parser — emitter/parser contract broken"
+        )

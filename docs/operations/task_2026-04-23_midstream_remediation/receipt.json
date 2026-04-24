@@ -734,9 +734,46 @@
       ]
     },
     {
+      "slice_id": "S2.5",
+      "name": "data_readiness_tail_harvester_winning_bin_format_unification_nh_e2",
+      "commit": "pending",
+      "date": "2026-04-23",
+      "critic_status": "self_verified_27_of_27_pass_ast_antibody_closes_reintroduction_category",
+      "planning_lock": "GREEN on 1 file (tests/test_harvester_dr33_live_enablement.py — already registered)",
+      "authority_basis": "data-readiness workstream closure-banner NH-E2 — harvester winning_bin format unification",
+      "pre_slice_state_verification": "grep -rn '_format_range' src/ tests/ scripts/ returns 0 function references (only the retirement-comment at src/execution/harvester.py:615-620 mentioning its removal during DR-33-A commit 9026192); grep -rn unicode ≥/≤ in src/ returns 1 hit at src/execution/harvester.py:628 which is a DOCSTRING explaining why text form is used (not actual emission).",
+      "verdict_on_original_scope": "VERIFIED-ALREADY-DONE by DR-33-A (commit 9026192). Original S2.5 scope of 'delete legacy _format_range + remove unicode shoulder emitters' was completed during DR-33-A land. No production code change required this slice.",
+      "value_add_this_slice": "2 NEW AST-walk antibody tests close the RE-INTRODUCTION category at CI time (Fitz K<<N — makes silent regression category impossible, not just 'document that it happened')",
+      "files_changed": [
+        "tests/test_harvester_dr33_live_enablement.py (append 2 new tests in existing registered file; zero src mutation)",
+        "docs/operations/task_2026-04-23_midstream_remediation/work_log.md",
+        "docs/operations/task_2026-04-23_midstream_remediation/receipt.json"
+      ],
+      "new_antibody_tests": {
+        "test_S25_format_range_function_never_reappears": {
+          "mechanism": "ast.walk(tree) on src/execution/harvester.py; asserts no FunctionDef with names in {_format_range, format_range, _format_bin_range}; asserts no string literals START with ≥ or ≤ (lstrip + startswith — prose/docstring carve-out preserved)",
+          "category_closed": "future refactor that re-introduces a range-formatter function OR starts emitting unicode shoulders flips test red before merge"
+        },
+        "test_S25_every_canonical_label_passes_strict_parser": {
+          "mechanism": "round-trip every _canonical_bin_label output through S2.4 _parse_canonical_bin_label; distinct from existing T4b round-trip via tolerant _parse_temp_range",
+          "category_closed": "emitter/parser contract break between _canonical_bin_label and _parse_canonical_bin_label — either side drifting flips test red"
+        }
+      },
+      "docstring_carve_out_rationale": "Initial implementation flagged L624 docstring prose 'because src/data/market_scanner.py::_parse_temp_range uses re.search and would silently misparse ≥21°C as POINT bin' as violation. Fixed: changed assertion from `'≥' not in value` to `value.lstrip().startswith('≥')` so explanatory prose (which REFERENCES the unicode form to document why it's avoided) passes while actual label emissions (which WOULD start with ≥) fail. Correct semantic distinction.",
+      "category_immunity_fitz_k_lt_n_score": "1.0/1.0 on re-introduction category — the two classes of silent regression (legacy function name comeback, unicode shoulder emission) are structurally impossible at CI time.",
+      "regression_evidence_L28": {
+        "narrow": "pytest -q tests/test_harvester_dr33_live_enablement.py -> 27 passed in 0.94s (25 existing + 2 new S2.5)",
+        "delta": "+2 passes; zero existing src touched; delta = 0 new failures"
+      },
+      "acceptance_commands_run": [
+        ".venv/bin/python -m pytest -q tests/test_harvester_dr33_live_enablement.py -> 27 passed in 0.94s",
+        ".venv/bin/python scripts/topology_doctor.py --planning-lock --changed-files tests/test_harvester_dr33_live_enablement.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/plan.md --json -> GREEN"
+      ]
+    },
+    {
       "slice_id": "S2.4",
       "name": "data_readiness_tail_strict_canonical_bin_label_parser_nh_e1",
-      "commit": "pending",
+      "commit": "cdfd558",
       "date": "2026-04-23",
       "critic_status": "self_verified_29_antibodies_pass_critic_dispatch_pending",
       "planning_lock": "GREEN on 3 files (src/data/market_scanner.py + tests/test_parse_canonical_bin_label.py + architecture/test_topology.yaml)",
