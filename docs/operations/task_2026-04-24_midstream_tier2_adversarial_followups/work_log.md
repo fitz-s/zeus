@@ -293,7 +293,95 @@ carve-out.
 
 ### S4 — M3 (CANONICAL_DATA_VERSIONS rename + parallel allowlists)
 
-_Pending execution._
+**Status**: landed in-tree, pending con-nyx verdict before commit.
+
+**Files**:
+- `src/contracts/ensemble_snapshot_provenance.py` — renamed
+  `CANONICAL_DATA_VERSIONS` → `CANONICAL_ENSEMBLE_DATA_VERSIONS`
+  (the legacy name never reflected scope; it always applied only to
+  `ensemble_snapshots_v2` writers/readers per the module docstring).
+  Added deprecation alias `CANONICAL_DATA_VERSIONS =
+  CANONICAL_ENSEMBLE_DATA_VERSIONS` for one cycle (remove in
+  post-S4 cleanup slice). Added parallel allowlist frozensets:
+  `CANONICAL_OBSERVATION_DATA_VERSIONS` (5 native source paths: WU,
+  HKO, Ogimet, Meteostat, Open-Meteo) and
+  `CANONICAL_SETTLEMENT_DATA_VERSIONS` (4 source-scoped data_versions
+  from the harvester `_HARVESTER_LIVE_DATA_VERSION` dispatch dict).
+  Updated `assert_data_version_allowed` at L141-147 to reference the
+  renamed symbol (not the alias), so consumer intent is explicit.
+- `tests/test_canonical_data_versions_namespace.py` — NEW 7-test
+  antibody pinning: ensemble set covers HIGH+LOW; deprecation alias is
+  `is` identical (object identity, not equality — catches silent
+  divergence); observation + settlement sets disjoint from ensemble;
+  observation set follows `v1.<source>-native` convention; settlement
+  set contains harvester source-scoped versions;
+  `assert_data_version_allowed` body references ensemble set by name
+  (regression-bar against accidental broadening).
+- `tests/test_calibration_bins_canonical.py` — 4 usage sites (import,
+  len assertion, iterate, docstring) updated `CANONICAL_DATA_VERSIONS`
+  → `CANONICAL_ENSEMBLE_DATA_VERSIONS`. Freshness header promoted
+  `# Created / # Last reused` → `# Lifecycle:` format.
+- `tests/test_fdr.py` — docstring comment referencing the old symbol
+  renamed. Freshness header promoted to Lifecycle format.
+- `tests/test_phase7a_metric_cutover.py` — comment reference updated.
+- `architecture/test_topology.yaml` — registered the new antibody
+  test file (alphabetic insert).
+
+**Verification**:
+- Import smoke test (module-level `from src.contracts... import
+  CANONICAL_ENSEMBLE_DATA_VERSIONS, CANONICAL_DATA_VERSIONS,
+  CANONICAL_OBSERVATION_DATA_VERSIONS,
+  CANONICAL_SETTLEMENT_DATA_VERSIONS`) passes; deprecation alias
+  is-identical to renamed set.
+- `pytest tests/test_canonical_data_versions_namespace.py
+  tests/test_calibration_bins_canonical.py tests/test_fdr.py
+  tests/test_phase7a_metric_cutover.py` → 83 passed.
+- Packet-wide pytest across S1+S2+S3+S4 antibody surface
+  (canonical_data_versions_namespace, calibration_bins_canonical, fdr,
+  phase7a_metric_cutover, semantic_linter, harvester_metric_identity,
+  ingest_grib_law5_antibody, harvester_high_calibration_v2_route)
+  → 130 passed.
+- `python -m py_compile src/contracts/ensemble_snapshot_provenance.py`
+  → clean.
+- `topology_doctor --planning-lock --plan-evidence /
+  --freshness-metadata / --map-maintenance --map-maintenance-mode
+  precommit` → all ok.
+
+**Design decision — parallel allowlists are scaffolding**:
+`CANONICAL_OBSERVATION_DATA_VERSIONS` and
+`CANONICAL_SETTLEMENT_DATA_VERSIONS` have no current consumer (no
+writer/reader asserts against them yet). They are scaffolding: next
+slice that touches observation or settlement data_version enforcement
+cites these constants instead of inventing a new set. This is a
+deliberate scope expansion per handoff M3 — making the three
+namespaces explicit and citable. Future consumer wiring is a
+followup (`T2-S4-followup-OBSERVATION-WIRING` / `T2-S4-followup-
+SETTLEMENT-WIRING`).
+
+Alternative considered + rejected: skip the parallel allowlists as
+"premature abstraction per AGENTS.md". Rejected because the handoff
+plan explicitly called them out and con-nyx's earlier dispatches
+referenced them. Adding the constants without consumers keeps the
+surface minimal (two frozensets + docstring pointers, no logic
+changes) while making the namespace disambiguation legible.
+
+**Residual risks**:
+1. Deprecation alias `CANONICAL_DATA_VERSIONS = CANONICAL_ENSEMBLE_...`
+   must drop in a cleanup slice once all callers migrate. Current
+   callers: zero production (all 4 test callsites updated); the alias
+   exists purely for external consumers that don't exist today.
+   Tracked as `T2-S4-followup-ALIAS-DROP`.
+2. Parallel allowlists have no asserting consumer. Any writer that
+   mis-tags a data_version (WU writer using "wu_legacy_v1" instead of
+   "v1.wu-native") will not be caught by the observation set until a
+   future slice wires the assertion into
+   `observation_instants_v2_writer.py`. Tracked as
+   `T2-S4-followup-OBSERVATION-WIRING`.
+3. `assert_data_version_allowed` still reads the ensemble set only;
+   no analogous `assert_observation_data_version_allowed` or
+   `assert_settlement_data_version_allowed` exists. Adding those
+   requires wiring at the respective writer call sites — structural
+   work for a followup.
 
 ## Verification (will be filled per slice)
 

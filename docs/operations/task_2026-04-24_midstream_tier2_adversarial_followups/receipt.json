@@ -91,6 +91,11 @@
     "scripts/etl_forecast_skill_from_forecasts.py",
     "scripts/semantic_linter.py",
     "tests/test_semantic_linter.py",
+    "src/contracts/ensemble_snapshot_provenance.py",
+    "tests/test_canonical_data_versions_namespace.py",
+    "tests/test_calibration_bins_canonical.py",
+    "tests/test_fdr.py",
+    "tests/test_phase7a_metric_cutover.py",
     "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md",
     "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md",
     "docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json"
@@ -137,6 +142,27 @@
       "scope": "scripts/semantic_linter.py",
       "owner": "opportunistic",
       "origin": "T2-S3 residual risk 3"
+    },
+    "T2-S4-followup-ALIAS-DROP": {
+      "description": "Drop the deprecation alias CANONICAL_DATA_VERSIONS = CANONICAL_ENSEMBLE_DATA_VERSIONS in src/contracts/ensemble_snapshot_provenance.py once external callers (if any) have migrated. All 4 internal test callsites updated in T2-S4 commit; no production caller uses the alias. Safe to drop at any time; scheduled as a cleanup slice to avoid mid-session refactor churn.",
+      "effort_hours_estimate": 0.5,
+      "scope": "src/contracts/ensemble_snapshot_provenance.py",
+      "owner": "cleanup slice",
+      "origin": "T2-S4 scope decision — deprecation alias"
+    },
+    "T2-S4-followup-OBSERVATION-WIRING": {
+      "description": "Wire CANONICAL_OBSERVATION_DATA_VERSIONS into src/data/observation_instants_v2_writer.py as a pre-INSERT assertion (pattern analogous to assert_data_version_allowed for ensemble snapshots). This closes the M3 namespace disambiguation from constant-only scaffolding to enforced contract on the observation writer. Owner should verify against live DB that all 1.8M pre-existing observation_instants_v2 rows carry v1.wu-native (confirmed via SELECT DISTINCT 2026-04-24) OR extend allowlist.",
+      "effort_hours_estimate": 2,
+      "scope": "src/data/observation_instants_v2_writer.py + new tests/test_observation_data_version_contract.py",
+      "owner": "dedicated slice",
+      "origin": "T2-S4 scope decision — observation allowlist scaffolding"
+    },
+    "T2-S4-followup-SETTLEMENT-WIRING": {
+      "description": "Wire CANONICAL_SETTLEMENT_DATA_VERSIONS into src/execution/harvester.py write path as pre-INSERT assertion. Current harvester uses _HARVESTER_LIVE_DATA_VERSION dispatch dict — the new allowlist gives a single citable constant for the harvester + any future non-harvester settlement writer (P-E reconstruction, backfill paths) to share.",
+      "effort_hours_estimate": 2,
+      "scope": "src/execution/harvester.py + new tests/test_settlement_data_version_contract.py",
+      "owner": "dedicated slice",
+      "origin": "T2-S4 scope decision — settlement allowlist scaffolding"
     }
   },
   "tests_evidence": [
