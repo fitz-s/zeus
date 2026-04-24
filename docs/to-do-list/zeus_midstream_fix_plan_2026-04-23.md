@@ -23,6 +23,277 @@ authority by reference. When a slice closes, record its closure in the
 owning task packet and, if durable, extract into machine manifest /
 test / contract / lore card.**
 
+## Closure snapshot (2026-04-24 end-of-session)
+
+**Wave 1-4 CLOSED — CONDITIONAL gate materially achieved.** Wave 5
+substrate-deferred slices remain blocked on non-plan dependencies;
+two out-of-plan "follow-up" feature slices shipped opportunistically
+beyond the original 36-slice workbook.
+
+| Wave | Planned | Shipped | Retroactive | Upstream-blocked |
+|---|---|---|---|---|
+| W1 | 6 | 6 ✅ | - | - |
+| W2 | 10 | 10 ✅ | - | - |
+| W3 | 12 | 12 ✅ | - | - |
+| W4 | 5 | 4 ✅ | N1.2 retroactively accounted (already FIXED 2026-03-31) | T3.4-observe (upstream K4) |
+| W5 | 4 | 0 | - | T6.1 / T6.2 / N1.1 (live-B3 + ≥30 settlements); T4.2-Phase2 (7-day audit clean) |
+
+**Out-of-plan shipped this session**:
+- **T6.4-phase2** (correlation crowding via ExitContext portfolio threading) — promotes D6 category immunity 0.7/1.0 → 1.0/1.0 when `exit.correlation_crowding_rate > 0`. Feature-flag-safe default 0.0 until operator flip.
+- **Day0-canonical-event feature slice** — new `build_day0_window_entered_canonical_write` + `DAY0_WINDOW_ENTERED` event_type in position_events CHECK + legacy-DB migration helper. Closes T1.c-followup L875 OBSOLETE_PENDING_FEATURE.
+
+**Plan-premise corrections accumulated during execution** (numbered
+session-running, not plan-slice IDs):
+
+| # | Slice | Correction |
+|---|---|---|
+| #1 | T4.0 | `decision_log` has no `decision_snapshot_id` column |
+| #2 | T1.b | `config/provenance_registry.yaml` pre-existed |
+| #3 | T3.3 | bootstrap already creates 31 canonical columns |
+| #4 | T3.2b | AST-walk `projection.py` vacuous |
+| #5 | T7.a | skip at L67 is a comment |
+| #6 | T3.1 | 7 callers → 5 patches |
+| #7 | T5.a | `place_buy_order` does not exist |
+| #8 | T4.1b | accept path is L1700+ not L753 rejection |
+| #9 | T4.2-Phase1 | `exit_triggers.py` is test-only |
+| #10 | T4.3b | `Day0Signal → Day0Router.route` refactor |
+| #11 | T4.3 | `assert_symmetric_with` not `..._or_stronger` |
+| #12 | T5.c | NegRisk passthrough verified → skip |
+| #13 | T1.c | skip lines +3 shifted by T1.a header prepend |
+| #14 | T2.d.1 | Day0Signal → Day0Router.route echo + DT7 monkeypatch redundant |
+| #15 | T6.3 | `VigTreatment` + `from_raw` pre-existed; slice = extension not greenfield |
+| #18 | T6.4 | `exit_triggers.py` has ZERO production callers; real seam is `Position.evaluate_exit` in `src/state/portfolio.py` (planning-locked) |
+| #19 | T6.3 | B086 archive + T2.c xfail body + plan L109 sibling_snapshot are 3-way colliding; operator chose Option C (sibling primary + p_cal fallback with typed provenance) |
+| #20 | T6.3 | `test_sparse_vs_complete_held_bin_stability` silently RED on master since B086; T1 currency audit missed it (checked headers, not pytest green-ness) |
+| #21 | T6.4 | `_buy_no_exit` path bypassed HoldValue entirely (bare math); T6.4 brought both directions through contract for parity |
+| #22 | T6.4 | `HoldValue.compute` accepted `extra_costs` dict per docstring but `__post_init__` validator ignored extras — latent ValueError surfaced + fixed with trailing `extra_costs_total` field |
+| #23 | N1.2 | Already FIXED 2026-03-31; plan row is retroactive accounting, no new code |
+| #24 | Day0-canonical | `position_events.event_type` CHECK is a hard gate; new event types require SQL CHECK update + legacy-DB migration helper |
+
+## Slice closure status (W1–W4)
+
+All slices below are CLOSED unless annotated. Commit hashes are the
+primary reference; packet receipts (`T1_receipt.json`,
+`T2_receipt.json`, `T6_receipt.json`) carry the detailed audit trail
+for multi-slice families.
+
+### Wave 1 (foundation)
+- T1.a ✅ `67b5908`
+- T1.b ✅ `4943d0d`
+- T3.1 ✅ `716bfdd`
+- T3.3 ✅ `36f0189`
+- T7.b ✅ `beea8a9`
+- T4.0 ✅ `9365b20`
+
+### Wave 2 (testpath unblocked)
+- T1.d ✅ `979eb3b` (keep NC-12 L70 until Phase-7 v2 substrate rebuild)
+- T1.e ✅ `692a3af`
+- T2.a/T2.b ✅ `c4ee26a`
+- T2.d/e/f ✅ `7d064be` (T2.d.1 substitute slice per critic prompt fix)
+- T3.2+T3.2b ✅ `566a48f`
+- T3.4 **BLOCKED — upstream K4**
+- T7.a ✅ (pre-session activation confirmed; plan citation was wrong line)
+- T4.1 → **T4.1a** `547bcdd` + **T4.1b** `1d541a3` (split into primitive + wiring)
+- T5.a ✅ `abd5bb6`
+
+### Wave 3 (residual fails resolved)
+- T1.c ✅ `9b3e4bd` (+ T1.c-followup `480e4f3` for P9 rewrites; L1536/L1569 OBSOLETE_BY_ARCHITECTURE kept pending operator decision)
+- T1.f ✅ `9b3e4bd`
+- T2.c ✅ closed via **T6.3 Option C** `6f53ef2` (xfail(strict=True) XPASS removed)
+- T4.2-Phase1 ✅ `0206428`
+- T4.3b ✅ `abd04ad`
+- T4.3 ✅ `dc027bb`
+- T5.b ✅ `c5c916b`
+- T5.c ✅ `63c5c36` (SDK-passthrough audit; no typed contract per plan-premise #12)
+- **T6.3** ✅ `6f53ef2` (Option C) + `d83d5ff` (b+j hardening) + `38bcba2` (d+e+partial-f followups)
+
+### Wave 4 (CONDITIONAL milestone)
+- T2.g ✅ `6fbdabb` (Day0TemporalContext fixture built; un-monkeypatched real-Day0Router integration passes)
+- T5.d ✅ `782d2af`
+- **T6.4** ✅ `96fd850` (minimal) + `6b4455f` (surrogate HIGH+MED hardening) + `4edd4c8` (con-nyx post-edit hardening) + **`ebdfb2d` T6.4-phase2** (correlation crowding → D6 full 1.0/1.0 when rate > 0)
+- N1.2 ✅ retroactively accounted (plan-premise #23; already FIXED 2026-03-31)
+- T3.4-observe **BLOCKED — upstream K4**
+
+### Wave 5 (TRUSTWORTHY milestone — NOT achievable this session)
+
+See "Wave 5 remaining blockers" section below for structured reasons
+each slice cannot be ground through the regular per-slice ritual.
+
+## Wave 5 remaining blockers (2026-04-24 snapshot)
+
+The four Wave 5 slices share one structural property: they depend on
+data / time substrate that cannot be manufactured by engineering work.
+This is NOT a pre-emptive deferral — plan L171 (P2 risk card) predicted
+"concretely months, not days" and the session's execution bore that
+out. Each row below is a **tracked open item** with its specific gate,
+NOT a bug.
+
+| Slice | Hrs | Plan gate | Concrete blocker | What unblocks |
+|---|---|---|---|---|
+| **T6.1** | 16 | live-B3 + ≥ 30 settlements | `portfolio_position_count = 0` in `state/status_summary.json`; no realized P&L corpus exists to derive EV-optimal α from regression | Zeus resumes live trading + accumulates ≥ 30 settled positions with realized P&L data points |
+| **T6.2** | 12 | live-B3 + ≥ 30 buy_no settlements | Same corpus absence; additionally narrower (buy_no-direction subset) | Same + `buy_no`-direction share reaches ≥ 30 |
+| **N1.1** | 6 | live-B3 | Bias-correction harvester legacy-path Stage-2 skip cannot flip to `canonical_only_enforced` until live-B3 substrate populates | Live-readiness B3 closes |
+| **T4.2-Phase2** | 2 | Phase1 ≥ 7 days audit clean with `audit_log_false_positive_rate ≤ 0.05` | Phase1 audit-only path shipped 2026-04-23 (`0206428`); needs 7 consecutive days of live cycles emitting clean audits | Zeus runs ≥ 7 continuous days in live + audit log metric computable |
+| **T3.4** | 1 | Upstream K4 closure | Upstream data-readiness packet owns the raw-hour-leakage root cause; midstream owns only the acceptance signal | Upstream packet closes K4 |
+
+### Why this session cannot push Wave 5 further
+
+None of these gates are code-addressable in isolation:
+
+1. **Capital corpus gates (T6.1, T6.2, N1.1)** require settled realized
+   P&L from live Polymarket weather trades. Synthesized backtest data
+   was explicitly rejected as the live-readiness workbook evidence
+   source. Writing more code does not manufacture settled positions.
+2. **Time-window gate (T4.2-Phase2)** requires a 7-day operational
+   window of Phase1 audit-only output with FP rate ≤ 0.05. Phase1 went
+   live 2026-04-23; a 7-day clean window would earliest end
+   2026-04-30, only if Zeus runs continuously. Current status: auto-
+   paused (`state/auto_pause_failclosed.tombstone` exists).
+3. **Upstream packet gate (T3.4)** requires the data-readiness team to
+   close K4. Midstream cannot force that closure.
+
+**Operator choice points**:
+- Resume Zeus live trading to start accumulating the capital corpus.
+- OR accept that midstream stays at CONDITIONAL indefinitely, with
+  TRUSTWORTHY blocked until operational substrate materializes.
+
+## Out-of-plan deferrals surfaced during execution
+
+These items are NOT in the 36-slice workbook but emerged from
+execution and require tracking. Each has a defined scope + owner.
+
+### T6.3-followup-1 — Bootstrap CI delta audit (production corpus)
+
+**Origin**: con-nyx post-edit review of T6.3 Option C (finding f).
+**Scope**: Replay harness on frozen monitor_refresh corpus including
+sparse-monitor events; compare T6.3 p_cal_fallback branch vs pre-T6.3
+no-impute branch under identical seeds; report `|delta|` on
+`should_trade` rate per direction (Y/N) at each fixed alpha.
+**Partial landed**: `test_sparse_p_market_bootstrap_produces_finite_ci`
+(tests/test_k3_slice_p.py) asserts no NaN/Inf CI on sparse p_market —
+regression guard, not comparative delta audit.
+**Blocker**: needs frozen production monitor_refresh corpus (not
+available in engineering env).
+**Gate for**: live-readiness B3 closure (pre-requisite for flipping
+`feature_flags.HOLD_VALUE_EXIT_COSTS=true`).
+**Estimated size**: ~3h.
+
+### T6.4 pre-flag-flip operator checklist
+
+**Origin**: con-nyx T6.4 post-edit review — items (a) + (j remainder).
+Code-enforced safeguards are in place (bounds validators on
+`exit.fee_rate` / `exit.daily_hurdle_rate` / `exit.correlation_
+crowding_rate`; `_compute_exit_correlation_crowding` defensive zeros;
+HoldValue extra_costs_total field; authority-gap breadcrumb when
+`hours_to_settlement` is None). Two items remain operator-governance:
+
+1. **`(a)` polymarket_fee currency verify**: Operator re-verifies
+   Polymarket fee schedule at https://docs.polymarket.com/trading/fees
+   against `src/contracts/execution_price.py:130` formula `rate × p ×
+   (1-p)` with `fee_rate=0.05`. Last verification timestamp should be
+   recorded in receipt addendum. Current last-verified stamp is
+   2026-03 per git log on `execution_price.py`.
+2. **`(j remainder)` replay-receipt enforcement**: Currently the flag-
+   note at `config/settings.json:147` documents T6.3-followup-1 as a
+   flag-flip prerequisite in prose only. A future hardening slice
+   could add a file-presence assertion inside
+   `hold_value_exit_costs_enabled()` pointing at
+   `docs/operations/.../T6.3-followup-1_replay_receipt.json`. Deferred
+   pending operator policy decision on whether code-enforcement is
+   preferred over operator-checklist governance.
+
+### Day0-canonical-event production DB migration
+
+**Origin**: Day0-canonical-event feature slice (2026-04-24).
+**Scope**: The `_ensure_day0_window_entered_event_type` migration in
+`src/state/ledger.py` detects legacy DBs missing `DAY0_WINDOW_ENTERED`
+in the CHECK constraint and rebuilds the `position_events` table
+(rename → re-create via kernel SQL → copy rows → drop). Fresh tmp-path
+DBs get the new CHECK via `CREATE TABLE IF NOT EXISTS`. **Production
+daemon requires `init_schema(conn)` call on the live
+`state/zeus-world.db`** to apply the migration. Not done by the slice
+per Zeus runtime-safety convention (daemon restart + snapshot + verify
+pattern, same as prior migration batches T3.3 / REOPEN-1 / S2.1 /
+S2.2).
+**Pre-migration snapshot**: operator should generate a pre-migration
+snapshot with SHA-256 sidecar before invoking `init_schema(conn)`,
+following the REOPEN-2 pattern documented in `docs/operations/task_
+2026-04-23_midstream_remediation/work_log.md` S2.2 row.
+**Estimated size**: ~1h (mechanical, follows proven pattern).
+
+### T1.c-followup L1536 / L1569 — OBSOLETE_BY_ARCHITECTURE
+
+**Origin**: T1.c-followup (2026-04-23) — 2 skipped tests
+(`test_contamination_guard_blocks_wrong_env` +
+`test_empty_env_positions_pass_guard`) validate the deleted
+`_load_portfolio_from_json_data` contamination guard. Post-DB-first
+`load_portfolio` architecture, env is carried on each row so the
+"run loader in paper mode, expect RuntimeError on live position"
+scenario does not exist.
+**Operator decision needed**: `OBSOLETE_DELETE` (physically remove the
+two test functions) vs `KEEP` (documentation antibody of the removed
+contract, following the L589 paper-mode precedent).
+**Blocker**: governance preference, not code.
+**Estimated size**: ~0.5h either direction.
+
+### T1.d NC-12 L70 — KEEP until Phase-7 v2 substrate rebuild
+
+**Origin**: T1.d audit 2026-04-23 (`979eb3b`). One skip marker at
+`tests/test_dual_track_law_stubs.py:70`
+(`test_no_high_low_mix_in_platt_or_bins`) classified
+`KEEP_LEGITIMATE`.
+**Fact**: INV-16 Day0 LOW causality enforcement IS coded at
+`src/engine/evaluator.py:922-944`, but NC-12 is multi-surface (Platt +
+calibration pairs + bin lookup + settlement identity) and full
+enforcement awaits Phase-7 v2 substrate rebuild — `ensemble_snapshots_v2`
++ `calibration_pairs_v2` + `platt_models_v2` currently empty.
+**Blocker**: Phase-7 v2 substrate rebuild (external).
+**Estimated size**: revisit after Phase-7 ships.
+
+### T6.4 surrogate MED-5 — buy_no `best_bid` kwarg naming approximation
+
+**Origin**: surrogate code-reviewer@opus T6.4 post-edit MED finding.
+**Scope**: `_buy_no_exit` passes `current_market_price` as the
+`best_bid=` kwarg to `HoldValue.compute_with_exit_costs`. Numerically
+harmless (polymarket_fee p*(1-p) is symmetric), but semantically
+approximate — capital-locked semantic for buy_no is slightly
+miscalibrated vs buy_yes because native-space sell price differs from
+mark-to-market capital.
+**Full fix**: thread `best_bid_no` separately through `ExitContext`
+(touches same architectural layer as T6.4-phase2 portfolio threading;
+natural phase2 extension).
+**Current mitigation**: docstring comment at portfolio.py buy_no sites
+documents the approximation; operator accepts until a dedicated
+phase2+ slice lifts the kwarg.
+**Estimated size**: ~2h as part of a T6.4-phase3 scope.
+
+### Day0TemporalContext fixture promotion
+
+**Origin**: T2.g closure (2026-04-24, `6fbdabb`).
+**Scope**: The ad-hoc Dallas/2026-04-12/CDT Day0TemporalContext
+fixture built inline in `tests/test_fdr.py:
+test_evaluate_candidate_exercises_real_day0_router_on_fixture_db` is a
+candidate for promotion to a shared helper (e.g., `tests/fixtures/
+day0_temporal_context.py::build_dallas_cdt_fixture(target_date)`).
+Other tests using `SimpleNamespace(current_utc_timestamp=now)` stubs
+(`tests/test_fdr.py:616,823,1038`) could migrate to the shared helper
+for consistent integration coverage.
+**Blocker**: none technical; scope + opportunity cost vs other work.
+**Estimated size**: ~1h (promote helper) + ~1h per stub migration.
+
+### T2.g clearance of related SimpleNamespace stubs
+
+**Origin**: T2.d/e/f closure used `SimpleNamespace(current_utc_
+timestamp=now)` as temporary stubs in the same test file.
+**Scope**: The 3 sibling tests (L616 / L823 / L1038) still use the
+minimal stub even after T2.g built the real fixture. They pass the
+DT7 gate via the `_seed_ensemble_snapshots_v2_row` path (co-tenant
+S1.3 commit `36c5f1d`) so they do not hit the Day0HighSignal
+temporal_context code path — but they would benefit from the real
+fixture for consistency.
+**Blocker**: none; scope decision.
+**Estimated size**: ~1h.
+
 ## Executive plan summary
 
 **36 slices, ~126 engineer-hours, 5 sequenced waves.**
