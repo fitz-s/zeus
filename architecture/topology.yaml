@@ -475,7 +475,7 @@ active_operations_registry:
     - Next action
   surface_prefix: docs/operations/
   required_anchors:
-    - docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md
+    - docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml
