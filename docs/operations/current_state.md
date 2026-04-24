@@ -5,12 +5,25 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `data-improve`
-- Mainline task: Midstream Remediation (test-currency + active-failure + D3/D4/D6 antibody wave)
+- Mainline task: **Midstream Remediation + Data-Readiness-Tail CONDITIONAL-ACHIEVED 2026-04-24**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-23_midstream_remediation/receipt.json`
-- Status: W0 packet opened 2026-04-23; W1 executing (T1.a + T1.b + T3.1 + T3.3 + T7.b + T4.0)
+- Status: CONDITIONAL milestone materially reached. Midstream 36-slice
+  workbook: T1+T2+T3+T4+T5+T7+N1.2 all CLOSED or applied. Data-readiness
+  tail: S2.1/S2.2/S2.3/S2.4/S2.5/S3.1/REOPEN-1/REOPEN-2/DR-33-B all
+  shipped and live-DB-applied on 2026-04-24. Remaining open: DR-33-C
+  operator flag flip, forensic C5 (market_slug retrofit — blocked on
+  empty market_events), forensic C6 (39,431 observations empty
+  provenance — deferred to dedicated packet), TRUSTWORTHY-gate
+  substrate-deferred items (T6.1/T6.2/T6.4/N1.1/T4.2-Phase2).
 - Authority source for the 36-slice plan: `docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md`
+- **Live-DB state post-migration (2026-04-24)**: forecasts 15-col schema
+  with rebuild_run_id/data_source_version; settlements UNIQUE(city,
+  target_date, temperature_metric) + 3 triggers (authority_monotonic v2
+  + verified_insert_integrity + verified_update_integrity);
+  observation_instants_v2 32-col with INV-14 spine extension + training_
+  allowed + causality_status + source_role. k2_forecasts_daily cron will
+  succeed on next tick.
 
 ## Concurrent parallel packet
 
