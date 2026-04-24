@@ -356,6 +356,10 @@ class TestSelectionFamilySubstrate:
         }
 
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
+        # TODO(T2.g): this test bypasses DT7 via empty-v2 natural behavior
+        # (no explicit monkeypatch). T2.g plan row requires populating
+        # ensemble_snapshots_v2 with a real boundary_ambiguous=0 fixture
+        # row to exercise DT7 against the actual schema path.
         conn = get_connection(tmp_path / "selection_eval_path.db")
         init_schema(conn)
         now = datetime.now(timezone.utc)
@@ -363,6 +367,19 @@ class TestSelectionFamilySubstrate:
         class FakeEns:
             def __init__(self, *args, **kwargs):
                 self.member_maxes = np.array([70.0, 71.0, 72.0, 73.0])
+                # T2.d.1 2026-04-24: production evaluator reads
+                # `ens.member_extrema` AND `ens.bias_corrected` at FOUR
+                # sites — evaluator.py:991 (_store_snapshot_p_raw kwarg),
+                # :1284 (MarketAnalysis construction kwarg member_maxes),
+                # :1292 (MarketAnalysis construction kwarg bias_corrected),
+                # :1842 (_store_ens_snapshot body .tolist()). Attr access
+                # happens at KWARG-EVALUATION TIME, before the stubbed
+                # callees take over, so FakeEns must carry these attrs
+                # regardless of what the stubs do with them. MarketAnalysis
+                # is monkeypatched to FakeAnalysis which drops both kwargs,
+                # but Python still evaluates them to build the call.
+                self.member_extrema = np.array([70.0, 71.0, 72.0, 73.0])
+                self.bias_corrected = False
 
             def spread(self):
                 return evaluator_module.TemperatureDelta(1.0, "F")
@@ -378,18 +395,34 @@ class TestSelectionFamilySubstrate:
                 pass
 
             def p_vector(self, bins):
-                return np.array([0.2, 0.5, 0.3])
+                # T2.d.1 2026-04-24: return bins-sized uniform vector so
+                # downstream FDR family scan can index by bin without
+                # out-of-bounds (was hardcoded size 3; now dynamic).
+                _n = len(bins)
+                return np.full(_n, 1.0 / _n)
 
             def forecast_context(self):
                 return {"day0_test": True}
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
+                # calibrator / lead_days / etc. are intentionally dropped.
+                # We pin bin topology from the candidate and fabricate a
+                # 1-bin-positive-edge layout so FDR + BH exercise a
+                # deterministic selection (bin 0 YES only).
                 self.bins = kwargs["bins"]
                 self.p_raw = kwargs["p_raw"]
                 self.p_cal = kwargs["p_cal"]
-                self.p_market = np.array([0.1, 0.2, 0.7])
-                self.p_posterior = np.array([0.2, 0.3, 0.5])
+                # T2.d.1 2026-04-24: scale p_market/p_posterior to n_bins
+                # (now 4 with left-shoulder). Bin 0 keeps the positive edge
+                # (p_posterior > p_market) so exactly one hypothesis passes
+                # BH + prefilter; bins 1-3 fail at edge<=0 prefilter.
+                _n_bins = len(self.bins)
+                self.p_market = np.full(_n_bins, 0.2)
+                self.p_market[0] = 0.1
+                self.p_posterior = np.full(_n_bins, 0.15)
+                self.p_posterior[0] = 1.0 - float(self.p_posterior[1:].sum())
 
             def forecast_context(self):
                 return {"uncertainty": {}, "location": {}}
@@ -438,7 +471,40 @@ class TestSelectionFamilySubstrate:
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
         monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
-        monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        # T2.d.1 2026-04-24: Day0Signal symbol was refactored to
+        # Day0Router.route in a prior session — target the current class
+        # method (HIGH-only fixture; FakeDay0Signal is HIGH-shaped).
+        # TODO(T2.g): if this test is ever parameterized for LOW, update
+        # FakeDay0Signal and wrap the route lambda to dispatch on
+        # inputs.temperature_metric.is_low().
+        #
+        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
+        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
+        # table naturally returns {} → boundary_ambiguous_refuses_signal
+        # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
+        # WILL replace this natural bypass with a real v2 fixture row
+        # (boundary_ambiguous=0) to exercise DT7 on fixture DB.
+        #
+        # ENS snapshot persistence is stubbed so FakeEns does not need
+        # the full production attribute surface at the PERSISTENCE seam;
+        # FakeEns also needs member_extrema + bias_corrected attrs because
+        # evaluator.py:991 + :1284 + :1292 read them as KEYWORD ARGS
+        # (evaluated at call-time, before the stubbed callee receives
+        # them).
+        monkeypatch.setattr(
+            "src.signal.day0_router.Day0Router.route",
+            staticmethod(lambda inputs: FakeDay0Signal()),
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_ens_snapshot",
+            lambda conn, city, target_date, ens, ens_result: "snap-t2d1-test",
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_snapshot_p_raw",
+            lambda *args, **kwargs: None,
+        )
         from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
             evaluator_module,
@@ -469,6 +535,10 @@ class TestSelectionFamilySubstrate:
             city=cities_by_name["Dallas"],
             target_date="2026-04-12",
             outcomes=[
+                # T2.d.1 2026-04-24: left-shoulder added so validate_bin_topology
+                # passes (leftmost must have range_low=None per open-shoulder
+                # contract — see src/types/market.py::validate_bin_topology).
+                {"title": "67°F or lower", "range_low": None, "range_high": 67, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
                 {"title": "68-69°F", "range_low": 68, "range_high": 69, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
                 {"title": "70-71°F", "range_low": 70, "range_high": 71, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
                 {"title": "72°F or higher", "range_low": 72, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
@@ -477,7 +547,13 @@ class TestSelectionFamilySubstrate:
             hours_to_resolution=12.0,
             event_id="event-test",
             discovery_mode="day0_capture",
-            observation={"high_so_far": 70, "current_temp": 69, "source": "test", "observation_time": now.isoformat()},
+            observation=types.SimpleNamespace(
+                high_so_far=70,
+                low_so_far=None,
+                current_temp=69,
+                source="test",
+                observation_time=now.isoformat(),
+            ),
         )
 
         decisions = evaluator_module.evaluate_candidate(
@@ -494,13 +570,19 @@ class TestSelectionFamilySubstrate:
         meta = json.loads(conn.execute("SELECT meta_json FROM selection_family_fact").fetchone()["meta_json"])
         conn.close()
 
+        # T2.d.1 2026-04-24: bin count increased 3 -> 4 (left-shoulder).
+        # hypothesis_count = 2 * n_bins = 8 (YES + NO per bin). Bin 0 is
+        # the only one with positive edge + CI_lower > 0; others fail at
+        # prefilter. active_fdr_selected remains 1.
         assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
         assert family_count == 1
-        assert hypothesis_count == 6
-        assert meta["tested_hypotheses"] == 6
+        assert hypothesis_count == 8
+        assert meta["tested_hypotheses"] == 8
         assert meta["active_fdr_selected"] == 1
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
+        # TODO(T2.g): DT7 gate passes via natural empty-v2 behavior; T2.g
+        # follow-up should replace with real boundary_ambiguous=0 fixture.
         conn = get_connection(tmp_path / "selection_fail_closed.db")
         init_schema(conn)
         now = datetime.now(timezone.utc)
@@ -508,6 +590,19 @@ class TestSelectionFamilySubstrate:
         class FakeEns:
             def __init__(self, *args, **kwargs):
                 self.member_maxes = np.array([70.0, 71.0, 72.0, 73.0])
+                # T2.d.1 2026-04-24: production evaluator reads
+                # `ens.member_extrema` AND `ens.bias_corrected` at FOUR
+                # sites — evaluator.py:991 (_store_snapshot_p_raw kwarg),
+                # :1284 (MarketAnalysis construction kwarg member_maxes),
+                # :1292 (MarketAnalysis construction kwarg bias_corrected),
+                # :1842 (_store_ens_snapshot body .tolist()). Attr access
+                # happens at KWARG-EVALUATION TIME, before the stubbed
+                # callees take over, so FakeEns must carry these attrs
+                # regardless of what the stubs do with them. MarketAnalysis
+                # is monkeypatched to FakeAnalysis which drops both kwargs,
+                # but Python still evaluates them to build the call.
+                self.member_extrema = np.array([70.0, 71.0, 72.0, 73.0])
+                self.bias_corrected = False
 
             def spread(self):
                 return evaluator_module.TemperatureDelta(1.0, "F")
@@ -523,13 +618,22 @@ class TestSelectionFamilySubstrate:
                 pass
 
             def p_vector(self, bins):
-                return np.array([0.2, 0.5, 0.3])
+                # T2.d.1 2026-04-24: return bins-sized uniform vector so
+                # downstream FDR family scan can index by bin without
+                # out-of-bounds (was hardcoded size 3; now dynamic).
+                _n = len(bins)
+                return np.full(_n, 1.0 / _n)
 
             def forecast_context(self):
                 return {"day0_test": True}
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
+                # calibrator / lead_days / etc. are intentionally dropped.
+                # We pin bin topology from the candidate and fabricate a
+                # 1-bin-positive-edge layout so FDR + BH exercise a
+                # deterministic selection (bin 0 YES only).
                 self.bins = kwargs["bins"]
                 self.p_raw = kwargs["p_raw"]
                 self.p_cal = kwargs["p_cal"]
@@ -577,7 +681,40 @@ class TestSelectionFamilySubstrate:
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
         monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
-        monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        # T2.d.1 2026-04-24: Day0Signal symbol was refactored to
+        # Day0Router.route in a prior session — target the current class
+        # method (HIGH-only fixture; FakeDay0Signal is HIGH-shaped).
+        # TODO(T2.g): if this test is ever parameterized for LOW, update
+        # FakeDay0Signal and wrap the route lambda to dispatch on
+        # inputs.temperature_metric.is_low().
+        #
+        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
+        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
+        # table naturally returns {} → boundary_ambiguous_refuses_signal
+        # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
+        # WILL replace this natural bypass with a real v2 fixture row
+        # (boundary_ambiguous=0) to exercise DT7 on fixture DB.
+        #
+        # ENS snapshot persistence is stubbed so FakeEns does not need
+        # the full production attribute surface at the PERSISTENCE seam;
+        # FakeEns also needs member_extrema + bias_corrected attrs because
+        # evaluator.py:991 + :1284 + :1292 read them as KEYWORD ARGS
+        # (evaluated at call-time, before the stubbed callee receives
+        # them).
+        monkeypatch.setattr(
+            "src.signal.day0_router.Day0Router.route",
+            staticmethod(lambda inputs: FakeDay0Signal()),
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_ens_snapshot",
+            lambda conn, city, target_date, ens, ens_result: "snap-t2d1-test",
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_snapshot_p_raw",
+            lambda *args, **kwargs: None,
+        )
         monkeypatch.setattr(
             evaluator_module,
             "_get_day0_temporal_context",
@@ -610,6 +747,10 @@ class TestSelectionFamilySubstrate:
             city=cities_by_name["Dallas"],
             target_date="2026-04-12",
             outcomes=[
+                # T2.d.1 2026-04-24: left-shoulder added so validate_bin_topology
+                # passes (leftmost must have range_low=None per open-shoulder
+                # contract — see src/types/market.py::validate_bin_topology).
+                {"title": "67°F or lower", "range_low": None, "range_high": 67, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
                 {"title": "68-69°F", "range_low": 68, "range_high": 69, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
                 {"title": "70-71°F", "range_low": 70, "range_high": 71, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
                 {"title": "72°F or higher", "range_low": 72, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
@@ -618,7 +759,13 @@ class TestSelectionFamilySubstrate:
             hours_to_resolution=12.0,
             event_id="event-test",
             discovery_mode="day0_capture",
-            observation={"high_so_far": 70, "current_temp": 69, "source": "test", "observation_time": now.isoformat()},
+            observation=types.SimpleNamespace(
+                high_so_far=70,
+                low_so_far=None,
+                current_temp=69,
+                source="test",
+                observation_time=now.isoformat(),
+            ),
         )
 
         decisions = evaluator_module.evaluate_candidate(
@@ -646,6 +793,8 @@ class TestSelectionFamilySubstrate:
         The evaluator must NOT fall back to legacy fdr_filter; it must fail closed
         and set fdr_fallback_fired=True so observability surfaces the anomaly.
         """
+        # TODO(T2.g): DT7 gate passes via natural empty-v2 behavior; T2.g
+        # follow-up should replace with real boundary_ambiguous=0 fixture.
         conn = get_connection(tmp_path / "selection_empty_family.db")
         init_schema(conn)
         now = datetime.now(timezone.utc)
@@ -653,6 +802,19 @@ class TestSelectionFamilySubstrate:
         class FakeEns:
             def __init__(self, *args, **kwargs):
                 self.member_maxes = np.array([70.0, 71.0, 72.0, 73.0])
+                # T2.d.1 2026-04-24: production evaluator reads
+                # `ens.member_extrema` AND `ens.bias_corrected` at FOUR
+                # sites — evaluator.py:991 (_store_snapshot_p_raw kwarg),
+                # :1284 (MarketAnalysis construction kwarg member_maxes),
+                # :1292 (MarketAnalysis construction kwarg bias_corrected),
+                # :1842 (_store_ens_snapshot body .tolist()). Attr access
+                # happens at KWARG-EVALUATION TIME, before the stubbed
+                # callees take over, so FakeEns must carry these attrs
+                # regardless of what the stubs do with them. MarketAnalysis
+                # is monkeypatched to FakeAnalysis which drops both kwargs,
+                # but Python still evaluates them to build the call.
+                self.member_extrema = np.array([70.0, 71.0, 72.0, 73.0])
+                self.bias_corrected = False
 
             def spread(self):
                 return evaluator_module.TemperatureDelta(1.0, "F")
@@ -668,13 +830,22 @@ class TestSelectionFamilySubstrate:
                 pass
 
             def p_vector(self, bins):
-                return np.array([0.2, 0.5, 0.3])
+                # T2.d.1 2026-04-24: return bins-sized uniform vector so
+                # downstream FDR family scan can index by bin without
+                # out-of-bounds (was hardcoded size 3; now dynamic).
+                _n = len(bins)
+                return np.full(_n, 1.0 / _n)
 
             def forecast_context(self):
                 return {"day0_test": True}
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
+                # calibrator / lead_days / etc. are intentionally dropped.
+                # We pin bin topology from the candidate and fabricate a
+                # 1-bin-positive-edge layout so FDR + BH exercise a
+                # deterministic selection (bin 0 YES only).
                 self.bins = kwargs["bins"]
                 self.p_raw = kwargs["p_raw"]
                 self.p_cal = kwargs["p_cal"]
@@ -722,7 +893,40 @@ class TestSelectionFamilySubstrate:
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
         monkeypatch.setattr(evaluator_module, "EnsembleSignal", FakeEns)
-        monkeypatch.setattr(evaluator_module, "Day0Signal", FakeDay0Signal)
+        # T2.d.1 2026-04-24: Day0Signal symbol was refactored to
+        # Day0Router.route in a prior session — target the current class
+        # method (HIGH-only fixture; FakeDay0Signal is HIGH-shaped).
+        # TODO(T2.g): if this test is ever parameterized for LOW, update
+        # FakeDay0Signal and wrap the route lambda to dispatch on
+        # inputs.temperature_metric.is_low().
+        #
+        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
+        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
+        # table naturally returns {} → boundary_ambiguous_refuses_signal
+        # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
+        # WILL replace this natural bypass with a real v2 fixture row
+        # (boundary_ambiguous=0) to exercise DT7 on fixture DB.
+        #
+        # ENS snapshot persistence is stubbed so FakeEns does not need
+        # the full production attribute surface at the PERSISTENCE seam;
+        # FakeEns also needs member_extrema + bias_corrected attrs because
+        # evaluator.py:991 + :1284 + :1292 read them as KEYWORD ARGS
+        # (evaluated at call-time, before the stubbed callee receives
+        # them).
+        monkeypatch.setattr(
+            "src.signal.day0_router.Day0Router.route",
+            staticmethod(lambda inputs: FakeDay0Signal()),
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_ens_snapshot",
+            lambda conn, city, target_date, ens, ens_result: "snap-t2d1-test",
+        )
+        monkeypatch.setattr(
+            evaluator_module,
+            "_store_snapshot_p_raw",
+            lambda *args, **kwargs: None,
+        )
         monkeypatch.setattr(
             evaluator_module,
             "_get_day0_temporal_context",
@@ -757,6 +961,10 @@ class TestSelectionFamilySubstrate:
             city=cities_by_name["Dallas"],
             target_date="2026-04-12",
             outcomes=[
+                # T2.d.1 2026-04-24: left-shoulder added so validate_bin_topology
+                # passes (leftmost must have range_low=None per open-shoulder
+                # contract — see src/types/market.py::validate_bin_topology).
+                {"title": "67°F or lower", "range_low": None, "range_high": 67, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
                 {"title": "68-69°F", "range_low": 68, "range_high": 69, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
                 {"title": "70-71°F", "range_low": 70, "range_high": 71, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
                 {"title": "72°F or higher", "range_low": 72, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
@@ -765,7 +973,13 @@ class TestSelectionFamilySubstrate:
             hours_to_resolution=12.0,
             event_id="event-test",
             discovery_mode="day0_capture",
-            observation={"high_so_far": 70, "current_temp": 69, "source": "test", "observation_time": now.isoformat()},
+            observation=types.SimpleNamespace(
+                high_so_far=70,
+                low_so_far=None,
+                current_temp=69,
+                source="test",
+                observation_time=now.isoformat(),
+            ),
         )
 
         decisions = evaluator_module.evaluate_candidate(
