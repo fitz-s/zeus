@@ -28,23 +28,22 @@
     },
     {
       "slice_id": "T2.g",
-      "commit": "pending (this slice)",
+      "commit_initial": "xfail(strict=False) absorbed into co-tenant f8f403e 2026-04-24",
+      "commit_closure": "pending (this session — W4 closure 2026-04-24)",
       "scope": "Un-monkeypatched real-Day0Router fail-closed verification",
-      "outcome": "xfail(strict=False) — real-Day0Router integration test at tests/test_fdr.py::TestSelectionFamilySubstrate::test_evaluate_candidate_exercises_real_day0_router_on_fixture_db",
-      "test": "new test exercises evaluate_candidate with Day0Router.route NOT stubbed; Day0HighSignal constructs and computes p_vector over fixture bins",
-      "current_blocker": "Day0HighSignal.p_vector requires a populated Day0TemporalContext (solar_day, clock_semantics, etc.) that the fixture's SimpleNamespace stub does not carry",
-      "rationale": "Plan estimated size 3h for full real-Day0Router integration fixture. Rather than block T2 closure on building that fixture, this slice lands the xfail antibody so coverage is visible and a future fixture-build slice removes the marker. strict=False allows the test to pass silently if the xfail is removed (signal of fixture progress) rather than failing loudly."
+      "outcome": "closed full — xfail(strict=False) marker removed after Day0TemporalContext fixture was built (Dallas/2026-04-12/CDT DST-active SolarDay with sunrise 12:00 UTC ≈ 07:00 CDT, sunset 00:45 UTC next day ≈ 19:45 CDT; peak_hour=15, post_peak_confidence=0.4, daylight_progress=0.5). Fixture replaces the prior SimpleNamespace(current_utc_timestamp=now) stub so Day0HighSignal.p_vector can traverse solar_day / peak_hour / daylight_progress via its Day0Signal delegation without TypeError.",
+      "test": "tests/test_fdr.py::TestSelectionFamilySubstrate::test_evaluate_candidate_exercises_real_day0_router_on_fixture_db — PASSES real Day0Router dispatch; terminal assertion `decisions[0].rejection_stage == 'SIZING_TOO_SMALL'` matches the monkeypatched T2.d variant (RiskLimits(min_order_usd=999999.0) forces rejection after real Day0HighSignal.p_vector runs over 4 fixture bins).",
+      "category_immunity": "Future Day0TemporalContext schema drift (new required field, renamed field, dropped attribute) now fails LOUD via this test instead of silently xfail-passing."
     }
   ],
   "t2_family_effective_status": {
     "slices_planned": 7,
-    "closed_full": ["T2.a", "T2.b", "T2.c", "T2.d", "T2.e", "T2.f"],
-    "closed_as_xfail_antibody": ["T2.g"],
-    "unresolved_deferrals": [
-      "T2.g xfail clears when Day0TemporalContext fixture builder lands (separate slice, ~3h)"
-    ],
+    "closed_full": ["T2.a", "T2.b", "T2.c", "T2.d", "T2.e", "T2.f", "T2.g"],
+    "closed_as_xfail_antibody": [],
+    "unresolved_deferrals": [],
     "closure_history": {
-      "T2.c": "2026-04-24 — T6.3 Option C landed; xfail(strict=True) XPASS forced marker removal; fixture asymmetrized per con-nyx pre-edit finding a."
+      "T2.c": "2026-04-24 — T6.3 Option C landed; xfail(strict=True) XPASS forced marker removal; fixture asymmetrized per con-nyx pre-edit finding a.",
+      "T2.g": "2026-04-24 W4 closure — Day0TemporalContext fixture built (Dallas/2026-04-12/CDT); xfail(strict=False) removed; real Day0Router dispatch path exercised end-to-end with SIZING_TOO_SMALL terminal rejection matching monkeypatched variant."
     }
   },
   "t2_d_1_substitute_slice": {

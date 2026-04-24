@@ -12,7 +12,7 @@ Covers:
 
 import json
 import types
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -1106,28 +1106,17 @@ class TestSelectionFamilySubstrate:
         assert decisions[0].n_edges_found == 1
         assert decisions[0].n_edges_after_fdr == 0
 
-    @pytest.mark.xfail(
-        reason="T2.g 2026-04-24: un-monkeypatched real Day0Router integration. "
-               "Runs evaluate_candidate with Day0Router.route NOT stubbed so "
-               "real Day0HighSignal (from src/signal/day0_high_signal.py) "
-               "constructs and computes p_vector over the fixture bins. "
-               "Currently xfail because Day0HighSignal.p_vector requires a "
-               "populated Day0TemporalContext (solar_day, clock_semantics, "
-               "etc.) that the fixture's SimpleNamespace stub does not "
-               "carry. Full integration setup is plan-estimated size 3h; "
-               "this xfail marks the real-Day0Router coverage target so a "
-               "future slice can remove the marker when the temporal_context "
-               "fixture is built out. Paired with T2.d/e/f (monkeypatched "
-               "coverage of the same assertions).",
-        strict=False,
-    )
     def test_evaluate_candidate_exercises_real_day0_router_on_fixture_db(self, tmp_path, monkeypatch):
-        """T2.g — same scenario as test_evaluate_candidate_materializes_selection_facts
-        but without the Day0Router.route monkeypatch. Verifies the real
-        Day0Router dispatch path doesn't raise on a fixture DB with synthesized
-        HIGH-metric inputs. When Day0HighSignal's temporal_context requirements
-        are met by the fixture, this xfail flips and the marker must be
-        removed; that transition is the antibody signal.
+        """T2.g (W4 closure, 2026-04-24): runs evaluate_candidate WITHOUT the
+        Day0Router.route monkeypatch, exercising the real Day0Router dispatch
+        path against a full Day0TemporalContext fixture. Previously xfail
+        (strict=False) pending fixture-builder work; closure commit replaces
+        the SimpleNamespace stub with a real Day0TemporalContext + SolarDay
+        built via _build_day0_temporal_context_fixture() so Day0HighSignal
+        p_vector can compute over the fixture bins without TypeError.
+
+        Regression signal: if a future refactor drops a required field on
+        Day0TemporalContext, this test fails loudly (not xfail).
         """
         conn = get_connection(tmp_path / "t2g_real_day0.db")
         init_schema(conn)
@@ -1220,10 +1209,49 @@ class TestSelectionFamilySubstrate:
             "_store_snapshot_p_raw",
             lambda *args, **kwargs: None,
         )
+        # T2.g W4 closure (2026-04-24): replace the SimpleNamespace stub
+        # with a real Day0TemporalContext fixture so Day0HighSignal.p_vector
+        # (delegating to Day0Signal) can traverse solar_day /
+        # peak_hour / daylight_progress without TypeError. Dallas /
+        # 2026-04-12 / CDT (UTC-5, DST active).
+        from src.types import Day0TemporalContext, SolarDay
+
+        _t2g_target_date = date(2026, 4, 12)
+        _t2g_local_noon = datetime(2026, 4, 12, 17, 0, tzinfo=timezone.utc)  # ≈ 12:00 CDT
+        _t2g_sunrise_utc = datetime(2026, 4, 12, 12, 0, tzinfo=timezone.utc)  # ≈ 07:00 CDT
+        _t2g_sunset_utc = datetime(2026, 4, 13, 0, 45, tzinfo=timezone.utc)  # ≈ 19:45 CDT
+        _t2g_solar_day = SolarDay(
+            city="Dallas",
+            target_date=_t2g_target_date,
+            timezone="America/Chicago",
+            sunrise_local=_t2g_sunrise_utc,
+            sunset_local=_t2g_sunset_utc,
+            sunrise_utc=_t2g_sunrise_utc,
+            sunset_utc=_t2g_sunset_utc,
+            utc_offset_minutes=-300,
+            dst_active=True,
+        )
+        _t2g_temporal_context = Day0TemporalContext(
+            city="Dallas",
+            target_date=_t2g_target_date,
+            timezone="America/Chicago",
+            current_local_timestamp=_t2g_local_noon,
+            current_utc_timestamp=_t2g_local_noon,
+            current_local_hour=12.0,
+            solar_day=_t2g_solar_day,
+            observation_instant=None,
+            peak_hour=15,
+            post_peak_confidence=0.4,
+            daylight_progress=0.5,
+            utc_offset_minutes=-300,
+            dst_active=True,
+            time_basis="fixture_t2g",
+            confidence_source="test_fixture",
+        )
         monkeypatch.setattr(
             evaluator_module,
             "_get_day0_temporal_context",
-            lambda *args, **kwargs: types.SimpleNamespace(current_utc_timestamp=now),
+            lambda *args, **kwargs: _t2g_temporal_context,
         )
         from src.signal.day0_extrema import RemainingMemberExtrema as _REM
         monkeypatch.setattr(
