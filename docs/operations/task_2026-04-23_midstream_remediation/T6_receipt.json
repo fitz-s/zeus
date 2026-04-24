@@ -84,18 +84,48 @@
     },
     {
       "slice_id": "T6.4",
-      "status": "DEFERRED_FOR_RESCOPING",
-      "scope": "D6 nonzero funding + correlation cost in HoldValue.compute(); wires existing src/strategy/correlation.py + config/city_correlation_matrix.json into exit authority",
+      "status": "CLOSED_MINIMAL",
+      "commit": "pending (this session)",
+      "scope_delivered": "D6 fee + time opportunity cost wired into HoldValue at live exit seam via HoldValue.compute_with_exit_costs() factory; feature-flag-gated (HOLD_VALUE_EXIT_COSTS default OFF) so pre-T6.4 behavior preserved during shadow validation. 4 call sites rewired: src/state/portfolio.py:_buy_yes_exit L545 (Day0) + L598 (Layer-4 EV) + _buy_no_exit L684 (Day0) + L760 (Layer-4 EV).",
+      "scope_deferred_to_phase2": "D6 correlation crowding cost — requires threading portfolio context (list of currently-held Positions for correlated_exposure computation) through ExitContext dataclass. More invasive architectural change; phase2 ticket.",
       "estimated_size": 14,
-      "blocker": "plan-premise correction #18 — plan cites src/execution/exit_triggers.py as wiring seam but that module has ZERO production callers (test-only, evaluate_exit_triggers at L49 only used by tests/test_lifecycle.py). Real exit authority is src/state/portfolio.py:296::Position.evaluate_exit ← src/engine/cycle_runtime.py:630. Seam correction requires planning-lock approval for src/state/** edit; scope+risk not matching plan's 14h estimate. Flagged to operator for re-scoping as separate slice.",
-      "wave": "W4 (was) → re-scoping slice TBD"
+      "actual_size_estimate": "~6-7h (4 wire-in sites + new factory + config settings + feature flag + test file + HoldValue dataclass bug #22 fix)",
+      "plan_premise_corrections_introduced": [
+        "#18: src/execution/exit_triggers.py has ZERO production callers (only tests/test_lifecycle.py) — real seam is Position.evaluate_exit ← cycle_runtime.py:630, inside src/state/** planning-lock zone. Plan cited dead module.",
+        "#21: _buy_no_exit path (L626, L672 pre-edit) bypassed HoldValue entirely — used bare math `shares * current_market_price <= shares * current_p_posterior`. T6.4 brought it through the contract for consistency with _buy_yes_exit (flag-gated).",
+        "#22: HoldValue.compute() accepts extra_costs dict per docstring, but __post_init__ validator only checked `net_value == gross - fee - time` — extras caused construction failure. Latent bug uncovered when T6.4 correlation_crowding=0.15 factory call raised. Fix: added trailing `extra_costs_total: float = 0.0` field with validator accounting."
+      ],
+      "files_modified": [
+        "src/contracts/hold_value.py (new compute_with_exit_costs factory + extra_costs_total field + validator fix for #22)",
+        "src/config.py (3 new getters: exit_fee_rate, exit_daily_hurdle_rate, hold_value_exit_costs_enabled)",
+        "config/settings.json (new exit.fee_rate + exit.daily_hurdle_rate + feature_flags.HOLD_VALUE_EXIT_COSTS)",
+        "src/state/portfolio.py (4 call site wire-ins + hours_to_settlement threading into _buy_yes_exit + updated 2 callers)"
+      ],
+      "files_added": [
+        "tests/test_hold_value_exit_costs.py (12 tests across 3 classes)"
+      ],
+      "feature_flag": "HOLD_VALUE_EXIT_COSTS (default OFF). Flip protocol: after operator validates should_exit-rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a soft prerequisite; a live A/B on a fraction of capital is the stronger signal).",
+      "regression_delta": {
+        "touched_scope_post": "53 passed / 0 failed / 0 xfailed (across test_hold_value_exit_costs + test_vig_treatment_provenance + test_k3_slice_p + test_market_analysis::TestComputePosterior)",
+        "broader_regression": "80 passed / 1 failed — the 1 failure is TestVWMP::test_zero_size_fallback (pre-existing since post-B084 vwmp ValueError; unrelated to T6.4).",
+        "hold_value_specific": "15 passed / 0 failed across all hold_value-keyed tests (HoldValue dataclass changes backwards-compatible with existing callers)."
+      },
+      "category_immunity": "0.7/1.0 — fee + time cost category closed (prior silent zero-cost violation of D6 is now eliminated at both buy_yes and buy_no seams when flag ON). Remaining 0.3: correlation crowding category still open (needs phase2 portfolio-context threading); operator flag flip gate is the current safety mechanism rather than structural impossibility."
     }
   ],
   "t6_family_effective_status": {
     "slices_planned": 4,
     "closed_full": ["T6.3"],
-    "blocked": ["T6.1", "T6.2"],
-    "deferred_rescoping": ["T6.4"]
+    "closed_minimal_with_phase2_deferred": ["T6.4"],
+    "blocked": ["T6.1", "T6.2"]
+  },
+  "t6_4_phase2_tracked": {
+    "id": "T6.4-phase2",
+    "scope": "D6 correlation crowding cost — thread portfolio-position references through ExitContext so Position.evaluate_exit can compute correlation_crowding via src/strategy/correlation.py::correlated_exposure(). Required for full D6 category immunity (1.0/1.0).",
+    "architectural_work": "ExitContext dataclass extension (new field: portfolio_positions: list or a ReadOnlyPortfolioView); cycle_runtime._build_exit_context() populates from current PortfolioState; HoldValue.compute_with_exit_costs receives correlation_crowding via new caller logic at the 4 wire-in sites.",
+    "estimated_size": 6,
+    "blocker_for": "D6 full category immunity",
+    "prerequisites": ["T6.3-followup-1 production-corpus replay for should_exit delta baseline"]
   },
   "surrogate_critic_notes": {
     "con_nyx_pre_edit_review_quality": "HIGH — surfaced 3 findings the team-lead initial scope missed: (b) B086 rationale staleness, (e) test vacuity, (f) latent RED test. Adversarial 10-ask template per feedback_critic_prompt_adversarial_template.md is load-bearing for this level of architectural review.",

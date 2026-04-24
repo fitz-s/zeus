@@ -386,3 +386,27 @@ def correlation_matrix() -> dict[str, dict[str, float]]:
                 f"correlation.matrix[{cluster!r}] has unknown cluster targets: {sorted(bad_targets)}"
             )
     return matrix
+
+
+def exit_fee_rate() -> float:
+    """T6.4: fee_rate parameter for polymarket_fee() when computing
+    HoldValue fee_cost in exit-decision path. See config/settings.json
+    exit.fee_rate for authority + calibration notes."""
+    return float(settings["exit"]["fee_rate"])
+
+
+def exit_daily_hurdle_rate() -> float:
+    """T6.4: daily opportunity-cost rate on locked capital for HoldValue
+    time_cost in exit-decision path. See config/settings.json
+    exit.daily_hurdle_rate for authority + calibration notes."""
+    return float(settings["exit"]["daily_hurdle_rate"])
+
+
+def hold_value_exit_costs_enabled() -> bool:
+    """T6.4 feature flag: when False (default), _buy_yes_exit /
+    _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4
+    behavior preserved during shadow validation). When True, exit
+    decisions include fee + time opportunity cost via
+    HoldValue.compute_with_exit_costs. See config/settings.json
+    feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""
+    return bool(settings["feature_flags"].get("HOLD_VALUE_EXIT_COSTS", False))

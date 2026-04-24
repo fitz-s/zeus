@@ -14,7 +14,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from src.config import STATE_DIR, get_mode, settings, state_path
+from src.config import (
+    STATE_DIR,
+    exit_daily_hurdle_rate,
+    exit_fee_rate,
+    get_mode,
+    hold_value_exit_costs_enabled,
+    settings,
+    state_path,
+)
 from src.contracts import (
     HeldSideProbability, 
     NativeSidePrice, 
@@ -386,6 +394,7 @@ class Position:
                     current_p_posterior=float(exit_context.fresh_prob),
                     best_bid=exit_context.best_bid,
                     day0_active=True,
+                    hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
                 )
             if day0_decision.should_exit:
@@ -506,6 +515,7 @@ class Position:
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=best_bid,
                 day0_active=bool(exit_context.day0_active),
+                hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
             )
 
@@ -515,9 +525,17 @@ class Position:
         current_p_posterior: float,
         best_bid: Optional[float] = None,
         day0_active: bool = False,
+        hours_to_settlement: Optional[float] = None,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
-        """Standard 2-consecutive EDGE_REVERSAL with EV gate."""
+        """Standard 2-consecutive EDGE_REVERSAL with EV gate.
+
+        T6.4: when feature_flags.HOLD_VALUE_EXIT_COSTS is enabled, the EV
+        gate uses HoldValue.compute_with_exit_costs (fee + time opportunity
+        cost) instead of the legacy zero-cost HoldValue.compute. hours_to_
+        settlement feeds the time_cost component; when None, time_cost
+        collapses to 0.0 as a soft conservative default.
+        """
         applied = list(applied or [])
         if best_bid is None:
             applied.append("exit_context_incomplete")
@@ -535,11 +553,22 @@ class Position:
             applied.append("day0_observation_gate")
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price if self.entry_price > 0 else 0.0
-            hold_value = HoldValue.compute(
-                gross_value=shares * current_p_posterior,
-                fee_cost=0.0,
-                time_cost=0.0,
-            )
+            if hold_value_exit_costs_enabled():
+                applied.append("hold_value_exit_costs_enabled")
+                hold_value = HoldValue.compute_with_exit_costs(
+                    shares=shares,
+                    current_p_posterior=current_p_posterior,
+                    best_bid=best_bid,
+                    hours_to_settlement=hours_to_settlement,
+                    fee_rate=exit_fee_rate(),
+                    daily_hurdle_rate=exit_daily_hurdle_rate(),
+                )
+            else:
+                hold_value = HoldValue.compute(
+                    gross_value=shares * current_p_posterior,
+                    fee_cost=0.0,
+                    time_cost=0.0,
+                )
             if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
@@ -580,11 +609,22 @@ class Position:
         if best_bid is not None and self.entry_price > 0:
             applied.append("ev_gate")
             shares = self.size_usd / self.entry_price
-            hold_value = HoldValue.compute(
-                gross_value=shares * current_p_posterior,
-                fee_cost=0.0,
-                time_cost=0.0,
-            )
+            if hold_value_exit_costs_enabled():
+                applied.append("hold_value_exit_costs_enabled")
+                hold_value = HoldValue.compute_with_exit_costs(
+                    shares=shares,
+                    current_p_posterior=current_p_posterior,
+                    best_bid=best_bid,
+                    hours_to_settlement=hours_to_settlement,
+                    fee_rate=exit_fee_rate(),
+                    daily_hurdle_rate=exit_daily_hurdle_rate(),
+                )
+            else:
+                hold_value = HoldValue.compute(
+                    gross_value=shares * current_p_posterior,
+                    fee_cost=0.0,
+                    time_cost=0.0,
+                )
             if shares * best_bid <= hold_value.net_value:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
@@ -611,7 +651,15 @@ class Position:
         day0_active: bool = False,
         applied: Optional[list[str]] = None,
     ) -> ExitDecision:
-        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math."""
+        """Layer 1: Buy-no has ~87.5% base win rate. Different exit math.
+
+        T6.4: routes the EV gate through HoldValue contract (previously
+        bypassed). When feature_flags.HOLD_VALUE_EXIT_COSTS is enabled,
+        exit decisions include fee + time opportunity cost. Sell price
+        for buy_no is current_market_price (native NO-space probability
+        from the orderbook); polymarket_fee formula p*(1-p) is symmetric
+        so passing current_market_price as best_bid is semantically OK.
+        """
         applied = list(applied or [])
         evidence_edge = conservative_forward_edge(forward_edge, self.entry_ci_width)
         edge_threshold = buy_no_edge_threshold(self.entry_ci_width)
@@ -623,7 +671,24 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                if hold_value_exit_costs_enabled():
+                    applied.append("hold_value_exit_costs_enabled")
+                    hold_value = HoldValue.compute_with_exit_costs(
+                        shares=shares,
+                        current_p_posterior=current_p_posterior,
+                        best_bid=current_market_price,
+                        hours_to_settlement=hours_to_settlement,
+                        fee_rate=exit_fee_rate(),
+                        daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    )
+                else:
+                    hold_value = HoldValue.compute(
+                        gross_value=shares * current_p_posterior,
+                        fee_cost=0.0,
+                        time_cost=0.0,
+                    )
+                sell_value = shares * current_market_price
+                if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
@@ -669,7 +734,24 @@ class Position:
             if self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
-                if shares * current_market_price <= shares * current_p_posterior:
+                if hold_value_exit_costs_enabled():
+                    applied.append("hold_value_exit_costs_enabled")
+                    hold_value = HoldValue.compute_with_exit_costs(
+                        shares=shares,
+                        current_p_posterior=current_p_posterior,
+                        best_bid=current_market_price,
+                        hours_to_settlement=hours_to_settlement,
+                        fee_rate=exit_fee_rate(),
+                        daily_hurdle_rate=exit_daily_hurdle_rate(),
+                    )
+                else:
+                    hold_value = HoldValue.compute(
+                        gross_value=shares * current_p_posterior,
+                        fee_cost=0.0,
+                        time_cost=0.0,
+                    )
+                sell_value = shares * current_market_price
+                if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
