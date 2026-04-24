@@ -301,10 +301,28 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         # constraint is only applied to NEW DBs (SQLite ALTER cannot add CHECK);
         # live tables rely on writer-level A6 enforcement.
         # Pairs with Gap A closure in step1_schema_audit.md.
+        #
+        # A4/C7 (2026-04-24, data-readiness-tail forensic closure): extend
+        # observation_instants_v2 with INV-14 identity spine (temperature_metric
+        # + physical_quantity + observation_field) + training_allowed +
+        # causality_status + source_role. Previously only authority +
+        # data_version + provenance_json were present. Per critic-opus P0.2
+        # finding C7: without these fields, Day0 features can train on
+        # fallback-mixed rows (e.g., `wu_icao` canonical + `openmeteo` fallback
+        # share data_version='v1'). Adding the columns unblocks the per-row
+        # identity check at the training-input boundary. All columns nullable
+        # on ALTER path (SQLite limitation); writer-side enforcement catches
+        # future INSERTs; existing 1.8M rows remain NULL until backfill.
         for alter_sql in [
             "ALTER TABLE observation_instants_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
             "ALTER TABLE observation_instants_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
             "ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN temperature_metric TEXT",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN physical_quantity TEXT",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN observation_field TEXT",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN training_allowed INTEGER DEFAULT 1",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN causality_status TEXT DEFAULT 'OK'",
+            "ALTER TABLE observation_instants_v2 ADD COLUMN source_role TEXT",
         ]:
             try:
                 conn.execute(alter_sql)
