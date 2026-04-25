@@ -1840,6 +1840,32 @@ def test_navigation_unclassified_requested_file_blocks_route(monkeypatch):
     assert payload["direct_blockers"][0]["code"] == "navigation_requested_file_unclassified"
 
 
+def test_navigation_missing_known_root_file_still_blocks_once(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation("script task", ["scripts/does_not_exist.py"])
+
+    assert payload["ok"] is False
+    assert len(payload["direct_blockers"]) == 1
+    assert payload["direct_blockers"][0]["code"] == "navigation_requested_file_unclassified"
+
+
 def test_navigation_synthetic_global_issue_is_advisory_without_strict_health(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 
