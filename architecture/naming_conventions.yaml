@@ -76,6 +76,8 @@ file_naming:
         refit_platt_v2.py: established repair command name (metric-aware v2 variant landed Phase 7A)
         replay_parity.py: established diagnostic command
         semantic_linter.py: established enforcement tool
+        snapshot_checksum.py: established rollback snapshot integrity command; noun-first name retained because checksum is the operator object
+        test_currency_audit.py: established midstream guardian panel audit command; name follows packet terminology rather than generic audit_ prefix
         topology_doctor_artifact_checks.py: artifact/work-record checker-family module imported by topology_doctor.py
         topology_doctor_cli.py: CLI facade for topology_doctor.py; not a separate authority surface
         topology_doctor_closeout.py: compiled closeout checker-family module imported by topology_doctor.py

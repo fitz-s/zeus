@@ -17,7 +17,11 @@ import pytest
 from src.state.db import get_connection, init_schema, query_portfolio_loader_view
 from src.state.schema.v2_schema import apply_v2_schema
 from scripts import verify_truth_surfaces as truth_surfaces
-from scripts.verify_truth_surfaces import build_training_readiness_report
+from scripts.verify_truth_surfaces import (
+    build_calibration_pair_rebuild_preflight_report,
+    build_platt_refit_preflight_report,
+    build_training_readiness_report,
+)
 
 
 def _now_utc() -> datetime:
@@ -163,6 +167,115 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         )
 
 
+def _seed_safe_observation_instant(conn):
+    conn.execute(
+        """
+        INSERT INTO observation_instants_v2 (
+            city, target_date, source, timezone_name, local_timestamp,
+            utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
+            imported_at, training_allowed, source_role, causality_status
+        ) VALUES (
+            'NYC', '2026-04-23', 'wu_icao_history', 'America/New_York',
+            '2026-04-23T10:00:00-04:00', '2026-04-23T14:00:00Z',
+            -240, 'hourly', 'F', '2026-04-23T14:05:00Z',
+            1, 'historical_hourly', 'OK'
+        )
+        """
+    )
+
+
+def _seed_rebuild_preflight_inputs(conn):
+    _seed_safe_observation_instant(conn)
+    snapshot_rows = [
+        (
+            "high",
+            "mx2t6_local_calendar_day_max",
+            "high_temp",
+            "tigge_mx2t6_local_calendar_day_max_v1",
+        ),
+        (
+            "low",
+            "mn2t6_local_calendar_day_min",
+            "low_temp",
+            "tigge_mn2t6_local_calendar_day_min_v1",
+        ),
+    ]
+    for metric, physical_quantity, observation_field, data_version in snapshot_rows:
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2 (
+                city, target_date, temperature_metric, physical_quantity,
+                observation_field, issue_time, valid_time, available_at,
+                fetch_time, lead_hours, members_json, model_version,
+                data_version, training_allowed, causality_status, authority,
+                provenance_json
+            ) VALUES (
+                'NYC', '2026-04-23', ?, ?, ?,
+                '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
+                '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
+                24.0, '[70.0, 71.0, 72.0]', 'tigge',
+                ?, 1, 'OK', 'VERIFIED', '{"source":"tigge"}'
+            )
+            """,
+            (metric, physical_quantity, observation_field, data_version),
+        )
+    conn.execute(
+        """
+        INSERT INTO observations (
+            city, target_date, source, high_temp, low_temp, unit,
+            station_id, fetched_at, authority,
+            high_provenance_metadata, low_provenance_metadata
+        ) VALUES (
+            'NYC', '2026-04-23', 'wu_icao_history', 72.0, 61.0, 'F',
+            'KNYC', '2026-04-23T23:55:00Z', 'VERIFIED',
+            '{"source":"wu","payload_hash":"high"}',
+            '{"source":"wu","payload_hash":"low"}'
+        )
+        """
+    )
+
+
+def _seed_platt_refit_pairs(conn, *, n_groups=15):
+    pair_specs = [
+        (
+            "high",
+            "high_temp",
+            "tigge_mx2t6_local_calendar_day_max_v1",
+        ),
+        (
+            "low",
+            "low_temp",
+            "tigge_mn2t6_local_calendar_day_min_v1",
+        ),
+    ]
+    for metric, observation_field, data_version in pair_specs:
+        for index in range(n_groups):
+            conn.execute(
+                """
+                INSERT INTO calibration_pairs_v2 (
+                    city, target_date, temperature_metric, observation_field,
+                    range_label, p_raw, outcome, lead_days, season, cluster,
+                    forecast_available_at, settlement_value, decision_group_id,
+                    authority, bin_source, data_version, training_allowed,
+                    causality_status
+                ) VALUES (
+                    'NYC', ?, ?, ?, '70-71F', ?, ?, 1.0, 'spring',
+                    'temperate', '2026-04-22T12:10:00Z', 71.0, ?,
+                    'VERIFIED', 'canonical_v2', ?, 1, 'OK'
+                )
+                """,
+                (
+                    f"2026-04-{index + 1:02d}",
+                    metric,
+                    observation_field,
+                    0.25 + (index / 100.0),
+                    index % 2,
+                    f"{metric}-decision-group-{index}",
+                    data_version,
+                ),
+            )
+
+
 def _create_legacy_settlements_table(conn):
     columns = [
         "id INTEGER PRIMARY KEY",
@@ -286,6 +399,171 @@ class TestTrainingReadinessP0:
         ]:
             assert checks[table]["status"] == "FAIL"
             assert checks[table]["count"] == 0
+
+    def test_rebuild_preflight_does_not_require_target_artifacts(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+        training_report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert report["mode"] == "calibration-pair-rebuild-preflight"
+        assert "calibration_pairs_v2" not in report["checks"]
+        assert "platt_models_v2" not in report["checks"]
+        assert training_report["ready"] is False
+        assert "empty_v2_table" in _blocker_codes(training_report)
+
+    def test_rebuild_preflight_fails_when_snapshot_identity_is_unsafe(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        conn.execute(
+            """
+            UPDATE ensemble_snapshots_v2
+            SET physical_quantity = '',
+                available_at = 'reconstructed_from_target_date'
+            WHERE temperature_metric = 'high'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+
+        assert report["ready"] is False
+        assert "ensemble_snapshots_v2.rebuild_input_unsafe" in _blocker_codes(report)
+        assert "empty_rebuild_eligible_snapshots" in _blocker_codes(report)
+
+    def test_rebuild_preflight_fails_when_wu_label_provenance_is_empty(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        conn.execute(
+            """
+            UPDATE observations
+            SET high_provenance_metadata = '{}'
+            WHERE source = 'wu_icao_history'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+
+        assert report["ready"] is False
+        blockers = _blocker_codes(report)
+        assert "observations.verified_without_provenance" in blockers
+        assert "observations.wu_empty_provenance" in blockers
+        assert report["checks"]["observations.high.wu_provenance_present"]["count"] == 1
+
+    def test_rebuild_preflight_fails_when_observation_instant_is_unsafe(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET source_role = 'fallback', causality_status = 'UNKNOWN'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "observation_instants_v2.training_role_unsafe" in blockers
+        assert "observation_instants_v2.causality_unsafe" in blockers
+
+    def test_platt_refit_preflight_does_not_require_existing_platt_models(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_platt_refit_pairs(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_platt_refit_preflight_report(db_path)
+
+        assert report["ready"] is True
+        assert report["mode"] == "platt-refit-preflight"
+        assert "platt_models_v2" not in report["checks"]
+        assert report["checks"]["calibration_pairs_v2.high.mature_bucket_present"]["status"] == "PASS"
+        assert report["checks"]["calibration_pairs_v2.low.mature_bucket_present"]["status"] == "PASS"
+
+    def test_platt_refit_preflight_fails_when_pair_inputs_are_unsafe(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_platt_refit_pairs(conn)
+        conn.execute(
+            """
+            UPDATE calibration_pairs_v2
+            SET p_raw = 1.2, causality_status = 'UNKNOWN', decision_group_id = ''
+            WHERE temperature_metric = 'high'
+              AND target_date = '2026-04-01'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_platt_refit_preflight_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "calibration_pairs_v2.p_raw_domain_unsafe" in blockers
+        assert "calibration_pairs_v2.causality_unsafe" in blockers
+        assert "calibration_pairs_v2.decision_group_missing" in blockers
+
+    def test_rebuild_live_write_refuses_when_preflight_is_not_ready(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        from scripts import rebuild_calibration_pairs_v2
+
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+
+        monkeypatch.setattr(
+            rebuild_calibration_pairs_v2.sys,
+            "argv",
+            [
+                "rebuild_calibration_pairs_v2.py",
+                "--no-dry-run",
+                "--force",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert rebuild_calibration_pairs_v2.main() == 1
+        assert "preflight is NOT_READY" in capsys.readouterr().err
+
+    def test_refit_live_write_refuses_when_preflight_is_not_ready(
+        self,
+        tmp_path,
+        monkeypatch,
+        capsys,
+    ):
+        from scripts import refit_platt_v2
+
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        monkeypatch.setattr(
+            refit_platt_v2.sys,
+            "argv",
+            [
+                "refit_platt_v2.py",
+                "--no-dry-run",
+                "--force",
+                "--db",
+                str(db_path),
+            ],
+        )
+
+        assert refit_platt_v2.main() == 1
+        assert "preflight is NOT_READY" in capsys.readouterr().err
 
     def test_training_readiness_fails_when_required_truth_surfaces_are_empty(self, tmp_path):
         db_path = tmp_path / "sparse-world.db"

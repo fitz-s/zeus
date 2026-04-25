@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Refit metric-aware Platt v2 models behind dry-run and preflight gates.
+# Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
+
 """Refit Platt calibration models from calibration_pairs_v2 (high track).
 
 Phase 4D — reads high-track calibration pairs from ``calibration_pairs_v2``
@@ -57,6 +61,7 @@ from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 from src.calibration.metric_specs import METRIC_SPECS
+from scripts.verify_truth_surfaces import SHARED_DB, build_platt_refit_preflight_report
 
 _, _, MIN_DECISION_GROUPS = calibration_maturity_thresholds()  # level3 = refit threshold
 
@@ -114,6 +119,16 @@ def _fetch_pairs_for_bucket(
           AND decision_group_id != ''
           AND p_raw IS NOT NULL
     """, (metric_identity.temperature_metric, cluster, season, data_version)).fetchall()
+
+
+def _assert_platt_refit_preflight_ready(db_path: Path) -> None:
+    report = build_platt_refit_preflight_report(db_path)
+    if not report["ready"]:
+        blocker_codes = sorted({item["code"] for item in report["blockers"]})
+        raise RuntimeError(
+            "Refusing live Platt v2 refit: platt-refit preflight is "
+            f"{report['status']} ({', '.join(blocker_codes)})"
+        )
 
 
 def _fit_bucket(
@@ -328,6 +343,14 @@ def main() -> int:
         help="Path to the world DB (default: production zeus-world.db).",
     )
     args = parser.parse_args()
+
+    db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
+    if not args.dry_run:
+        try:
+            _assert_platt_refit_preflight_ready(db_path_for_preflight)
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
 
     if args.db_path:
         conn = sqlite3.connect(args.db_path)

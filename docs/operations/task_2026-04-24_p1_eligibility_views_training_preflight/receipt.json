@@ -1,40 +1,41 @@
 {
-  "task": "P1.5 eligibility views/adapters and training preflight planning",
+  "task": "P1.5a eligibility preflight implementation",
   "packet": "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md"
   ],
-  "packet_status": "planning_only_active",
+    "packet_status": "implementation_ready_to_commit",
   "prior_commits": {
     "p1_4_planning": "da1662f",
     "p1_4_implementation": "df9ece5",
-    "p1_4_control_surface_closeout": "50cd713"
+    "p1_4_control_surface_closeout": "50cd713",
+    "p1_5_planning": "07c86d8"
   },
   "required_law": [
     "AGENTS.md",
-    "workspace_map.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
     "docs/operations/current_data_state.md",
-    "docs/operations/current_source_validity.md",
-    "docs/operations/known_gaps.md",
-    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/11_data_readiness_ruling.md",
-    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/17_apply_order.md",
-    "architecture/AGENTS.md",
-    "scripts/AGENTS.md",
-    "tests/AGENTS.md",
-    "src/state/AGENTS.md",
-    "src/calibration/AGENTS.md"
-  ],
-  "allowed_files": [
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "architecture/topology.yaml",
-    "architecture/docs_registry.yaml",
-    "docs/operations/AGENTS.md",
-    "docs/operations/current_state.md",
+        "docs/operations/current_source_validity.md",
+        "docs/operations/known_gaps.md",
+        "architecture/AGENTS.md",
+        "scripts/AGENTS.md",
+        "tests/AGENTS.md",
+        "architecture/naming_conventions.yaml",
+        "architecture/script_manifest.yaml",
+        "architecture/test_topology.yaml"
+    ],
+    "allowed_files": [
+        "architecture/naming_conventions.yaml",
+        "architecture/test_topology.yaml",
+        "scripts/verify_truth_surfaces.py",
+        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/refit_platt_v2.py",
+        "scripts/topology_doctor_test_checks.py",
+        "tests/test_truth_surface_health.py",
+        "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
@@ -42,74 +43,86 @@
   "forbidden_files": [
     "state/**",
     ".code-review-graph/graph.db",
-    "src/**",
-    "src/state/**",
-    "src/calibration/**",
+    "src/state/** schema/view DDL",
+    "src/calibration/** runtime library changes",
     "src/engine/**",
     "src/execution/**",
     "docs/authority/**",
-    "architecture/** except architecture/topology.yaml and architecture/docs_registry.yaml companion registry updates",
     "production DBs",
     "generated runtime JSON",
     "graph artifacts"
-  ],
-  "changed_files": [
-    "docs/AGENTS.md",
-    "docs/README.md",
-    "architecture/topology.yaml",
-    "architecture/docs_registry.yaml",
-    "docs/operations/AGENTS.md",
-    "docs/operations/current_state.md",
+    ],
+    "changed_files": [
+        "architecture/naming_conventions.yaml",
+        "architecture/test_topology.yaml",
+        "scripts/verify_truth_surfaces.py",
+        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/refit_platt_v2.py",
+        "scripts/topology_doctor_test_checks.py",
+        "tests/test_truth_surface_health.py",
+        "docs/operations/current_state.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
   ],
-  "future_implementation_candidates": [
-    "scripts/verify_truth_surfaces.py",
-    "scripts/rebuild_calibration_pairs_v2.py",
-    "scripts/refit_platt_v2.py",
-    "tests/test_truth_surface_health.py",
-    "tests/test_phase7a_metric_cutover.py",
-    "tests/test_calibration_bins_canonical.py"
-  ],
-  "planning_decisions": [
-    "P1.5 planning commit is docs/control-surface only",
-    "future implementation starts with script-side preflight/adapters, not K0 state-schema views",
-    "preflight modes must separate full training readiness from calibration-pair rebuild preflight and Platt-refit preflight",
-    "src/state schema/view DDL, including observation_instants_current semantics, requires a separate state-schema packet",
-    "broad replay/live/runtime consumer rewiring remains P3",
-    "settlements_v2 and market_events_v2 population or legacy settlement promotion remains P4"
-  ],
+  "implementation_decisions": [
+    "Add read-only calibration-pair rebuild preflight mode instead of changing src/state eligibility views",
+    "Add read-only Platt-refit preflight mode instead of using full training-readiness as a circular gate",
+        "Keep training-readiness as the end-to-end readiness verdict requiring downstream artifacts",
+        "Guard repair script operator live-write CLI entry points only, preserving direct function-level regression testability",
+        "Apply only small topology hygiene fixes needed by the post-merge topology-reform gates; do not widen into trading/source behavior",
+        "Do not touch production DBs, state schema/view DDL, runtime/replay consumers, or P4 market/settlement population"
+    ],
   "subagent_reviews": [
     {
       "role": "scout",
-      "verdict": "mapped implementation seams and contract risks"
+      "verdict": "mapped exact code seams, tests, schema columns, and hazards"
     },
     {
       "role": "architect",
-      "verdict": "PASS planning-only; BLOCK implementation-first, K0 schema-first, P3-widened, or P4-widened variants"
-    }
-  ],
+      "verdict": "PASS narrow P1.5a: additive read-only preflight modes plus live CLI guards; BLOCK state-schema/P3/P4/full-readiness-gate variants"
+    },
+        {
+            "role": "critic",
+            "verdict": "PASS after excluding forbidden runtime artifacts from submit diff; no remaining blocking logic issue in P1.5a slice"
+        },
+        {
+            "role": "verifier",
+            "verdict": "PASS: current diff exactly matches 11 receipt files; no state/** or unrelated topology WIP in submit diff"
+        }
+    ],
   "tests_evidence": [
     "python3 scripts/topology_doctor.py --task-boot-profiles --json -> ok",
-    "python3 scripts/topology_doctor.py --fatal-misreads --json -> ok",
-    "python3 scripts/topology_doctor.py --navigation --task \"P1.5 eligibility views adapters training preflight planning\" --files <planning files> --json -> scoped allowed files plus known global docs/source/history-lore red context",
-    "python3 scripts/topology_doctor.py --navigation --task \"P1.5 planning packet map maintenance companions\" --files <expanded planning files> --json -> companion registry files allowed plus known global red context",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <expanded planning files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
-    "python3 scripts/topology_doctor.py --work-record --changed-files <expanded planning files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
-    "python3 scripts/topology_doctor.py --change-receipts --changed-files <expanded planning files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
-    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
-    "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <expanded planning files> --json -> ok",
-    "python3 -m json.tool docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json -> ok",
-    "git diff --check -> ok",
-    "architect review -> PASS planning-only",
-    "critic review -> PASS",
-    "verifier review -> PASS"
+        "python3 scripts/topology_doctor.py --fatal-misreads --json -> ok",
+        "python3 scripts/topology_doctor.py --navigation --task \"add read-only diagnostic modes to verify_truth_surfaces for P1.5 preflight\" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --json -> allowed files",
+        "python3 scripts/topology_doctor.py --navigation --task \"add read-only diagnostic modes to verify_truth_surfaces for existing P1.5 preflight checks without DB mutation\" --files <P1.5a files> --json -> allowed files plus known global red context",
+        "python3 scripts/topology_doctor.py --navigation --task \"restore P1.5a read-only preflight modes and CLI live guards after branch recovery and topology reform\" --files <restored P1.5a files> --json -> ok",
+        "python3 scripts/topology_doctor.py --navigation --task \"repair test topology manifest classification and skip metadata after topology reform merge\" --files architecture/test_topology.yaml scripts/topology_doctor_test_checks.py tests/test_topology_doctor.py --json -> ok",
+        ".venv/bin/python -m py_compile scripts/verify_truth_surfaces.py scripts/rebuild_calibration_pairs_v2.py scripts/refit_platt_v2.py -> ok",
+        ".venv/bin/python -m py_compile scripts/topology_doctor_test_checks.py -> ok",
+        ".venv/bin/python -m pytest -q tests/test_truth_surface_health.py::TestTrainingReadinessP0 -> 50 passed",
+        ".venv/bin/python -m pytest -q tests/test_topology_doctor.py -k \"scripts or tests_mode\" -> 16 passed, 226 deselected",
+        ".venv/bin/python scripts/semantic_linter.py --check scripts/verify_truth_surfaces.py scripts/rebuild_calibration_pairs_v2.py scripts/refit_platt_v2.py tests/test_truth_surface_health.py -> ok",
+        ".venv/bin/python scripts/verify_truth_surfaces.py --mode calibration-pair-rebuild-preflight --world-db state/zeus-world.db --json -> NOT_READY expected",
+        ".venv/bin/python scripts/verify_truth_surfaces.py --mode platt-refit-preflight --world-db state/zeus-world.db --json -> NOT_READY expected",
+        ".venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json -> NOT_READY expected",
+        "python3 scripts/topology_doctor.py --scripts --json -> ok",
+        "python3 scripts/topology_doctor.py --tests --json -> ok",
+        "python3 scripts/topology_doctor.py --naming-conventions --json -> ok",
+        "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <touched script/test files> --json -> ok",
+        "python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files plus topology hygiene files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
+        "python3 scripts/topology_doctor.py --work-record --changed-files <P1.5a files plus topology hygiene files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
+        "python3 scripts/topology_doctor.py --change-receipts --changed-files <P1.5a files plus topology hygiene files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <P1.5a files plus topology hygiene files> --json -> ok",
+        "git diff --name-only exact-set check against receipt files -> ok; no state/**",
+        "git diff --check -> ok"
   ],
   "known_red_context": [
-    "topology navigation reports pre-existing global docs/source/history-lore issues",
-    "Code Review Graph is stale/branch-mismatched derived context and not authority",
-    "state/daemon-heartbeat.json and state/status_summary.json are dirty runtime artifacts and forbidden for this packet",
-    "current production world DB is expected to remain NOT_READY until later P/P4 work clears blockers"
+        "topology navigation reports pre-existing global docs/source/history-lore issues",
+        "full tests/test_topology_doctor.py still has 13 unrelated live-topology/global-health failures; focused script/test topology gates pass",
+        "Code Review Graph is stale/branch-mismatched derived context and not authority",
+        "state/daemon-heartbeat.json and state/status_summary.json runtime artifacts were preserved in local stash entries and are forbidden for this packet",
+    "current production world DB remains NOT_READY until later P/P4 work clears source-role, provenance, v2 artifact, and settlement/market blockers"
   ]
 }
