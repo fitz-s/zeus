@@ -41,7 +41,10 @@ Role: single live control pointer for the repo.
   checks fail closed when training-allowed obs_v2 rows lack JSON provenance
   identity. This packet did not mutate production DB rows, create schemas/views,
   overhaul `INSERT OR REPLACE`, quarantine existing legacy observations, or
-  jump to P2/P3/P4.
+  jump to P2/P3/P4. The implementation landed in commit `11c6315`, which also
+  carried a concurrent `pytest.ini` test-isolation change already pushed to
+  origin before the packet-specific commit command could create a separate
+  Lore commit.
 
 ## Required evidence
 
