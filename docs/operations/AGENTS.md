@@ -34,11 +34,13 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-No execution packet is currently frozen after P1.5a closeout. The next packet
-candidate is the Immediate 4.1.A-C group in
-`task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`, but
-`current_state.md` must name a new active packet after fresh phase-entry
-planning before code edits begin.
+No execution packet is currently frozen after P1.5a closeout. Branch facts show
+the Immediate 4.1.A-C group in
+`task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md` is
+already landed and closed in the midstream work log. The next packet must be
+selected from unresolved POST_AUDIT_HANDOFF 4.2+ work by fresh phase-entry
+planning, and `current_state.md` must name the new active packet before code
+edits begin.
 
 ### Packet Evidence
 

@@ -1209,6 +1209,18 @@ Verification:
 - `git diff --check -- <changed files>` -> clean.
 Next: Start forensic P0 containment with a readiness command plus fail-closed empty-table guards; do not run calibration/training before P0-P3 pass.
 
+### Post-P1.5 pointer reconciliation - 2026-04-24
+
+After P1.5a closeout, the live control pointer was rechecked against current
+branch facts before opening the next packet. `scripts/onboard_cities.py` no
+longer writes settlement scaffolds, `tests/test_settlements_unique_migration.py`
+contains the NULL-metric trigger antibody, `append_event_and_project` is absent
+from `src/state/ledger.py` and `src/state/db.py`, and `src/execution/harvester.py`
+already documents REOPEN-2 `(city, target_date, temperature_metric)` idempotency.
+Therefore POST_AUDIT_HANDOFF Immediate 4.1.A-C remains closed by this P-1 entry
+and must not be reused as the next execution packet. Resume by selecting the next
+unresolved 4.2+ slice through fresh phase-entry planning.
+
 ## Session docs reorganization (2026-04-24 end-of-session)
 
 | Docs reorg after W4 closure + T6.4-phase2 + Day0-canonical-event shipping | closed | pending | Three-doc update reflecting CONDITIONAL-achieved reality + structured remaining work:

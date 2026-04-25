@@ -34,13 +34,17 @@ Role: single live control pointer for the repo.
 ## Freeze point
 
 - Current freeze: P1.5a is closed. No code edit is authorized from the closed
-  packet. The next packet candidate is POST_AUDIT_HANDOFF Immediate 4.1.A-C,
-  but it must complete a fresh phase-entry plan with root/scoped `AGENTS.md`
-  rereads, topology navigation, important-file exploration, and reviewer
-  challenge before implementation. No production DB mutation,
-  `settlements_v2` population, market-identity backfill, replay/live/runtime
-  consumer rewiring, or legacy-settlement promotion is authorized by this
-  pointer.
+  packet. Current branch facts show POST_AUDIT_HANDOFF Immediate 4.1.A-C
+  already landed and closed in
+  `docs/operations/task_2026-04-23_midstream_remediation/work_log.md`
+  (`P-1 Pre-P0 Post-Audit Cleanup -- 2026-04-24`), so it must not be
+  re-opened as the next execution packet without new evidence. The next packet
+  must be selected from unresolved POST_AUDIT_HANDOFF 4.2+ work by fresh
+  phase-entry planning with root/scoped `AGENTS.md` rereads, topology
+  navigation, important-file exploration, and reviewer challenge before
+  implementation. No production DB mutation, `settlements_v2` population,
+  market-identity backfill, replay/live/runtime consumer rewiring, or
+  legacy-settlement promotion is authorized by this pointer.
 
 ## Current fact companions
 
@@ -55,7 +59,8 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Open and freeze the next small packet from
+- Open and freeze the next unresolved small packet from
   `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-  Immediate 4.1.A-C after fresh phase-entry planning.
+  4.2+ after fresh phase-entry planning. Likely starting point: Forensic P0
+  readiness/containment, but no execution packet is frozen yet.
 - Preserve unrelated dirty work and concurrent in-flight edits.
