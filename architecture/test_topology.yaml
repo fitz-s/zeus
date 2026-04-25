@@ -64,6 +64,17 @@ test_trust_policy:
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-21"}
+    tests/test_decision_evidence_runtime_invocation.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_exit_evidence_audit.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_harvester_dr33_live_enablement.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_hold_value_exit_costs.py: {created: "2026-04-24", last_used: "2026-04-24"}
+    tests/test_neg_risk_passthrough.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_parse_canonical_bin_label.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_realized_fill.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_settlements_verified_row_integrity.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
 
 categories:
   core_law_antibody:
@@ -144,6 +155,17 @@ categories:
     - tests/test_harvester_metric_identity.py
     - tests/test_ingest_grib_law5_antibody.py
     - tests/test_settlements_unique_migration.py
+    - tests/test_canonical_position_current_schema_alignment.py
+    - tests/test_decision_evidence_entry_emission.py
+    - tests/test_decision_evidence_persistence.py
+    - tests/test_decision_evidence_runtime_invocation.py
+    - tests/test_executor_typed_boundary.py
+    - tests/test_harvester_dr33_live_enablement.py
+    - tests/test_no_deprecated_make_family_id_calls.py
+    - tests/test_parse_canonical_bin_label.py
+    - tests/test_pe_reconstruction_relationships.py
+    - tests/test_settlements_authority_trigger.py
+    - tests/test_settlements_verified_row_integrity.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
@@ -217,6 +239,12 @@ categories:
     - tests/test_dt1_commit_ordering.py
     - tests/test_dt1_savepoint_integration.py
     - tests/test_dt4_chain_three_state.py
+    - tests/test_exit_evidence_audit.py
+    - tests/test_hold_value_exit_costs.py
+    - tests/test_neg_risk_passthrough.py
+    - tests/test_realized_fill.py
+    - tests/test_tick_size.py
+    - tests/test_vig_treatment_provenance.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py

@@ -32,6 +32,18 @@ def check_ownership_schema(api: Any, schema: dict[str, Any] | None = None) -> li
             )
         ]
     for fact_type, spec in fact_types.items():
+        if not isinstance(spec, dict):
+            issues.append(
+                api.issue(
+                    "ownership_required_field_missing",
+                    f"architecture/topology_schema.yaml:ownership.fact_types.{fact_type}",
+                    "ownership fact type value is not a dict",
+                    owner_manifest="architecture/topology_schema.yaml",
+                    repair_kind="propose_owner_manifest",
+                    blocking_modes=("strict_full_repo", "closeout"),
+                )
+            )
+            continue
         missing = sorted(REQUIRED_OWNERSHIP_FIELDS - set(spec or {}))
         for field in missing:
             issues.append(
@@ -77,6 +89,18 @@ def check_module_manifest_maturity(api: Any, module_manifest: dict[str, Any] | N
     module_manifest = module_manifest or api.load_module_manifest()
     issues: list[Any] = []
     for module_id, spec in (module_manifest.get("modules") or {}).items():
+        if not isinstance(spec, dict):
+            issues.append(
+                api.issue(
+                    "module_manifest_maturity_invalid",
+                    f"architecture/module_manifest.yaml:{module_id}",
+                    "module manifest row is not a dict",
+                    owner_manifest="architecture/module_manifest.yaml",
+                    repair_kind="update_companion",
+                    blocking_modes=("strict_full_repo", "closeout"),
+                )
+            )
+            continue
         maturity = spec.get("maturity")
         if maturity not in allowed:
             issues.append(

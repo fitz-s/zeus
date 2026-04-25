@@ -1434,7 +1434,7 @@ entries:
   current_role: dated TIGGE data/training handoff snapshot; evidence only
   canonical_replaced_by:
   - docs/runbooks/tigge_cloud_download.md
-  - docs/authority/zeus_dual_track_architecture.md
+  - docs/authority/zeus_current_architecture.md
   next_action: retain_as_evidence
   lifecycle_state: transitional
   coverage_scope: exact

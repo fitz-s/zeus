@@ -89,9 +89,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap; not universal authority |
-| `task_2026-04-13_topology_compiler_program.md` | packet evidence | Historical/active topology compiler program tracker |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |
-| `task_2026-04-14_session_backlog.md` | packet evidence | Session backlog snapshot from calibration-refactor work |
+
 | `task_2026-04-16_dual_track_metric_spine/` | packet evidence | Dual-track metric spine refactor packet and evidence |
 | `task_2026-04-16_function_naming_freshness/` | packet evidence | Governance package for naming and freshness metadata |
 | `task_2026-04-19_code_review_graph_topology_bridge/` | packet evidence | Code Review Graph topology-first integration package |
