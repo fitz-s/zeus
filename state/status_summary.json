@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-04-25T19:16:59.611321+00:00",
+  "timestamp": "2026-04-25T20:01:59.661110+00:00",
   "process": {
     "pid": 17530,
     "mode": "live",
@@ -40,15 +40,15 @@
       "daily_loss_source": "risk_state_history",
       "weekly_loss_source": "risk_state_history",
       "daily_loss_reference": {
-        "row_id": 8414,
-        "checked_at": "2026-04-24T19:15:35.925170+00:00",
+        "row_id": 8459,
+        "checked_at": "2026-04-24T20:00:44.322369+00:00",
         "initial_bankroll": 150.0,
         "total_pnl": 0.0,
         "effective_bankroll": 150.0
       },
       "weekly_loss_reference": {
-        "row_id": 297,
-        "checked_at": "2026-04-18T19:15:30.495758+00:00",
+        "row_id": 342,
+        "checked_at": "2026-04-18T20:00:37.775125+00:00",
         "initial_bankroll": 150.0,
         "total_pnl": 0.0,
         "effective_bankroll": 150.0
@@ -212,8 +212,8 @@
     "recent_stage_counts": {}
   },
   "cycle": {
-    "mode": "day0_capture",
-    "started_at": "2026-04-25T19:16:58.648269+00:00",
+    "mode": "opening_hunt",
+    "started_at": "2026-04-25T20:01:58.645336+00:00",
     "monitors": 0,
     "exits": 0,
     "candidates": 0,
@@ -256,7 +256,7 @@
   ],
   "truth": {
     "mode": "live",
-    "generated_at": "2026-04-25T19:16:59.611321+00:00",
+    "generated_at": "2026-04-25T20:01:59.661110+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,
