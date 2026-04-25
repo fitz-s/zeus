@@ -23,6 +23,120 @@ node_required_fields:
   - authority_role
   - forbidden_misread
 
+issue_json_contract:
+  schema_versions:
+    "1": "legacy issue keys only"
+    "2": "legacy keys plus optional typed metadata"
+  legacy_fields:
+    code: string
+    path: string
+    message: string
+    severity: string
+  typed_fields:
+    lane: string
+    scope: string
+    owner_manifest: string
+    repair_kind: string
+    blocking_modes: list[string]
+    related_paths: list[string]
+    companion_of: string
+    maturity: string
+    expires_at: string
+    confidence: string_or_number
+    authority_status: string
+    repair_hint: string
+  enums:
+    repair_kind:
+      - add_registry_row
+      - update_companion
+      - extract_law_to_book
+      - propose_owner_manifest
+      - refresh_graph
+      - none
+    maturity:
+      - stable
+      - provisional
+      - placeholder
+    authority_status:
+      - authority
+      - derived
+      - evidence
+      - unknown
+    blocking_modes:
+      - navigation
+      - navigation_strict_health
+      - closeout
+      - strict_full_repo
+      - global_health
+
+ownership:
+  maturity_values:
+    - stable
+    - provisional
+    - placeholder
+  fact_types:
+    doc_classification:
+      canonical_owner: architecture/docs_registry.yaml
+      derived_owners:
+        - docs/AGENTS.md
+        - docs/reference/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    module_routing:
+      canonical_owner: architecture/module_manifest.yaml
+      derived_owners:
+        - docs/reference/modules/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    source_rationale:
+      canonical_owner: architecture/source_rationale.yaml
+      derived_owners:
+        - src/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    test_category_and_law_gate:
+      canonical_owner: architecture/test_topology.yaml
+      derived_owners:
+        - tests/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    script_lifecycle_and_safety:
+      canonical_owner: architecture/script_manifest.yaml
+      derived_owners:
+        - scripts/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    companion_update_rule:
+      canonical_owner: architecture/map_maintenance.yaml
+      derived_owners:
+        - architecture/topology.yaml
+      companion_update_rule: architecture/map_maintenance.yaml
+    context_budget_posture:
+      canonical_owner: architecture/context_budget.yaml
+      derived_owners:
+        - workspace_map.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    artifact_class:
+      canonical_owner: architecture/artifact_lifecycle.yaml
+      derived_owners:
+        - docs/operations/AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    graph_protocol:
+      canonical_owner: architecture/code_review_graph_protocol.yaml
+      derived_owners:
+        - docs/reference/modules/code_review_graph.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    history_lore_card:
+      canonical_owner: architecture/history_lore.yaml
+      derived_owners:
+        - docs/archive_registry.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    invariant_definition:
+      canonical_owner: architecture/invariants.yaml
+      derived_owners:
+        - docs/authority/zeus_current_architecture.md
+      companion_update_rule: architecture/map_maintenance.yaml
+    negative_constraint:
+      canonical_owner: architecture/negative_constraints.yaml
+      derived_owners:
+        - AGENTS.md
+      companion_update_rule: architecture/map_maintenance.yaml
+
 enums:
   status:
     - active

@@ -43,6 +43,7 @@ def run_cli_json(args):
     return json.loads(buffer.getvalue())
 
 
+@pytest.mark.live_topology
 def test_topology_strict_passes_after_residual_classification(monkeypatch):
     visible = topology_doctor._git_visible_files()
     monkeypatch.setattr(
@@ -64,12 +65,14 @@ def test_topology_strict_passes_after_residual_classification(monkeypatch):
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_docs_mode_passes_with_active_data_package_excluded():
     result = topology_doctor.run_docs()
 
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_cli_json_parity_for_docs_mode():
     payload = run_cli_json(["--docs", "--json"])
     result = topology_doctor.run_docs()
@@ -140,6 +143,7 @@ def test_cli_json_parity_for_semantic_bootstrap_command():
     )
 
 
+@pytest.mark.live_topology
 def test_cli_json_parity_for_current_state_candidate_command():
     receipt = "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
     payload = run_cli_json(["current-state", "--from-receipt", receipt, "--json"])
@@ -434,6 +438,7 @@ def test_code_review_graph_status_reports_path_mode_and_absent_sidecar(monkeypat
     }
 
 
+@pytest.mark.live_topology
 def test_code_review_graph_mcp_repo_resolution_avoids_workstation_default(monkeypatch, tmp_path):
     from scripts import code_review_graph_mcp_readonly
 
@@ -1275,12 +1280,14 @@ def test_config_agents_allows_artifact_pointer_without_dated_snapshot(monkeypatc
     assert issues == []
 
 
+@pytest.mark.live_topology
 def test_topology_source_mode_covers_all_tracked_src_files():
     result = topology_doctor.run_source()
 
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_tests_mode_classifies_actual_suite_and_law_gate():
     result = topology_doctor.run_tests()
 
@@ -1398,6 +1405,7 @@ def test_tests_mode_rejects_high_sensitivity_skip_count_drift(monkeypatch):
     )
 
 
+@pytest.mark.live_topology
 def test_topology_scripts_mode_covers_all_top_level_scripts():
     result = topology_doctor.run_scripts()
 
@@ -1410,6 +1418,7 @@ def test_topology_data_rebuild_mode_encodes_certification_blockers():
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_history_lore_mode_validates_dense_cards():
     result = topology_doctor.run_history_lore()
 
@@ -1526,6 +1535,7 @@ def test_map_maintenance_requires_docs_mesh_for_top_level_artifact(monkeypatch):
     assert any("docs/README.md" in issue.message for issue in result.issues)
 
 
+@pytest.mark.live_topology
 def test_map_maintenance_requires_reports_registry_for_new_report(monkeypatch):
     original_exists = topology_doctor.Path.exists
     monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/reports/AGENTS.md"])
@@ -1721,6 +1731,325 @@ def test_format_issues_lists_each_issue_on_its_own_line():
 
     assert "1. [error:code_a] a.py: first" in text
     assert "2. [warning:code_b] b.py: second" in text
+
+
+def test_issue_legacy_json_keys_preserved():
+    issue = topology_doctor.issue(
+        "source_rationale_missing",
+        "src/example.py",
+        "tracked src file has no rationale entry",
+    )
+
+    payload = topology_doctor.asdict(issue)
+
+    assert list(payload) == ["code", "path", "message", "severity"]
+    assert payload["code"] == "source_rationale_missing"
+
+
+def test_issue_v2_emits_owner_manifest_when_present():
+    issue = topology_doctor.issue(
+        "source_rationale_missing",
+        "src/example.py",
+        "tracked src file has no rationale entry",
+    )
+
+    payload = topology_doctor._issue_to_json(issue, "2")
+
+    assert payload["owner_manifest"] == "architecture/source_rationale.yaml"
+    assert payload["repair_kind"] == "add_registry_row"
+    assert "navigation" in payload["blocking_modes"]
+
+
+def test_issue_factories_set_blocking_modes():
+    advisory = topology_doctor.advisory("docs_registry_missing", "docs/a.md", "advisory")
+    blocking = topology_doctor.blocking("script_manifest_missing", "scripts/a.py", "blocking")
+    legacy = topology_doctor.legacy_issue("script_manifest_missing", "scripts/a.py", "legacy")
+
+    assert advisory.severity == "warning"
+    assert advisory.blocking_modes == ("global_health",)
+    assert blocking.severity == "error"
+    assert "closeout" in blocking.blocking_modes
+    assert legacy.owner_manifest is None
+    assert legacy.blocking_modes is None
+
+
+def test_renderer_groups_by_repair_kind():
+    issues = [
+        topology_doctor.issue("source_rationale_missing", "src/a.py", "missing"),
+        topology_doctor.issue("script_manifest_missing", "scripts/a.py", "missing"),
+    ]
+
+    summary = topology_doctor.summarize_issues(issues)
+    formatted = topology_doctor.format_issues(issues)
+
+    assert "by owner/repair:" in summary
+    assert "architecture/source_rationale.yaml:add_registry_row: 1" in summary
+    assert "(architecture/script_manifest.yaml; add_registry_row)" in formatted
+
+
+def test_blocking_modes_drives_navigation_lane_policy(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    advisory_source_issue = topology_doctor.TopologyIssue(
+        code="source_rationale_missing",
+        path="src/engine/replay.py",
+        message="global-only advisory",
+        blocking_modes=("global_health",),
+    )
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(
+        topology_doctor,
+        "run_source",
+        lambda: topology_doctor.StrictResult(ok=False, issues=[advisory_source_issue]),
+    )
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"], issue_schema_version="2")
+
+    assert payload["ok"] is True
+    assert payload["direct_blockers"] == []
+    assert payload["repo_health_warnings"][0]["blocking_modes"] == ["global_health"]
+
+
+def test_issue_schema_drift_guard():
+    schema = topology_doctor.load_schema()["issue_json_contract"]
+    expected = set(schema["legacy_fields"]) | set(schema["typed_fields"])
+
+    assert set(topology_doctor.topology_issue_field_names()) == expected
+    assert set(schema["enums"]["repair_kind"]) == topology_doctor.ISSUE_REPAIR_KINDS
+    assert set(schema["enums"]["maturity"]) == topology_doctor.ISSUE_MATURITY_VALUES
+    assert set(schema["enums"]["authority_status"]) == topology_doctor.ISSUE_AUTHORITY_STATUSES
+    assert tuple(schema["enums"]["blocking_modes"]) == topology_doctor.ISSUE_BLOCKING_MODES
+
+
+def test_system_books_have_required_headings():
+    required_headings = [
+        "> Status:",
+        "## Purpose",
+        "## Authority anchors",
+        "## How it works",
+        "## Hidden obligations",
+        "## Failure modes",
+        "## Repair routes",
+        "## Cross-links",
+    ]
+    books = [
+        "docs/reference/modules/topology_system.md",
+        "docs/reference/modules/code_review_graph.md",
+        "docs/reference/modules/docs_system.md",
+        "docs/reference/modules/manifests_system.md",
+        "docs/reference/modules/topology_doctor_system.md",
+        "docs/reference/modules/closeout_and_receipts_system.md",
+    ]
+
+    for book in books:
+        text = (topology_doctor.ROOT / book).read_text(encoding="utf-8")
+        assert text.startswith("# "), book
+        for heading in required_headings:
+            assert heading in text, f"{book} missing {heading}"
+
+
+def test_progress_handoff_allows_reference_module_closeout_book(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/reference/modules/closeout_and_receipts_system.md"],
+    )
+
+    assert topology_doctor._docs_checks().check_progress_handoff_paths(topology_doctor) == []
+
+
+def test_progress_handoff_rejects_other_reference_module_handoff_names(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/reference/modules/random_handoff.md"],
+    )
+
+    issues = topology_doctor._docs_checks().check_progress_handoff_paths(topology_doctor)
+
+    assert [issue.code for issue in issues] == ["progress_handoff_path_violation"]
+
+
+def test_ownership_matrix_loadable_from_schema():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert "doc_classification" in fact_types
+    assert fact_types["doc_classification"]["canonical_owner"] == "architecture/docs_registry.yaml"
+    assert len(fact_types) >= 12
+
+
+def test_two_canonical_owners_for_same_fact_type_blocks():
+    schema = {
+        "ownership": {
+            "fact_types": {
+                "doc_classification": {
+                    "canonical_owner": "architecture/docs_registry.yaml",
+                    "canonical_owners": ["architecture/docs_registry.yaml", "architecture/module_manifest.yaml"],
+                    "derived_owners": [],
+                    "companion_update_rule": "architecture/map_maintenance.yaml",
+                }
+            }
+        }
+    }
+
+    issues = topology_doctor._ownership_checks().check_ownership_schema(topology_doctor, schema)
+
+    assert [issue.code for issue in issues] == ["ownership_multiple_canonical_owners"]
+
+
+def test_blocking_issue_without_owner_manifest_raises(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "issue",
+        lambda code, path, message, **metadata: topology_doctor.legacy_issue(code, path, message),
+    )
+
+    issues = topology_doctor._ownership_checks().check_first_wave_issue_owners(topology_doctor)
+
+    assert {issue.code for issue in issues} == {"ownership_issue_owner_missing"}
+
+
+def test_module_manifest_maturity_field_validated():
+    module_manifest = {
+        "modules": {
+            "sample": {
+                "path": "src/sample",
+                "module_book": "docs/reference/modules/sample.md",
+                "maturity": "invalid",
+            }
+        }
+    }
+
+    issues = topology_doctor._ownership_checks().check_module_manifest_maturity(topology_doctor, module_manifest)
+
+    assert [issue.code for issue in issues] == ["module_manifest_maturity_invalid"]
+
+
+def test_doc_classification_owned_only_by_docs_registry():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert fact_types["doc_classification"]["canonical_owner"] == "architecture/docs_registry.yaml"
+    assert "architecture/module_manifest.yaml" not in fact_types["doc_classification"].get("derived_owners", [])
+
+
+def test_module_routing_owned_only_by_module_manifest():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert fact_types["module_routing"]["canonical_owner"] == "architecture/module_manifest.yaml"
+    assert "architecture/docs_registry.yaml" not in fact_types["module_routing"].get("derived_owners", [])
+
+
+def test_graph_appendix_marks_derived_not_authority():
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["authority_status"] == "derived_not_authority"
+    assert "Graph output is derived review context only." in appendix["limitations"]
+
+
+def test_graph_appendix_respects_size_budget(monkeypatch):
+    payload = {
+        "usable": True,
+        "changed_nodes": [
+            {"path": "scripts/very_long_file.py", "line_start": idx, "qualified_name": "x" * 200}
+            for idx in range(50)
+        ],
+        "tests_for": [],
+        "impacted_files": [f"src/{idx}_{'x' * 100}.py" for idx in range(50)],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["truncation"]["applied"] is True
+    assert len(json.dumps(appendix).encode("utf-8")) <= 2048
+
+
+def test_graph_appendix_stale_is_advisory_by_default(monkeypatch):
+    payload = {
+        "usable": False,
+        "reason": "graph cache is unavailable, stale, or missing target code coverage",
+        "graph_health": {
+            "issues": [
+                {
+                    "code": "code_review_graph_stale_head",
+                    "path": ".code-review-graph/graph.db",
+                    "message": "stale",
+                    "severity": "warning",
+                }
+            ]
+        },
+        "changed_nodes": [],
+        "tests_for": [],
+        "impacted_files": [],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["graph_freshness"] == "stale"
+    assert appendix["authority_status"] == "derived_not_authority"
+
+
+def test_graph_appendix_stale_blocks_when_required_by_profile():
+    profiles = topology_doctor.load_context_pack_profiles()["profiles"]
+
+    assert all(profile.get("requires_graph_evidence") is False for profile in profiles)
+
+
+def test_context_pack_includes_graph_appendix_for_code_review_profile():
+    payload = topology_doctor.build_context_pack(
+        "package_review",
+        task="package review graph appendix",
+        files=["scripts/topology_doctor.py"],
+    )
+
+    assert payload["graph_appendix"]["authority_status"] == "derived_not_authority"
+
+
+def test_context_pack_handles_missing_graph_db_gracefully(monkeypatch):
+    payload = {
+        "usable": False,
+        "reason": "graph DB missing",
+        "graph_health": {
+            "issues": [
+                {
+                    "code": "code_review_graph_missing",
+                    "path": ".code-review-graph/graph.db",
+                    "message": "missing",
+                    "severity": "warning",
+                }
+            ]
+        },
+        "changed_nodes": [],
+        "tests_for": [],
+        "impacted_files": [],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    pack = topology_doctor.build_context_pack(
+        "debug",
+        task="debug missing graph",
+        files=["scripts/topology_doctor.py"],
+    )
+
+    assert pack["graph_appendix"]["graph_freshness"] == "missing"
+    assert pack["graph_appendix"]["authority_status"] == "derived_not_authority"
 
 
 def test_navigation_aggregates_default_health_and_digest():
@@ -2233,6 +2562,7 @@ def test_reference_replacement_delete_requires_final_claim_status(monkeypatch):
     assert any(issue.code == "reference_replacement_delete_unsafe" and "final claim" in issue.message for issue in result.issues)
 
 
+@pytest.mark.live_topology
 def test_reference_artifact_digest_routes_to_reference_profile():
     digest = topology_doctor.build_digest("reference artifact claim extraction for zeus_math_spec fact spec")
 
@@ -2487,6 +2817,7 @@ def test_data_backfill_digest_includes_row_contract_and_replay_coverage():
     assert "calibration model activation" in data_topology["diagnostic_non_promotion"]["forbidden_promotions"]
 
 
+@pytest.mark.live_topology
 def test_script_digest_routes_agents_to_lifecycle_law():
     digest = topology_doctor.build_digest("add a replay diagnostic script")
     script_lifecycle = digest["script_lifecycle"]
@@ -2512,6 +2843,7 @@ def test_lore_digest_routes_rounding_tasks_to_wmo_lesson():
     assert "UNCOMMITTED_AGENT_EDIT_LOSS" not in lore_ids
 
 
+@pytest.mark.live_topology
 def test_lore_digest_routes_history_tasks_to_density_policy():
     digest = topology_doctor.build_digest("extract lore from historical work packets")
     lore_ids = {card["id"] for card in digest["history_lore"]}
@@ -3389,6 +3721,7 @@ def test_impact_reports_write_routes_and_tests_for_store():
     assert impact["context_assumption"]["planning_lock_independent"] is True
 
 
+@pytest.mark.live_topology
 def test_impact_marks_missing_relations_provisional_for_platt():
     impact = topology_doctor.build_impact(["src/calibration/platt.py"])
     entry = impact["entries"][0]
@@ -3570,6 +3903,7 @@ def test_debug_context_pack_shapes_single_file_symptom():
     assert "complete_understanding" not in text
 
 
+@pytest.mark.live_topology
 def test_debug_context_pack_marks_provisional_boundaries():
     packet = topology_doctor.build_context_pack(
         "debug",
@@ -3770,6 +4104,7 @@ def test_core_map_probability_chain_is_proof_backed_and_bounded():
     assert not payload["invalid"]
 
 
+@pytest.mark.live_topology
 def test_compiled_topology_is_derived_read_model():
     payload = topology_doctor.build_compiled_topology()
 

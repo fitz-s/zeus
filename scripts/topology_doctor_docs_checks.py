@@ -386,6 +386,7 @@ def check_progress_handoff_paths(api: Any) -> list[Any]:
         allowed = (
             rel.startswith("docs/operations/task_")
             or rel in {"docs/operations/current_state.md"}
+            or rel == "docs/reference/modules/closeout_and_receipts_system.md"
         )
         if not allowed:
             issues.append(
