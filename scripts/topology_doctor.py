@@ -82,21 +82,6 @@ _NAVIGATION_MODE_POLICY = {
     "strict_full_repo": "all_errors_block",
     "global_health": "advisory_counts",
 }
-_NAVIGATION_KNOWN_ROOTS = {
-    ".github",
-    "architecture",
-    "config",
-    "docs",
-    "raw",
-    "scripts",
-    "src",
-    "tests",
-}
-_NAVIGATION_KNOWN_ROOT_FILES = {
-    "AGENTS.md",
-    "requirements.txt",
-    "workspace_map.md",
-}
 
 
 @dataclass(frozen=True)
@@ -1141,11 +1126,6 @@ def _navigation_requested_file_issues(requested_paths: list[str]) -> list[dict[s
             continue
         if (ROOT / normalized).exists():
             continue
-        first_part = normalized.split("/", 1)[0]
-        if "/" in normalized and first_part in _NAVIGATION_KNOWN_ROOTS:
-            continue
-        if normalized in _NAVIGATION_KNOWN_ROOT_FILES:
-            continue
         issues.append(
             {
                 "lane": "navigation",
@@ -1184,12 +1164,13 @@ def run_navigation(task: str, files: list[str] | None = None, *, strict_health: 
     requested_paths = files or []
     digest = build_digest(task, requested_paths)
     route_issues = _navigation_requested_file_issues(requested_paths)
-    issues = [
+    health_issues = [
         {"lane": lane, **asdict(issue)}
         for lane, result in checks.items()
         for issue in result.issues
-    ] + route_issues
-    direct_blockers = route_issues + _navigation_direct_blockers(issues, requested_paths)
+    ]
+    issues = health_issues + route_issues
+    direct_blockers = route_issues + _navigation_direct_blockers(health_issues, requested_paths)
     repo_health_warnings = [issue for issue in issues if issue not in direct_blockers]
     legacy_blocking = [issue for issue in issues if issue.get("severity") == "error"]
     route_context = {
