@@ -1305,9 +1305,23 @@ def build_digest(task: str, files: list[str] | None = None) -> dict[str, Any]:
 
 
 def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str]) -> bool:
+    """Check if an issue's path is in scope for the requested navigation paths.
+
+    Handles both real file paths and semantic IDs (e.g. schema key paths).
+    Guards against path traversal via resolve() check.
+    """
     if not requested_paths:
         return False
     normalized = issue_path.split(":", 1)[0].rstrip("/")
+    # Path traversal guard: resolve and verify the normalized path stays under ROOT
+    try:
+        resolved = (ROOT / normalized).resolve()
+        if not resolved.is_relative_to(ROOT.resolve()):
+            return False
+    except (OSError, ValueError):
+        # Malformed path — treat as non-file semantic ID; fall through to
+        # lane-level matching below.
+        pass
     for requested in requested_paths:
         scoped = requested.rstrip("/")
         same_path = normalized == scoped
@@ -1332,13 +1346,23 @@ def _issue_blocks_mode(issue: dict[str, Any], mode: str) -> bool:
 
 
 def _navigation_direct_blockers(issues: list[dict[str, Any]], requested_paths: list[str]) -> list[dict[str, Any]]:
-    return [
-        issue
-        for issue in issues
-        if issue.get("severity") == "error"
-        and _issue_blocks_mode(issue, "navigation")
-        and _navigation_issue_path_in_scope(str(issue.get("path", "")), requested_paths)
-    ]
+    blockers = []
+    for issue in issues:
+        if issue.get("severity") != "error":
+            continue
+        if not _issue_blocks_mode(issue, "navigation"):
+            continue
+        path = str(issue.get("path", ""))
+        # Match by path scope OR by lane for semantic-ID issues that
+        # don't correspond to a repo file path (Bug #1: non-file paths
+        # like schema key paths were silently dropped).
+        if _navigation_issue_path_in_scope(path, requested_paths):
+            blockers.append(issue)
+        elif issue.get("lane") == "navigation":
+            # Lane-level match: navigation-lane errors always surface
+            # regardless of whether their path is a real file.
+            blockers.append(issue)
+    return blockers
 
 
 def _navigation_requested_file_issues(requested_paths: list[str]) -> list[dict[str, Any]]:

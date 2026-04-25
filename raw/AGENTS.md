@@ -7,6 +7,7 @@ These files are input evidence, not canonical strategy authority.
 
 | Path | Purpose |
 |------|---------|
+| `README.md` | Directory scope orientation for the untracked raw data surface |
 | `oracle_shadow_snapshots/` | Per-city oracle API snapshots captured near settlement windows for oracle-error-rate calibration evidence |
 
 ## Rules

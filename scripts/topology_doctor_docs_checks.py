@@ -176,12 +176,14 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
                         "non-markdown docs artifact must live in a declared artifact/evidence subroot",
                     )
                 )
-        if path.name in {"plan.md", "progress.md"} and not rel.startswith("docs/operations/task_"):
+        if path.name in {"plan.md", "progress.md"} and not (
+            rel.startswith("docs/operations/task_") or rel.startswith("docs/archives/packets/task_")
+        ):
             issues.append(
                 api._issue(
                     "docs_generic_name",
                     rel,
-                    "generic docs names are only allowed inside active task folders",
+                    "generic docs names are only allowed inside active task folders or archived packets",
                 )
             )
         if " " in rel:

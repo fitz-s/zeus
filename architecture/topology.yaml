@@ -431,6 +431,18 @@ state_surfaces:
     zone: state
     authority_role: runtime_support
     forbidden_misread: Auto-pause fail-closed tombstone is runtime evidence, not canonical trade truth.
+  - path: "state/*.sha256"
+    status: active
+    scope: audit
+    zone: state
+    authority_role: audit_sidecar
+    forbidden_misread: SHA-256 hash sidecar for DB backup integrity verification; not trade truth.
+  - path: "state/*.md5"
+    status: active
+    scope: audit
+    zone: state
+    authority_role: audit_sidecar
+    forbidden_misread: MD5 hash sidecar for DB backup integrity verification; not trade truth.
 
 required_active_pointers:
   - path: "docs/operations/current_state.md"
