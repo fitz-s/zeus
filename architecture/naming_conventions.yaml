@@ -44,6 +44,7 @@ file_naming:
       exceptions:
         _yaml_bootstrap.py: import bootstrap helper for script entrypoints
         _tigge_common.py: shared helpers for extract_tigge_* extractors (Phase 7B-followup extraction)
+        _zpkt_scope.py: shared scope helper for Packet Runtime (zpkt) CLI and pre-commit hook
         antibody_scan.py: established operator diagnostic name
         apply_recommended_controls.py: established control-plane repair entrypoint
         automation_analysis.py: established automation diagnostic report
@@ -101,6 +102,7 @@ file_naming:
         topology_doctor.py: established topology compiler/checker
         venus_autonomy_gate.py: established Venus boundary gate
         venus_sensing_report.py: established Venus boundary report
+        zpkt.py: Packet Runtime CLI; noun command retained as the operator-facing packet lifecycle tool
     packet_ephemeral:
       pattern: "task_YYYY-MM-DD_<purpose>.py"
       required_metadata:
