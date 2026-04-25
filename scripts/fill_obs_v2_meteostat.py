@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-22; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Fill sparse WU observation_instants_v2 gaps from Meteostat bulk hourly archives.
+# Reuse: Verify fallback source allowlist and provenance identity before changing row construction.
 # Created: 2026-04-22
-# Last reused/audited: 2026-04-22
+# Last reused/audited: 2026-04-25
 # Authority basis: subagent research 2026-04-22 → bulk CSV archive for
 #                  sparse-WU ICAO stations. Closes the 12-hour Ogimet
 #                  serialization gap for 5 sparse cities.
@@ -42,6 +45,7 @@ volume is typically <10% of the original problem, so the existing
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sqlite3
@@ -57,6 +61,7 @@ if str(_REPO_ROOT) not in sys.path:
 from src.config import cities_by_name  # noqa: E402
 from src.data.meteostat_bulk_client import (  # noqa: E402
     ICAO_TO_WMO,
+    METEOSTAT_BULK_URL,
     fetch_meteostat_bulk,
     meteostat_source_tag,
 )
@@ -71,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "obs_v2_meteostat_fill_log.jsonl"
+OBS_V2_METEOSTAT_FILL_PARSER_VERSION = "obs_v2_meteostat_bulk_fill_v2"
 
 
 def _append_log(path: Path, entry: dict) -> None:
@@ -162,6 +168,24 @@ def _fill_one_city(
                             "raw_obs_count": obs.observation_count,
                             "aggregation": "meteostat_hourly_single_value",
                             "fallback_reason": "sparse_wu_plus_slow_ogimet",
+                            "payload_hash": _sha256_json(
+                                {
+                                    "city": obs.city,
+                                    "target_date": obs.target_date,
+                                    "source": source_tag,
+                                    "station_id": obs.station_id,
+                                    "wmo_id": ICAO_TO_WMO[icao],
+                                    "utc_timestamp": obs.utc_timestamp,
+                                    "hour_max_raw_ts": obs.hour_max_raw_ts,
+                                    "hour_min_raw_ts": obs.hour_min_raw_ts,
+                                    "observation_count": obs.observation_count,
+                                }
+                            ),
+                            "payload_scope": "obs_v2_meteostat_hour_bucket_source_identity",
+                            "source_url": METEOSTAT_BULK_URL.format(
+                                wmo=ICAO_TO_WMO[icao]
+                            ),
+                            "parser_version": OBS_V2_METEOSTAT_FILL_PARSER_VERSION,
                         },
                         separators=(",", ":"),
                     ),
@@ -208,6 +232,13 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args(argv)
+
+
+def _sha256_json(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def main(argv: Optional[list[str]] = None) -> int:

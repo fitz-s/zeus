@@ -45,6 +45,7 @@ body or bundle.
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
 | `operations/task_2026-04-25_p0_market_events_preflight/` | Closed POST_AUDIT 4.2.C implementation packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` | Closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` | Closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet; route through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |

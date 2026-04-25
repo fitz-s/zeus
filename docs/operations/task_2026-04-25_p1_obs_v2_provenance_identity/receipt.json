@@ -1,0 +1,119 @@
+{
+  "task": "P1 obs_v2 provenance identity contract",
+  "packet": "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "src/data/AGENTS.md",
+    "architecture/AGENTS.md",
+    "docs/AGENTS.md",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md",
+    "architecture/test_topology.yaml",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/task_boot_profiles.yaml",
+    "architecture/fatal_misreads.yaml"
+  ],
+  "allowed_files": [
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "src/data/observation_instants_v2_writer.py",
+    "scripts/backfill_obs_v2.py",
+    "scripts/fill_obs_v2_dst_gaps.py",
+    "scripts/fill_obs_v2_meteostat.py",
+    "scripts/hko_ingest_tick.py",
+    "scripts/verify_truth_surfaces.py",
+    "tests/test_obs_v2_writer.py",
+    "tests/test_hk_rejects_vhhh_source.py",
+    "tests/test_truth_surface_health.py",
+    "tests/test_backfill_scripts_match_live_config.py",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".omx/**",
+    ".code-review-graph/graph.db",
+    "production DBs",
+    "src/state/** schema/view changes",
+    "src/engine/**",
+    "src/execution/**",
+    "P2 upsert/revision work",
+    "P3 safe-view migration",
+    "P4 data population",
+    "row-level quarantine or production DB mutation"
+  ],
+  "status": "closed",
+  "changed_files": [
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "src/data/observation_instants_v2_writer.py",
+    "scripts/backfill_obs_v2.py",
+    "scripts/fill_obs_v2_dst_gaps.py",
+    "scripts/fill_obs_v2_meteostat.py",
+    "scripts/hko_ingest_tick.py",
+    "scripts/verify_truth_surfaces.py",
+    "tests/test_obs_v2_writer.py",
+    "tests/test_hk_rejects_vhhh_source.py",
+    "tests/test_truth_surface_health.py",
+    "tests/test_backfill_scripts_match_live_config.py",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
+    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
+  ],
+  "implementation_semantics": [
+    "ObsV2Row rejects provenance JSON lacking payload_hash, parser_version, source identity, or station identity.",
+    "Active obs_v2 producers stamp deterministic sha256 payload identity over available row/source fields and label payload_scope when the hash is not a raw-provider byte hash.",
+    "WU source locators redact API keys and producer provenance uses non-secret Ogimet, Meteostat, or HKO source identity.",
+    "verify_truth_surfaces remains read-only and fails training readiness when training-allowed obs_v2 rows lack JSON provenance identity and dedicated payload columns are absent.",
+    "No production DB rows, schemas, views, upsert policy, quarantine policy, or P3/P4 consumers were changed."
+  ],
+  "tests_evidence": [
+    ".venv/bin/python -m py_compile src/data/observation_instants_v2_writer.py scripts/backfill_obs_v2.py scripts/fill_obs_v2_dst_gaps.py scripts/fill_obs_v2_meteostat.py scripts/hko_ingest_tick.py scripts/verify_truth_surfaces.py tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_truth_surface_health.py tests/test_backfill_scripts_match_live_config.py",
+    ".venv/bin/python -m pytest tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_backfill_scripts_match_live_config.py tests/test_truth_surface_health.py -q (123 passed, 5 skipped)",
+    ".venv/bin/python -m pytest tests/test_backfill_scripts_match_live_config.py -q (16 passed after producer behavior tests)",
+    "python3 scripts/topology_doctor.py --task-boot-profiles --json",
+    "python3 scripts/topology_doctor.py --fatal-misreads --json",
+    "python3 scripts/topology_doctor.py --tests --json",
+    "python3 scripts/topology_doctor.py --scripts --json",
+    "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet files> --json",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md --json",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md --json",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json --json",
+    "python3 scripts/topology_doctor.py --current-state-receipt-bound --json",
+    "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <packet files> --json",
+    "critic review PASS; non-blocking packet-accounting mismatch fixed; producer behavior tests added for DST-gap and Meteostat rows",
+    "git diff --check"
+  ],
+  "critic": {
+    "review": "PASS",
+    "residual_non_blockers": [
+      "DST-gap and Meteostat producers initially had only source-text tests; behavior-level row-construction tests were added after review.",
+      "tests/test_hk_rejects_vhhh_source.py was initially omitted from plan/receipt scope; packet evidence now includes it."
+    ]
+  },
+  "known_gaps": [
+    "Topology navigation for the full producer-script batch reports scope_expansion_required because the data-ingestion profile admits only the writer and direct writer tests; the architect-approved packet boundary is documented rather than changing topology admission here.",
+    "Existing unsafe production rows remain fail-closed but are not mutated in this packet."
+  ]
+}

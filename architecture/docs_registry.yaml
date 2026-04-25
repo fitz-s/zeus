@@ -514,7 +514,7 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: false
-  current_role: active or closed packet directories; route through current_state for the current active packet or latest closeout evidence
+  current_role: active or closed packet directories, including the closed P1 obs_v2 provenance identity packet; route through current_state for the current active packet or latest closeout evidence
   canonical_replaced_by: []
   next_action: archive_after_closeout
   lifecycle_state: transitional
