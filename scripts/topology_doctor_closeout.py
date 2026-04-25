@@ -59,13 +59,13 @@ def changed_files_touch(changed_files: list[str], patterns: tuple[str, ...]) -> 
     return any(path.startswith(pattern) for path in changed_files for pattern in patterns)
 
 
-def lane_summary(api: Any, result: Any) -> dict[str, Any]:
+def lane_summary(api: Any, result: Any, *, issue_schema_version: str = "1") -> dict[str, Any]:
     return {
         "ok": result.ok,
         "issue_count": len(result.issues),
         "blocking_count": len([issue for issue in result.issues if issue.severity == "error"]),
         "warning_count": len([issue for issue in result.issues if issue.severity == "warning"]),
-        "issues": [api.asdict(issue) for issue in result.issues],
+        "issues": [api._issue_to_json(issue, issue_schema_version) for issue in result.issues],
     }
 
 
@@ -103,7 +103,11 @@ def issue_in_scope(issue_path: str, changed_files: list[str]) -> bool:
 
 def scoped_result(api: Any, result: Any, changed_files: list[str]) -> Any:
     issues = [issue for issue in result.issues if issue_in_scope(issue.path, changed_files)]
-    blocking = [issue for issue in issues if issue.severity == "error"]
+    blocking = [
+        issue
+        for issue in issues
+        if issue.severity == "error" and api._issue_blocks_mode(api._issue_to_json(issue, "2"), "closeout")
+    ]
     return api.StrictResult(ok=not blocking, issues=issues)
 
 
@@ -155,6 +159,20 @@ def selected_lanes(api: Any, changed_files: list[str]) -> dict[str, Any]:
     }
 
 
+def ensure_global_health_lanes(api: Any, unscoped_lanes: dict[str, Any]) -> None:
+    runners = {
+        "docs": api.run_docs,
+        "source": api.run_source,
+        "tests": api.run_tests,
+        "scripts": api.run_scripts,
+        "data_rebuild": api.run_data_rebuild,
+        "context_budget": api.run_context_budget,
+    }
+    for lane, runner in runners.items():
+        if lane not in unscoped_lanes:
+            unscoped_lanes[lane] = runner()
+
+
 def run_closeout(
     api: Any,
     *,
@@ -162,6 +180,7 @@ def run_closeout(
     plan_evidence: str | None = None,
     work_record_path: str | None = None,
     receipt_path: str | None = None,
+    issue_schema_version: str = "1",
 ) -> dict[str, Any]:
     actual_changed = effective_changed_files(api, changed_files, receipt_path=receipt_path)
     selected = selected_lanes(api, actual_changed)
@@ -206,15 +225,16 @@ def run_closeout(
             lanes["context_budget"] = unscoped_lanes["context_budget"]
         else:
             lanes["context_budget"] = scoped_result(api, unscoped_lanes["context_budget"], actual_changed)
+    ensure_global_health_lanes(api, unscoped_lanes)
 
     blocking_issues = [
-        {"lane": lane, **api.asdict(issue)}
+        {"lane": lane, **api._issue_to_json(issue, issue_schema_version)}
         for lane, result in lanes.items()
         for issue in result.issues
-        if issue.severity == "error"
+        if issue.severity == "error" and api._issue_blocks_mode(api._issue_to_json(issue, "2"), "closeout")
     ]
     warning_issues = [
-        {"lane": lane, **api.asdict(issue)}
+        {"lane": lane, **api._issue_to_json(issue, issue_schema_version)}
         for lane, result in lanes.items()
         for issue in result.issues
         if issue.severity == "warning"
@@ -226,7 +246,7 @@ def run_closeout(
         "authority_status": "generated_closeout_not_authority",
         "changed_files": actual_changed,
         "selected_lanes": selected,
-        "lanes": {lane: lane_summary(api, result) for lane, result in lanes.items()},
+        "lanes": {lane: lane_summary(api, result, issue_schema_version=issue_schema_version) for lane, result in lanes.items()},
         "global_health": {lane: global_health_summary(result) for lane, result in unscoped_lanes.items()},
         "telemetry": telemetry,
         "blocking_issues": blocking_issues,

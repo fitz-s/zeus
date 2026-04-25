@@ -87,6 +87,7 @@ file_naming:
         topology_doctor_docs_checks.py: docs checker-family module imported by topology_doctor.py
         topology_doctor_freshness_checks.py: freshness/naming checker-family module imported by topology_doctor.py
         topology_doctor_map_maintenance.py: map-maintenance checker-family module imported by topology_doctor.py
+        topology_doctor_ownership_checks.py: manifest ownership checker-family module imported by topology_doctor.py
         topology_doctor_packet_prefill.py: packet-prefill/invariant-slice builder-family module imported by topology_doctor.py
         topology_doctor_policy_checks.py: governance/policy checker-family module imported by topology_doctor.py
         topology_doctor_registry_checks.py: registry/root/docs-strict checker-family module imported by topology_doctor.py

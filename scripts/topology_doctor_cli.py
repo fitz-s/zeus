@@ -34,6 +34,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
     parser.add_argument("--module-books", action="store_true", help="Check module-book registration and launcher routing")
     parser.add_argument("--module-manifest", action="store_true", help="Check module manifest coherence and target paths")
+    parser.add_argument("--ownership", action="store_true", help="Check manifest fact ownership and issue owner metadata")
     parser.add_argument("--current-state-receipt-bound", action="store_true", help="Check current_state receipt-bound pointer integrity")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
@@ -70,6 +71,12 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--receipt-path", default=None, help="Receipt path for --change-receipts")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     parser.add_argument("--summary-only", action="store_true", help="Emit issue counts by code instead of full issue list")
+    parser.add_argument(
+        "--issue-schema-version",
+        choices=["1", "2"],
+        default="1",
+        help="Issue JSON schema version; v1 preserves legacy issue keys, v2 includes typed metadata",
+    )
     parser.add_argument("--task", default="", help="Task string for --navigation")
     parser.add_argument("--files", nargs="*", default=[], help="Files for --navigation")
     parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
@@ -105,6 +112,12 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     closeout.add_argument("--receipt-path", default=None, help="Receipt path")
     closeout.add_argument("--json", action="store_true", help="Emit JSON")
     closeout.add_argument("--summary-only", action="store_true", help="Emit compact lane summary")
+    closeout.add_argument(
+        "--issue-schema-version",
+        choices=["1", "2"],
+        default=argparse.SUPPRESS,
+        help="Issue JSON schema version for closeout issue payloads",
+    )
 
     context_pack = sub.add_parser("context-pack", help="Emit task-shaped agent context packet")
     context_pack.add_argument("--pack-type", default="auto", choices=["auto", "package_review", "debug"], help="Context-pack profile")
@@ -192,6 +205,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("context_packs", api.run_context_packs),
         ("module_books", api.run_module_books),
         ("module_manifest", api.run_module_manifest),
+        ("ownership", api.run_ownership),
         ("current_state_receipt_bound", api.run_current_state_receipt_bound),
         ("agents_coherence", api.run_agents_coherence),
         ("idioms", api.run_idioms),
@@ -209,33 +223,41 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
     for attr, fn in commands:
         if getattr(args, attr):
             result = fn()
-            api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+            api._print_strict(
+                result,
+                as_json=args.json,
+                summary_only=args.summary_only,
+                issue_schema_version=args.issue_schema_version,
+            )
             return 0 if result.ok else 1
     if args.invariants:
         render_payload(api, api.build_invariants_slice(args.zone), as_json=args.json)
         return 0
     if args.work_record:
         result = api.run_work_record(args.changed_files, args.work_record_path)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     if args.change_receipts:
         result = api.run_change_receipts(args.changed_files, args.receipt_path)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     if args.map_maintenance:
         result = api.run_map_maintenance(args.changed_files, mode=args.map_maintenance_mode)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     if args.freshness_metadata:
         result = api.run_freshness_metadata(args.changed_files)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     if args.code_review_graph_status:
         result = api.run_code_review_graph_status(args.changed_files)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     if args.navigation:
-        payload = api.run_navigation(args.task or "general navigation", args.files, strict_health=args.strict_health)
+        navigation_kwargs = {"strict_health": args.strict_health}
+        if args.issue_schema_version != "1":
+            navigation_kwargs["issue_schema_version"] = args.issue_schema_version
+        payload = api.run_navigation(args.task or "general navigation", args.files, **navigation_kwargs)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
@@ -259,7 +281,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         return 0 if payload["ok"] else 1
     if args.planning_lock:
         result = api.run_planning_lock(args.changed_files, args.plan_evidence)
-        api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
+        api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     return None
 
@@ -297,6 +319,7 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             plan_evidence=args.plan_evidence,
             work_record_path=args.work_record_path,
             receipt_path=args.receipt_path,
+            issue_schema_version=args.issue_schema_version,
         )
         if args.json:
             print(json.dumps(payload, indent=2))

@@ -39,6 +39,9 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 | `topology_system.md` | Dense module book for machine routing, topology doctor, and manifest law |
 | `docs_system.md` | Dense module book for the tracked docs mesh and trust-layer routing |
 | `code_review_graph.md` | Dense module book for derived structural context and graph boundaries |
+| `topology_doctor_system.md` | Dense system book for topology-doctor lanes, issue models, and CLI/closeout seams |
+| `manifests_system.md` | Dense system book for manifest ownership, fact-type boundaries, and repair routing |
+| `closeout_and_receipts_system.md` | Dense system book for scoped closeout, receipts, work records, and deferral evidence |
 
 ## Rules
 
