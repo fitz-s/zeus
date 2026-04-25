@@ -4,7 +4,7 @@ These tests verify cross-surface invariants that Venus detected as broken.
 They run against the live Zeus database, not test fixtures, because the
 invariants they check are about production state integrity.
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Protect canonical truth surfaces and P0 training-readiness fail-closed checks.
 # Reuse: Inspect high-sensitivity skip metadata and live-DB assumptions before treating full-file results as closeout evidence.
 
@@ -14,7 +14,12 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.state.db import get_connection, init_schema, query_portfolio_loader_view
+from src.state.db import (
+    get_connection,
+    get_trade_connection,
+    init_schema,
+    query_portfolio_loader_view,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from scripts import verify_truth_surfaces as truth_surfaces
 from scripts.verify_truth_surfaces import (
@@ -1502,7 +1507,7 @@ class TestGhostPositions:
         a decision was entered but never reached durable position truth or was
         never voided/settled after expiry.
         """
-        conn = get_connection()
+        conn = get_trade_connection()
         today = date.today()
         rows = conn.execute(
             "SELECT trade_id, bin_label FROM trade_decisions WHERE status='entered'"

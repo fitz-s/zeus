@@ -1,5 +1,8 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-04-02; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
+# Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 from __future__ import annotations
 
@@ -370,6 +373,61 @@ def test_init_schema_bootstraps_additive_canonical_support_tables():
         "source_module",
         "created_at",
     }.issubset(token_suppression_columns)
+    conn.close()
+
+
+def test_init_schema_creates_legacy_hourly_evidence_view():
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    view_record = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?",
+        ("v_evidence_hourly_observations",),
+    ).fetchone()
+    view_columns = [
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(v_evidence_hourly_observations)"
+        ).fetchall()
+    ]
+
+    assert view_record["type"] == "view"
+    assert view_columns == [
+        "id",
+        "city",
+        "obs_date",
+        "obs_hour",
+        "temp",
+        "temp_unit",
+        "source",
+    ]
+
+    conn.execute(
+        """
+        INSERT INTO hourly_observations (
+            city, obs_date, obs_hour, temp, temp_unit, source
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("Chicago", "2026-04-24", 15, 72.5, "F", "legacy_fixture"),
+    )
+
+    columns = "id, city, obs_date, obs_hour, temp, temp_unit, source"
+    legacy_row = dict(
+        conn.execute(
+            f"SELECT {columns} FROM hourly_observations"
+        ).fetchone()
+    )
+    evidence_row = dict(
+        conn.execute(
+            f"SELECT {columns} FROM v_evidence_hourly_observations"
+        ).fetchone()
+    )
+
+    assert evidence_row == legacy_row
     conn.close()
 
 

@@ -3,7 +3,7 @@
 Verifies that the linter detects bare FROM calibration_pairs queries
 outside the allowlist (src/calibration/store.py, migrations/).
 """
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Protect static semantic-linter antibodies for unsafe table/query usage.
 # Reuse: Inspect architecture/test_topology.yaml and scripts/semantic_linter.py allowlists before extending.
 from __future__ import annotations
@@ -321,6 +321,78 @@ def test_linter_allows_evidence_hourly_view_reference(tmp_path):
         adapter_file, adapter_file.read_text()
     )
     assert violations == []
+
+
+def test_linter_allows_evidence_hourly_view_definition(tmp_path):
+    """The schema may create the explicit evidence adapter over legacy rows."""
+    schema_file = tmp_path / "db_schema.py"
+    schema_file.write_text(
+        'conn.executescript("""\n'
+        'DROP VIEW IF EXISTS v_evidence_hourly_observations;\n'
+        'CREATE VIEW v_evidence_hourly_observations AS\n'
+        '    SELECT id, city, obs_date, obs_hour, temp, temp_unit, source\n'
+        '    FROM hourly_observations;\n'
+        '""")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        schema_file, schema_file.read_text()
+    )
+    assert violations == []
+
+
+def test_linter_rejects_filtered_evidence_hourly_view_definition(tmp_path):
+    """The evidence adapter exemption is only for exact passthrough DDL."""
+    schema_file = tmp_path / "filtered_db_schema.py"
+    schema_file.write_text(
+        'conn.executescript("""\n'
+        'CREATE VIEW v_evidence_hourly_observations AS\n'
+        '    SELECT id, city, obs_date, obs_hour, temp, temp_unit, source\n'
+        '    FROM hourly_observations\n'
+        "    WHERE source = 'wu';\n"
+        '""")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        schema_file, schema_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_rejects_joined_evidence_hourly_view_definition(tmp_path):
+    """The evidence adapter must not smuggle in joined legacy semantics."""
+    schema_file = tmp_path / "joined_db_schema.py"
+    schema_file.write_text(
+        'conn.executescript("""\n'
+        'CREATE VIEW v_evidence_hourly_observations AS\n'
+        '    SELECT hourly_observations.id, city, obs_date, obs_hour, temp, temp_unit, source\n'
+        '    FROM hourly_observations\n'
+        '    JOIN other_table ON other_table.id = hourly_observations.id;\n'
+        '""")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        schema_file, schema_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+
+
+def test_linter_rejects_bare_hourly_read_after_evidence_view_definition(tmp_path):
+    """The view DDL exemption must not hide unrelated legacy table reads."""
+    bad_file = tmp_path / "bad_schema_and_query.py"
+    bad_file.write_text(
+        'conn.executescript("""\n'
+        'CREATE VIEW v_evidence_hourly_observations AS\n'
+        '    SELECT id, city, obs_date, obs_hour, temp, temp_unit, source\n'
+        '    FROM hourly_observations;\n'
+        '""")\n'
+        'rows = conn.execute("SELECT * FROM hourly_observations")\n'
+    )
+    violations = _check_legacy_hourly_observations_select(
+        bad_file, bad_file.read_text()
+    )
+    assert len(violations) == 1
+    assert "P0_unsafe_table" in violations[0]
+    assert "SELECT * FROM hourly_observations" in violations[0]
 
 
 def test_linter_allows_hourly_observations_compatibility_writer(tmp_path):

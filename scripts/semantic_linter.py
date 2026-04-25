@@ -435,6 +435,41 @@ def _sql_call_literal_args(content: str) -> list[tuple[int, int, str]]:
     return literals
 
 
+def _is_evidence_hourly_observations_view_statement(sql: str) -> bool:
+    view_header_pattern = re.compile(
+        r"\bcreate\s+(?:temp(?:orary)?\s+)?view\s+"
+        r"(?:if\s+not\s+exists\s+)?v_evidence_hourly_observations\b",
+        re.IGNORECASE,
+    )
+    exact_view_pattern = re.compile(
+        r"create\s+(?:temp(?:orary)?\s+)?view\s+"
+        r"(?:if\s+not\s+exists\s+)?v_evidence_hourly_observations\s+as\s+"
+        r"select\s+id\s*,\s*city\s*,\s*obs_date\s*,\s*obs_hour\s*,\s*"
+        r"temp\s*,\s*temp_unit\s*,\s*source\s+from\s+"
+        r"(?:main\s*\.\s*)?hourly_observations",
+        re.IGNORECASE,
+    )
+    table_ref_pattern = re.compile(
+        r"\b(?:from|join)\s+(?:main\s*\.\s*)?hourly_observations\b",
+        re.IGNORECASE,
+    )
+    matched_view_statement = False
+    for statement in sql.split(";"):
+        normalized = re.sub(r"\s+", " ", statement).strip().lower()
+        if not normalized or not table_ref_pattern.search(normalized):
+            continue
+        view_header = view_header_pattern.search(normalized)
+        if not view_header:
+            return False
+        prefix = normalized[: view_header.start()]
+        if table_ref_pattern.search(prefix):
+            return False
+        if not exact_view_pattern.fullmatch(normalized[view_header.start() :]):
+            return False
+        matched_view_statement = True
+    return matched_view_statement
+
+
 def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> list[str]:
     """P0 containment: forbid bare canonical reads from hourly_observations.
 
@@ -471,6 +506,13 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
     for match in pattern.finditer(stripped_content):
         lineno = stripped_content[:match.start()].count("\n") + 1
         line = source_lines[lineno - 1] if lineno <= len(source_lines) else ""
+        statement_start = stripped_content.rfind(";", 0, match.start()) + 1
+        statement_end = stripped_content.find(";", match.end())
+        if statement_end == -1:
+            statement_end = len(stripped_content)
+        statement = stripped_content[statement_start:statement_end]
+        if _is_evidence_hourly_observations_view_statement(statement):
+            continue
         violations.append(
             f"{py_file}:{lineno}:\n"
             "  [ERROR] P0_unsafe_table: bare read from legacy hourly_observations.\n"
@@ -484,6 +526,8 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
             continue
         normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
         if not pattern.search(normalized_sql):
+            continue
+        if _is_evidence_hourly_observations_view_statement(normalized_sql):
             continue
         line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
         violations.append(
