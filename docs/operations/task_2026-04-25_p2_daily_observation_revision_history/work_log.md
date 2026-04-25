@@ -69,3 +69,12 @@ Next: Verify the daily-specific helper/schema + two script write-path updates, t
   - `pytest -q tests/test_backfill_completeness_guardrails.py tests/test_k2_live_ingestion_relationships.py tests/test_backfill_scripts_match_live_config.py` -> 77 passed
   - `pytest -q tests/test_db.py tests/test_architecture_contracts.py tests/test_truth_surface_health.py` -> 162 passed, 46 skipped
   - `python scripts/semantic_linter.py --check <A2 source/script/focused tests>` -> ok
+
+## 2026-04-25 -- closeout
+- Implementation landed and pushed at `91d2a35`.
+- Post-push runtime projection churn was isolated and pushed separately at
+  `9ea3c1f` and `edc6bb6` so the next package starts without mixed runtime
+  evidence.
+- Next packet selected: P3 4.5.B reader-gate closeout for
+  `observation_instants_v2` consumers. The next packet must not resolve the
+  separate metric-layer design question.

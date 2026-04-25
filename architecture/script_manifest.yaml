@@ -366,7 +366,7 @@ scripts:
   diagnose_truth_surfaces.py: {class: diagnostic}
   equity_curve.py: {class: diagnostic}
   etl_asos_wu_offset.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
-  etl_diurnal_curves.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
+  etl_diurnal_curves.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, required_tests: [tests/test_obs_v2_reader_gate.py, tests/test_truth_surface_health.py]}
   etl_forecast_skill_from_forecasts.py: {class: etl_writer}
   etl_historical_forecasts.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_hourly_observations.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
@@ -438,7 +438,7 @@ scripts:
   replay_parity.py: {class: diagnostic}
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
-  semantic_linter.py: {class: enforcement}
+  semantic_linter.py: {class: enforcement, required_tests: [tests/test_semantic_linter.py]}
   snapshot_checksum.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/snapshot_checksum.py --verify-all", reason: "SHA-256 rollback snapshot integrity tool; replaces MD5 (collision-broken) on the data-readiness rollback chain (pre-pg/pb/pf/pe_2026-04-23 snapshots). Streaming 4 MiB chunks so multi-GB DB files do not blow memory. Existing .md5 sidecars preserved for audit continuity. Follow-up to data-readiness workstream closure (docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md)."}
   test_currency_audit.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/test_currency_audit.py", reason: "T1.e midstream guardian panel dated-header audit; reads architecture/test_topology.yaml::midstream_guardian_panel and validates each listed file carries Created/Last reused audited/Authority basis markers per ~/CLAUDE.md file-header provenance rule"}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}

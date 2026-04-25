@@ -36,23 +36,23 @@ law or implementation permission.
 ### Active Execution Packet
 
 The active execution packet is
-`task_2026-04-25_p2_daily_observation_revision_history/plan.md`.
+`task_2026-04-25_p3_obs_v2_reader_gate/plan.md`.
 
 Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
 already landed and closed; do not reuse those slices as execution packets
 without new evidence. The latest packet hardened the
 `observation_instants_v2` writer and active obs_v2 producers so written rows
 carry payload/source/parser/station provenance identity without secret-bearing
-source locators. The P2 backfill completeness packet, P3 4.5.A metric-read
-linter closeout, and P3 residual replay usage-path guard are closed. This
+source locators. The P2 backfill completeness packet, P2 4.4.A1/A2 revision
+history packets, P3 4.5.A metric-read linter closeout, and P3 residual replay
+usage-path guard are closed. This
 router does not authorize production DB mutation, canonical v2 population,
 market-identity backfill, live executor DB authority, legacy-settlement
 promotion, broad P1 source-role/view work, live daily-ingest changes, row-level
-quarantine, P3 4.5.B reader-gate design, or P4 data population. The active
-packet may only add hash-checked revision-history behavior for the WU/HKO
-daily `observations` backfill scripts and update focused tests/control
-surfaces. Ogimet daily history is deferred until a stable payload-identity
-contract is planned.
+quarantine, shared obs_v2 view redesign, hourly high/low metric placement, or
+P4 data population. The active packet may only add non-metric reader gates to
+the canonical obs_v2 diurnal analytics consumer plus readiness/tests/control
+surfaces.
 
 ### Packet Evidence
 
@@ -134,7 +134,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, scope.yaml schema, and tooling_runtime test category |
 | `task_2026-04-25_p2_backfill_completeness_guardrails/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.B-lite packet for script-level backfill completeness manifests and fail-threshold guardrails |
 | `task_2026-04-25_p2_obs_v2_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A1 packet for schema-backed observation_instants_v2 hash-checked revision history |
-| `task_2026-04-25_p2_daily_observation_revision_history/` | packet evidence | Active POST_AUDIT_HANDOFF 4.4.A2 packet for daily WU/HKO observations backfill revision history |
+| `task_2026-04-25_p2_daily_observation_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A2 packet for daily WU/HKO observations backfill revision history |
+| `task_2026-04-25_p3_obs_v2_reader_gate/` | packet evidence | Active POST_AUDIT_HANDOFF 4.5.B-lite packet for obs_v2 reader-gate consumer hardening |
 | `task_2026-04-25_p3_settlement_metric_linter_closeout/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.5.A closeout packet for settlement metric-read lint enforcement |
 | `task_2026-04-25_p3_usage_path_residual_guards/` | packet evidence | Closed P3 residual usage-path guard packet for replay settlement metric predicates and hourly canonical-ban proof |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |

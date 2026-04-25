@@ -5,9 +5,10 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P2 4.4.A2 daily observation revision history active**
+- Mainline task: **Post-audit remediation mainline — P3 4.5.B-lite obs_v2 reader gate active**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
+- Prior P2 A2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
 - Prior P2 A1 closeout evidence packet: `docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
 - Prior P3 residual closeout evidence packet: `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
 - Prior P3 closeout evidence packet: `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
@@ -16,7 +17,7 @@ Role: single live control pointer for the repo.
 - Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
 - Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/receipt.json`
+- Receipt-bound source: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -63,20 +64,23 @@ Role: single live control pointer for the repo.
   identity and preserving the canonical `hourly_observations` ban proof. The
   P2 4.4.A1 then closed at `0837afc`, adding a schema-backed revision sink and
   replacing the central obs_v2 writer's silent `INSERT OR REPLACE` overwrite
-  path with hash-checked idempotence. The active packet is now P2 4.4.A2:
-  daily WU/HKO `observations` backfill revision history using a dedicated
-  daily revision table. Ogimet daily revision history is deferred until a
-  stable payload-identity contract is planned. Legacy `observation_instants`,
-  live daily ingest revision behavior, production DB mutation, row-level
-  quarantine, P3 4.5.B reader-gate design, and P4 data population remain out
-  of scope.
+  path with hash-checked idempotence. P2 4.4.A2 closed at `91d2a35`, adding a
+  daily-specific revision sink for WU/HKO `observations` backfill payload drift;
+  Ogimet daily revision history remains deferred until a stable payload-identity
+  contract is planned. The active packet is now P3 4.5.B-lite: add non-metric
+  reader gates to the canonical `observation_instants_current` analytics
+  consumer and training-readiness diagnostics without changing shared view
+  semantics or deciding hourly high/low metric placement. Legacy
+  `observation_instants`, live daily ingest revision behavior, production DB
+  mutation, row-level quarantine, full P3 4.5.B metric-layer design, and P4
+  data population remain out of scope.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
-- `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/work_log.md`
-- `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/scope.yaml`
-- `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/receipt.json`
+- `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
+- `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/work_log.md`
+- `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/scope.yaml`
+- `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json`
 
 ## Freeze point
 
@@ -90,15 +94,15 @@ Role: single live control pointer for the repo.
   `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
   remains a historical topology anchor only; it is not the active slice.
   WU/HKO daily observation writer provenance identity, obs_v2 provenance
-  identity, P2 4.4.B-lite backfill completeness guardrails, P3 4.5.A
-  settlement metric-read enforcement, and the P3 residual replay usage-path
-  guard and P2 4.4.A1 obs_v2 revision history are closed. The active
-  implementation scope is P2 4.4.A2 daily observation backfill revision history
-  only. This pointer does not authorize production DB mutation,
+  identity, P2 4.4.B-lite backfill completeness guardrails, P2 4.4.A1/A2
+  revision history, P3 4.5.A settlement metric-read enforcement, and the P3
+  residual replay usage-path guard are closed. The active implementation scope
+  is P3 4.5.B-lite obs_v2 reader-gate consumer hardening only. This pointer
+  does not authorize production DB mutation,
   `settlements_v2` population, market-identity backfill, live executor DB
   authority, legacy-settlement promotion, broad P1 source-role/view work,
-  row-level quarantine, live daily ingest changes, P3 4.5.B reader-gate design,
-  or P4 data population.
+  row-level quarantine, live daily ingest changes, shared obs_v2 view redesign,
+  hourly high/low metric placement, or P4 data population.
 
 ## Current fact companions
 
@@ -128,7 +132,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Implement and verify the active P2 4.4.A2 daily-observation writer-history
-  packet, then commit/push it before opening the next remediation packet.
+- Implement, review, verify, commit, and push the active P3 4.5.B-lite
+  obs_v2 reader-gate packet.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->
