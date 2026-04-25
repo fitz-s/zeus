@@ -1,5 +1,9 @@
+"""Replay settlement-value outcome antibodies."""
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Lock WU settlement-value replay scoring against winning-bin and market-event fixture drift.
+# Reuse: Pair with tests/test_run_replay_cli.py when changing replay settlement queries.
+# Authority basis: P3 usage-path residual guards packet; replay settlement-value outcome antibodies.
 from __future__ import annotations
-
 import json
 import sqlite3
 
@@ -7,6 +11,24 @@ from src.engine import replay as replay_module
 from src.engine.replay import derive_outcome_from_settlement_value
 from src.state.db import get_connection, init_backtest_schema, init_schema
 from src.types import Bin
+
+
+def _seed_market_event(conn, *, city: str, target_date: str, range_label: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO market_events
+        (market_slug, city, target_date, condition_id, token_id, range_label)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{city.lower()}-{target_date}-{range_label}",
+            city,
+            target_date,
+            f"condition-{city.lower()}-{target_date}-{range_label}",
+            f"token-{city.lower()}-{target_date}-{range_label}",
+            range_label,
+        ),
+    )
 
 
 def _run_wu_sweep(tmp_path, monkeypatch, *, winning_bin: str | None, value: float):
@@ -18,10 +40,17 @@ def _run_wu_sweep(tmp_path, monkeypatch, *, winning_bin: str | None, value: floa
     init_schema(world)
     world.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('NYC', '2026-04-03', ?, ?)
+        INSERT INTO settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', ?, ?, 'high')
         """,
         (winning_bin, value),
+    )
+    _seed_market_event(
+        world,
+        city="NYC",
+        target_date="2026-04-03",
+        range_label=winning_bin or "39-40°F",
     )
     world.execute(
         """
@@ -57,6 +86,16 @@ def _run_wu_sweep(tmp_path, monkeypatch, *, winning_bin: str | None, value: floa
     row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
     conn.close()
     return summary, row
+
+
+def _patch_connections(monkeypatch, trade_db, world_db, backtest_db) -> None:
+    def _trade_with_world():
+        conn = get_connection(trade_db)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
+        return conn
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", _trade_with_world)
+    monkeypatch.setattr(replay_module, "get_backtest_connection", lambda: get_connection(backtest_db))
 
 
 def test_wu_outcome_ignores_null_winning_bin(tmp_path, monkeypatch):
@@ -125,9 +164,16 @@ def test_wu_sweep_flags_invalid_probability_groups(tmp_path, monkeypatch):
     init_schema(world)
     world.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0)
+        INSERT INTO settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
         """
+    )
+    _seed_market_event(
+        world,
+        city="NYC",
+        target_date="2026-04-03",
+        range_label="39-40°F",
     )
     world.execute(
         """
@@ -171,6 +217,75 @@ def test_wu_sweep_flags_invalid_probability_groups(tmp_path, monkeypatch):
     assert skill["top_bin_total"] == 0
     assert skill["top_bin_accuracy"] is None
     assert skill["valid_group_forecast_skill"]["forecast_skill_rows"] == 0
+
+
+def test_trade_history_audit_uses_position_metric_for_settlement_match(tmp_path, monkeypatch):
+    trade_db = tmp_path / "trade.db"
+    world_db = tmp_path / "world.db"
+    backtest_db = tmp_path / "backtest.db"
+
+    world = get_connection(world_db)
+    init_schema(world)
+    world.execute(
+        """
+        INSERT INTO settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', '100°F+', 100.0, 'high')
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'low')
+        """
+    )
+    world.commit()
+    world.close()
+
+    trade = get_connection(trade_db)
+    init_schema(trade)
+    trade.execute(
+        """
+        INSERT INTO position_current
+        (position_id, phase, trade_id, market_id, city, cluster, target_date,
+         bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+         entry_price, p_posterior, last_monitor_prob, last_monitor_edge,
+         last_monitor_market_price, decision_snapshot_id, entry_method,
+         strategy_key, edge_source, discovery_mode, chain_state, order_id,
+         order_status, updated_at, temperature_metric)
+        VALUES ('pos-low', 'settled', 'pos-low', 'mkt', 'NYC',
+                'US-Northeast', '2026-04-03', '39-40°F', 'buy_yes', 'F',
+                5.0, 10.0, 5.0, 0.5, 0.6, 0.6, 0.1, 0.5, 'snap-low',
+                'entry', 'center_buy', 'edge', 'opening_hunt', 'on_chain',
+                'ord-low', 'filled', '2026-04-02T00:00:00Z', 'low')
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO outcome_fact
+        (position_id, strategy_key, settled_at, decision_snapshot_id, pnl, outcome)
+        VALUES ('pos-low', 'center_buy', '2026-04-04T00:00:00Z',
+                'snap-low', -5.0, 0)
+        """
+    )
+    trade.commit()
+    trade.close()
+    _patch_connections(monkeypatch, trade_db, world_db, backtest_db)
+
+    summary = replay_module.run_replay(
+        "2026-04-03",
+        "2026-04-03",
+        mode="trade_history_audit",
+    )
+
+    conn = get_connection(backtest_db)
+    row = conn.execute("SELECT * FROM backtest_outcome_comparison").fetchone()
+    conn.close()
+    assert summary.n_settlements == 1
+    assert row["settlement_value"] == 40.0
+    assert row["derived_wu_outcome"] == 1
+    assert row["divergence_status"] == "wu_win_trade_loss"
 
 
 def test_closed_bin_scores_from_settlement_value():

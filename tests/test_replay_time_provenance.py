@@ -1,3 +1,8 @@
+"""Replay point-in-time provenance antibodies."""
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Lock replay snapshot/decision reference selection to point-in-time evidence.
+# Reuse: Run with replay fidelity gates when changing ReplayContext reference lookup.
+# Authority basis: P3 usage-path residual guards packet; replay point-in-time provenance gate.
 from src.engine.replay import ReplayContext
 from src.state.db import get_connection, init_schema
 

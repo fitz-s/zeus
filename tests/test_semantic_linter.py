@@ -721,3 +721,34 @@ def test_h3_enforced_script_set_is_clean():
         )
 
     assert violations == []
+
+
+def test_h3_replay_source_is_clean():
+    """Replay settlement reads must preserve HIGH/LOW settlement identity."""
+    py_file = PROJECT_ROOT / "src" / "engine" / "replay.py"
+
+    violations = _check_settlements_metric_filter(py_file, py_file.read_text())
+
+    assert violations == []
+
+
+def test_canonical_paths_do_not_read_bare_hourly_observations():
+    """Canonical source paths cannot consume lossy legacy hourly rows directly."""
+    violations = []
+    for root in [
+        PROJECT_ROOT / "src" / "calibration",
+        PROJECT_ROOT / "src" / "engine",
+    ]:
+        for py_file in sorted(root.rglob("*.py")):
+            violations.extend(
+                _check_legacy_hourly_observations_select(
+                    py_file,
+                    py_file.read_text(),
+                )
+            )
+    for py_file in sorted((PROJECT_ROOT / "scripts").glob("rebuild*_v2.py")):
+        violations.extend(
+            _check_legacy_hourly_observations_select(py_file, py_file.read_text())
+        )
+
+    assert violations == []

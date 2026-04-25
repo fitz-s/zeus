@@ -1,0 +1,44 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-25_p3_usage_path_residual_guards
+status: in_progress
+branch: midstream_remediation
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+in_scope:
+- docs/operations/task_2026-04-25_p3_usage_path_residual_guards/**
+- src/engine/replay.py
+- tests/test_semantic_linter.py
+- tests/test_phase8_shadow_code.py
+- tests/test_backtest_settlement_value_outcome.py
+- tests/test_replay_time_provenance.py
+- architecture/test_topology.yaml
+- architecture/docs_registry.yaml
+- architecture/topology.yaml
+- docs/AGENTS.md
+- docs/README.md
+- docs/operations/AGENTS.md
+- docs/operations/current_state.md
+allow_companions:
+- AGENTS.md
+- workspace_map.md
+- docs/operations/current_data_state.md
+- docs/operations/current_source_validity.md
+- docs/operations/known_gaps.md
+- docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md
+- docs/authority/zeus_current_architecture.md
+- docs/authority/zeus_current_delivery.md
+- docs/reference/zeus_domain_model.md
+- architecture/source_rationale.yaml
+- architecture/task_boot_profiles.yaml
+- architecture/fatal_misreads.yaml
+- architecture/city_truth_contract.yaml
+- architecture/script_manifest.yaml
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- state/*.db
+- src/state/**
+- production DBs
+- P2 4.4.A upsert/revision-history redesign
+- P3 4.5.B observation_instants_v2 reader gate design
+- P4 data population

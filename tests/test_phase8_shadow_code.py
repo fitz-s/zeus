@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-18; last_reviewed=2026-04-18; last_reused=never
+# Lifecycle: created=2026-04-18; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Phase 8 R-BP..R-BQ antibodies: code-ready LOW shadow prerequisites.
 #          R-BP — run_replay public entry threads temperature_metric kwarg to
 #          _replay_one_settlement (S1); default 'high' backward compat preserved.
@@ -37,7 +37,12 @@ class TestRBPRunReplayMetricThreading:
     so every pre-P8 caller's behavior is unchanged.
     """
 
-    def _make_fake_ctx_and_settlements(self, temperature_metric_captured: list):
+    def _make_fake_ctx_and_settlements(
+        self,
+        temperature_metric_captured: list,
+        *,
+        settlement_metric: str = "high",
+    ):
         """Build the minimal fake replay context + settlement row needed to
         drive run_replay through at least one _replay_one_settlement call.
 
@@ -54,15 +59,27 @@ class TestRBPRunReplayMetricThreading:
             """
             CREATE TABLE settlements (
                 city TEXT, target_date TEXT,
-                settlement_value REAL, winning_bin TEXT
+                settlement_value REAL, winning_bin TEXT,
+                temperature_metric TEXT
             )
             """
         )
         # Stub ensemble_snapshots so ReplayContext._sp probe accepts the monolithic path
         conn.execute("CREATE TABLE ensemble_snapshots (city TEXT)")
         conn.execute(
-            "INSERT INTO settlements VALUES (?, ?, ?, ?)",
-            ("Chicago", "2026-04-10", 52.3, "52-53°F"),
+            """
+            CREATE TABLE market_events (
+                city TEXT, target_date TEXT, range_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO settlements VALUES (?, ?, ?, ?, ?)",
+            ("Chicago", "2026-04-10", 52.3, "52-53°F", settlement_metric),
+        )
+        conn.execute(
+            "INSERT INTO market_events VALUES (?, ?, ?)",
+            ("Chicago", "2026-04-10", "52-53°F"),
         )
         conn.commit()
         return conn
@@ -73,7 +90,7 @@ class TestRBPRunReplayMetricThreading:
         """R-BP.1: run_replay(..., temperature_metric='low') → captured kwarg is 'low'."""
         from src.engine import replay as replay_module
 
-        conn = self._make_fake_ctx_and_settlements([])
+        conn = self._make_fake_ctx_and_settlements([], settlement_metric="low")
         captured: dict = {}
 
         def _fake_replay_one(ctx, city, target_date, settlement, temperature_metric="high"):
@@ -522,10 +539,11 @@ class TestRBTEntriesBlockedReasonDegraded:
 
 class TestRBURunReplayModeMetricWarning:
     """Phase 9A MINOR M2: run_replay emits a warning when temperature_metric is
-    passed to a mode that silently drops it (WU_SWEEP_LANE, TRADE_HISTORY_LANE).
+    passed to a mode that ignores the public replay metric kwarg.
 
-    Pre-P9A: caller passing `temperature_metric="low", mode="trade_history_audit"`
-    got HIGH behavior silently. Post-P9A: logger.warning makes the drop visible.
+    WU sweep remains intentionally HIGH-only. Trade-history audit ignores this
+    public kwarg, but its settlement comparison is metric-aware through each
+    stored `position_current.temperature_metric`.
     """
 
     def test_run_replay_warns_on_metric_with_wu_sweep_mode(self, monkeypatch, caplog):

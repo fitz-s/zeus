@@ -660,12 +660,17 @@ class ReplayContext:
         import math
         return float('nan')
 
-    def get_settlement(self, city_name: str, target_date: str) -> Optional[dict]:
+    def get_settlement(
+        self,
+        city_name: str,
+        target_date: str,
+        temperature_metric: Literal["high", "low"] = "high",
+    ) -> Optional[dict]:
         """Get settlement outcome for scoring."""
         row = self.conn.execute(
             f"SELECT settlement_value, winning_bin FROM {self._sp}settlements "
-            "WHERE city = ? AND target_date = ?",
-            (city_name, target_date),
+            "WHERE city = ? AND target_date = ? AND temperature_metric = ?",
+            (city_name, target_date, temperature_metric),
         ).fetchone()
         if row:
             return {
@@ -1695,6 +1700,7 @@ def run_wu_settlement_sweep(
         SELECT city, target_date, settlement_value, winning_bin
         FROM {ctx._sp}settlements
         WHERE target_date >= ? AND target_date <= ?
+          AND temperature_metric = 'high'
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city
         """,
@@ -1994,7 +2000,8 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
 
         current = conn.execute(
             """
-            SELECT position_id, city, target_date, bin_label, direction, unit
+            SELECT position_id, city, target_date, bin_label, direction, unit,
+                   temperature_metric
             FROM position_current
             WHERE position_id = ?
             """,
@@ -2031,14 +2038,15 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         summary.n_settlements += 1
         city = cities_by_name.get(city_name)
         unit = current["unit"] or (city.settlement_unit if city else "")
+        position_metric = current["temperature_metric"] or "high"
         bin = bin_from_range_label(current["bin_label"], unit) if unit else None
         settlement = conn.execute(
             """
             SELECT settlement_value
             FROM world.settlements
-            WHERE city = ? AND target_date = ?
+            WHERE city = ? AND target_date = ? AND temperature_metric = ?
             """,
-            (city_name, target_date),
+            (city_name, target_date, position_metric),
         ).fetchone()
 
         missing = []
@@ -2126,14 +2134,20 @@ def run_replay(
     assert temperature_metric in ("high", "low"), (
         f"Invalid temperature_metric: {temperature_metric!r}"
     )
-    # Phase 9A MINOR-M2: warn if caller passes a non-default temperature_metric
-    # into a mode that silently drops it (WU sweep / trade-history audit lanes
-    # don't thread the kwarg — their outputs remain single-metric as of P9A).
+    # Phase 9A MINOR-M2 plus P3 residual guard:
+    # - WU sweep is intentionally HIGH-only and ignores this public kwarg.
+    # - trade-history audit ignores this public kwarg, but settlement matching
+    #   is metric-aware via each stored position_current.temperature_metric.
     if mode in (WU_SWEEP_LANE, TRADE_HISTORY_LANE) and temperature_metric != "high":
+        metric_note = (
+            "WU sweep is HIGH-only"
+            if mode == WU_SWEEP_LANE
+            else "trade-history uses stored position_current.temperature_metric"
+        )
         logger.warning(
-            "run_replay: temperature_metric=%r silently dropped by mode=%r lane "
-            "(lane is not metric-aware as of Phase 9A; P9+ scope)",
-            temperature_metric, mode,
+            "run_replay: temperature_metric=%r ignored by mode=%r lane "
+            "(%s)",
+            temperature_metric, mode, metric_note,
         )
     if mode == WU_SWEEP_LANE:
         return run_wu_settlement_sweep(
@@ -2157,9 +2171,10 @@ def run_replay(
         SELECT city, target_date, settlement_value, winning_bin
         FROM {ctx._sp}settlements
         WHERE target_date >= ? AND target_date <= ?
+          AND temperature_metric = ?
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city
-    """, (start_date, end_date)).fetchall()
+    """, (start_date, end_date, temperature_metric)).fetchall()
     try:
         _assert_market_events_ready_for_replay(
             ctx,
