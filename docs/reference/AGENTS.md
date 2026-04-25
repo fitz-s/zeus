@@ -57,6 +57,12 @@ which module reference matters.
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |
 | `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
 | `modules/data.md` | Dense source-routing / ingest / data-versioning module book |
+| `modules/topology_system.md` | Dense topology-system reference for machine routing and manifest law |
+| `modules/docs_system.md` | Dense docs-system reference for trust layers and docs mesh maintenance |
+| `modules/code_review_graph.md` | Dense derived-context reference for graph boundaries |
+| `modules/topology_doctor_system.md` | Dense topology-doctor reference for lanes, issue models, and closeout seams |
+| `modules/manifests_system.md` | Dense manifest-system reference for fact ownership and repair routing |
+| `modules/closeout_and_receipts_system.md` | Dense closeout/receipts reference for scoped gates and evidence |
 
 ## Rules
 

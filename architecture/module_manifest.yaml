@@ -498,6 +498,82 @@ modules:
       - tests/test_structural_linter.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  topology_doctor_system:
+    path: scripts
+    scoped_agents: scripts/AGENTS.md
+    module_book: docs/reference/modules/topology_doctor_system.md
+    priority: p2_topology_rehydration
+    zone: scripts
+    authority_role: topology_checker
+    high_risk_files:
+      - scripts/topology_doctor.py
+      - scripts/topology_doctor_cli.py
+      - scripts/topology_doctor_closeout.py
+    public_entry_files:
+      - scripts/topology_doctor.py
+    law_dependencies:
+      - architecture/topology.yaml
+      - architecture/topology_schema.yaml
+      - docs/authority/zeus_current_delivery.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
+  manifests_system:
+    path: architecture
+    scoped_agents: architecture/AGENTS.md
+    module_book: docs/reference/modules/manifests_system.md
+    priority: p2_topology_rehydration
+    zone: architecture
+    authority_role: manifest_ownership_reference
+    high_risk_files:
+      - architecture/topology.yaml
+      - architecture/docs_registry.yaml
+      - architecture/module_manifest.yaml
+      - architecture/source_rationale.yaml
+      - architecture/test_topology.yaml
+      - architecture/script_manifest.yaml
+    public_entry_files:
+      - architecture/topology.yaml
+      - architecture/docs_registry.yaml
+      - architecture/module_manifest.yaml
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_current_delivery.md
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
+  closeout_and_receipts_system:
+    path: docs/operations
+    scoped_agents: docs/operations/AGENTS.md
+    module_book: docs/reference/modules/closeout_and_receipts_system.md
+    priority: p2_topology_rehydration
+    zone: docs
+    authority_role: packet_closeout_evidence
+    high_risk_files:
+      - scripts/topology_doctor_closeout.py
+      - architecture/artifact_lifecycle.yaml
+      - architecture/change_receipt_schema.yaml
+      - architecture/map_maintenance.yaml
+      - docs/operations/current_state.md
+    public_entry_files:
+      - scripts/topology_doctor.py
+      - docs/operations/current_state.md
+    law_dependencies:
+      - docs/authority/zeus_current_delivery.md
+      - architecture/artifact_lifecycle.yaml
+      - architecture/change_receipt_schema.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_topology_doctor.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: partial
   code_review_graph:
     path: .code-review-graph
     scoped_agents: AGENTS.md
