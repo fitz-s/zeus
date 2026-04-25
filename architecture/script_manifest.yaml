@@ -255,6 +255,11 @@ scripts:
   _build_pm_truth.py: {class: config_writer, write_targets: [data/pm_settlements_full.json], target_db: data/pm_settlements_full.json, external_inputs: [Polymarket Gamma API], apply_flag: implicit, unguarded_write_rationale: "Existing packet-generated builder writes a data artifact directly; output is evidence and must be reviewed before promotion.", promotion_barrier: "Generated PM settlement export is evidence and must not become canonical truth without a dedicated settlement authority packet."}
   _yaml_bootstrap.py: {class: utility}
   _tigge_common.py: {class: utility}
+  backfill_completeness.py:
+    class: utility
+    canonical_command: DO_NOT_RUN
+    required_tests: [tests/test_backfill_completeness_guardrails.py]
+    reason: "Imported by observation backfill scripts to write P2 4.4.B-lite completeness manifests and enforce fail thresholds."
   analyze_paper_trading.py: {class: diagnostic_report_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/paper_trading_analysis.json, stdout], replacement: run_replay.py, reason: paper-era report}
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
@@ -283,22 +288,36 @@ scripts:
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_ens.py: {class: etl_writer}
   backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
-  backfill_hko_daily.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
+  backfill_hko_daily.py:
+    class: etl_writer
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
+    external_inputs: [HKO Open Data API]
+    target_db: state/zeus-world.db
+    write_targets: [observations]
+    observability: [state/backfill_manifest_hko_daily_*.json]
+    required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
   backfill_hourly_openmeteo.py: {class: etl_writer}
   backfill_obs_v2.py:
     class: etl_writer
     module_owner: data
     packet: docs/operations/task_2026-04-21_gate_f_data_backfill
-    required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client]
+    required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, scripts.backfill_completeness]
     external_inputs: [WU historical.json, Ogimet METAR]
     target_db: state/zeus-world.db
     write_targets: [observation_instants_v2]
-    observability: [state/obs_v2_backfill_log.jsonl]
-    required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hourly_clients_parse.py]
+    observability: [state/obs_v2_backfill_log.jsonl, state/backfill_manifest_obs_v2_*.json]
+    required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hourly_clients_parse.py, tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
     do_not_use_when: "current_source_validity or current_data_state is stale for obs_v2 routing work"
   fill_obs_v2_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
   fill_obs_v2_meteostat.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.meteostat_bulk_client], external_inputs: [Meteostat bulk CSV], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_meteostat_fill_log.jsonl], notes: "Bulk parallel fill for 45 WU cities via Meteostat's static CDN CSV archives. No rate limit; covers 2024 through ~weeks-behind-real-time. Replaces 12-hour Ogimet serial fill with <2-minute parallel downloads."}
-  backfill_ogimet_metar.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics], external_inputs: [Ogimet METAR/SYNOP], target_db: state/zeus-world.db}
+  backfill_ogimet_metar.py:
+    class: etl_writer
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
+    external_inputs: [Ogimet METAR/SYNOP]
+    target_db: state/zeus-world.db
+    write_targets: [observations]
+    observability: [state/backfill_manifest_ogimet_metar_*.json]
+    required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
   backfill_observations_from_settlements.py: {class: etl_writer}
   # backfill_open_positions_canonical.py: REMOVED — dead script calling deleted function
   backfill_openmeteo_previous_runs.py: {class: etl_writer}
@@ -318,7 +337,14 @@ scripts:
   backfill_tigge_snapshot_p_raw_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware p_raw backfill; safety gates mirror rebuild_v2 (--dry-run default, --no-dry-run + --force required)."}
   backfill_trade_decision_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_truth_metadata.py: {class: etl_writer}
-  backfill_wu_daily_all.py: {class: etl_writer, required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]}
+  backfill_wu_daily_all.py:
+    class: etl_writer
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
+    external_inputs: [WU historical.json]
+    target_db: state/zeus-world.db
+    write_targets: [observations]
+    observability: [state/backfill_manifest_wu_daily_all_*.json]
+    required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
   baseline_experiment.py: {class: diagnostic_report_writer, write_targets: [state/baseline_results.json, stdout]}
   build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
   capture_replay_artifact.py: {class: shadow_artifact_writer}

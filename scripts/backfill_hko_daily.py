@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Backfill Hong Kong HKO daily observations with provenance and completeness guardrails.
+# Reuse: Run topology and current source/data checks before changing HKO source, write, or guardrail semantics.
 """Backfill Hong Kong daily high+low from HKO Open Data API.
 
 Hong Kong uses the Hong Kong Observatory (HKO) as Polymarket's canonical
@@ -58,12 +61,20 @@ from src.data.ingestion_guard import (
 from src.types.observation_atom import ObservationAtom
 from src.calibration.manager import season_from_date
 from src.state.db import get_world_connection, init_schema
+from scripts.backfill_completeness import (
+    add_completeness_args,
+    emit_manifest_footer,
+    evaluate_completeness,
+    resolve_manifest_path,
+    write_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
 HKO_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
 HKO_STATION = "HKO"  # HKO Headquarters — the canonical settlement station
 HKO_DAILY_PARSER_VERSION = "hko_daily_backfill_v2"
+COMPLETENESS_MANIFEST_PREFIX = "backfill_manifest_hko_daily"
 SLEEP_BETWEEN_REQUESTS = 0.5
 FETCH_RETRY_COUNT = 2
 FETCH_RETRY_BACKOFF_SEC = 3.0
@@ -520,7 +531,7 @@ def run_backfill(
     return stats
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -532,7 +543,11 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=SLEEP_BETWEEN_REQUESTS)
     parser.add_argument("--dry-run", action="store_true",
                         help="Fetch and validate but no DB writes")
-    args = parser.parse_args()
+    add_completeness_args(
+        parser,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+    )
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -592,7 +607,50 @@ def main() -> int:
     for k in _STAT_KEYS:
         print(f"  {k:25s} {stats[k]}")
 
-    return 0
+    legitimate_gap_count = stats["days_incomplete"] + stats["days_unavailable"]
+    failed_count = (
+        stats["guard_rejected"]
+        + stats["fetch_errors"]
+        + stats["insert_errors"]
+    )
+    attempted_count = stats["inserted"] + legitimate_gap_count + failed_count
+    completeness = evaluate_completeness(
+        actual_count=stats["inserted"],
+        failed_count=failed_count,
+        attempted_count=attempted_count,
+        expected_count=args.expected_count,
+        fail_threshold_percent=args.fail_threshold_percent,
+        legitimate_gap_count=legitimate_gap_count,
+    )
+    manifest_path = resolve_manifest_path(
+        args.completeness_manifest,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+        run_id=rebuild_run_id,
+    )
+    write_manifest(
+        manifest_path,
+        script_name="backfill_hko_daily.py",
+        run_id=rebuild_run_id,
+        dry_run=args.dry_run,
+        inputs={
+            "city": _CITY_NAME,
+            "start": start,
+            "end": end,
+            "sleep": args.sleep,
+            "expected_count": args.expected_count,
+            "fail_threshold_percent": args.fail_threshold_percent,
+        },
+        counters={
+            "unit_kind": "target_day",
+            **stats,
+            "legitimate_gap_count": legitimate_gap_count,
+            "failed": failed_count,
+            "attempted": attempted_count,
+        },
+        completeness=completeness,
+    )
+    emit_manifest_footer(manifest_path, completeness)
+    return int(completeness["exit_code"])
 
 
 if __name__ == "__main__":

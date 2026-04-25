@@ -96,11 +96,19 @@ from src.data.wu_hourly_client import (  # noqa: E402
     HourlyObservation,
     fetch_wu_hourly,
 )
+from scripts.backfill_completeness import (  # noqa: E402
+    add_completeness_args,
+    emit_manifest_footer,
+    evaluate_completeness,
+    resolve_manifest_path,
+    write_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "obs_v2_backfill_log.jsonl"
+COMPLETENESS_MANIFEST_PREFIX = "backfill_manifest_obs_v2"
 
 # Exponential-backoff schedule per window on transient failures.
 _RETRY_DELAYS_SEC = [2.0, 4.0, 8.0]
@@ -123,9 +131,12 @@ class BackfillStats:
     tier: str
     station: str
     rows_written: int
+    rows_ready: int
     rows_raw: int
+    row_build_errors: int
     windows_attempted: int
     windows_failed: int
+    empty_windows: int
 
 
 # ----------------------------------------------------------------------
@@ -292,9 +303,12 @@ def _backfill_wu_city(
 
     cursor_date = start_date
     total_written = 0
+    total_ready = 0
     total_raw = 0
+    total_build_errors = 0
     windows_attempted = 0
     windows_failed = 0
+    empty_windows = 0
 
     from datetime import timedelta
 
@@ -343,38 +357,43 @@ def _backfill_wu_city(
             continue
 
         total_raw += result.raw_observation_count
-        if not dry_run and result.observations:
-            imported_at = datetime.now(timezone.utc).isoformat()
-            rows = []
-            build_errors = 0
-            for obs in result.observations:
-                try:
-                    rows.append(
-                        _hourly_obs_to_v2_row(
-                            obs,
-                            data_version=data_version,
-                            imported_at=imported_at,
-                            tier_name="WU_ICAO",
-                        )
+        imported_at = datetime.now(timezone.utc).isoformat()
+        rows = []
+        build_errors = 0
+        for obs in result.observations:
+            try:
+                rows.append(
+                    _hourly_obs_to_v2_row(
+                        obs,
+                        data_version=data_version,
+                        imported_at=imported_at,
+                        tier_name="WU_ICAO",
                     )
-                except (InvalidObsV2RowError, ValueError) as exc:
-                    build_errors += 1
-                    logger.warning(
-                        "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
-                    )
-            if build_errors:
-                _write_log(
-                    log_path,
-                    {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "city": city_name,
-                        "event": "row_build_failures",
-                        "window_start": cursor_date.isoformat(),
-                        "window_end": window_end.isoformat(),
-                        "build_errors": build_errors,
-                        "rows_salvaged": len(rows),
-                    },
                 )
+            except (InvalidObsV2RowError, ValueError) as exc:
+                build_errors += 1
+                logger.warning(
+                    "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
+                )
+        if build_errors:
+            _write_log(
+                log_path,
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "city": city_name,
+                    "event": "row_build_failures",
+                    "window_start": cursor_date.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "build_errors": build_errors,
+                    "rows_salvaged": len(rows),
+                    "dry_run": dry_run,
+                },
+            )
+        if not rows and build_errors == 0:
+            empty_windows += 1
+        total_ready += len(rows)
+        total_build_errors += build_errors
+        if not dry_run and rows:
             conn.execute("BEGIN")
             try:
                 written = insert_rows(conn, rows)
@@ -392,9 +411,12 @@ def _backfill_wu_city(
         tier="WU_ICAO",
         station=icao,
         rows_written=total_written,
+        rows_ready=total_ready,
         rows_raw=total_raw,
+        row_build_errors=total_build_errors,
         windows_attempted=windows_attempted,
         windows_failed=windows_failed,
+        empty_windows=empty_windows,
     )
 
 
@@ -422,9 +444,12 @@ def _backfill_ogimet_city(
 
     cursor_date = start_date
     total_written = 0
+    total_ready = 0
     total_raw = 0
+    total_build_errors = 0
     windows_attempted = 0
     windows_failed = 0
+    empty_windows = 0
 
     while cursor_date <= end_date:
         window_end = min(
@@ -473,36 +498,41 @@ def _backfill_ogimet_city(
             continue
 
         total_raw += result.raw_metar_count
-        if not dry_run and result.observations:
-            imported_at = datetime.now(timezone.utc).isoformat()
-            rows = []
-            build_errors = 0
-            for obs in result.observations:
-                try:
-                    rows.append(
-                        _hourly_obs_to_v2_row(
-                            obs,
-                            data_version=data_version,
-                            imported_at=imported_at,
-                            tier_name="OGIMET_METAR",
-                        )
+        imported_at = datetime.now(timezone.utc).isoformat()
+        rows = []
+        build_errors = 0
+        for obs in result.observations:
+            try:
+                rows.append(
+                    _hourly_obs_to_v2_row(
+                        obs,
+                        data_version=data_version,
+                        imported_at=imported_at,
+                        tier_name="OGIMET_METAR",
                     )
-                except (InvalidObsV2RowError, ValueError) as exc:
-                    build_errors += 1
-                    logger.warning(
-                        "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
-                    )
-            if build_errors:
-                _write_log(
-                    log_path,
-                    {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "city": city_name,
-                        "event": "row_build_failures",
-                        "build_errors": build_errors,
-                        "rows_salvaged": len(rows),
-                    },
                 )
+            except (InvalidObsV2RowError, ValueError) as exc:
+                build_errors += 1
+                logger.warning(
+                    "row build failed %s %s: %s", city_name, obs.utc_timestamp, exc
+                )
+        if build_errors:
+            _write_log(
+                log_path,
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "city": city_name,
+                    "event": "row_build_failures",
+                    "build_errors": build_errors,
+                    "rows_salvaged": len(rows),
+                    "dry_run": dry_run,
+                },
+            )
+        if not rows and build_errors == 0:
+            empty_windows += 1
+        total_ready += len(rows)
+        total_build_errors += build_errors
+        if not dry_run and rows:
             conn.execute("BEGIN")
             try:
                 written = insert_rows(conn, rows)
@@ -520,9 +550,12 @@ def _backfill_ogimet_city(
         tier="OGIMET_METAR",
         station=station,
         rows_written=total_written,
+        rows_ready=total_ready,
         rows_raw=total_raw,
+        row_build_errors=total_build_errors,
         windows_attempted=windows_attempted,
         windows_failed=windows_failed,
+        empty_windows=empty_windows,
     )
 
 
@@ -581,6 +614,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Emit INFO-level progress to stderr.",
     )
+    add_completeness_args(
+        p,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+    )
     return p.parse_args(argv)
 
 
@@ -621,6 +658,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         apply_v2_schema(conn)
 
         all_stats: list[BackfillStats] = []
+        unsupported_cities: list[str] = []
         for name in args.cities:
             tier = tier_for_city(name)
             if tier is Tier.WU_ICAO:
@@ -634,6 +672,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     args.log, args.dry_run,
                 )
             elif tier is Tier.HKO_NATIVE:
+                unsupported_cities.append(name)
                 print(
                     f"SKIP: {name} is Tier HKO_NATIVE; backfill not supported "
                     "(plan v3 Phase 0 deliberately excludes HK — accumulator-"
@@ -646,22 +685,103 @@ def main(argv: Optional[list[str]] = None) -> int:
             all_stats.append(stats)
             logger.info(
                 "city=%s tier=%s station=%s rows_written=%d rows_raw=%d "
-                "windows=%d/%d_failed",
+                "rows_ready=%d windows=%d/%d_failed",
                 stats.city, stats.tier, stats.station, stats.rows_written,
-                stats.rows_raw, stats.windows_attempted, stats.windows_failed,
+                stats.rows_raw, stats.rows_ready, stats.windows_attempted,
+                stats.windows_failed,
             )
             print(
                 f"{stats.city:16s} tier={stats.tier:13s} station={stats.station:6s} "
-                f"rows={stats.rows_written:7d}  raw={stats.rows_raw:7d}  "
+                f"rows={stats.rows_written:7d}  ready={stats.rows_ready:7d}  "
+                f"raw={stats.rows_raw:7d}  "
                 f"windows={stats.windows_attempted}/{stats.windows_failed}_failed"
             )
 
         # Summary footer
         total_written = sum(s.rows_written for s in all_stats)
-        total_failed = sum(s.windows_failed for s in all_stats)
+        total_ready = sum(s.rows_ready for s in all_stats)
+        total_build_errors = sum(s.row_build_errors for s in all_stats)
+        total_empty_windows = sum(s.empty_windows for s in all_stats)
+        total_failed_windows = sum(s.windows_failed for s in all_stats)
+        unsupported_count = len(unsupported_cities)
+        hard_blockers = {
+            "failed_windows": total_failed_windows,
+            "empty_windows": total_empty_windows,
+            "unsupported_cities": unsupported_count,
+        }
+        hard_blocker_count = sum(hard_blockers.values())
+        total_attempted = sum(s.windows_attempted for s in all_stats)
+        completeness = evaluate_completeness(
+            actual_count=total_ready,
+            failed_count=total_build_errors,
+            attempted_count=total_ready + total_build_errors,
+            expected_count=args.expected_count,
+            fail_threshold_percent=args.fail_threshold_percent,
+        )
+        if hard_blocker_count:
+            completeness = dict(completeness)
+            hard_reasons = [
+                name
+                for name, count in hard_blockers.items()
+                if count > 0
+            ]
+            completeness["passed"] = False
+            completeness["exit_code"] = 1
+            completeness["hard_blocker_count"] = hard_blocker_count
+            completeness["hard_blocker_reasons"] = hard_reasons
+            completeness["reasons"] = sorted(
+                set(completeness["reasons"] + ["hard_blocker_present"])
+            )
+        else:
+            completeness["hard_blocker_count"] = 0
+            completeness["hard_blocker_reasons"] = []
+        run_id = f"obs_v2_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        manifest_path = resolve_manifest_path(
+            args.completeness_manifest,
+            manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+            run_id=run_id,
+        )
+        write_manifest(
+            manifest_path,
+            script_name="backfill_obs_v2.py",
+            run_id=run_id,
+            dry_run=args.dry_run,
+            inputs={
+                "cities": args.cities,
+                "start": args.start,
+                "end": args.end,
+                "data_version": args.data_version,
+                "db": args.db,
+                "log": args.log,
+                "expected_count": args.expected_count,
+                "fail_threshold_percent": args.fail_threshold_percent,
+            },
+            counters={
+                "unit_kind": "obs_v2_row",
+                "rows_written": total_written,
+                "rows_ready": total_ready,
+                "rows_raw": sum(s.rows_raw for s in all_stats),
+                "windows_attempted": total_attempted,
+                "windows_failed": total_failed_windows,
+                "row_build_errors": total_build_errors,
+                "empty_windows": total_empty_windows,
+                "hard_blockers": hard_blockers,
+                "hard_blocker_count": hard_blocker_count,
+                "unsupported_city_count": unsupported_count,
+                "unsupported_cities": unsupported_cities,
+                "city_count": len(all_stats),
+                "per_city": [s.__dict__ for s in all_stats],
+            },
+            completeness=completeness,
+        )
         print(f"\nTotal rows written: {total_written}")
-        print(f"Total failed windows: {total_failed}")
-        return 0 if total_failed == 0 else 1
+        print(f"Total rows ready: {total_ready}")
+        print(f"Total failed windows: {total_failed_windows}")
+        print(f"Total row build errors: {total_build_errors}")
+        print(f"Total empty windows: {total_empty_windows}")
+        print(f"Unsupported cities: {unsupported_count}")
+        emit_manifest_footer(manifest_path, completeness)
+        return int(completeness["exit_code"])
     finally:
         conn.close()
 

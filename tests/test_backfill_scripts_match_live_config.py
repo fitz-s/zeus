@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WU_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_wu_daily_all.py"
 OGIMET_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_ogimet_metar.py"
 OBS_V2_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_obs_v2.py"
+HKO_DAILY_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_hko_daily.py"
 OBS_V2_DST_GAP_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_dst_gaps.py"
 OBS_V2_METEOSTAT_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_meteostat.py"
 HKO_INGEST_TICK_PATH = REPO_ROOT / "scripts" / "hko_ingest_tick.py"
@@ -49,6 +50,12 @@ OBS_V2_PRODUCER_PATHS = [
     OBS_V2_DST_GAP_FILL_PATH,
     OBS_V2_METEOSTAT_FILL_PATH,
     HKO_INGEST_TICK_PATH,
+]
+COMPLETENESS_GUARDED_BACKFILL_PATHS = [
+    OBS_V2_BACKFILL_PATH,
+    WU_BACKFILL_PATH,
+    HKO_DAILY_BACKFILL_PATH,
+    OGIMET_BACKFILL_PATH,
 ]
 
 
@@ -258,6 +265,33 @@ def test_obs_v2_producers_stamp_payload_identity_keys(path):
         or '"station_registry_version"' in source
         or '"station_registry_hash"' in source
     ), f"{path.name} must stamp station identity"
+
+
+@pytest.mark.parametrize(
+    "path",
+    COMPLETENESS_GUARDED_BACKFILL_PATHS,
+    ids=lambda p: p.name,
+)
+def test_p2_backfill_scripts_declare_completeness_guardrails(path):
+    source = path.read_text(encoding="utf-8")
+    for required in (
+        "add_completeness_args",
+        "COMPLETENESS_MANIFEST_PREFIX",
+        "backfill_manifest_",
+    ):
+        assert required in source, f"{path.name} must declare {required}"
+
+
+def test_p2_backfill_completeness_helper_declares_cli_flags():
+    source = (REPO_ROOT / "scripts" / "backfill_completeness.py").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "--completeness-manifest",
+        "--expected-count",
+        "--fail-threshold-percent",
+    ):
+        assert required in source
 
 
 def test_obs_v2_backfill_row_stamps_provenance_identity(obs_v2_backfill_module):

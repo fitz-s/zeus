@@ -5,14 +5,15 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P1 obs_v2 provenance identity closed; next phase reassessment**
+- Mainline task: **Post-audit remediation mainline — P2 backfill completeness guardrails active**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: none after this packet closeout
-- Closeout evidence packet: `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
+- Closeout evidence packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
+- Prior P1 closeout evidence packet: `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`
 - Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
 - Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json`
+- Receipt-bound source: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -44,13 +45,17 @@ Role: single live control pointer for the repo.
   jump to P2/P3/P4. The implementation landed in commit `11c6315`, which also
   carried a concurrent `pytest.ini` test-isolation change already pushed to
   origin before the packet-specific commit command could create a separate
-  Lore commit.
+  Lore commit. Phase-entry reassessment selected a narrow P2 4.4.B-lite
+  script-guardrail slice for backfill completeness manifests and fail
+  thresholds. This active packet does not authorize production DB mutation,
+  row-level quarantine, schema/view changes, 4.4.A upsert/revision redesign,
+  P3 replay/live consumer rewiring, or P4 data population.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`
-- `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md`
-- `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json`
+- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
+- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md`
+- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json`
 
 ## Freeze point
 
@@ -64,9 +69,8 @@ Role: single live control pointer for the repo.
   `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
   remains a historical topology anchor only; it is not the active slice.
   WU/HKO daily observation writer provenance identity and obs_v2 provenance
-  identity are closed in this packet. The active implementation scope is now
-  empty until the next packet is
-  selected. This pointer does not authorize production DB mutation,
+  identity are closed. The active implementation scope is now P2 4.4.B-lite
+  script-level completeness guardrails only. This pointer does not authorize production DB mutation,
   `settlements_v2` population, market-identity backfill, live executor DB
   authority, legacy-settlement promotion, broad P1 source-role/view work, P2
   upsert/revision work, P3 safe-view migration, or P4 data population.
@@ -98,9 +102,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Rebuild phase-entry context before the next packet: reread `AGENTS.md`, run
-  topology for the next candidate, and reassess the remaining post-audit
-  P1/P2/P3 sequence against the current branch facts before any new code
-  implementation.
+- Implement and verify the active P2 4.4.B-lite backfill completeness
+  guardrail packet.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->

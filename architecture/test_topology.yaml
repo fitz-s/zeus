@@ -30,6 +30,7 @@ test_trust_policy:
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
+    tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
@@ -182,6 +183,7 @@ categories:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
     - tests/test_b063_rescue_events_v2.py
+    - tests/test_backfill_completeness_guardrails.py
     - tests/test_backfill_openmeteo_previous_runs.py
     - tests/test_bootstrap_symmetry.py
     - tests/test_bug100_k1_k2_structural.py
@@ -634,3 +636,13 @@ test_metadata:
     notes: >
       Keeps current backfill/write scripts aligned with the live routing/config
       contract so P2 module books can trust the named script surfaces.
+  tests/test_backfill_completeness_guardrails.py:
+    modules: [scripts]
+    category: useful_regression
+    blocks_commit: true
+    law_dependencies:
+      - architecture/script_manifest.yaml
+    notes: >
+      Verifies P2 4.4.B-lite backfill scripts emit completeness manifests and
+      return non-zero when failed or missing units exceed the configured
+      threshold.
