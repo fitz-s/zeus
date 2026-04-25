@@ -1,0 +1,62 @@
+{
+  "task": "POST_AUDIT_HANDOFF 4.2.C market-events empty-table preflight",
+  "packet": "docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "src/AGENTS.md",
+    "src/engine/AGENTS.md",
+    "src/execution/AGENTS.md",
+    "tests/AGENTS.md",
+    "architecture/source_rationale.yaml",
+    "architecture/test_topology.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md",
+    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/17_apply_order.md"
+  ],
+  "allowed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".code-review-graph/graph.db",
+    ".omx/**",
+    "production DBs",
+    "generated runtime JSON",
+    "src/engine/**",
+    "src/execution/**",
+    "scripts/**",
+    "tests/**"
+  ],
+  "changed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md",
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml"
+  ],
+  "tests_evidence": [
+    "docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md"
+  ]
+}

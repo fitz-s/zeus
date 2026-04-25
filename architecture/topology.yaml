@@ -489,6 +489,7 @@ active_operations_registry:
   required_anchors:
     - docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md
     - docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md
+    - docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml

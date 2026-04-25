@@ -35,20 +35,20 @@ law or implementation permission.
 ### Active Execution Packet
 
 The active execution packet is
-`task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md` for
-POST_AUDIT_HANDOFF 4.2.B evidence-only legacy hourly observations view plus
-canonical-path bare-table lint proof.
+`task_2026-04-25_p0_market_events_preflight/plan.md` for
+POST_AUDIT_HANDOFF 4.2.C market-events empty-table preflight planning.
 
 Branch facts show the Immediate 4.1.A-C group in
 `task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md` is
 already landed and closed in the midstream work log, and 4.2.A closed at commit
-`0b61261`; do not reuse either slice as an execution packet without new
-evidence. The active 4.2.B code scope is limited to a read-only schema view in
-`src/state/db.py`, focused schema contract coverage, the minimal semantic
-linter DDL exemption needed for that view, and the live-health test connection
-fix needed to run the required state gate. This router does not authorize
-production DB mutation, canonical v2 population, market-identity backfill,
-replay/live/runtime consumer rewiring, or legacy-settlement promotion.
+`0b61261`, and 4.2.B closed at `3e1bda7`; do not reuse those slices as
+execution packets without new evidence. The active 4.2.C packet is docs-only
+planning. It corrects the handoff's stale replay-path wording to the actual
+`src/engine/replay.py` seam and keeps `executor.py` out of scope unless a later
+packet explicitly authorizes a live-money boundary change. This router does not
+authorize production DB mutation, canonical v2 population, market-identity
+backfill, replay/live/runtime consumer rewiring, legacy-settlement promotion,
+P1 provenance work, P3 safe-view migration, or P4 data population.
 
 ### Packet Evidence
 
@@ -122,7 +122,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-24_p1_unsafe_observation_quarantine/` | packet evidence | Closed P1.3 unsafe-observation quarantine diagnostics packet (implementation `7a3524e`; read-only training-readiness blockers for unsafe observation rows) |
 | `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | packet evidence | Closed P1.4 implementation packet for read-only legacy settlement evidence-only / finalization policy blockers before eligibility-view adoption and v2 population (`df9ece5`) |
 | `task_2026-04-24_p1_eligibility_views_training_preflight/` | packet evidence | Closed P1.5/P1.5a packet for script-side eligibility/preflight adapters before any calibration/training cutover (`07c86d8` planning, `99c4ac3` implementation) |
-| `task_2026-04-25_p0_legacy_hourly_evidence_view/` | active execution packet | Active POST_AUDIT_HANDOFF 4.2.B schema-view packet for `v_evidence_hourly_observations`, bare-table lint proof, and required state-gate test-surface fix |
+| `task_2026-04-25_p0_legacy_hourly_evidence_view/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.2.B schema-view packet for `v_evidence_hourly_observations`, bare-table lint proof, and required state-gate test-surface fix (`3e1bda7`) |
+| `task_2026-04-25_p0_market_events_preflight/` | active execution packet | Active POST_AUDIT_HANDOFF 4.2.C docs-only planning packet for market-events empty-table replay preflight |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
