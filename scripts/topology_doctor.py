@@ -421,6 +421,15 @@ def _registry_checks():
     return topology_doctor_registry_checks
 
 
+def _ownership_checks():
+    try:
+        from scripts import topology_doctor_ownership_checks
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_doctor_ownership_checks
+
+    return topology_doctor_ownership_checks
+
+
 def _declared_paths(items: list[dict[str, Any]]) -> set[str]:
     return _registry_checks().declared_paths(items)
 
@@ -565,7 +574,14 @@ def _check_wmo_gate() -> list[TopologyIssue]:
 
 
 def run_strict() -> StrictResult:
-    return _registry_checks().run_strict(sys.modules[__name__])
+    result = _registry_checks().run_strict(sys.modules[__name__])
+    ownership = run_ownership()
+    issues = result.issues + ownership.issues
+    return StrictResult(ok=not issues, issues=issues)
+
+
+def run_ownership() -> StrictResult:
+    return _ownership_checks().run_ownership(sys.modules[__name__])
 
 
 def run_docs() -> StrictResult:

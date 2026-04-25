@@ -22,6 +22,7 @@ modules:
     scoped_agents: src/state/AGENTS.md
     module_book: docs/reference/modules/state.md
     priority: p1_first_wave
+    maturity: stable
     zone: source
     authority_role: canonical_runtime_truth
     high_risk_files:
@@ -56,6 +57,7 @@ modules:
     scoped_agents: src/engine/AGENTS.md
     module_book: docs/reference/modules/engine.md
     priority: p1_first_wave
+    maturity: stable
     zone: source
     authority_role: orchestration_runtime
     high_risk_files:
@@ -88,6 +90,7 @@ modules:
     scoped_agents: src/data/AGENTS.md
     module_book: docs/reference/modules/data.md
     priority: p1_first_wave
+    maturity: stable
     zone: source
     authority_role: external_data_ingest
     high_risk_files:
@@ -128,6 +131,7 @@ modules:
     scoped_agents: src/execution/AGENTS.md
     module_book: docs/reference/modules/execution.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: live_execution
     high_risk_files:
@@ -156,6 +160,7 @@ modules:
     scoped_agents: src/signal/AGENTS.md
     module_book: docs/reference/modules/signal.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: signal_generation
     high_risk_files:
@@ -187,6 +192,7 @@ modules:
     scoped_agents: src/calibration/AGENTS.md
     module_book: docs/reference/modules/calibration.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: calibration_runtime
     high_risk_files:
@@ -215,6 +221,7 @@ modules:
     scoped_agents: src/strategy/AGENTS.md
     module_book: docs/reference/modules/strategy.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: strategy_identity
     high_risk_files:
@@ -244,6 +251,7 @@ modules:
     scoped_agents: src/riskguard/AGENTS.md
     module_book: docs/reference/modules/riskguard.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: risk_control
     high_risk_files:
@@ -268,6 +276,7 @@ modules:
     scoped_agents: src/contracts/AGENTS.md
     module_book: docs/reference/modules/contracts.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: runtime_contracts
     high_risk_files:
@@ -296,6 +305,7 @@ modules:
     scoped_agents: src/control/AGENTS.md
     module_book: docs/reference/modules/control.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: operator_control
     high_risk_files:
@@ -318,6 +328,7 @@ modules:
     scoped_agents: src/supervisor_api/AGENTS.md
     module_book: docs/reference/modules/supervisor_api.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: supervisory_interface
     high_risk_files:
@@ -338,6 +349,7 @@ modules:
     scoped_agents: src/observability/AGENTS.md
     module_book: docs/reference/modules/observability.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: monitoring_support
     high_risk_files:
@@ -359,6 +371,7 @@ modules:
     scoped_agents: src/types/AGENTS.md
     module_book: docs/reference/modules/types.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: shared_types
     high_risk_files:
@@ -385,6 +398,7 @@ modules:
     scoped_agents: src/analysis/AGENTS.md
     module_book: docs/reference/modules/analysis.md
     priority: p2_remaining
+    maturity: provisional
     zone: source
     authority_role: analytical_support
     high_risk_files:
@@ -402,6 +416,7 @@ modules:
     scoped_agents: scripts/AGENTS.md
     module_book: docs/reference/modules/scripts.md
     priority: p2_remaining
+    maturity: provisional
     zone: scripts
     authority_role: operator_script_surface
     high_risk_files:
@@ -428,6 +443,7 @@ modules:
     scoped_agents: tests/AGENTS.md
     module_book: docs/reference/modules/tests.md
     priority: p2_remaining
+    maturity: provisional
     zone: tests
     authority_role: proof_surface
     high_risk_files:
@@ -453,6 +469,7 @@ modules:
     scoped_agents: docs/AGENTS.md
     module_book: docs/reference/modules/docs_system.md
     priority: p2_remaining
+    maturity: provisional
     zone: docs
     authority_role: docs_mesh
     high_risk_files:
@@ -477,6 +494,7 @@ modules:
     scoped_agents: architecture/AGENTS.md
     module_book: docs/reference/modules/topology_system.md
     priority: p2_remaining
+    maturity: provisional
     zone: architecture
     authority_role: machine_routing_kernel
     high_risk_files:
@@ -503,6 +521,7 @@ modules:
     scoped_agents: scripts/AGENTS.md
     module_book: docs/reference/modules/topology_doctor_system.md
     priority: p2_topology_rehydration
+    maturity: stable
     zone: scripts
     authority_role: topology_checker
     high_risk_files:
@@ -526,6 +545,7 @@ modules:
     scoped_agents: architecture/AGENTS.md
     module_book: docs/reference/modules/manifests_system.md
     priority: p2_topology_rehydration
+    maturity: stable
     zone: architecture
     authority_role: manifest_ownership_reference
     high_risk_files:
@@ -553,6 +573,7 @@ modules:
     scoped_agents: docs/operations/AGENTS.md
     module_book: docs/reference/modules/closeout_and_receipts_system.md
     priority: p2_topology_rehydration
+    maturity: stable
     zone: docs
     authority_role: packet_closeout_evidence
     high_risk_files:
@@ -579,6 +600,7 @@ modules:
     scoped_agents: AGENTS.md
     module_book: docs/reference/modules/code_review_graph.md
     priority: p2_remaining
+    maturity: provisional
     zone: derived_context
     authority_role: tracked_derived_context
     high_risk_files:

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; enforcement remains in the manifests and topology-doctor tests.
+The manifests system explains which machine-readable file owns which governance fact so agents do not create parallel registries or duplicate truth. It is a reference map for ownership; the canonical machine matrix now lives in `architecture/topology_schema.yaml` under `ownership.fact_types`, and enforcement remains in topology-doctor checks/tests.
 
 ## Authority anchors
 
@@ -20,18 +20,7 @@ The manifests system explains which machine-readable file owns which governance 
 
 Each manifest should own a fact type, not merely a path prefix. Reference books may explain those facts but must not become alternate registries. When two manifests appear to describe the same fact, the intended repair is to identify the canonical owner, leave cross-references as pointers, and add a validator only after ownership is explicit.
 
-Ownership matrix for P3 enforcement planning:
-
-| Fact type | Canonical owner | Reference explainer |
-|---|---|---|
-| Docs classification/default-read | `architecture/docs_registry.yaml` | `docs/reference/modules/docs_system.md` |
-| Module-book routing | `architecture/module_manifest.yaml` | this book |
-| Source rationale/write routes | `architecture/source_rationale.yaml` | source module books |
-| Test classification/trust | `architecture/test_topology.yaml` | `docs/reference/modules/tests.md` |
-| Script lifecycle/write safety | `architecture/script_manifest.yaml` | `docs/reference/modules/scripts.md` |
-| Companion rules | `architecture/map_maintenance.yaml` | `docs/reference/modules/closeout_and_receipts_system.md` |
-| Issue JSON shape | `architecture/topology_schema.yaml` | `docs/reference/modules/topology_doctor_system.md` |
-| Graph protocol | `architecture/code_review_graph_protocol.yaml` | `docs/reference/modules/code_review_graph.md` |
+The canonical ownership matrix is the `ownership.fact_types` section in `architecture/topology_schema.yaml`. This book intentionally does not duplicate the matrix rows; it explains how to use that schema without becoming a second registry.
 
 ## Hidden obligations
 
@@ -39,7 +28,7 @@ Ownership matrix for P3 enforcement planning:
 - A module book can route cognition but cannot authorize runtime/source behavior changes.
 - `default_read: true` is a context-budget and authority decision, not a convenience flag.
 - Current facts belong in operations current-fact surfaces, not durable reference manifests.
-- P3 ownership enforcement must remain warning-first until duplicate ownership checks are proven.
+- Ownership enforcement is schema-driven; warnings versus errors are policy decisions in topology-doctor mode handling, not prose in this book.
 
 ## Failure modes
 

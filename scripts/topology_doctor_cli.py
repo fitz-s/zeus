@@ -34,6 +34,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--context-packs", action="store_true", help="Run context-pack profile checks")
     parser.add_argument("--module-books", action="store_true", help="Check module-book registration and launcher routing")
     parser.add_argument("--module-manifest", action="store_true", help="Check module manifest coherence and target paths")
+    parser.add_argument("--ownership", action="store_true", help="Check manifest fact ownership and issue owner metadata")
     parser.add_argument("--current-state-receipt-bound", action="store_true", help="Check current_state receipt-bound pointer integrity")
     parser.add_argument("--agents-coherence", action="store_true", help="Check scoped AGENTS prose against machine maps")
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
@@ -204,6 +205,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         ("context_packs", api.run_context_packs),
         ("module_books", api.run_module_books),
         ("module_manifest", api.run_module_manifest),
+        ("ownership", api.run_ownership),
         ("current_state_receipt_bound", api.run_current_state_receipt_bound),
         ("agents_coherence", api.run_agents_coherence),
         ("idioms", api.run_idioms),

@@ -1873,6 +1873,75 @@ def test_progress_handoff_rejects_other_reference_module_handoff_names(monkeypat
     assert [issue.code for issue in issues] == ["progress_handoff_path_violation"]
 
 
+def test_ownership_matrix_loadable_from_schema():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert "doc_classification" in fact_types
+    assert fact_types["doc_classification"]["canonical_owner"] == "architecture/docs_registry.yaml"
+    assert len(fact_types) >= 12
+
+
+def test_two_canonical_owners_for_same_fact_type_blocks():
+    schema = {
+        "ownership": {
+            "fact_types": {
+                "doc_classification": {
+                    "canonical_owner": "architecture/docs_registry.yaml",
+                    "canonical_owners": ["architecture/docs_registry.yaml", "architecture/module_manifest.yaml"],
+                    "derived_owners": [],
+                    "companion_update_rule": "architecture/map_maintenance.yaml",
+                }
+            }
+        }
+    }
+
+    issues = topology_doctor._ownership_checks().check_ownership_schema(topology_doctor, schema)
+
+    assert [issue.code for issue in issues] == ["ownership_multiple_canonical_owners"]
+
+
+def test_blocking_issue_without_owner_manifest_raises(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "issue",
+        lambda code, path, message, **metadata: topology_doctor.legacy_issue(code, path, message),
+    )
+
+    issues = topology_doctor._ownership_checks().check_first_wave_issue_owners(topology_doctor)
+
+    assert {issue.code for issue in issues} == {"ownership_issue_owner_missing"}
+
+
+def test_module_manifest_maturity_field_validated():
+    module_manifest = {
+        "modules": {
+            "sample": {
+                "path": "src/sample",
+                "module_book": "docs/reference/modules/sample.md",
+                "maturity": "invalid",
+            }
+        }
+    }
+
+    issues = topology_doctor._ownership_checks().check_module_manifest_maturity(topology_doctor, module_manifest)
+
+    assert [issue.code for issue in issues] == ["module_manifest_maturity_invalid"]
+
+
+def test_doc_classification_owned_only_by_docs_registry():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert fact_types["doc_classification"]["canonical_owner"] == "architecture/docs_registry.yaml"
+    assert "architecture/module_manifest.yaml" not in fact_types["doc_classification"].get("derived_owners", [])
+
+
+def test_module_routing_owned_only_by_module_manifest():
+    fact_types = topology_doctor._ownership_checks().ownership_fact_types(topology_doctor.load_schema())
+
+    assert fact_types["module_routing"]["canonical_owner"] == "architecture/module_manifest.yaml"
+    assert "architecture/docs_registry.yaml" not in fact_types["module_routing"].get("derived_owners", [])
+
+
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(
         "fix settlement rounding in replay",

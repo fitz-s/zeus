@@ -426,6 +426,7 @@ scripts:
   topology_doctor_docs_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for docs checker family}
   topology_doctor_freshness_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for changed-file script/test freshness metadata checks}
   topology_doctor_map_maintenance.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for map-maintenance checker family}
+  topology_doctor_ownership_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for manifest ownership checker family}
   topology_doctor_packet_prefill.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for packet-prefill/invariant-slice builder family}
   topology_doctor_policy_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for governance/policy checker family}
   topology_doctor_registry_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for registry/root/docs-strict checker family}
