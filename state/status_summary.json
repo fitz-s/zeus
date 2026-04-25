@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-04-16T13:23:22.019606+00:00",
+  "timestamp": "2026-04-25T19:16:59.611321+00:00",
   "process": {
-    "pid": 79490,
+    "pid": 17530,
     "mode": "live",
     "version": "zeus_v2"
   },
@@ -24,20 +24,127 @@
     "recommended_commands": []
   },
   "risk": {
-    "level": "RED",
-    "riskguard_level": "RED",
-    "details": {},
+    "level": "GREEN",
+    "riskguard_level": "GREEN",
+    "details": {
+      "brier_level": "GREEN",
+      "settlement_quality_level": "GREEN",
+      "execution_quality_level": "GREEN",
+      "strategy_signal_level": "GREEN",
+      "daily_loss_level": "GREEN",
+      "weekly_loss_level": "GREEN",
+      "daily_loss": 0.0,
+      "weekly_loss": 0.0,
+      "daily_loss_status": "ok",
+      "weekly_loss_status": "ok",
+      "daily_loss_source": "risk_state_history",
+      "weekly_loss_source": "risk_state_history",
+      "daily_loss_reference": {
+        "row_id": 8414,
+        "checked_at": "2026-04-24T19:15:35.925170+00:00",
+        "initial_bankroll": 150.0,
+        "total_pnl": 0.0,
+        "effective_bankroll": 150.0
+      },
+      "weekly_loss_reference": {
+        "row_id": 297,
+        "checked_at": "2026-04-18T19:15:30.495758+00:00",
+        "initial_bankroll": 150.0,
+        "total_pnl": 0.0,
+        "effective_bankroll": 150.0
+      },
+      "initial_bankroll": 150.0,
+      "daily_baseline_total": 150.0,
+      "weekly_baseline_total": 150.0,
+      "realized_pnl": 0,
+      "unrealized_pnl": 0,
+      "total_pnl": 0,
+      "effective_bankroll": 150.0,
+      "portfolio_truth_source": "position_current",
+      "portfolio_loader_status": "empty",
+      "portfolio_fallback_active": false,
+      "portfolio_fallback_reason": "",
+      "portfolio_position_count": 0,
+      "portfolio_capital_source": "dual_source_blended",
+      "realized_truth_source": "none",
+      "realized_degraded": false,
+      "settlement_sample_size": 0,
+      "settlement_storage_source": "none",
+      "settlement_row_storage_sources": [],
+      "settlement_authority_levels": {},
+      "settlement_degraded_row_count": 0,
+      "settlement_learning_snapshot_ready_count": 0,
+      "settlement_canonical_payload_complete_count": 0,
+      "settlement_metric_ready_count": 0,
+      "probability_directional_accuracy": 0.5,
+      "strategy_settlement_summary": {},
+      "entry_execution_summary": {
+        "overall": {
+          "attempted": 0,
+          "filled": 0,
+          "rejected": 0,
+          "fill_rate": null
+        },
+        "by_strategy": {}
+      },
+      "strategy_tracker_summary": {
+        "settlement_capture": {
+          "trades": 0,
+          "pnl": 0.0
+        },
+        "shoulder_sell": {
+          "trades": 0,
+          "pnl": 0.0
+        },
+        "center_buy": {
+          "trades": 0,
+          "pnl": 0.0
+        },
+        "opening_inertia": {
+          "trades": 0,
+          "pnl": 0.0
+        }
+      },
+      "strategy_edge_compression_alerts": [],
+      "strategy_tracker_accounting": {
+        "accounting_scope": "canonical_projection",
+        "performance_headline_authority": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
+        "tracker_role": "canonical_projection",
+        "authority_mode": "projection_from_position_events",
+        "includes_legacy_history": false,
+        "current_regime_started_at": "",
+        "history_archive_path": "",
+        "projection_source": "position_events via query_authoritative_settlement_rows"
+      },
+      "strategy_tracker_error": "",
+      "recommended_strategy_gates": [],
+      "recommended_strategy_gate_reasons": {},
+      "recommended_controls": [],
+      "recommended_control_reasons": {},
+      "durable_risk_action_emission_status": "emitted",
+      "durable_risk_action_emitted_count": 0,
+      "durable_risk_action_expired_count": 0,
+      "strategy_health_refresh_status": "refreshed_empty",
+      "strategy_health_rows_written": 0,
+      "strategy_health_missing_required_tables": [],
+      "strategy_health_missing_optional_tables": [],
+      "strategy_health_omitted_fields": [
+        "risk_level",
+        "brier_30d",
+        "edge_trend_30d"
+      ],
+      "strategy_health_snapshot_status": "empty",
+      "strategy_health_stale_strategy_keys": []
+    },
     "consistency_check": {
       "ok": false,
       "issues": [
-        "cycle_risk_level_mismatch:GREEN->RED",
         "strategy_health_empty"
       ],
       "cycle_risk_level": "GREEN"
     },
     "infrastructure_level": "YELLOW",
     "infrastructure_issues": [
-      "cycle_risk_level_mismatch:GREEN->RED",
       "strategy_health_empty"
     ]
   },
@@ -105,8 +212,8 @@
     "recent_stage_counts": {}
   },
   "cycle": {
-    "mode": "opening_hunt",
-    "started_at": "2026-04-16T13:21:17.690649+00:00",
+    "mode": "day0_capture",
+    "started_at": "2026-04-25T19:16:58.648269+00:00",
     "monitors": 0,
     "exits": 0,
     "candidates": 0,
@@ -114,26 +221,50 @@
     "no_trades": 0,
     "risk_level": "GREEN",
     "pending_voids": 0,
+    "chain_sync": {
+      "synced": 0,
+      "voided": 0,
+      "quarantined": 0,
+      "updated": 0,
+      "skipped_pending": 0,
+      "rescued_pending": 0
+    },
+    "config_cap_usd": 150.0,
+    "wallet_balance_usd": 94.944218,
+    "dynamic_cap_usd": 94.944218,
+    "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+    "bankroll_truth_source": "wallet_balance",
+    "wallet_balance_used": true,
+    "pending_exits_filled": 0,
+    "pending_exits_retried": 0,
     "portfolio_heat_pct": 0.0,
     "smoke_test_open_cost_basis_usd": 0,
     "smoke_test_portfolio_cap_usd": 5.0,
     "entries_paused": true,
-    "entries_pause_reason": "auto_pause:ValueError",
-    "completed_at": "2026-04-16T13:23:22.019555+00:00"
+    "entries_blocked_reason": "entries_paused"
   },
+  "v2_row_counts": {
+    "platt_models_v2": 0,
+    "calibration_pairs_v2": 0,
+    "ensemble_snapshots_v2": 0,
+    "historical_forecasts_v2": 0,
+    "settlements_v2": 0
+  },
+  "dual_track_scaffold_claimed": true,
+  "discrepancy_flags": [
+    "v2_empty_despite_closure_claim"
+  ],
   "truth": {
     "mode": "live",
-    "generated_at": "2026-04-16T13:23:22.019606+00:00",
+    "generated_at": "2026-04-25T19:16:59.611321+00:00",
     "source_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/status_summary.json",
     "stale_age_seconds": 0.0,
     "deprecated": false,
     "archived_to": null,
+    "authority": "VERIFIED",
     "db_primary_inputs": {
       "position_current": "ok",
       "strategy_health": "empty"
-    },
-    "compatibility_inputs": {
-      "bankroll_fallback_source": "settings.capital_base_usd"
     }
   }
 }
