@@ -546,6 +546,60 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
+- path: docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.B-lite backfill completeness guardrail packet plan
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.B-lite backfill completeness guardrail work log
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.B-lite backfill completeness guardrail receipt
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/task_*.md
   doc_class: operations
   default_read: false

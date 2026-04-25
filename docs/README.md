@@ -47,6 +47,7 @@ Historical governance files demoted from authority live under
 - `operations/task_2026-04-25_p0_market_events_preflight/` - closed POST_AUDIT 4.2.C implementation packet
 - `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` - closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet
 - `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` - closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet
+- `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` - active POST_AUDIT 4.4.B-lite backfill completeness guardrail packet
 - `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
 - `../workspace_map.md` - repo visibility and routing guide
 

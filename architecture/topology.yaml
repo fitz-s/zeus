@@ -492,6 +492,7 @@ active_operations_registry:
     - docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md
     - docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md
     - docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md
+    - docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md
 
 docs_registry:
   path: architecture/docs_registry.yaml

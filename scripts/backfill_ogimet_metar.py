@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-14; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Backfill Ogimet daily observations with provenance and completeness guardrails.
+# Reuse: Run topology and current source/data checks before changing Ogimet source, write, or guardrail semantics.
 """Backfill daily high/low temperatures from Ogimet METAR/SYNOP archive.
 
 Why this exists (2026-04-14)
@@ -66,6 +69,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import City, load_cities  # noqa: E402
 from src.state.db import get_world_connection, init_schema  # noqa: E402
+from scripts.backfill_completeness import (  # noqa: E402
+    add_completeness_args,
+    emit_manifest_footer,
+    evaluate_completeness,
+    resolve_manifest_path,
+    write_manifest,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +130,7 @@ HEADERS = {"User-Agent": "zeus-ogimet-backfill/1.0 (research; contact via repo)"
 CHUNK_DAYS = 30
 RETRY_PAUSE_SECONDS = 5.0
 MAX_RETRIES = 3
+COMPLETENESS_MANIFEST_PREFIX = "backfill_manifest_ogimet_metar"
 
 
 def _fetch_window(
@@ -469,7 +480,12 @@ def backfill_city(
 
     if not observations:
         print(f"  [{city.name}] no parsable observations; skipping")
-        return {"city": city.name, "days_written": 0, "days_skipped": 0}
+        requested_days = (end - start).days + 1
+        return {
+            "city": city.name,
+            "days_written": 0,
+            "days_skipped": requested_days,
+        }
 
     buckets = _group_by_local_day(observations, tz)
     # Trim to the requested date range.
@@ -496,13 +512,17 @@ def backfill_city(
         else:
             _write_day(conn, city, target, local_date, bucket, run_id)
         days_written += 1
+    missing_days = ((end - start).days + 1) - len(buckets)
+    if missing_days > 0:
+        days_skipped += missing_days
+        print(f"  [{city.name}] missing_days={missing_days} -- counted as skipped")
     if not dry_run:
         conn.commit()
     print(f"  [{city.name}] days_written={days_written} days_skipped={days_skipped}")
     return {"city": city.name, "days_written": days_written, "days_skipped": days_skipped}
 
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cities", nargs="+", default=None,
                         help="City names to backfill (default: all registered in OGIMET_TARGETS)")
@@ -510,7 +530,11 @@ def main() -> int:
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--dry-run", action="store_true", help="Parse only, do not write to DB")
     parser.add_argument("--db", default=None, help="DB path override")
-    args = parser.parse_args()
+    add_completeness_args(
+        parser,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+    )
+    args = parser.parse_args(argv)
 
     try:
         start = date.fromisoformat(args.start)
@@ -562,7 +586,47 @@ def main() -> int:
             )
     finally:
         conn.close()
-    return 0
+
+    total_written = sum(s["days_written"] for s in summaries)
+    total_skipped = sum(s["days_skipped"] for s in summaries)
+    total_attempted = total_written + total_skipped
+    completeness = evaluate_completeness(
+        actual_count=total_written,
+        failed_count=total_skipped,
+        attempted_count=total_attempted,
+        expected_count=args.expected_count,
+        fail_threshold_percent=args.fail_threshold_percent,
+    )
+    manifest_path = resolve_manifest_path(
+        args.completeness_manifest,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+        run_id=run_id,
+    )
+    write_manifest(
+        manifest_path,
+        script_name="backfill_ogimet_metar.py",
+        run_id=run_id,
+        dry_run=args.dry_run,
+        inputs={
+            "cities": targets,
+            "start": start,
+            "end": end,
+            "db": args.db,
+            "expected_count": args.expected_count,
+            "fail_threshold_percent": args.fail_threshold_percent,
+        },
+        counters={
+            "unit_kind": "target_day",
+            "days_written": total_written,
+            "days_skipped": total_skipped,
+            "attempted": total_attempted,
+            "city_count": len(summaries),
+            "per_city": summaries,
+        },
+        completeness=completeness,
+    )
+    emit_manifest_footer(manifest_path, completeness)
+    return int(completeness["exit_code"])
 
 
 if __name__ == "__main__":

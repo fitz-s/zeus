@@ -35,9 +35,8 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-There is no active execution packet after the P1 obs_v2 provenance identity
-closeout. The latest closed packet is
-`task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`.
+The active execution packet is
+`task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`.
 
 Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
 already landed and closed; do not reuse those slices as execution packets
@@ -47,8 +46,8 @@ carry payload/source/parser/station provenance identity without secret-bearing
 source locators. This router does not authorize production DB mutation,
 canonical v2 population, market-identity backfill, live executor DB authority,
 legacy-settlement promotion, broad P1 source-role/view work, P2 upsert/revision
-work, P3 safe-view migration, or P4 data population. Before the next packet,
-rebuild phase-entry context and run topology for the selected candidate.
+work, P3 safe-view migration, or P4 data population. The active packet may add
+script-level completeness manifests and fail thresholds only.
 
 ### Packet Evidence
 
@@ -128,6 +127,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-25_p1_daily_observation_writer_provenance/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B-lite packet for WU/HKO daily observation writer provenance identity |
 | `task_2026-04-25_p1_obs_v2_provenance_identity/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B packet for observation_instants_v2 provenance identity and active obs_v2 producer stamps |
 | `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, scope.yaml schema, and tooling_runtime test category |
+| `task_2026-04-25_p2_backfill_completeness_guardrails/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.B-lite packet for script-level backfill completeness manifests and fail-threshold guardrails |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules

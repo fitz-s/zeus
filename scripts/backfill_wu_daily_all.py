@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Backfill WU daily observation rows with provenance and completeness guardrails.
+# Reuse: Run topology and current source/data checks before changing source, write, or guardrail semantics.
 """Backfill WU daily high temperatures for all configured cities.
 
 Uses the WU v1/location/{ICAO}:9:{CC}/observations/historical.json endpoint
@@ -33,6 +36,13 @@ from src.config import cities_by_name
 from src.data.ingestion_guard import IngestionGuard
 from src.types.observation_atom import ObservationAtom, IngestionRejected
 from src.calibration.manager import hemisphere_for_lat, season_from_date
+from scripts.backfill_completeness import (
+    add_completeness_args,
+    emit_manifest_footer,
+    evaluate_completeness,
+    resolve_manifest_path,
+    write_manifest,
+)
 
 
 def _write_atom_to_observations(
@@ -127,6 +137,7 @@ def _require_wu_api_key() -> None:
 # Default preserves existing behavior; set WU_API_KEY env var to override.
 WU_ICAO_HISTORY_URL = "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
 WU_DAILY_PARSER_VERSION = "wu_icao_daily_backfill_v2"
+COMPLETENESS_MANIFEST_PREFIX = "backfill_manifest_wu_daily_all"
 
 # Module-level guard instance (loads config/city_monthly_bounds.json once)
 _GUARD = IngestionGuard()
@@ -424,6 +435,7 @@ def backfill_city(
     days_back: int,
     conn,
     *,
+    rebuild_run_id: str | None = None,
     chunk_days: int = 31,
     sleep_seconds: float = 0.5,
     missing_only: bool = False,
@@ -447,7 +459,11 @@ def backfill_city(
     err_count = 0
     guard_rejected = 0
     request_count = 0
-    rebuild_run_id = f"backfill_wu_daily_all_{datetime.now(_tz.utc).isoformat()}"
+    if rebuild_run_id is None:
+        rebuild_run_id = (
+            f"backfill_wu_daily_all_"
+            f"{datetime.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        )
 
     end_date = date.today() - timedelta(days=2)
     start_date = end_date - timedelta(days=days_back - 1)
@@ -650,7 +666,7 @@ def backfill_city(
     return {"city": city_name, "collected": collected, "skip": skip_count, "err": err_count, "guard_rejected": guard_rejected, "requests": request_count}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     _require_wu_api_key()
     import argparse
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -661,7 +677,11 @@ def main() -> int:
     parser.add_argument("--missing-only", action="store_true", help="Fetch only dates missing WU observations or valued settlements")
     parser.add_argument("--all", action="store_true", help="All configured cities")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and validate but do not write to DB; print per-city summary")
-    args = parser.parse_args()
+    add_completeness_args(
+        parser,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+    )
+    args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -687,9 +707,13 @@ def main() -> int:
         targets = [c for c in CITY_STATIONS if c not in covered]
 
     dry_run = args.dry_run
+    run_id = datetime.now(_tz.utc).strftime("backfill_wu_daily_all_%Y%m%dT%H%M%SZ")
     if dry_run:
         print("[DRY RUN] No rows will be written to the DB.")
-    print(f"=== WU ICAO Station History Backfill ({len(targets)} cities, {args.days} days) ===")
+    print(
+        f"=== WU ICAO Station History Backfill "
+        f"({len(targets)} cities, {args.days} days, run_id={run_id}) ==="
+    )
 
     results = []
     for city_name in targets:
@@ -699,6 +723,7 @@ def main() -> int:
             city_name,
             args.days,
             conn,
+            rebuild_run_id=run_id,
             chunk_days=args.chunk_days,
             sleep_seconds=args.sleep,
             missing_only=args.missing_only,
@@ -725,7 +750,53 @@ def main() -> int:
             if r["collected"] > 0:
                 print(f"  {r['city']:20s} +{r['collected']}")
 
-    return 0
+    total_passed = sum(r["collected"] + r["skip"] for r in results)
+    total_failed = sum(r["err"] + r["guard_rejected"] for r in results)
+    total_attempted = total_passed + total_failed
+    completeness = evaluate_completeness(
+        actual_count=total_passed,
+        failed_count=total_failed,
+        attempted_count=total_attempted,
+        expected_count=args.expected_count,
+        fail_threshold_percent=args.fail_threshold_percent,
+    )
+    manifest_path = resolve_manifest_path(
+        args.completeness_manifest,
+        manifest_prefix=COMPLETENESS_MANIFEST_PREFIX,
+        run_id=run_id,
+    )
+    write_manifest(
+        manifest_path,
+        script_name="backfill_wu_daily_all.py",
+        run_id=run_id,
+        dry_run=args.dry_run,
+        inputs={
+            "cities": targets,
+            "days": args.days,
+            "chunk_days": args.chunk_days,
+            "sleep": args.sleep,
+            "missing_only": args.missing_only,
+            "all": args.all,
+            "expected_count": args.expected_count,
+            "fail_threshold_percent": args.fail_threshold_percent,
+        },
+        counters={
+            "unit_kind": "target_day",
+            "passed": total_passed,
+            "failed": total_failed,
+            "attempted": total_attempted,
+            "new_count": sum(r["collected"] for r in results),
+            "replaced_or_existing_count": sum(r["skip"] for r in results),
+            "fetch_or_missing_errors": sum(r["err"] for r in results),
+            "guard_rejected": sum(r["guard_rejected"] for r in results),
+            "requests": sum(r.get("requests", 0) for r in results),
+            "city_count": len(results),
+            "per_city": results,
+        },
+        completeness=completeness,
+    )
+    emit_manifest_footer(manifest_path, completeness)
+    return int(completeness["exit_code"])
 
 
 if __name__ == "__main__":
