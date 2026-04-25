@@ -889,12 +889,18 @@ def _code_review_graph_checks():
     return topology_doctor_code_review_graph
 
 
-def run_code_review_graph_status(changed_files: list[str] | None = None) -> StrictResult:
-    return _code_review_graph_checks().run_code_review_graph_status(sys.modules[__name__], changed_files)
+def run_code_review_graph_status(changed_files: list[str] | None = None, *, include_appendix: bool = True) -> StrictResult:
+    return _code_review_graph_checks().run_code_review_graph_status(
+        sys.modules[__name__], changed_files, include_appendix=include_appendix
+    )
 
 
 def build_code_impact_graph(files: list[str], task: str = "") -> dict[str, Any]:
     return _code_review_graph_checks().build_code_impact_graph(sys.modules[__name__], files, task=task)
+
+
+def build_graph_appendix(files: list[str], task: str | None = None) -> dict[str, Any]:
+    return _code_review_graph_checks().build_graph_appendix(sys.modules[__name__], files, task=task)
 
 
 def _packet_prefill_checks():

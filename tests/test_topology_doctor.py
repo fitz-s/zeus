@@ -1942,6 +1942,106 @@ def test_module_routing_owned_only_by_module_manifest():
     assert "architecture/docs_registry.yaml" not in fact_types["module_routing"].get("derived_owners", [])
 
 
+def test_graph_appendix_marks_derived_not_authority():
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["authority_status"] == "derived_not_authority"
+    assert "Graph output is derived review context only." in appendix["limitations"]
+
+
+def test_graph_appendix_respects_size_budget(monkeypatch):
+    payload = {
+        "usable": True,
+        "changed_nodes": [
+            {"path": "scripts/very_long_file.py", "line_start": idx, "qualified_name": "x" * 200}
+            for idx in range(50)
+        ],
+        "tests_for": [],
+        "impacted_files": [f"src/{idx}_{'x' * 100}.py" for idx in range(50)],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["truncation"]["applied"] is True
+    assert len(json.dumps(appendix).encode("utf-8")) <= 2048
+
+
+def test_graph_appendix_stale_is_advisory_by_default(monkeypatch):
+    payload = {
+        "usable": False,
+        "reason": "graph cache is unavailable, stale, or missing target code coverage",
+        "graph_health": {
+            "issues": [
+                {
+                    "code": "code_review_graph_stale_head",
+                    "path": ".code-review-graph/graph.db",
+                    "message": "stale",
+                    "severity": "warning",
+                }
+            ]
+        },
+        "changed_nodes": [],
+        "tests_for": [],
+        "impacted_files": [],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    appendix = topology_doctor.build_graph_appendix(["scripts/topology_doctor.py"], task="graph review")
+
+    assert appendix["graph_freshness"] == "stale"
+    assert appendix["authority_status"] == "derived_not_authority"
+
+
+def test_graph_appendix_stale_blocks_when_required_by_profile():
+    profiles = topology_doctor.load_context_pack_profiles()["profiles"]
+
+    assert all(profile.get("requires_graph_evidence") is False for profile in profiles)
+
+
+def test_context_pack_includes_graph_appendix_for_code_review_profile():
+    payload = topology_doctor.build_context_pack(
+        "package_review",
+        task="package review graph appendix",
+        files=["scripts/topology_doctor.py"],
+    )
+
+    assert payload["graph_appendix"]["authority_status"] == "derived_not_authority"
+
+
+def test_context_pack_handles_missing_graph_db_gracefully(monkeypatch):
+    payload = {
+        "usable": False,
+        "reason": "graph DB missing",
+        "graph_health": {
+            "issues": [
+                {
+                    "code": "code_review_graph_missing",
+                    "path": ".code-review-graph/graph.db",
+                    "message": "missing",
+                    "severity": "warning",
+                }
+            ]
+        },
+        "changed_nodes": [],
+        "tests_for": [],
+        "impacted_files": [],
+        "test_gaps": [],
+    }
+    monkeypatch.setattr(topology_doctor, "build_code_impact_graph", lambda files, task="": payload)
+
+    pack = topology_doctor.build_context_pack(
+        "debug",
+        task="debug missing graph",
+        files=["scripts/topology_doctor.py"],
+    )
+
+    assert pack["graph_appendix"]["graph_freshness"] == "missing"
+    assert pack["graph_appendix"]["authority_status"] == "derived_not_authority"
+
+
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(
         "fix settlement rounding in replay",

@@ -23,6 +23,7 @@ profiles:
       reviews. It synthesizes topology evidence into review questions instead
       of emitting edit permission or a hand-written core map.
     authority_status: generated_review_packet_not_authority
+    requires_graph_evidence: false
     trigger_terms:
       - package review
       - package-level
@@ -40,6 +41,7 @@ profiles:
       - coverage_gaps
       - downstream_risks
       - code_impact_graph
+      - graph_appendix
       - tests_required
       - static_checks
       - route_health
@@ -63,6 +65,7 @@ profiles:
       topology evidence into checks, likely boundaries, and context-expansion
       triggers without requiring the agent to read every boundary rule first.
     authority_status: generated_debug_packet_not_authority
+    requires_graph_evidence: false
     trigger_terms:
       - debug
       - diagnose
@@ -83,6 +86,7 @@ profiles:
       - coverage_gaps
       - downstream_risks
       - code_impact_graph
+      - graph_appendix
       - route_health
       - repo_health
       - context_assumption
