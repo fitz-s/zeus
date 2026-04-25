@@ -744,6 +744,96 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed post-P3/P4 preflight evidence packet plan
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed post-P3/P4 preflight evidence matrix
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed post-P3/P4 preflight work log
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_post_p3_p4_preflight/scope.yaml
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed post-P3/P4 preflight scope sidecar
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed post-P3/P4 preflight receipt
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md
   doc_class: operations
   default_read: false
