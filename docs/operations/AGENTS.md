@@ -40,14 +40,12 @@ No active execution packet is frozen. The latest closeout evidence packet is
 
 Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
 already landed and closed; do not reuse those slices as execution packets
-without new evidence. The latest packet hardened the
-`observation_instants_v2` writer and active obs_v2 producers so written rows
-carry payload/source/parser/station provenance identity without secret-bearing
-source locators. The P2 backfill completeness packet, P2 4.4.A1/A2 revision
-history packets, P3 4.5.A metric-read linter closeout, P3 residual replay
-usage-path guard, and P3 4.5.B-lite obs_v2 reader-gate consumer hardening are
-closed. The post-P3/P4 preflight evidence packet is also closed and records
-that P4 mutation remains blocked by operator evidence. This
+without new evidence. The latest implementation packets closed P2 backfill
+completeness, P2 4.4.A1/A2 revision history, P3 4.5.A metric-read linter
+enforcement, the P3 residual replay usage-path guard, and P3 4.5.B-lite
+obs_v2 reader-gate consumer hardening. The latest closeout evidence packet is
+the post-P3/P4 preflight, which is read-only and records that P4 mutation
+remains blocked by operator evidence. This
 router does not authorize production DB mutation, canonical v2 population,
 market-identity backfill, live executor DB authority, legacy-settlement
 promotion, broad P1 source-role/view work, live daily-ingest changes, row-level
