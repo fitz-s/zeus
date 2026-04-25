@@ -27,6 +27,7 @@ from src.state.schema.v2_schema import apply_v2_schema
 from scripts import verify_truth_surfaces as truth_surfaces
 from scripts.verify_truth_surfaces import (
     build_calibration_pair_rebuild_preflight_report,
+    build_p4_readiness_report,
     build_platt_refit_preflight_report,
     build_training_readiness_report,
 )
@@ -57,6 +58,62 @@ def _fresh_training_readiness_world_db(tmp_path):
 
 def _blocker_codes(report):
     return {item["code"] for item in report["blockers"]}
+
+
+def _ready_p4_state_dir(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "scheduler_jobs_health.json").write_text(
+        """
+        {
+          "k2_daily_obs": {"status": "OK", "last_success_at": "2026-04-25T12:00:00Z"},
+          "k2_forecasts_daily": {"status": "OK", "last_success_at": "2026-04-25T13:00:00Z"}
+        }
+        """,
+        encoding="utf-8",
+    )
+    (state_dir / "status_summary.json").write_text(
+        '{"risk":{"infrastructure_level":"GREEN"}}',
+        encoding="utf-8",
+    )
+    (state_dir / "k2_forecasts_daily_row_count.json").write_text(
+        '{"status":"OK","row_count":12}',
+        encoding="utf-8",
+    )
+    return state_dir
+
+
+def _write_accepted_market_rule(path):
+    path.write_text(
+        """
+        {
+          "source_url": "https://polymarket.example/rules/nyc-high",
+          "station_id": "KNYC",
+          "finalization_policy": "WU integer display after source finalization",
+          "rule_version": "market-rule-v1",
+          "temperature_metric": "high",
+          "unit": "F",
+          "bin_identity": {"market_slug": "market-slug", "range_label": "70-71F"}
+        }
+        """,
+        encoding="utf-8",
+    )
+
+
+def _write_accepted_tigge_manifest(path, *, track):
+    path.write_text(
+        f"""
+        {{
+          "track": "{track}",
+          "cloud_local_parity_verified": true,
+          "manifest_hash": "sha256:test-{track}",
+          "issue_time_verified": true,
+          "available_at_verified": true,
+          "files": [{{"name": "sample.json", "sha256": "sha256:file-{track}"}}]
+        }}
+        """,
+        encoding="utf-8",
+    )
 
 
 def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
@@ -1570,6 +1627,184 @@ class TestTrainingReadinessP0:
         assert "empty_v2_table" in _blocker_codes(report)
         for check in report["checks"].values():
             assert set(check) >= {"id", "status", "detail"}
+
+
+class TestP4Readiness:
+    """P4: post-P3 readiness checker is read-only and fail-closed."""
+
+    def test_p4_readiness_opens_world_db_read_only(self, tmp_path, monkeypatch):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        state_dir = _ready_p4_state_dir(tmp_path)
+        calls = []
+        real_connect = truth_surfaces.sqlite3.connect
+
+        def capture_connect(database, *args, **kwargs):
+            calls.append((database, kwargs))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(truth_surfaces.sqlite3, "connect", capture_connect)
+
+        build_p4_readiness_report(
+            db_path,
+            state_dir=state_dir,
+            env={},
+            market_rule_paths=(tmp_path / "missing-rules",),
+            tigge_track_paths={
+                "mx2t6_high": (tmp_path / "missing-mx",),
+                "mn2t6_low": (tmp_path / "missing-mn",),
+            },
+        )
+
+        assert calls
+        database, kwargs = calls[0]
+        assert str(database).startswith(f"file:{db_path}")
+        assert "mode=ro" in str(database)
+        assert kwargs.get("uri") is True
+
+    def test_p4_readiness_reports_post_p3_blockers(self, tmp_path):
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        report = build_p4_readiness_report(
+            db_path,
+            state_dir=state_dir,
+            env={},
+            market_rule_paths=(tmp_path / "missing-rules",),
+            tigge_track_paths={
+                "mx2t6_high": (tmp_path / "missing-mx",),
+                "mn2t6_low": (tmp_path / "missing-mn",),
+            },
+        )
+
+        assert report["ready"] is False
+        assert report["status"] == "NOT_READY"
+        assert report["mode"] == "p4-readiness"
+        blockers = _blocker_codes(report)
+        assert {
+            "p4_metric_layer_decision_missing",
+            "p4_market_rule_acceptance_contract_missing",
+            "p4_tigge_manifest_missing",
+            "p4_market_events_v2_empty",
+            "p4_settlements_v2_empty",
+            "p4_ensemble_snapshots_v2_empty",
+            "p4_calibration_pairs_v2_empty",
+            "p4_wu_api_key_missing",
+            "p4_scheduler_health_missing",
+            "p4_forecast_row_count_evidence_missing",
+            "p4_status_summary_unavailable",
+        }.issubset(blockers)
+        for blocker in report["blockers"]:
+            assert blocker["lane"] in report["lanes"]
+            assert blocker["code"].startswith("p4_")
+        assert report["checks"]["p4.4_8.status_summary_infrastructure_green"]["status"] == "FAIL"
+
+    def test_p4_readiness_can_pass_with_explicit_operator_evidence(self, tmp_path):
+        db_path = tmp_path / "p4-ready-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.commit()
+        conn.close()
+        state_dir = _ready_p4_state_dir(tmp_path)
+        market_rule_file = tmp_path / "market_rule.json"
+        _write_accepted_market_rule(market_rule_file)
+        mx_dir = tmp_path / "tigge_mx"
+        mn_dir = tmp_path / "tigge_mn"
+        mx_dir.mkdir()
+        mn_dir.mkdir()
+        _write_accepted_tigge_manifest(mx_dir / "manifest.json", track="mx2t6_high")
+        _write_accepted_tigge_manifest(mn_dir / "manifest.json", track="mn2t6_low")
+
+        report = build_p4_readiness_report(
+            db_path,
+            state_dir=state_dir,
+            env={"WU_API_KEY": "present"},
+            market_rule_paths=(market_rule_file,),
+            tigge_track_paths={
+                "mx2t6_high": (mx_dir,),
+                "mn2t6_low": (mn_dir,),
+            },
+            metric_layer_decision="daily-aggregate",
+        )
+
+        assert report["ready"] is True
+        assert report["status"] == "READY"
+        assert report["blockers"] == []
+        assert report["checks"]["p4.4_5_b.metric_layer_decision_present"]["status"] == "PASS"
+        assert report["checks"]["market_events_v2.p4_market_identity_present"]["status"] == "PASS"
+        assert report["checks"]["p4.4_8.k2_daily_obs_ok"]["status"] == "PASS"
+        assert report["checks"]["p4.4_8.k2_forecasts_daily_row_count_verified"]["status"] == "PASS"
+
+    def test_p4_readiness_rejects_placeholder_operator_artifacts(self, tmp_path):
+        db_path = tmp_path / "p4-placeholder-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.commit()
+        conn.close()
+        state_dir = _ready_p4_state_dir(tmp_path)
+        market_rule_file = tmp_path / "market_rule.json"
+        market_rule_file.write_text("{}", encoding="utf-8")
+        mx_dir = tmp_path / "tigge_mx"
+        mn_dir = tmp_path / "tigge_mn"
+        mx_dir.mkdir()
+        mn_dir.mkdir()
+        (mx_dir / "sample.json").write_text("{}", encoding="utf-8")
+        (mn_dir / "sample.json").write_text("{}", encoding="utf-8")
+
+        report = build_p4_readiness_report(
+            db_path,
+            state_dir=state_dir,
+            env={"WU_API_KEY": "present"},
+            market_rule_paths=(market_rule_file,),
+            tigge_track_paths={
+                "mx2t6_high": (mx_dir,),
+                "mn2t6_low": (mn_dir,),
+            },
+            metric_layer_decision="daily-aggregate",
+        )
+
+        blockers = _blocker_codes(report)
+        assert report["ready"] is False
+        assert "p4_market_rule_acceptance_contract_missing" in blockers
+        assert "p4_tigge_manifest_missing" in blockers
+
+    def test_p4_readiness_blocks_unverified_runtime_evidence(self, tmp_path):
+        db_path = tmp_path / "p4-runtime-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.commit()
+        conn.close()
+        state_dir = _ready_p4_state_dir(tmp_path)
+        (state_dir / "status_summary.json").write_text(
+            '{"risk":{"infrastructure_level":"YELLOW"}}',
+            encoding="utf-8",
+        )
+        (state_dir / "k2_forecasts_daily_row_count.json").unlink()
+        market_rule_file = tmp_path / "market_rule.json"
+        _write_accepted_market_rule(market_rule_file)
+        mx_dir = tmp_path / "tigge_mx"
+        mn_dir = tmp_path / "tigge_mn"
+        mx_dir.mkdir()
+        mn_dir.mkdir()
+        _write_accepted_tigge_manifest(mx_dir / "manifest.json", track="mx2t6_high")
+        _write_accepted_tigge_manifest(mn_dir / "manifest.json", track="mn2t6_low")
+
+        report = build_p4_readiness_report(
+            db_path,
+            state_dir=state_dir,
+            env={"WU_API_KEY": "present"},
+            market_rule_paths=(market_rule_file,),
+            tigge_track_paths={
+                "mx2t6_high": (mx_dir,),
+                "mn2t6_low": (mn_dir,),
+            },
+            metric_layer_decision="daily-aggregate",
+        )
+
+        blockers = _blocker_codes(report)
+        assert report["ready"] is False
+        assert "p4_forecast_row_count_evidence_missing" in blockers
+        assert "p4_status_summary_infrastructure_not_green" in blockers
 
 
 class TestPortfolioTruthSource:

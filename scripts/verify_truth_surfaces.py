@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import date
@@ -33,6 +34,9 @@ SHARED_DB = STATE_DIR / "zeus-world.db"
 RISK_DB = STATE_DIR / "risk_state.db"
 POSITIONS_JSON = STATE_DIR / "positions.json"
 STATUS_JSON = STATE_DIR / "status_summary.json"
+SCHEDULER_HEALTH_JSON = STATE_DIR / "scheduler_jobs_health.json"
+AUTO_PAUSE_TOMBSTONE = STATE_DIR / "auto_pause_failclosed.tombstone"
+FORECAST_ROW_COUNT_EVIDENCE_JSON = STATE_DIR / "k2_forecasts_daily_row_count.json"
 
 TODAY = date.today().isoformat()
 
@@ -70,6 +74,48 @@ SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS = (
     "temperature_metric",
     "market_slug",
 )
+MARKET_EVENTS_V2_MARKET_IDENTITY_COLUMNS = (
+    "market_slug",
+    "condition_id",
+    "token_id",
+    "city",
+    "target_date",
+    "temperature_metric",
+)
+P4_METRIC_LAYER_DECISIONS = frozenset({
+    "instant-level",
+    "daily-aggregate",
+})
+DEFAULT_TIGGE_TRACK_PATHS = {
+    "mx2t6_high": (
+        STATE_DIR / "tigge_localday_mx2t6_max",
+        STATE_DIR / "tigge_ecmwf_ens_mx2t6_localday_max",
+    ),
+    "mn2t6_low": (
+        STATE_DIR / "tigge_localday_mn2t6_min",
+        STATE_DIR / "tigge_ecmwf_ens_mn2t6_localday_min",
+    ),
+}
+DEFAULT_MARKET_RULE_PATHS = (
+    STATE_DIR / "market_rules",
+    STATE_DIR / "market_events",
+    ROOT / "raw" / "market_rules",
+    ROOT / "data" / "market_rules",
+)
+P4_TIGGE_MANIFEST_NAMES = (
+    "tigge_manifest.json",
+    "integrity_manifest.json",
+    "manifest.json",
+    "cloud_local_parity.json",
+)
+P4_ALLOWED_LANES = frozenset({
+    "4.5.B-full",
+    "4.6.A",
+    "4.6.B",
+    "4.6.C",
+    "4.7",
+    "4.8",
+})
 ENSEMBLE_SNAPSHOT_PREFLIGHT_COLUMNS = (
     "city",
     "target_date",
@@ -284,6 +330,224 @@ def _finalize_report(report: dict) -> dict:
     report["ready"] = ready
     report["status"] = READY if ready else NOT_READY
     return report
+
+
+def _path_has_any_entry(path: Path) -> bool:
+    if path.is_file():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except (OSError, StopIteration):
+        return False
+    return True
+
+
+def _json_value_present(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _json_has_key(payload: object, keys: tuple[str, ...]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key, value in payload.items():
+        if key in keys and _json_value_present(value):
+            return True
+        if isinstance(value, dict) and _json_has_key(value, keys):
+            return True
+    return False
+
+
+def _json_text_for_key(payload: object, keys: tuple[str, ...]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key, value in payload.items():
+        if key in keys and _json_value_present(value):
+            return str(value).strip()
+        if isinstance(value, dict):
+            nested = _json_text_for_key(value, keys)
+            if nested:
+                return nested
+    return None
+
+
+def _json_bool_or_status_ok(
+    payload: dict,
+    *,
+    bool_keys: tuple[str, ...] = (),
+    status_keys: tuple[str, ...] = (),
+) -> bool:
+    for key in bool_keys:
+        value = _json_text_for_key(payload, (key,))
+        if value and value.lower() in {"true", "1", "yes", "ok", "pass", "passed", "verified"}:
+            return True
+    for key in status_keys:
+        value = _json_text_for_key(payload, (key,))
+        if value and value.lower() in {"ok", "pass", "passed", "verified", "green"}:
+            return True
+    return False
+
+
+def _iter_direct_json_candidates(paths: tuple[Path, ...]) -> list[Path]:
+    candidates: list[Path] = []
+    for path in paths:
+        if path.is_file():
+            candidates.append(path)
+            continue
+        if not path.is_dir():
+            continue
+        for name in P4_TIGGE_MANIFEST_NAMES:
+            candidate = path / name
+            if candidate.is_file():
+                candidates.append(candidate)
+        try:
+            direct_json = sorted(path.glob("*.json"))
+        except OSError:
+            direct_json = []
+        for candidate in direct_json:
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _load_json_object(path: Path) -> tuple[dict | None, str | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"unreadable: {exc}"
+    if not isinstance(payload, dict):
+        return None, "not a JSON object"
+    return payload, None
+
+
+def _market_rule_acceptance_errors(payload: dict) -> list[str]:
+    required_checks = (
+        ("source URL/file", _json_has_key(payload, ("source_url", "source_file"))),
+        ("station/source", _json_has_key(payload, ("station_id", "station", "source", "source_name"))),
+        ("finalization policy", _json_has_key(payload, ("finalization_policy", "source_finalization_policy"))),
+        ("rule version", _json_has_key(payload, ("rule_version", "market_rule_version"))),
+        ("metric", _json_has_key(payload, ("temperature_metric", "metric"))),
+        ("unit", _json_has_key(payload, ("unit", "temp_unit", "temperature_unit"))),
+        (
+            "bin identity",
+            _json_has_key(
+                payload,
+                (
+                    "bin_identity",
+                    "bins",
+                    "range_label",
+                    "bin_type",
+                    "condition_id",
+                    "token_id",
+                    "market_slug",
+                ),
+            ),
+        ),
+    )
+    return [name for name, met in required_checks if not met]
+
+
+def _tigge_manifest_errors(payload: dict, *, track: str) -> list[str]:
+    errors: list[str] = []
+    manifest_track = _json_text_for_key(payload, ("track", "dataset_track"))
+    if manifest_track != track:
+        errors.append("track")
+    parity_verified = _json_bool_or_status_ok(
+        payload,
+        bool_keys=("cloud_local_parity_verified", "parity_verified"),
+        status_keys=("cloud_local_parity", "parity_status"),
+    )
+    if not parity_verified:
+        errors.append("cloud/local parity")
+    hash_present = _json_has_key(
+        payload,
+        ("manifest_hash", "source_hash", "sha256", "cloud_hash", "local_hash"),
+    )
+    files = payload.get("files")
+    if isinstance(files, list):
+        hash_present = hash_present or any(
+            isinstance(item, dict)
+            and _json_has_key(item, ("sha256", "source_hash", "cloud_hash", "local_hash"))
+            for item in files
+        )
+    if not hash_present:
+        errors.append("hash evidence")
+    source_verified_timestamps = _json_bool_or_status_ok(
+        payload,
+        bool_keys=("source_verified_timestamps",),
+        status_keys=("timestamp_status",),
+    )
+    issue_verified = source_verified_timestamps or _json_bool_or_status_ok(
+        payload,
+        bool_keys=("issue_time_verified",),
+        status_keys=("issue_time_status",),
+    )
+    available_verified = source_verified_timestamps or _json_bool_or_status_ok(
+        payload,
+        bool_keys=("available_at_verified",),
+        status_keys=("available_at_status",),
+    )
+    if not issue_verified:
+        errors.append("source-verified issue_time")
+    if not available_verified:
+        errors.append("source-verified available_at")
+    return errors
+
+
+def _first_accepted_json_artifact(
+    paths: tuple[Path, ...],
+    validator,
+) -> tuple[Path | None, list[str]]:
+    diagnostics: list[str] = []
+    candidates = _iter_direct_json_candidates(paths)
+    if not candidates:
+        return None, ["no JSON acceptance artifact found"]
+    for candidate in candidates:
+        payload, error = _load_json_object(candidate)
+        if error:
+            diagnostics.append(f"{candidate}: {error}")
+            continue
+        assert payload is not None
+        errors = validator(payload)
+        if not errors:
+            return candidate, diagnostics
+        diagnostics.append(f"{candidate}: missing " + ", ".join(errors))
+    return None, diagnostics
+
+
+def _add_p4_check(
+    report: dict,
+    *,
+    check_id: str,
+    met: bool,
+    detail: str,
+    code: str,
+    lane: str,
+    count: int | None = None,
+    threshold: int | None = None,
+    blocking: bool = True,
+) -> None:
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else (FAIL if blocking else WARN),
+        detail=detail,
+        count=count,
+        threshold=threshold,
+        met=met,
+    )
+    if not met and blocking:
+        blocker = {"code": code, "lane": lane, "count": count if count is not None else 0}
+        if blocker not in report["blockers"]:
+            report["blockers"].append(blocker)
 
 
 def _add_required_columns_check(
@@ -1421,6 +1685,508 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             )
 
 
+def _add_p4_table_populated_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    lane: str,
+    code: str = "p4_table_empty",
+) -> None:
+    if not _table_exists(cur, table):
+        _add_p4_check(
+            report,
+            check_id=f"{table}.p4_populated",
+            met=False,
+            detail=f"{table} table is missing",
+            code="missing_table",
+            lane=lane,
+            count=0,
+            threshold=1,
+        )
+        return
+    count = _count(cur, table)
+    _add_p4_check(
+        report,
+        check_id=f"{table}.p4_populated",
+        met=count >= 1,
+        detail=f"{table} rows={count}, required>=1 for P4 closure",
+        code=code,
+        lane=lane,
+        count=count,
+        threshold=1,
+    )
+
+
+def _add_p4_identity_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    check_id: str,
+    columns: tuple[str, ...],
+    lane: str,
+) -> None:
+    if not _table_exists(cur, table):
+        _add_p4_check(
+            report,
+            check_id=check_id,
+            met=False,
+            detail=f"{table} table is missing",
+            code="missing_table",
+            lane=lane,
+            count=0,
+            threshold=0,
+        )
+        return
+    existing_columns = _columns(cur, table)
+    missing_columns = [column for column in columns if column not in existing_columns]
+    if missing_columns:
+        _add_p4_check(
+            report,
+            check_id=check_id,
+            met=False,
+            detail=f"{table} lacks required identity columns: " + ", ".join(missing_columns),
+            code="p4_market_identity_columns_missing",
+            lane=lane,
+            count=len(missing_columns),
+            threshold=0,
+        )
+        return
+    missing_identity = _count(cur, table, _any_blank_sql(columns))
+    _add_p4_check(
+        report,
+        check_id=check_id,
+        met=missing_identity == 0,
+        detail=f"{table} rows with incomplete market identity={missing_identity}",
+        code="p4_market_identity_missing",
+        lane=lane,
+        count=missing_identity,
+        threshold=0,
+    )
+
+
+def _add_p4_metric_layer_decision_check(
+    report: dict,
+    metric_layer_decision: str | None,
+) -> None:
+    normalized = (metric_layer_decision or "").strip().lower()
+    met = normalized in P4_METRIC_LAYER_DECISIONS
+    detail = (
+        f"obs_v2 metric-layer decision={normalized}"
+        if met
+        else "obs_v2 metric-layer decision missing; expected instant-level or daily-aggregate"
+    )
+    _add_p4_check(
+        report,
+        check_id="p4.4_5_b.metric_layer_decision_present",
+        met=met,
+        detail=detail,
+        code="p4_metric_layer_decision_missing",
+        lane="4.5.B-full",
+    )
+
+
+def _add_p4_market_rule_acceptance_check(
+    report: dict,
+    *,
+    paths: tuple[Path, ...],
+) -> None:
+    accepted_path, diagnostics = _first_accepted_json_artifact(
+        paths,
+        _market_rule_acceptance_errors,
+    )
+    _add_p4_check(
+        report,
+        check_id="p4.4_6_a.market_rule_acceptance_contract_present",
+        met=accepted_path is not None,
+        detail=(
+            f"accepted market-rule contract at {accepted_path}"
+            if accepted_path is not None
+            else "market-rule acceptance contract missing or incomplete; "
+            + "; ".join(diagnostics)
+        ),
+        code="p4_market_rule_acceptance_contract_missing",
+        lane="4.6.A",
+        count=1 if accepted_path is not None else 0,
+        threshold=1,
+    )
+
+
+def _add_p4_tigge_manifest_check(
+    report: dict,
+    *,
+    track: str,
+    paths: tuple[Path, ...],
+) -> None:
+    accepted_path, diagnostics = _first_accepted_json_artifact(
+        paths,
+        lambda payload: _tigge_manifest_errors(payload, track=track),
+    )
+    _add_p4_check(
+        report,
+        check_id=f"p4.4_7.{track}_parity_manifest_present",
+        met=accepted_path is not None,
+        detail=(
+            f"{track} accepted TIGGE parity manifest at {accepted_path}"
+            if accepted_path is not None
+            else f"{track} TIGGE parity/hash/timestamp manifest missing or incomplete; "
+            + "; ".join(diagnostics)
+        ),
+        code="p4_tigge_manifest_missing",
+        lane="4.7",
+        count=1 if accepted_path is not None else 0,
+        threshold=1,
+    )
+
+
+def _add_p4_scheduler_job_check(
+    report: dict,
+    *,
+    scheduler_health_path: Path,
+    job_name: str,
+    check_id: str,
+) -> None:
+    payload, error = _load_json_object(scheduler_health_path)
+    if error:
+        _add_p4_check(
+            report,
+            check_id=check_id,
+            met=False,
+            detail=f"scheduler health artifact {scheduler_health_path} {error}",
+            code="p4_scheduler_health_missing",
+            lane="4.8",
+        )
+        return
+    job = payload.get(job_name)
+    if not isinstance(job, dict):
+        _add_p4_check(
+            report,
+            check_id=check_id,
+            met=False,
+            detail=f"scheduler job {job_name} missing from {scheduler_health_path}",
+            code="p4_scheduler_job_missing",
+            lane="4.8",
+        )
+        return
+    status = str(job.get("status") or "").upper()
+    met = status == "OK"
+    detail = (
+        f"{job_name} status={status or 'missing'}; "
+        f"last_success_at={job.get('last_success_at')}; "
+        f"last_failure_reason={job.get('last_failure_reason')}"
+    )
+    _add_p4_check(
+        report,
+        check_id=check_id,
+        met=met,
+        detail=detail,
+        code=f"p4_{job_name}_not_ok",
+        lane="4.8",
+    )
+
+
+def _json_int_for_key(payload: object, keys: tuple[str, ...]) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for key, value in payload.items():
+        if key in keys:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+        if isinstance(value, dict):
+            nested = _json_int_for_key(value, keys)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _add_p4_forecast_row_count_check(report: dict, *, evidence_path: Path) -> None:
+    payload, error = _load_json_object(evidence_path)
+    if error:
+        _add_p4_check(
+            report,
+            check_id="p4.4_8.k2_forecasts_daily_row_count_verified",
+            met=False,
+            detail=f"k2_forecasts_daily row-count evidence {evidence_path} {error}",
+            code="p4_forecast_row_count_evidence_missing",
+            lane="4.8",
+        )
+        return
+    assert payload is not None
+    status = _json_text_for_key(payload, ("status",))
+    row_count = _json_int_for_key(
+        payload,
+        ("row_count", "rows", "rows_written", "forecast_rows", "rows_inserted"),
+    )
+    status_ok = not status or status.upper() == "OK"
+    met = status_ok and row_count is not None and row_count >= 1
+    detail = (
+        f"k2_forecasts_daily row-count evidence status={status or 'unspecified'} "
+        f"row_count={row_count}"
+    )
+    _add_p4_check(
+        report,
+        check_id="p4.4_8.k2_forecasts_daily_row_count_verified",
+        met=met,
+        detail=detail,
+        code="p4_forecast_row_count_not_verified",
+        lane="4.8",
+        count=row_count if row_count is not None else 0,
+        threshold=1,
+    )
+
+
+def _add_p4_runtime_checks(
+    report: dict,
+    *,
+    env: dict[str, str],
+    scheduler_health_path: Path,
+    forecast_row_count_evidence_path: Path,
+    auto_pause_tombstone_path: Path,
+    status_summary_path: Path,
+) -> None:
+    wu_key_present = bool((env.get("WU_API_KEY") or "").strip())
+    _add_p4_check(
+        report,
+        check_id="p4.4_8.wu_api_key_present",
+        met=wu_key_present,
+        detail=(
+            "WU_API_KEY present in supplied environment"
+            if wu_key_present
+            else "WU_API_KEY missing from supplied environment"
+        ),
+        code="p4_wu_api_key_missing",
+        lane="4.8",
+    )
+    _add_p4_scheduler_job_check(
+        report,
+        scheduler_health_path=scheduler_health_path,
+        job_name="k2_daily_obs",
+        check_id="p4.4_8.k2_daily_obs_ok",
+    )
+    _add_p4_scheduler_job_check(
+        report,
+        scheduler_health_path=scheduler_health_path,
+        job_name="k2_forecasts_daily",
+        check_id="p4.4_8.k2_forecasts_daily_ok",
+    )
+    _add_p4_forecast_row_count_check(
+        report,
+        evidence_path=forecast_row_count_evidence_path,
+    )
+
+    tombstone_present = auto_pause_tombstone_path.exists()
+    tombstone_detail = (
+        "auto-pause tombstone absent"
+        if not tombstone_present
+        else "auto-pause tombstone present: "
+        + auto_pause_tombstone_path.read_text(encoding="utf-8", errors="replace").strip()
+    )
+    _add_p4_check(
+        report,
+        check_id="p4.4_8.auto_pause_tombstone_absent",
+        met=not tombstone_present,
+        detail=tombstone_detail,
+        code="p4_auto_pause_tombstone_present",
+        lane="4.8",
+    )
+
+    payload, error = _load_json_object(status_summary_path)
+    if error:
+        _add_p4_check(
+            report,
+            check_id="p4.4_8.status_summary_infrastructure_green",
+            met=False,
+            detail=f"status summary {status_summary_path} {error}",
+            code="p4_status_summary_unavailable",
+            lane="4.8",
+        )
+        return
+    risk = payload.get("risk") if payload else None
+    if not isinstance(risk, dict):
+        _add_p4_check(
+            report,
+            check_id="p4.4_8.status_summary_infrastructure_green",
+            met=False,
+            detail=f"status summary {status_summary_path} lacks risk object",
+            code="p4_status_summary_infrastructure_missing",
+            lane="4.8",
+        )
+        return
+    infrastructure_level = str(risk.get("infrastructure_level") or "").upper()
+    _add_p4_check(
+        report,
+        check_id="p4.4_8.status_summary_infrastructure_green",
+        met=infrastructure_level == "GREEN",
+        detail=f"status_summary risk.infrastructure_level={infrastructure_level or 'missing'}",
+        code="p4_status_summary_infrastructure_not_green",
+        lane="4.8",
+    )
+
+
+def _p4_lane_for_generic_blocker(blocker: dict) -> tuple[str, str] | None:
+    code = str(blocker.get("code") or "")
+    if code.startswith("p4_") and blocker.get("lane") in P4_ALLOWED_LANES:
+        return code, str(blocker["lane"])
+    table = str(blocker.get("table") or "")
+    if code.startswith("observation_instants_v2") or code in {
+        "payload_identity_missing",
+        "missing_source_role_columns",
+        "missing_reader_identity_columns",
+    } or table == "observation_instants_v2":
+        return "p4_observation_instants_reader_inputs_not_ready", "4.5.B-full"
+    if code in {
+        "empty_rebuild_eligible_snapshots",
+        "ensemble_snapshots_v2.rebuild_input_unsafe",
+        "ensemble_snapshots_v2.metric_scope_unsafe",
+    } or table == "ensemble_snapshots_v2":
+        return "p4_ensemble_snapshot_inputs_not_ready", "4.6.B"
+    if code.startswith("calibration_pairs_v2") or code == "empty_platt_refit_bucket" or table == "calibration_pairs_v2":
+        return "p4_calibration_pairs_not_refit_ready", "4.6.C"
+    if code == "missing_table":
+        return "p4_required_table_missing", "4.6.A"
+    return None
+
+
+def _normalize_p4_blockers(report: dict) -> None:
+    normalized: dict[tuple[str, str, str], dict] = {}
+    for blocker in report["blockers"]:
+        mapped = _p4_lane_for_generic_blocker(blocker)
+        if mapped is None:
+            continue
+        code, lane = mapped
+        metric = str(blocker.get("temperature_metric") or "")
+        key = (code, lane, metric)
+        count = int(blocker.get("count") or 0)
+        existing = normalized.get(key)
+        if existing is None:
+            entry = {"code": code, "lane": lane, "count": count}
+            if metric:
+                entry["temperature_metric"] = metric
+            normalized[key] = entry
+        else:
+            existing["count"] = max(int(existing.get("count") or 0), count)
+    report["blockers"] = list(normalized.values())
+
+
+def build_p4_readiness_report(
+    world_db: Path = SHARED_DB,
+    *,
+    state_dir: Path = STATE_DIR,
+    env: dict[str, str] | None = None,
+    market_rule_paths: tuple[Path, ...] | None = None,
+    tigge_track_paths: dict[str, tuple[Path, ...]] | None = None,
+    metric_layer_decision: str | None = None,
+    scheduler_health_path: Path | None = None,
+    forecast_row_count_evidence_path: Path | None = None,
+    status_summary_path: Path | None = None,
+    auto_pause_tombstone_path: Path | None = None,
+) -> dict:
+    """Return a read-only P4 readiness report for post-P3 blockers."""
+    report = _new_report("p4-readiness", world_db)
+    report["lanes"] = {
+        "4.5.B-full": {"boot_profile": "hourly_observation_ingest"},
+        "4.6.A": {"boot_profile": "settlement_semantics"},
+        "4.6.B": {"boot_profile": "calibration"},
+        "4.6.C": {"boot_profile": "calibration"},
+        "4.7": {"boot_profile": "operator_tigge_rsync"},
+        "4.8": {"boot_profile": "operator_runtime_posture"},
+    }
+
+    _add_p4_metric_layer_decision_check(report, metric_layer_decision)
+
+    market_rule_candidates = market_rule_paths or DEFAULT_MARKET_RULE_PATHS
+    _add_p4_market_rule_acceptance_check(
+        report,
+        paths=tuple(market_rule_candidates),
+    )
+
+    tigge_candidates = tigge_track_paths or DEFAULT_TIGGE_TRACK_PATHS
+    for track, paths in tigge_candidates.items():
+        _add_p4_tigge_manifest_check(
+            report,
+            track=track,
+            paths=tuple(paths),
+        )
+
+    if not world_db.exists():
+        _add_database_missing(report, world_db)
+    else:
+        uri = f"file:{world_db}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        cur = conn.cursor()
+        try:
+            _add_p4_table_populated_check(
+                report,
+                cur,
+                table="market_events_v2",
+                lane="4.6.A",
+                code="p4_market_events_v2_empty",
+            )
+            _add_p4_identity_check(
+                report,
+                cur,
+                table="market_events_v2",
+                check_id="market_events_v2.p4_market_identity_present",
+                columns=MARKET_EVENTS_V2_MARKET_IDENTITY_COLUMNS,
+                lane="4.6.A",
+            )
+            _add_p4_table_populated_check(
+                report,
+                cur,
+                table="settlements_v2",
+                lane="4.6.A",
+                code="p4_settlements_v2_empty",
+            )
+            _add_p4_identity_check(
+                report,
+                cur,
+                table="settlements_v2",
+                check_id="settlements_v2.p4_market_identity_present",
+                columns=SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS,
+                lane="4.6.A",
+            )
+            _add_p4_table_populated_check(
+                report,
+                cur,
+                table="ensemble_snapshots_v2",
+                lane="4.6.B",
+                code="p4_ensemble_snapshots_v2_empty",
+            )
+            _add_rebuild_snapshot_preflight_checks(report, cur)
+            _add_observation_instants_safety_checks(report, cur)
+            _add_p4_table_populated_check(
+                report,
+                cur,
+                table="calibration_pairs_v2",
+                lane="4.6.C",
+                code="p4_calibration_pairs_v2_empty",
+            )
+            _add_platt_pair_preflight_checks(report, cur)
+        finally:
+            conn.close()
+
+    effective_state_dir = state_dir
+    _add_p4_runtime_checks(
+        report,
+        env=dict(os.environ if env is None else env),
+        scheduler_health_path=scheduler_health_path or effective_state_dir / "scheduler_jobs_health.json",
+        forecast_row_count_evidence_path=(
+            forecast_row_count_evidence_path
+            or effective_state_dir / "k2_forecasts_daily_row_count.json"
+        ),
+        auto_pause_tombstone_path=(
+            auto_pause_tombstone_path
+            or effective_state_dir / "auto_pause_failclosed.tombstone"
+        ),
+        status_summary_path=status_summary_path or effective_state_dir / "status_summary.json",
+    )
+    _normalize_p4_blockers(report)
+    return _finalize_report(report)
+
+
 def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) -> dict:
     """Return a read-only input preflight for calibration_pairs_v2 rebuilds.
 
@@ -1945,6 +2711,33 @@ def run_platt_refit_preflight(
     return 0 if report["ready"] else 1
 
 
+def run_p4_readiness(
+    *,
+    world_db: Path = SHARED_DB,
+    json_output: bool = False,
+    market_rule_paths: tuple[Path, ...] | None = None,
+    tigge_track_paths: dict[str, tuple[Path, ...]] | None = None,
+    metric_layer_decision: str | None = None,
+    forecast_row_count_evidence_path: Path | None = None,
+) -> int:
+    report = build_p4_readiness_report(
+        world_db,
+        market_rule_paths=market_rule_paths,
+        tigge_track_paths=tigge_track_paths,
+        metric_layer_decision=metric_layer_decision,
+        forecast_row_count_evidence_path=forecast_row_count_evidence_path,
+    )
+    if json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("P4 readiness:")
+        for check_id, check in report["checks"].items():
+            print(f"  [{check['status']}] {check_id}: {check['detail']}")
+        print()
+        print(f"RESULT: {report['status']}")
+    return 0 if report["ready"] else 1
+
+
 # ---------------------------------------------------------------------------
 # Individual checks — all accept a sqlite3.Cursor for the main zeus.db
 # ---------------------------------------------------------------------------
@@ -2220,6 +3013,7 @@ if __name__ == "__main__":
             "training-readiness",
             "calibration-pair-rebuild-preflight",
             "platt-refit-preflight",
+            "p4-readiness",
         ),
         default="truth-surfaces",
         help="Diagnostic mode to run.",
@@ -2229,6 +3023,39 @@ if __name__ == "__main__":
         type=Path,
         default=SHARED_DB,
         help="World DB path for training-readiness mode.",
+    )
+    parser.add_argument(
+        "--obs-v2-metric-layer-decision",
+        choices=sorted(P4_METRIC_LAYER_DECISIONS),
+        default=None,
+        help="Operator-approved obs_v2 metric-layer decision for p4-readiness.",
+    )
+    parser.add_argument(
+        "--market-rule-path",
+        type=Path,
+        action="append",
+        default=None,
+        help="Accepted market-rule artifact path for p4-readiness; may repeat.",
+    )
+    parser.add_argument(
+        "--tigge-mx2t6-path",
+        type=Path,
+        action="append",
+        default=None,
+        help="Local mx2t6 TIGGE artifact path for p4-readiness; may repeat.",
+    )
+    parser.add_argument(
+        "--tigge-mn2t6-path",
+        type=Path,
+        action="append",
+        default=None,
+        help="Local mn2t6 TIGGE artifact path for p4-readiness; may repeat.",
+    )
+    parser.add_argument(
+        "--forecast-row-count-evidence-path",
+        type=Path,
+        default=None,
+        help="Explicit k2_forecasts_daily row-count evidence JSON for p4-readiness.",
     )
     parser.add_argument(
         "--json",
@@ -2248,4 +3075,25 @@ if __name__ == "__main__":
         )
     if args.mode == "platt-refit-preflight":
         sys.exit(run_platt_refit_preflight(world_db=args.world_db, json_output=args.json))
+    if args.mode == "p4-readiness":
+        tigge_paths = None
+        if args.tigge_mx2t6_path or args.tigge_mn2t6_path:
+            tigge_paths = {
+                "mx2t6_high": tuple(args.tigge_mx2t6_path or ()),
+                "mn2t6_low": tuple(args.tigge_mn2t6_path or ()),
+            }
+        sys.exit(
+            run_p4_readiness(
+                world_db=args.world_db,
+                json_output=args.json,
+                market_rule_paths=(
+                    tuple(args.market_rule_path)
+                    if args.market_rule_path
+                    else None
+                ),
+                tigge_track_paths=tigge_paths,
+                metric_layer_decision=args.obs_v2_metric_layer_decision,
+                forecast_row_count_evidence_path=args.forecast_row_count_evidence_path,
+            )
+        )
     sys.exit(run_checks())

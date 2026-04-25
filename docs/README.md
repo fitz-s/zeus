@@ -51,6 +51,7 @@ Historical governance files demoted from authority live under
 - `operations/task_2026-04-25_p2_obs_v2_revision_history/` - closed POST_AUDIT 4.4.A1 obs_v2 revision-history packet
 - `operations/task_2026-04-25_p2_daily_observation_revision_history/` - closed POST_AUDIT 4.4.A2 daily observation backfill revision-history packet
 - `operations/task_2026-04-25_post_p3_p4_preflight/` - closed post-P3/P4 preflight evidence packet
+- `operations/task_2026-04-25_p4_readiness_checker/` - closed read-only P4 readiness-checker packet
 - `operations/task_2026-04-25_p3_obs_v2_reader_gate/` - closed POST_AUDIT 4.5.B-lite obs_v2 reader-gate consumer-hardening packet
 - `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` - closed POST_AUDIT 4.5.A settlement metric-read linter closeout packet
 - `operations/task_2026-04-25_p3_usage_path_residual_guards/` - closed P3 residual usage-path guard packet

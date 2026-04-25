@@ -5,10 +5,11 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — post-P3/P4 preflight closed; next code packet pending evidence**
+- Mainline task: **Post-audit remediation mainline — P4 read-only readiness checker closed; P4 mutation blocked**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
 - Active execution packet: none frozen; next packet pending phase-entry
-- Closeout evidence packet: `docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
+- Closeout evidence packet: `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
+- Prior post-P3/P4 preflight closeout evidence packet: `docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
 - Prior P3 B-lite closeout evidence packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
 - Prior P2 A2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
 - Prior P2 A1 closeout evidence packet: `docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
@@ -19,7 +20,7 @@ Role: single live control pointer for the repo.
 - Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
 - Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json`
+- Receipt-bound source: `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -85,13 +86,17 @@ Role: single live control pointer for the repo.
   `k2_daily_obs` is failing with the same env reason, and the auto-pause
   tombstone remains an operator decision.
 
+  The read-only P4 readiness checker is closed as a machine-readable status
+  surface. `python3 scripts/verify_truth_surfaces.py --mode p4-readiness
+  --json` reports `NOT_READY`, preserving P4 blocker status without DB or
+  runtime mutation.
+
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
-- `docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md`
-- `docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md`
-- `docs/operations/task_2026-04-25_post_p3_p4_preflight/scope.yaml`
-- `docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json`
+- `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
+- `docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md`
+- `docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml`
+- `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
 
 ## Freeze point
 
@@ -108,8 +113,9 @@ Role: single live control pointer for the repo.
   identity, P2 4.4.B-lite backfill completeness guardrails, P2 4.4.A1/A2
   revision history, P3 4.5.A settlement metric-read enforcement, the P3
   residual replay usage-path guard, P3 4.5.B-lite obs_v2 reader-gate consumer
-  hardening, and post-P3/P4 preflight evidence are closed. No next execution
-  packet is frozen yet. This pointer does not authorize production DB mutation,
+  hardening, post-P3/P4 preflight evidence, and the read-only P4 readiness
+  checker are closed. No active implementation packet is frozen. This pointer
+  does not authorize production DB mutation,
   `settlements_v2` population, market-identity backfill, live executor DB
   authority, legacy-settlement promotion, broad P1 source-role/view work,
   row-level quarantine, live daily ingest changes, shared obs_v2 view redesign,
@@ -143,9 +149,8 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- If operator evidence remains unavailable, freeze a narrow read-only P4
-  readiness-checker packet. If operator evidence appears, freeze the relevant
-  4.5.B-full, 4.6.A, 4.6.B, or 4.6.C packet with semantic boot and topology
-  gates before implementation.
+- Use the closed P4 readiness checker output to freeze the next narrow packet.
+  Do not start P4 mutation until the relevant operator/source/data evidence
+  appears and semantic boot/topology gates are rerun.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->

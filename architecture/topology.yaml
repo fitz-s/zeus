@@ -496,6 +496,7 @@ active_operations_registry:
     - docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md
     - docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md
     - docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md
+    - docs/operations/task_2026-04-25_p4_readiness_checker/plan.md
     - docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md
     - docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md
     - docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md

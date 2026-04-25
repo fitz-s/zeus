@@ -36,7 +36,7 @@ law or implementation permission.
 ### Active Execution Packet
 
 No active execution packet is frozen. The latest closeout evidence packet is
-`task_2026-04-25_post_p3_p4_preflight/plan.md`.
+`task_2026-04-25_p4_readiness_checker/plan.md`.
 
 Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
 already landed and closed; do not reuse those slices as execution packets
@@ -44,7 +44,7 @@ without new evidence. The latest implementation packets closed P2 backfill
 completeness, P2 4.4.A1/A2 revision history, P3 4.5.A metric-read linter
 enforcement, the P3 residual replay usage-path guard, and P3 4.5.B-lite
 obs_v2 reader-gate consumer hardening. The latest closeout evidence packet is
-the post-P3/P4 preflight, which is read-only and records that P4 mutation
+the P4 readiness checker, which is read-only and records that P4 mutation
 remains blocked by operator evidence. This
 router does not authorize production DB mutation, canonical v2 population,
 market-identity backfill, live executor DB authority, legacy-settlement
@@ -135,6 +135,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-25_p2_obs_v2_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A1 packet for schema-backed observation_instants_v2 hash-checked revision history |
 | `task_2026-04-25_p2_daily_observation_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A2 packet for daily WU/HKO observations backfill revision history |
 | `task_2026-04-25_post_p3_p4_preflight/` | packet evidence | Closed post-P3/P4 preflight evidence packet for remaining blocker and operator-decision gates |
+| `task_2026-04-25_p4_readiness_checker/` | packet evidence | Closed read-only P4 readiness-checker packet for blocker status reporting |
 | `task_2026-04-25_p3_obs_v2_reader_gate/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.5.B-lite packet for obs_v2 reader-gate consumer hardening |
 | `task_2026-04-25_p3_settlement_metric_linter_closeout/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.5.A closeout packet for settlement metric-read lint enforcement |
 | `task_2026-04-25_p3_usage_path_residual_guards/` | packet evidence | Closed P3 residual usage-path guard packet for replay settlement metric predicates and hourly canonical-ban proof |
