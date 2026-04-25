@@ -17,6 +17,7 @@ from typing import Any
 GRAPH_DIR = ".code-review-graph"
 GRAPH_DB = ".code-review-graph/graph.db"
 GRAPH_META = ".code-review-graph/graph_meta.json"
+GRAPH_APPENDIX_BUDGET_BYTES = 2048
 CODE_PATTERNS = ("src/*.py", "src/**/*.py", "scripts/*.py", "scripts/*.sh", "tests/test_*.py")
 GRAPH_UNUSABLE_WARNING_CODES = {
     "code_review_graph_missing",
@@ -185,7 +186,7 @@ def effective_changes(api: Any, changed_files: list[str] | None) -> dict[str, st
         raise RuntimeError(str(exc)) from exc
 
 
-def run_code_review_graph_status(api: Any, changed_files: list[str] | None = None) -> Any:
+def run_code_review_graph_status(api: Any, changed_files: list[str] | None = None, *, include_appendix: bool = True) -> Any:
     issues: list[Any] = []
     db_path = api.ROOT / GRAPH_DB
     details: dict[str, Any] = {
@@ -199,6 +200,8 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
             "parity_status": "not_checked",
         },
     }
+    if changed_files and include_appendix:
+        details["appendix"] = build_graph_appendix(api, changed_files, task=None)
 
     if not db_path.exists():
         return api.StrictResult(
@@ -343,6 +346,83 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
     return api.StrictResult(ok=not blocking, issues=issues, details=details)
 
 
+def _node_ref(node: dict[str, Any]) -> str:
+    path = node.get("path") or ""
+    line = node.get("line_start")
+    name = node.get("qualified_name") or node.get("name") or ""
+    return f"{path}:{line}:{name}" if line else f"{path}:{name}"
+
+
+def _appendix_freshness(impact: dict[str, Any]) -> tuple[str, str]:
+    if impact.get("usable"):
+        return "fresh", "graph impact extraction succeeded"
+    reason = str(impact.get("reason") or "")
+    issues = (impact.get("graph_health") or {}).get("issues") or []
+    codes = {str(issue.get("code") or "") for issue in issues}
+    if "code_review_graph_missing" in codes or "graph db missing" in reason.lower():
+        return "missing", reason or "graph DB missing"
+    if codes & GRAPH_UNUSABLE_WARNING_CODES:
+        return "stale", reason or "graph health reported advisory issues"
+    if issues or reason:
+        return "stale", reason or "graph health reported advisory issues"
+    if not impact.get("applicable"):
+        return "fresh", "no graph-applicable code files requested"
+    return "stale", "graph appendix unavailable for unknown reason"
+
+
+def _budget_appendix(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["truncation"] = {"applied": False, "hint": ""}
+    encoded = json.dumps(payload, sort_keys=True)
+    if len(encoded.encode("utf-8")) <= GRAPH_APPENDIX_BUDGET_BYTES:
+        return payload
+    for key in ("changed_nodes", "likely_tests", "impacted_files", "missing_coverage"):
+        payload[key] = [str(item)[:160] for item in payload.get(key, [])[:3]]
+    payload["graph_freshness_reason"] = str(payload.get("graph_freshness_reason") or "")[:240]
+    payload["truncation"] = {
+        "applied": True,
+        "hint": "graph appendix exceeded 2048 bytes; run code-review-graph or topology_doctor graph commands directly",
+    }
+    while len(json.dumps(payload, sort_keys=True).encode("utf-8")) > GRAPH_APPENDIX_BUDGET_BYTES:
+        reduced = False
+        for key in ("changed_nodes", "likely_tests", "impacted_files", "missing_coverage"):
+            if payload.get(key):
+                payload[key] = payload[key][:-1]
+                reduced = True
+        if not reduced:
+            payload["graph_freshness_reason"] = str(payload.get("graph_freshness_reason") or "")[:80]
+            payload["limitations"] = ["Graph output is derived review context only."]
+            break
+    return payload
+
+
+def build_graph_appendix(api: Any, files: list[str], task: str | None = None) -> dict[str, Any]:
+    impact = api.build_code_impact_graph(files, task=task or "")
+    freshness, reason = _appendix_freshness(impact)
+    likely_tests = sorted(
+        {
+            test.get("path") or _node_ref(test)
+            for entry in impact.get("tests_for") or []
+            for test in entry.get("tests") or []
+        }
+    )
+    payload = {
+        "authority_status": "derived_not_authority",
+        "graph_freshness": freshness,
+        "graph_freshness_reason": reason,
+        "limitations": [
+            "Graph output is derived review context only.",
+            "Graph output never waives topology navigation, planning lock, manifests, receipts, tests, or source truth.",
+        ],
+        "changed_nodes": [_node_ref(node) for node in (impact.get("changed_nodes") or [])[:8]],
+        "likely_tests": likely_tests[:8],
+        "impacted_files": (impact.get("impacted_files") or [])[:12],
+        "missing_coverage": [
+            _node_ref(node) for node in (impact.get("test_gaps") or [])[:8]
+        ] + ([reason] if reason and not impact.get("usable") else []),
+    }
+    return _budget_appendix(payload)
+
+
 def relativize(api: Any, path: str) -> str:
     try:
         return Path(path).resolve().relative_to(api.ROOT).as_posix()
@@ -457,7 +537,10 @@ def build_code_impact_graph(api: Any, files: list[str], task: str = "") -> dict[
         payload["reason"] = "no source/test/script code files in this context pack"
         return payload
 
-    status = api.run_code_review_graph_status(code_files)
+    try:
+        status = api.run_code_review_graph_status(code_files, include_appendix=False)
+    except TypeError:
+        status = api.run_code_review_graph_status(code_files)
     health_issues = [api.asdict(issue) for issue in status.issues]
     payload["graph_health"] = {
         "ok": status.ok,
