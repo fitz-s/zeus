@@ -169,3 +169,18 @@ MUST READ `AGENTS.md` and `workspace_map.md`
 Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
 
 You may need to install new environment in your virtual machine or test may fail.
+
+### Packet Runtime (`zpkt`)
+
+A unified CLI collapses packet lifecycle, scope tracking, soft-warn enforcement, and closeout into a single surface. One-time setup (`zpkt setup`) installs the in-repo githook path. Daily use:
+
+```bash
+python3 scripts/zpkt.py setup                    # one-time per clone
+python3 scripts/zpkt.py start <slug>             # new packet + isolated worktree
+python3 scripts/zpkt.py status                   # one-call digest (5-min cached)
+python3 scripts/zpkt.py scope add <files>        # widen in_scope as you discover
+python3 scripts/zpkt.py commit -m "..." [files]  # commit with soft-warn
+python3 scripts/zpkt.py close                    # closeout: receipt + status flip
+```
+
+Full protocol: [`docs/operations/packet_scope_protocol.md`](docs/operations/packet_scope_protocol.md).

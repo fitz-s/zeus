@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Zeus Packet Soft-warn pre-commit hook (PSCB).
+
+Behavior contract (per implementation_plan.md, Group 3):
+
+* **Soft-warn only.** Hook prints a clear violation report to stderr and
+  exits ``0``. It never blocks a commit. Hard-blocking is reserved for a
+  future opt-in mode.
+* **Read-only.** Hook never writes to disk and never modifies the index.
+* **Zero third-party deps.** Imports stdlib + ``scripts/_zpkt_scope``.
+  ``yaml`` is required only because ``scope.yaml`` is YAML; if PyYAML is
+  missing the hook prints a one-line warning and exits ``0`` (still
+  soft).
+* **Cheap.** Should add < 80 ms to ``git commit`` for a typical packet.
+* **Bypass-friendly.** ``git commit --no-verify`` skips it natively, and
+  the body trailer ``Pscb-Bypass: <reason>`` is documented for cases
+  where the hook does run but the agent is intentionally widening
+  scope; ``zpkt audit-bypass`` aggregates these for monthly review.
+
+Exit codes:
+  0  always (soft-warn)
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    out = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    if out.returncode != 0:
+        return Path.cwd()
+    return Path(out.stdout.strip())
+
+
+def _staged_files(root: Path) -> list[str]:
+    cp = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        capture_output=True, text=True, check=False, cwd=str(root),
+    )
+    return [line for line in cp.stdout.splitlines() if line]
+
+
+def main() -> int:
+    if os.environ.get("PSCB_DISABLE") == "1":
+        return 0
+
+    root = _repo_root()
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        from _zpkt_scope import classify_many, load_active_scope, ScopeError  # noqa: E402
+    except Exception as exc:  # pragma: no cover -- defensive
+        print(f"[PSCB] helper import failed ({exc}); skipping (soft).", file=sys.stderr)
+        return 0
+
+    try:
+        scope = load_active_scope(root)
+    except ScopeError as exc:
+        print(f"[PSCB] scope.yaml invalid ({exc}); skipping (soft).", file=sys.stderr)
+        return 0
+
+    if scope is None:
+        # No active packet: the runtime is not yet adopted in this worktree.
+        # Stay silent; nagging on every commit creates new tax.
+        return 0
+
+    staged = _staged_files(root)
+    if not staged:
+        return 0
+
+    classifications = classify_many(scope, staged)
+    violations = [c for c in classifications if c.bucket in ("out_of_scope", "unscoped")]
+    if not violations:
+        return 0
+
+    out = sys.stderr
+    print("", file=out)
+    print(f"[PSCB] packet `{scope.packet}` -- out-of-scope files staged:", file=out)
+    for c in violations:
+        print(f"   - {c.path}  ({c.bucket})", file=out)
+    print("[PSCB] Remedies:", file=out)
+    print("   git restore --staged <file>             # commit later, in another packet", file=out)
+    print("   zpkt scope add <file>                    # widen this packet's scope", file=out)
+    print("   git commit (continues -- soft-warn only)", file=out)
+    print("[PSCB] If intentional, append a trailer to the commit body:", file=out)
+    print("   Pscb-Bypass: <one-sentence reason>", file=out)
+    print("", file=out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -195,3 +195,4 @@ docs/**/~$*
 docs/archives/
 docs/reports/generated/
 docs/artifacts/generated/
+.zpkt-cache/
