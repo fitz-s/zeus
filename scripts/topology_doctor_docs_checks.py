@@ -598,15 +598,17 @@ def check_current_state_receipt_bound(api: Any, topology: dict[str, Any]) -> lis
         return [api._issue("current_state_receipt_missing", rel, "current_state missing")]
     text = path.read_text(encoding="utf-8", errors="ignore")
     active_packet = current_state_label_value(text, "Active execution packet")
+    closeout_packet = current_state_label_value(text, "Closeout evidence packet")
+    packet = active_packet or closeout_packet
     active_source = current_state_label_value(text, "Active package source")
     receipt_source = current_state_label_value(text, "Receipt-bound source")
     issues: list[Any] = []
-    if not active_packet:
-        issues.append(api._issue("current_state_receipt_missing", rel, "missing Active execution packet"))
+    if not packet:
+        issues.append(api._issue("current_state_receipt_missing", rel, "missing Active execution packet or Closeout evidence packet"))
         return issues
     if active_source and active_source.startswith((".omx/", ".omc/")):
         issues.append(api._issue("current_state_receipt_mismatch", rel, "Active package source must be tracked packet evidence, not runtime-local scratch"))
-    expected_receipt = (Path(active_packet).parent / "receipt.json").as_posix()
+    expected_receipt = (Path(packet).parent / "receipt.json").as_posix()
     if not receipt_source:
         issues.append(api._issue("current_state_receipt_missing", rel, "missing Receipt-bound source"))
         receipt_source = expected_receipt
@@ -622,12 +624,12 @@ def check_current_state_receipt_bound(api: Any, topology: dict[str, Any]) -> lis
     if error:
         issues.append(api._issue("current_state_receipt_missing", receipt_source, f"receipt unavailable: {error}"))
         return issues
-    if str(receipt.get("packet") or "") != active_packet:
+    if str(receipt.get("packet") or "") != packet:
         issues.append(
             api._issue(
                 "current_state_receipt_mismatch",
                 receipt_source,
-                f"receipt packet {receipt.get('packet')!r} does not match active execution packet {active_packet!r}",
+                f"receipt packet {receipt.get('packet')!r} does not match current_state packet {packet!r}",
             )
         )
     if receipt_source not in text:

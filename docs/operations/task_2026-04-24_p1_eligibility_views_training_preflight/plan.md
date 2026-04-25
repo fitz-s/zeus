@@ -2,10 +2,10 @@
 
 Date: 2026-04-24
 Branch: `midstream_remediation`
-Status: P1.5 planning was pushed at `07c86d8`. P1.5a implementation is the
-first script-side preflight/adapters slice. No schema, DB, replay/live
-consumer rewiring, settlement-v2 population, or P4 market-identity work is
-authorized.
+Status: P1.5 planning was pushed at `07c86d8`. P1.5a implementation was
+pushed at `99c4ac3` and is closed after post-close control-surface alignment.
+No schema, DB, replay/live consumer rewiring, settlement-v2 population, or P4
+market-identity work is authorized.
 
 ## Task
 
@@ -232,6 +232,15 @@ P1.5a implements the first future slice above:
   scripts, `midstream_guardian_panel` treated as an overlay instead of an
   exclusive test category, and refreshed high-sensitivity skip metadata for
   two existing tests.
+
+## P1.5a Post-Close Status
+
+Implementation commit `99c4ac3` was pushed to `origin/midstream_remediation`.
+A post-close review found no code regression, but correctly failed the packet
+closeout while `current_state.md`, this packet receipt/work log, and the
+operations registry still described P1.5a as active or ready to commit. This
+closeout aligns those control surfaces and leaves the next packet unfrozen
+until a fresh phase-entry plan is written.
 
 ## Rejected Options
 

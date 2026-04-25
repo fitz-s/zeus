@@ -2,12 +2,14 @@
 
 Date: 2026-04-24
 Branch: `midstream_remediation`
-Status: P1.5a implementation ready to commit.
+Status: P1.5a implementation closed; post-close control surfaces aligned.
 
 Task: Implement the first P1.5 script-side eligibility/preflight adapter slice
 without schema, DB, runtime consumer, or P4 market/settlement widening.
 
 Changed files:
+
+Implementation commit `99c4ac3` file set:
 - `architecture/naming_conventions.yaml`
 - `architecture/test_topology.yaml`
 - `scripts/verify_truth_surfaces.py`
@@ -20,10 +22,20 @@ Changed files:
 - `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
 - `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
+Post-close closeout/checker changed files:
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `scripts/topology_doctor_docs_checks.py`
+- `tests/test_topology_doctor.py`
+
 Summary: Restored and adapted read-only calibration-pair rebuild and
 Platt-refit preflight modes, then wired repair script CLI live-write entry
 points to fail closed when their preflight is `NOT_READY`. Also applied small
 topology hygiene fixes needed by the post-merge topology-reform gates.
+Implementation commit `99c4ac3` was pushed to `origin/midstream_remediation`.
 
 Verification: Focused pytest, py_compile, semantic linter, topology
 planning-lock, topology map-maintenance advisory, script/test topology gates,
@@ -31,7 +43,8 @@ freshness metadata, and `git diff --check` passed. Production world DB
 preflight/readiness commands remain read-only and return expected `NOT_READY`
 blockers.
 
-Next: Commit and push this implementation slice.
+Next: Open and freeze the POST_AUDIT_HANDOFF Immediate 4.1.A-C packet only
+after a fresh phase-entry plan.
 
 ## Planning Entry
 
@@ -253,13 +266,75 @@ Parallel/unrelated WIP handling:
 - Critic requested changes while runtime `state/**` artifacts were still in
   the diff. Both `state/daemon-heartbeat.json` and
   `state/status_summary.json` were excluded from the closeout diff with local
-  skip-worktree handling after stash preservation; final diff exact-set check
-  matched the 11 receipt files and had no `state/**` entries.
-- Follow-up verifier PASS: current diff exactly matches the 11 receipt files;
-  `git diff --check`, py_compile, focused truth-surface tests, focused
-  topology tests, topology closeout gates, and receipt JSON parsing passed.
+  skip-worktree handling after stash preservation; the pre-`99c4ac3`
+  implementation staged diff exact-set check matched the 11 implementation
+  files and had no `state/**` entries.
+- Follow-up verifier PASS before `99c4ac3`: implementation staged diff
+  exactly matched the 11 implementation files; `git diff --check`,
+  py_compile, focused truth-surface tests, focused topology tests, topology
+  closeout gates, and receipt JSON parsing passed.
 - Follow-up critic PASS for code/topology logic after runtime artifact
   exclusion; no remaining blocking issue in the receipt-covered slice.
+
+## P1.5a Post-Close Control-Surface Closeout
+
+Date: 2026-04-24
+
+Post-close reviewer result:
+
+- Verdict: FAIL for stale control surfaces only.
+- Finding: implementation commit `99c4ac3` had no code regression and matched
+  the receipt, but repo-facing packet state still said P1.5a was active or
+  ready to commit.
+- Fix: align `docs/operations/current_state.md`,
+  `docs/operations/AGENTS.md`, this plan, this work log, and the receipt so
+  P1.5a is closed and the next packet remains unfrozen until phase-entry.
+
+Closeout topology:
+
+- Reread root `AGENTS.md` and `docs/operations/AGENTS.md`.
+- Ran topology navigation for the closeout docs. It allowed the five
+  operations-control files changed by this closeout and surfaced
+  `POST_CLOSE_CONTROL_SURFACE_MISMATCH` as active lore.
+- Known global docs/source/history-lore red issues remain outside this narrow
+  closeout and are recorded as context, not scope expansion.
+
+Closeout verification:
+
+- `python3 -m json.tool <receipt>` -> ok.
+- `python3 scripts/topology_doctor.py --planning-lock <closeout files>` -> ok.
+- `python3 scripts/topology_doctor.py --work-record <closeout files>` -> ok.
+- `python3 scripts/topology_doctor.py --change-receipts <closeout files>` -> ok.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound` -> ok
+  after adding a closeout-evidence packet fallback so closed packet evidence
+  no longer has to be presented as the active execution packet.
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit <closeout files>` -> ok.
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/topology_doctor_docs_checks.py tests/test_topology_doctor.py` -> ok.
+- `python3 scripts/topology_doctor.py --scripts --json` -> ok.
+- `python3 scripts/topology_doctor.py --tests --json` -> ok.
+- `python3 scripts/topology_doctor.py --naming-conventions --json` -> ok.
+- `.venv/bin/python -m py_compile scripts/topology_doctor_docs_checks.py` -> ok.
+- `.venv/bin/python -m pytest -q tests/test_topology_doctor.py -k current_state_receipt_bound` -> `4 passed, 239 deselected`.
+- `git diff --check` -> ok.
+
+Verifier correction:
+
+- A verifier correctly failed the first closeout draft because
+  `current_state.md` still placed the closed P1.5a plan in the
+  `Active execution packet` slot to satisfy a topology gate.
+- Fixed by teaching `current-state-receipt-bound` to accept
+  `Closeout evidence packet` when no active packet is frozen, adding a focused
+  regression test, and changing `current_state.md` to say active execution is
+  `none frozen`.
+
+Next packet candidate:
+
+- POST_AUDIT_HANDOFF Immediate 4.1.A-C:
+  `onboard_cities.py` NULL-metric antibody/fix,
+  `append_event_and_project` deletion, and harvester stale UNIQUE comment
+  cleanup.
+- Before that packet: rerun phase-entry with root/scoped `AGENTS.md`, topology
+  navigation, important-file exploration, and plan/reviewer challenge.
 
 ## P1.5a Process Note
 

@@ -1221,6 +1221,44 @@ def test_current_state_receipt_bound_rejects_missing_receipt(monkeypatch, tmp_pa
     assert any(issue.code == "current_state_receipt_missing" for issue in issues)
 
 
+def test_current_state_receipt_bound_accepts_closeout_evidence_packet(monkeypatch, tmp_path):
+    root = tmp_path
+    packet_dir = root / "docs" / "operations" / "task_2026-04-23_test"
+    packet = packet_dir / "plan.md"
+    receipt = packet_dir / "receipt.json"
+    current = root / "docs" / "operations" / "current_state.md"
+    packet_dir.mkdir(parents=True)
+    packet.write_text("# Plan\n", encoding="utf-8")
+    receipt.write_text(
+        json.dumps(
+            {
+                "task": "test closeout",
+                "packet": "docs/operations/task_2026-04-23_test/plan.md",
+                "changed_files": ["docs/operations/current_state.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    current.write_text(
+        "- Active package source: `docs/operations/task_2026-04-23_followup/handoff.md`\n"
+        "- Active execution packet: none frozen; next packet pending phase-entry\n"
+        "- Closeout evidence packet: `docs/operations/task_2026-04-23_test/plan.md`\n"
+        "- Receipt-bound source: `docs/operations/task_2026-04-23_test/receipt.json`\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    topology = {
+        "active_operations_registry": {
+            "current_state": "docs/operations/current_state.md",
+            "surface_prefix": "docs/operations/",
+        }
+    }
+
+    issues = topology_doctor._check_current_state_receipt_bound(topology)
+
+    assert issues == []
+
+
 def test_current_state_receipt_bound_rejects_packet_mismatch(monkeypatch, tmp_path):
     root = tmp_path
     packet_dir = root / "docs" / "operations" / "task_2026-04-23_test"

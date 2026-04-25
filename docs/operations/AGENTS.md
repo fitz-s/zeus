@@ -34,9 +34,11 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-| Path | Purpose |
-|------|---------|
-| `task_2026-04-24_p1_eligibility_views_training_preflight/` | Active P1.5 planning packet for eligibility/preflight adapter contract |
+No execution packet is currently frozen after P1.5a closeout. The next packet
+candidate is the Immediate 4.1.A-C group in
+`task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`, but
+`current_state.md` must name a new active packet after fresh phase-entry
+planning before code edits begin.
 
 ### Packet Evidence
 
@@ -109,7 +111,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-24_p1_writer_provenance_gates/` | packet evidence | Closed P1.2 writer provenance gates packet (plan `e498b0d`, implementation `16292e2`; post-close reassessment closed the writer-local slice and corrected future P1/P3 boundaries) |
 | `task_2026-04-24_p1_unsafe_observation_quarantine/` | packet evidence | Closed P1.3 unsafe-observation quarantine diagnostics packet (implementation `7a3524e`; read-only training-readiness blockers for unsafe observation rows) |
 | `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | packet evidence | Closed P1.4 implementation packet for read-only legacy settlement evidence-only / finalization policy blockers before eligibility-view adoption and v2 population (`df9ece5`) |
-| `task_2026-04-24_p1_eligibility_views_training_preflight/` | active packet | P1.5 planning-only packet for script-side eligibility/preflight adapters before any calibration/training cutover |
+| `task_2026-04-24_p1_eligibility_views_training_preflight/` | packet evidence | Closed P1.5/P1.5a packet for script-side eligibility/preflight adapters before any calibration/training cutover (`07c86d8` planning, `99c4ac3` implementation) |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules

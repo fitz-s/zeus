@@ -6,13 +6,36 @@
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md"
   ],
-    "packet_status": "implementation_ready_to_commit",
+    "packet_status": "closed_post_close_control_surface_aligned",
   "prior_commits": {
     "p1_4_planning": "da1662f",
     "p1_4_implementation": "df9ece5",
     "p1_4_control_surface_closeout": "50cd713",
-    "p1_5_planning": "07c86d8"
+    "p1_5_planning": "07c86d8",
+    "p1_5a_implementation": "99c4ac305dc48703530bbb515d39a3869f65d2a8"
   },
+  "implementation_commit_files": [
+    "architecture/naming_conventions.yaml",
+    "architecture/test_topology.yaml",
+    "scripts/verify_truth_surfaces.py",
+    "scripts/rebuild_calibration_pairs_v2.py",
+    "scripts/refit_platt_v2.py",
+    "scripts/topology_doctor_test_checks.py",
+    "tests/test_truth_surface_health.py",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+  ],
+  "post_close_closeout_files": [
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json",
+    "scripts/topology_doctor_docs_checks.py",
+    "tests/test_topology_doctor.py"
+  ],
   "required_law": [
     "AGENTS.md",
     "docs/operations/AGENTS.md",
@@ -23,11 +46,17 @@
         "architecture/AGENTS.md",
         "scripts/AGENTS.md",
         "tests/AGENTS.md",
+        "docs/operations/AGENTS.md",
+        "scripts/topology_doctor_docs_checks.py",
+        "tests/test_topology_doctor.py",
         "architecture/naming_conventions.yaml",
         "architecture/script_manifest.yaml",
         "architecture/test_topology.yaml"
     ],
     "allowed_files": [
+        "docs/operations/AGENTS.md",
+        "scripts/topology_doctor_docs_checks.py",
+        "tests/test_topology_doctor.py",
         "architecture/naming_conventions.yaml",
         "architecture/test_topology.yaml",
         "scripts/verify_truth_surfaces.py",
@@ -40,7 +69,7 @@
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
     "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
   ],
-  "forbidden_files": [
+    "forbidden_files": [
     "state/**",
     ".code-review-graph/graph.db",
     "src/state/** schema/view DDL",
@@ -53,6 +82,9 @@
     "graph artifacts"
     ],
     "changed_files": [
+        "docs/operations/AGENTS.md",
+        "scripts/topology_doctor_docs_checks.py",
+        "tests/test_topology_doctor.py",
         "architecture/naming_conventions.yaml",
         "architecture/test_topology.yaml",
         "scripts/verify_truth_surfaces.py",
@@ -88,7 +120,11 @@
         },
         {
             "role": "verifier",
-            "verdict": "PASS: current diff exactly matches 11 receipt files; no state/** or unrelated topology WIP in submit diff"
+            "verdict": "PASS before 99c4ac3: implementation staged diff exactly matched 11 implementation files; no state/** or unrelated topology WIP in submit diff"
+        },
+        {
+            "role": "post-close reviewer",
+            "verdict": "FAIL on stale control surfaces only: implementation commit 99c4ac3 had no code regression, but current_state, work log, and receipt still described P1.5a as active or ready to commit"
         }
     ],
   "tests_evidence": [
@@ -115,7 +151,21 @@
         "python3 scripts/topology_doctor.py --change-receipts --changed-files <P1.5a files plus topology hygiene files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
         "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
         "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <P1.5a files plus topology hygiene files> --json -> ok",
-        "git diff --name-only exact-set check against receipt files -> ok; no state/**",
+        "pre-99c4ac3 implementation staged exact-set check against implementation files -> ok; no state/**",
+        "git diff --check -> ok",
+        "python3 scripts/topology_doctor.py --navigation --task \"P1.5a post-close operations registry closeout after pushed implementation\" --files docs/operations/AGENTS.md docs/operations/current_state.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> allowed files plus known global red context",
+        "python3 -m json.tool docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json -> ok",
+        "python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
+        "python3 scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
+        "python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json -> ok",
+        "python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/topology_doctor_docs_checks.py tests/test_topology_doctor.py --json -> ok",
+        "python3 scripts/topology_doctor.py --scripts --json -> ok",
+        "python3 scripts/topology_doctor.py --tests --json -> ok",
+        "python3 scripts/topology_doctor.py --naming-conventions --json -> ok",
+        ".venv/bin/python -m py_compile scripts/topology_doctor_docs_checks.py -> ok",
+        ".venv/bin/python -m pytest -q tests/test_topology_doctor.py -k current_state_receipt_bound -> ok",
         "git diff --check -> ok"
   ],
   "known_red_context": [
