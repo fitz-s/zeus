@@ -1384,6 +1384,11 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 empty_code="empty_required_table",
             )
 
+        # Full training-readiness must inherit the stricter per-metric preflight
+        # predicates; raw table presence cannot certify unsafe inputs.
+        _add_rebuild_snapshot_preflight_checks(report, cur)
+        _add_platt_pair_preflight_checks(report, cur)
+
         checks = report["checks"]
         blockers = report["blockers"]
 

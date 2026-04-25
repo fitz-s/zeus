@@ -34,13 +34,16 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-No execution packet is currently frozen after P1.5a closeout. Branch facts show
-the Immediate 4.1.A-C group in
-`task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md` is
-already landed and closed in the midstream work log. The next packet must be
-selected from unresolved POST_AUDIT_HANDOFF 4.2+ work by fresh phase-entry
-planning, and `current_state.md` must name the new active packet before code
-edits begin.
+The active execution packet is
+`task_2026-04-24_p0_data_audit_containment/plan.md`, reopened only for the
+POST_AUDIT_HANDOFF 4.2.A readiness-query / fail-closed guard normalization
+follow-up named by `current_state.md`. Branch facts show the Immediate 4.1.A-C
+group in `task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
+is already landed and closed in the midstream work log; do not reuse 4.1.A-C as
+an execution packet without new evidence. This active P0 follow-up does not
+authorize production DB mutation, canonical v2 population, market-identity
+backfill, replay/live/runtime consumer rewiring, or legacy-settlement
+promotion.
 
 ### Packet Evidence
 

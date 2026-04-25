@@ -1,8 +1,10 @@
 # P0 Data Audit Containment Packet
 
 Date: 2026-04-24
-Branch: `data-improve`
-Status: implementation packet for the first post-audit P0 Ralph slice
+Original branch: `data-improve`
+Active follow-up branch: `midstream_remediation`
+Status: reopened for POST_AUDIT_HANDOFF 4.2.A readiness guard normalization
+follow-up; the original P0 Ralph slice below is historical packet context.
 
 ## Task
 
@@ -63,6 +65,34 @@ Forbidden files:
 7. Inventory the `.omx` Ralph/mainline planning artifacts that this packet
    uses as local planning evidence.
 
+## 4.2.A Follow-up Plan
+
+Status: active follow-up on `midstream_remediation`.
+
+This follow-up reuses the existing P0 packet instead of creating
+`scripts/zeus_readiness_check.py`. `scripts/verify_truth_surfaces.py` is already
+the long-lived truth-surface readiness command, and P1.5a split phase-specific
+`calibration-pair-rebuild-preflight` and `platt-refit-preflight` modes from the
+full `training-readiness` verdict.
+
+Plan:
+
+1. Keep the active scope to `scripts/verify_truth_surfaces.py`,
+   `tests/test_truth_surface_health.py`, this P0 packet, and the operations
+   pointer/router docs.
+2. In full `training-readiness`, reuse the existing per-metric
+   `ensemble_snapshots_v2` rebuild-eligibility predicates so table presence
+   cannot certify snapshots that are not training-allowed, verified,
+   causality-safe, metric-scoped, and time-safe.
+3. In full `training-readiness`, reuse the existing `calibration_pairs_v2`
+   Platt-refit predicates so table presence cannot certify calibration pairs
+   without per-metric mature decision-group buckets.
+4. Add focused `TestTrainingReadinessP0` antibodies for snapshot rows that
+   exist but are not per-metric eligible, and calibration pairs that exist but
+   are below the Platt mature-bucket threshold.
+5. Do not add a new script, touch `src/**`, mutate production DB/runtime state,
+   populate canonical v2 truth, or rewire replay/live consumers.
+
 ## Acceptance
 
 - Current local world DB readiness command exits non-zero and emits structured
@@ -70,4 +100,6 @@ Forbidden files:
 - P0 targeted tests pass.
 - Default truth-surface diagnostic remains callable through the default mode.
 - Static linter catches bare legacy hourly table reads in targeted paths.
+- 4.2.A follow-up targeted tests prove `training-readiness` fails closed on
+  per-metric ineligible snapshots and immature Platt calibration buckets.
 - No production DB, graph DB, runtime state, or source behavior is mutated.

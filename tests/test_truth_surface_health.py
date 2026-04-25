@@ -52,13 +52,38 @@ def _blocker_codes(report):
 
 
 def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
-    for table in [
-        "forecasts",
-        "calibration_pairs_v2",
-        "platt_models_v2",
-    ]:
-        conn.execute(f"CREATE TABLE {table} (id INTEGER)")
-        conn.execute(f"INSERT INTO {table} (id) VALUES (1)")
+    conn.execute("CREATE TABLE forecasts (id INTEGER, retrieved_at TEXT)")
+    conn.execute("INSERT INTO forecasts (id, retrieved_at) VALUES (1, '2026-04-22T12:00:00Z')")
+    conn.execute(
+        """
+        CREATE TABLE calibration_pairs_v2 (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            observation_field TEXT,
+            range_label TEXT,
+            p_raw REAL,
+            outcome INTEGER,
+            lead_days REAL,
+            season TEXT,
+            cluster TEXT,
+            forecast_available_at TEXT,
+            settlement_value REAL,
+            decision_group_id TEXT,
+            authority TEXT,
+            bin_source TEXT,
+            data_version TEXT,
+            training_allowed INTEGER,
+            causality_status TEXT
+        )
+        """
+    )
+    _seed_platt_refit_pairs(
+        conn,
+        n_groups=truth_surfaces.MIN_PLATT_DECISION_GROUPS,
+    )
+    conn.execute("CREATE TABLE platt_models_v2 (id INTEGER)")
+    conn.execute("INSERT INTO platt_models_v2 (id) VALUES (1)")
     conn.execute(
         """
         CREATE TABLE market_events_v2 (
@@ -106,22 +131,56 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     conn.execute(
         """
         CREATE TABLE ensemble_snapshots_v2 (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
             issue_time TEXT,
+            valid_time TEXT,
             available_at TEXT,
-            fetch_time TEXT
+            fetch_time TEXT,
+            lead_hours REAL,
+            members_json TEXT,
+            model_version TEXT,
+            data_version TEXT,
+            training_allowed INTEGER,
+            causality_status TEXT,
+            authority TEXT,
+            provenance_json TEXT
         )
         """
     )
-    conn.execute(
+    conn.executemany(
         """
         INSERT INTO ensemble_snapshots_v2 (
-            issue_time, available_at, fetch_time
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, valid_time, available_at,
+            fetch_time, lead_hours, members_json, model_version,
+            data_version, training_allowed, causality_status, authority,
+            provenance_json
         ) VALUES (
-            '2026-04-22T12:00:00Z',
-            '2026-04-22T12:00:00Z',
-            '2026-04-22T12:05:00Z'
+            'NYC', '2026-04-23', ?, ?, ?,
+            '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
+            '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
+            24.0, '[70.0, 71.0, 72.0]', 'tigge', ?,
+            1, 'OK', 'VERIFIED', '{"source":"tigge"}'
         )
-        """
+        """,
+        [
+            (
+                "high",
+                "mx2t6_local_calendar_day_max",
+                "high_temp",
+                "tigge_mx2t6_local_calendar_day_max_v1",
+            ),
+            (
+                "low",
+                "mn2t6_local_calendar_day_min",
+                "low_temp",
+                "tigge_mn2t6_local_calendar_day_min_v1",
+            ),
+        ],
     )
     conn.execute(
         """
@@ -235,7 +294,9 @@ def _seed_rebuild_preflight_inputs(conn):
     )
 
 
-def _seed_platt_refit_pairs(conn, *, n_groups=15):
+def _seed_platt_refit_pairs(conn, *, n_groups=None):
+    if n_groups is None:
+        n_groups = truth_surfaces.MIN_PLATT_DECISION_GROUPS
     pair_specs = [
         (
             "high",
@@ -399,6 +460,54 @@ class TestTrainingReadinessP0:
         ]:
             assert checks[table]["status"] == "FAIL"
             assert checks[table]["count"] == 0
+
+    def test_training_readiness_requires_per_metric_eligible_snapshots(self, tmp_path):
+        db_path = tmp_path / "missing-high-snapshot-eligibility-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute(
+            """
+            UPDATE ensemble_snapshots_v2
+            SET training_allowed = 0
+            WHERE temperature_metric = 'high'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_rebuild_eligible_snapshots" in _blocker_codes(report)
+        high_check = report["checks"]["ensemble_snapshots_v2.high.rebuild_eligible_present"]
+        low_check = report["checks"]["ensemble_snapshots_v2.low.rebuild_eligible_present"]
+        assert high_check["status"] == "FAIL"
+        assert high_check["count"] == 0
+        assert low_check["status"] == "PASS"
+
+    def test_training_readiness_requires_per_metric_mature_platt_bucket(self, tmp_path):
+        db_path = tmp_path / "immature-calibration-pairs-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute(
+            """
+            DELETE FROM calibration_pairs_v2
+            WHERE temperature_metric = 'high'
+              AND target_date = '2026-04-01'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_platt_refit_bucket" in _blocker_codes(report)
+        high_check = report["checks"]["calibration_pairs_v2.high.mature_bucket_present"]
+        low_check = report["checks"]["calibration_pairs_v2.low.mature_bucket_present"]
+        assert high_check["status"] == "FAIL"
+        assert high_check["count"] == 0
+        assert low_check["status"] == "PASS"
 
     def test_rebuild_preflight_does_not_require_target_artifacts(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)

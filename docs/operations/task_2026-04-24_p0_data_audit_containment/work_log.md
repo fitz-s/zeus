@@ -92,8 +92,71 @@ Verification:
   `trade_decisions`; non-failing count is 48 passed, 5 skipped.
 - Broad `--navigation`, `--scripts`, and `--tests` remain red on pre-existing
   registry/archive/script debt outside P0 scope; targeted receipt, planning,
-  freshness, map-maintenance, and test gates passed.
+  freshness, map-maintenance, and test gates passed. This statement records
+  the original P0 snapshot; the 4.2.A follow-up below reran `--scripts` and
+  `--tests` after intervening branch repairs and both returned green for the
+  current branch state.
 
 Next:
 - Run topology gates, critic/verifier review, then commit and push the scoped
   P0 follow-up files only.
+
+## 4.2.A Readiness Guard Normalization Follow-up — 2026-04-24
+
+Date: 2026-04-24
+Branch: `midstream_remediation`
+Task: POST_AUDIT_HANDOFF 4.2.A P0 readiness-query / fail-closed guard normalization.
+Changed files:
+- `scripts/verify_truth_surfaces.py`
+- `tests/test_truth_surface_health.py`
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+
+Plan:
+- Reuse this P0 packet and the existing `verify_truth_surfaces.py`
+  `training-readiness` command; do not create `scripts/zeus_readiness_check.py`.
+- Keep P1.5a's phase-specific rebuild/refit preflight modes separate, but
+  make the full `training-readiness` verdict inherit their strict per-metric
+  snapshot eligibility and Platt mature-bucket predicates.
+- Add focused `TestTrainingReadinessP0` antibodies for table-present but
+  semantically ineligible `ensemble_snapshots_v2` rows and table-present but
+  immature `calibration_pairs_v2` rows.
+- Keep `src/**`, production DBs, runtime state, canonical v2 population, market
+  backfills, and replay/live consumer rewiring out of scope.
+
+Verification:
+- `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py` -> passed.
+- `.venv/bin/python -m pytest -q tests/test_truth_surface_health.py -k training_readiness`
+  -> 44 passed, 15 deselected.
+- `.venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --json`
+  -> exited 1 as expected with `status=NOT_READY`; blockers now include
+  per-metric `empty_rebuild_eligible_snapshots` for high/low
+  `ensemble_snapshots_v2` and per-metric `empty_platt_refit_bucket` for
+  high/low `calibration_pairs_v2`, in addition to existing P0 unsafe-data
+  blockers.
+- `python3 scripts/topology_doctor.py --navigation --task "POST_AUDIT_HANDOFF 4.2.A P0 readiness guard normalization in existing P0 data-audit containment packet" --files <4.2.A files> --json`
+  -> `ok: true`, no direct blockers; repo-wide docs/source/lore debt remains
+  outside this packet.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.A files> --plan-evidence docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.A files> --work-record-path docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.A files> --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.A files> --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --scripts --json` and
+  `python3 scripts/topology_doctor.py --tests --json` -> both
+  `{ok: true, issues: []}`.
+- `git diff --check -- <4.2.A files>` -> clean.
+
+Next:
+- Run critic/verifier review, address any findings, then commit and push only
+  the scoped files.
