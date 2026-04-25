@@ -103,3 +103,4 @@ Role: single live control pointer for the repo.
   P1/P2/P3 sequence against the current branch facts before any new code
   implementation.
 - Preserve unrelated dirty work and concurrent in-flight edits.
+- 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->
