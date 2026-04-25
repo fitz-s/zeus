@@ -19,6 +19,7 @@ from typing import Any
 def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--strict", action="store_true", help="Run strict topology checks")
+    parser.add_argument("--global-health", action="store_true", help="Alias for --strict full-repo health checks")
     parser.add_argument("--docs", action="store_true", help="Run Packet 3 docs-mesh checks")
     parser.add_argument("--source", action="store_true", help="Run Packet 4 source-rationale checks")
     parser.add_argument("--tests", action="store_true", help="Run Packet 5 test topology checks")
@@ -56,6 +57,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         help="Map-maintenance severity mode",
     )
     parser.add_argument("--navigation", action="store_true", help="Run default navigation health and task digest")
+    parser.add_argument("--strict-health", action="store_true", help="Make --navigation fail on any repo-health error")
     parser.add_argument("--planning-lock", action="store_true", help="Check whether changed files require planning evidence")
     parser.add_argument(
         "--changed-files",
@@ -178,6 +180,7 @@ def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
 def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
     commands = [
         ("strict", api.run_strict),
+        ("global_health", api.run_strict),
         ("docs", api.run_docs),
         ("source", api.run_source),
         ("tests", api.run_tests),
@@ -232,13 +235,21 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only)
         return 0 if result.ok else 1
     if args.navigation:
-        payload = api.run_navigation(args.task or "general navigation", args.files)
+        payload = api.run_navigation(args.task or "general navigation", args.files, strict_health=args.strict_health)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
             print(f"navigation ok: {payload['ok']}")
             print(f"profile: {payload['digest']['profile']}")
-            if payload["issues"]:
+            if payload.get("direct_blockers"):
+                print("direct_blockers:")
+                for issue in payload["direct_blockers"]:
+                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            if payload.get("repo_health_warnings"):
+                print("repo_health_warnings:")
+                for issue in payload["repo_health_warnings"]:
+                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            elif not payload.get("direct_blockers") and payload["issues"]:
                 print("issues:")
                 for issue in payload["issues"]:
                     print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
@@ -299,6 +310,13 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                     f"- {lane}: {state} "
                     f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
                 )
+            if payload.get("global_health"):
+                print("global_health:")
+                for lane, summary in payload["global_health"].items():
+                    print(
+                        f"- {lane}: "
+                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                    )
             telemetry = payload.get("telemetry") or {}
             print(
                 f"telemetry: dark_write_targets={telemetry.get('dark_write_target_count', 0)}, "
@@ -320,6 +338,13 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                 for issue in summary["issues"]:
                     print(
                         f"  - [{issue['severity']}:{issue['code']}] {issue['path']}: {issue['message']}"
+                    )
+            if payload.get("global_health"):
+                print("global_health:")
+                for lane, summary in payload["global_health"].items():
+                    print(
+                        f"- {lane}: "
+                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
                     )
         return 0 if payload["ok"] else 1
     if args.command == "context-pack":
