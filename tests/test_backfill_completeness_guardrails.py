@@ -11,14 +11,18 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from scripts.backfill_completeness import (
     evaluate_completeness,
     write_manifest,
 )
+from src.data.daily_observation_writer import INSERTED, NOOP, REVISION
+from src.state.db import init_schema
+from src.types.observation_atom import ObservationAtom
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +42,87 @@ def _memdb() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _daily_atom(
+    *,
+    value_type: str,
+    value: float,
+    payload_hash: str,
+    source: str = "wu_icao_history",
+    station_id: str = "KORD",
+    target_d: date = date(2026, 4, 10),
+    rebuild_run_id: str = "unit-run",
+    parser_version: str = "test_daily_revision_v1",
+    data_source_version: str = "unit-v1",
+) -> ObservationAtom:
+    local_time = datetime(
+        target_d.year,
+        target_d.month,
+        target_d.day,
+        15,
+        0,
+        tzinfo=ZoneInfo("America/Chicago"),
+    )
+    fetch_utc = datetime(
+        target_d.year,
+        target_d.month,
+        target_d.day,
+        22,
+        0,
+        tzinfo=timezone.utc,
+    )
+    provenance = {
+        "payload_hash": payload_hash,
+        "source_url": "https://example.test/source.json",
+        "parser_version": parser_version,
+        "source": source,
+        "station_id": station_id,
+        "target_date": target_d.isoformat(),
+    }
+    return ObservationAtom(
+        city="Chicago",
+        target_date=target_d,
+        value_type=value_type,
+        value=value,
+        target_unit="F",
+        raw_value=value,
+        raw_unit="F",
+        source=source,
+        station_id=station_id,
+        api_endpoint="https://example.test/source.json",
+        fetch_utc=fetch_utc,
+        local_time=local_time,
+        collection_window_start_utc=datetime(
+            target_d.year,
+            target_d.month,
+            target_d.day,
+            6,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        collection_window_end_utc=datetime(
+            target_d.year,
+            target_d.month,
+            target_d.day,
+            22,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        timezone="America/Chicago",
+        utc_offset_minutes=-300,
+        dst_active=True,
+        is_ambiguous_local_hour=False,
+        is_missing_local_hour=False,
+        hemisphere="N",
+        season="MAM",
+        month=4,
+        rebuild_run_id=rebuild_run_id,
+        data_source_version=data_source_version,
+        authority="VERIFIED",
+        validation_pass=True,
+        provenance_metadata=provenance,
+    )
 
 
 def test_evaluate_completeness_allows_failure_rate_equal_to_threshold() -> None:
@@ -517,6 +602,162 @@ def test_hko_daily_legitimate_gaps_do_not_fail_completeness(
     assert exit_code == 0
     assert payload["counters"]["legitimate_gap_count"] == 2
     assert payload["completeness"]["expected_shortfall"] == 0
+
+
+def test_wu_daily_writer_records_payload_drift_without_overwrite() -> None:
+    module = _load_script(
+        REPO_ROOT / "scripts" / "backfill_wu_daily_all.py",
+        "test_wu_daily_revision_writer",
+    )
+    conn = _memdb()
+    init_schema(conn)
+    old_hash = "sha256:" + "a" * 64
+    new_hash = "sha256:" + "b" * 64
+
+    high = _daily_atom(value_type="high", value=75.0, payload_hash=old_hash)
+    low = _daily_atom(value_type="low", value=55.0, payload_hash=old_hash)
+    assert module._write_atom_to_observations(conn, high, atom_low=low) == INSERTED
+
+    rerun_high = _daily_atom(
+        value_type="high",
+        value=75.0,
+        payload_hash=old_hash,
+        rebuild_run_id="unit-rerun",
+        parser_version="test_daily_revision_v2",
+        data_source_version="unit-v2",
+    )
+    rerun_low = _daily_atom(
+        value_type="low",
+        value=55.0,
+        payload_hash=old_hash,
+        rebuild_run_id="unit-rerun",
+        parser_version="test_daily_revision_v2",
+        data_source_version="unit-v2",
+    )
+    assert module._write_atom_to_observations(
+        conn, rerun_high, atom_low=rerun_low
+    ) == NOOP
+
+    revised_high = _daily_atom(value_type="high", value=81.0, payload_hash=new_hash)
+    revised_low = _daily_atom(value_type="low", value=60.0, payload_hash=new_hash)
+    assert module._write_atom_to_observations(
+        conn, revised_high, atom_low=revised_low
+    ) == REVISION
+
+    row = conn.execute(
+        """
+        SELECT high_temp, low_temp, data_source_version, high_provenance_metadata
+        FROM observations
+        WHERE city='Chicago' AND target_date='2026-04-10'
+          AND source='wu_icao_history'
+        """
+    ).fetchone()
+    revision = conn.execute(
+        """
+        SELECT existing_combined_payload_hash, incoming_combined_payload_hash,
+               incoming_row_json
+        FROM daily_observation_revisions
+        WHERE city='Chicago' AND target_date='2026-04-10'
+          AND source='wu_icao_history'
+        """
+    ).fetchone()
+
+    assert row["high_temp"] == 75.0
+    assert row["low_temp"] == 55.0
+    assert row["data_source_version"] == "unit-v1"
+    assert json.loads(row["high_provenance_metadata"])["payload_hash"] == old_hash
+    assert revision is not None
+    assert revision["existing_combined_payload_hash"] == old_hash
+    assert revision["incoming_combined_payload_hash"] == new_hash
+    assert json.loads(revision["incoming_row_json"])["high_temp"] == 81.0
+
+
+def test_hko_daily_backfill_rerun_and_revision_do_not_inflate_inserted(
+    monkeypatch,
+) -> None:
+    module = _load_script(
+        REPO_ROOT / "scripts" / "backfill_hko_daily.py",
+        "test_hko_daily_revision_counters",
+    )
+    conn = _memdb()
+    init_schema(conn)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    payload_hashes = {
+        "CLMMAXT": "sha256:" + "c" * 64,
+        "CLMMINT": "sha256:" + "d" * 64,
+    }
+
+    def fake_fetch(year, month, data_type):
+        value = 27.0 if data_type == "CLMMAXT" else 22.0
+        identity = module._build_hko_payload_identity(
+            year=year,
+            month=month,
+            data_type=data_type,
+            payload_hash=payload_hashes[data_type],
+        )
+        return {(year, month, 2): (value, "C", identity)}, None
+
+    monkeypatch.setattr(module, "_fetch_hko_month_with_retry", fake_fetch)
+
+    first = module.run_backfill(
+        date(2026, 4, 2),
+        date(2026, 4, 2),
+        conn=conn,
+        rebuild_run_id="hko-first",
+        sleep_seconds=0,
+    )
+    second = module.run_backfill(
+        date(2026, 4, 2),
+        date(2026, 4, 2),
+        conn=conn,
+        rebuild_run_id="hko-rerun",
+        sleep_seconds=0,
+    )
+    payload_hashes["CLMMAXT"] = "sha256:" + "e" * 64
+    third = module.run_backfill(
+        date(2026, 4, 2),
+        date(2026, 4, 2),
+        conn=conn,
+        rebuild_run_id="hko-revision",
+        sleep_seconds=0,
+    )
+
+    revision = conn.execute(
+        """
+        SELECT existing_high_payload_hash, existing_low_payload_hash,
+               incoming_high_payload_hash, incoming_low_payload_hash
+        FROM daily_observation_revisions
+        """
+    ).fetchone()
+    (revision_count,) = conn.execute(
+        "SELECT COUNT(*) FROM daily_observation_revisions"
+    ).fetchone()
+    row = conn.execute(
+        """
+        SELECT high_temp, low_temp
+        FROM observations
+        WHERE city='Hong Kong' AND target_date='2026-04-02'
+          AND source='hko_daily_api'
+        """
+    ).fetchone()
+
+    assert first["inserted"] == 1
+    assert second["inserted"] == 0
+    assert third["inserted"] == 0
+    assert revision_count == 1
+    assert revision["existing_high_payload_hash"] == "sha256:" + "c" * 64
+    assert revision["existing_low_payload_hash"] == "sha256:" + "d" * 64
+    assert revision["incoming_high_payload_hash"] == "sha256:" + "e" * 64
+    assert revision["incoming_low_payload_hash"] == "sha256:" + "d" * 64
+    assert row["high_temp"] == 27.0
+    assert row["low_temp"] == 22.0
+
+
+def test_daily_backfill_scripts_do_not_use_replace_over_observations() -> None:
+    for script_name in ("backfill_wu_daily_all.py", "backfill_hko_daily.py"):
+        source = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        assert "INSERT OR REPLACE INTO OBSERVATIONS" not in source.upper()
 
 
 def test_ogimet_main_writes_manifest_and_fails_on_skipped_days(

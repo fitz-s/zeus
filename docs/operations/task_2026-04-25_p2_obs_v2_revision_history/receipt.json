@@ -74,7 +74,13 @@
     "P3 4.5.B observation_instants_v2 reader gate design",
     "P4 data population"
   ],
-  "status": "implementation_verified_commit_ready",
+  "status": "closed_committed_pushed",
+  "closeout": {
+    "commit": "0837afc",
+    "branch": "midstream_remediation",
+    "pushed": true,
+    "follow_up": "docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md"
+  },
   "changed_files": [
     "architecture/docs_registry.yaml",
     "architecture/topology.yaml",

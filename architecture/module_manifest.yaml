@@ -95,6 +95,7 @@ modules:
     authority_role: external_data_ingest
     high_risk_files:
       - src/data/daily_obs_append.py
+      - src/data/daily_observation_writer.py
       - src/data/observation_client.py
       - src/data/hourly_instants_append.py
       - src/data/observation_instants_v2_writer.py
@@ -103,6 +104,7 @@ modules:
       - src/data/market_scanner.py
     public_entry_files:
       - src/data/daily_obs_append.py
+      - src/data/daily_observation_writer.py
       - src/data/observation_client.py
       - src/data/forecasts_append.py
       - src/data/market_scanner.py

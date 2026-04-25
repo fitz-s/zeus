@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import logging
 import sys
 import time
@@ -54,6 +53,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import httpx
 
 from src.config import cities_by_name
+from src.data.daily_observation_writer import (
+    INSERTED,
+    write_daily_observation_with_revision,
+)
 from src.data.ingestion_guard import (
     IngestionGuard,
     IngestionRejected,
@@ -98,56 +101,26 @@ def _write_atom_to_observations(
     conn,
     atom: ObservationAtom,
     atom_low: ObservationAtom | None = None,
-) -> None:
+) -> str:
     """Write one observation row with optional high + low values.
 
-    Identical contract to `scripts/backfill_wu_daily_all.py::_write_atom_to_observations`.
-    Kept local to avoid cross-script imports.
+    Same-key payload drift is recorded in `daily_observation_revisions` rather
+    than replacing the current row.
     """
-    if atom_low is not None:
-        assert atom.value_type == "high", f"expected high atom, got {atom.value_type!r}"
-        assert atom_low.value_type == "low", f"expected low atom, got {atom_low.value_type!r}"
-        assert atom.city == atom_low.city
-        assert atom.target_date == atom_low.target_date
-        assert atom.source == atom_low.source
-        assert atom.target_unit == atom_low.target_unit
-        low_temp_value = atom_low.value
-    else:
-        low_temp_value = None
-
-    conn.execute("""
-        INSERT OR REPLACE INTO observations (
-            city, target_date, source, high_temp, low_temp, unit, station_id, fetched_at,
-            raw_value, raw_unit, target_unit, value_type,
-            fetch_utc, local_time, collection_window_start_utc, collection_window_end_utc,
-            timezone, utc_offset_minutes, dst_active,
-            is_ambiguous_local_hour, is_missing_local_hour,
-            hemisphere, season, month,
-            rebuild_run_id, data_source_version,
-            authority, provenance_metadata
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?,
-            ?, ?, ?,
-            ?, ?,
-            ?, ?
-        )
-    """, (
-        atom.city, atom.target_date.isoformat(), atom.source,
-        atom.value, low_temp_value, atom.target_unit,
-        atom.station_id, atom.fetch_utc.isoformat(),
-        atom.raw_value, atom.raw_unit, atom.target_unit, atom.value_type,
-        atom.fetch_utc.isoformat(), atom.local_time.isoformat(),
-        atom.collection_window_start_utc.isoformat(), atom.collection_window_end_utc.isoformat(),
-        atom.timezone, atom.utc_offset_minutes, int(atom.dst_active),
-        int(atom.is_ambiguous_local_hour), int(atom.is_missing_local_hour),
-        atom.hemisphere, atom.season, atom.month,
-        atom.rebuild_run_id, atom.data_source_version,
-        atom.authority, json.dumps(atom.provenance_metadata),
-    ))
+    if atom_low is None:
+        raise ValueError("daily observations backfill requires both high and low atoms")
+    assert atom.value_type == "high", f"expected high atom, got {atom.value_type!r}"
+    assert atom_low.value_type == "low", f"expected low atom, got {atom_low.value_type!r}"
+    assert atom.city == atom_low.city
+    assert atom.target_date == atom_low.target_date
+    assert atom.source == atom_low.source
+    assert atom.target_unit == atom_low.target_unit
+    return write_daily_observation_with_revision(
+        conn,
+        atom,
+        atom_low,
+        writer="scripts.backfill_hko_daily._write_atom_to_observations",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -505,9 +478,12 @@ def run_backfill(
 
             if not dry_run:
                 try:
-                    _write_atom_to_observations(conn, atom_high, atom_low=atom_low)
-                    stats["inserted"] += 1
-                    month_inserted += 1
+                    outcome = _write_atom_to_observations(
+                        conn, atom_high, atom_low=atom_low
+                    )
+                    if outcome == INSERTED:
+                        stats["inserted"] += 1
+                        month_inserted += 1
                 except Exception as e:
                     stats["insert_errors"] += 1
                     logger.error(

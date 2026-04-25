@@ -290,7 +290,7 @@ scripts:
   backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_hko_daily.py:
     class: etl_writer
-    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, src.data.daily_observation_writer, scripts.backfill_completeness]
     external_inputs: [HKO Open Data API]
     target_db: state/zeus-world.db
     write_targets: [observations]
@@ -339,7 +339,7 @@ scripts:
   backfill_truth_metadata.py: {class: etl_writer}
   backfill_wu_daily_all.py:
     class: etl_writer
-    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, src.data.daily_observation_writer, scripts.backfill_completeness]
     external_inputs: [WU historical.json]
     target_db: state/zeus-world.db
     write_targets: [observations]

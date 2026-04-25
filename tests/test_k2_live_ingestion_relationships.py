@@ -1,5 +1,8 @@
 # Created: 2026-04-13
 # Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Protect K2 live-ingestion and backfill relationship contracts.
+# Reuse: Keep tests fixture-backed; inspect source-routing assumptions before extending.
 # Authority basis: K2 live-ingestion packet; P1 daily observation writer provenance packet.
 """K2 live-ingestion packet — relationship tests.
 
@@ -575,44 +578,7 @@ def _assert_provenance_identity(provenance: dict) -> None:
 
 
 def _legacy_observations_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE observations (
-            city TEXT,
-            target_date TEXT,
-            source TEXT,
-            high_temp REAL,
-            low_temp REAL,
-            unit TEXT,
-            station_id TEXT,
-            fetched_at TEXT,
-            raw_value REAL,
-            raw_unit TEXT,
-            target_unit TEXT,
-            value_type TEXT,
-            fetch_utc TEXT,
-            local_time TEXT,
-            collection_window_start_utc TEXT,
-            collection_window_end_utc TEXT,
-            timezone TEXT,
-            utc_offset_minutes INTEGER,
-            dst_active INTEGER,
-            is_ambiguous_local_hour INTEGER,
-            is_missing_local_hour INTEGER,
-            hemisphere TEXT,
-            season TEXT,
-            month INTEGER,
-            rebuild_run_id TEXT,
-            data_source_version TEXT,
-            authority TEXT,
-            provenance_metadata TEXT,
-            UNIQUE(city, target_date, source)
-        )
-        """
-    )
-    return conn
+    return _memdb()
 
 
 def test_R8_wu_backfill_writes_non_empty_provenance_identity() -> None:
@@ -644,7 +610,7 @@ def test_R8_wu_backfill_writes_non_empty_provenance_identity() -> None:
 
     script_source = (PROJECT_ROOT / "scripts" / "backfill_wu_daily_all.py").read_text()
     assert "provenance_metadata={}" not in script_source
-    assert "provenance_metadata=provenance" in script_source
+    assert "write_daily_observation_with_revision" in script_source
 
 
 def test_R8_wu_backfill_persists_provenance_identity(monkeypatch) -> None:
@@ -693,18 +659,22 @@ def test_R8_wu_backfill_persists_provenance_identity(monkeypatch) -> None:
 
     row = conn.execute(
         """
-        SELECT authority, source, station_id, provenance_metadata
+        SELECT authority, source, station_id,
+               high_provenance_metadata, low_provenance_metadata
         FROM observations
         WHERE city = 'Chicago' AND source = 'wu_icao_history'
         """
     ).fetchone()
     assert row is not None
     assert row["authority"] == "VERIFIED"
-    provenance = json.loads(row["provenance_metadata"])
-    _assert_provenance_identity(provenance)
-    assert provenance["station_id"] == row["station_id"] == "KORD"
-    assert "apiKey=" not in provenance["source_url"]
-    assert provenance["api_key_redacted"] is True
+    high_provenance = json.loads(row["high_provenance_metadata"])
+    low_provenance = json.loads(row["low_provenance_metadata"])
+    _assert_provenance_identity(high_provenance)
+    _assert_provenance_identity(low_provenance)
+    assert high_provenance["station_id"] == row["station_id"] == "KORD"
+    assert low_provenance["station_id"] == row["station_id"] == "KORD"
+    assert "apiKey=" not in high_provenance["source_url"]
+    assert high_provenance["api_key_redacted"] is True
 
 
 def test_R8_hko_backfill_writes_non_empty_provenance_identity() -> None:
@@ -745,7 +715,7 @@ def test_R8_hko_backfill_writes_non_empty_provenance_identity() -> None:
         '"dataType": ["CLMMAXT", "CLMMINT"]}'
         not in script_source
     )
-    assert "provenance_metadata=_build_hko_daily_provenance(" in script_source
+    assert "write_daily_observation_with_revision" in script_source
 
 
 def test_R8_hko_backfill_persists_provenance_identity(monkeypatch) -> None:
@@ -777,18 +747,22 @@ def test_R8_hko_backfill_persists_provenance_identity(monkeypatch) -> None:
 
     row = conn.execute(
         """
-        SELECT authority, source, station_id, provenance_metadata
+        SELECT authority, source, station_id,
+               high_provenance_metadata, low_provenance_metadata
         FROM observations
         WHERE city = 'Hong Kong' AND source = 'hko_daily_api'
         """
     ).fetchone()
     assert row is not None
     assert row["authority"] == "VERIFIED"
-    provenance = json.loads(row["provenance_metadata"])
-    _assert_provenance_identity(provenance)
-    assert provenance["station_id"] == row["station_id"] == "HKO"
-    assert provenance["component_payload_hashes"]["CLMMAXT"].startswith("sha256:")
-    assert provenance["component_payload_hashes"]["CLMMINT"].startswith("sha256:")
+    high_provenance = json.loads(row["high_provenance_metadata"])
+    low_provenance = json.loads(row["low_provenance_metadata"])
+    _assert_provenance_identity(high_provenance)
+    _assert_provenance_identity(low_provenance)
+    assert high_provenance["station_id"] == row["station_id"] == "HKO"
+    assert low_provenance["station_id"] == row["station_id"] == "HKO"
+    assert high_provenance["component_payload_hashes"]["CLMMAXT"].startswith("sha256:")
+    assert low_provenance["component_payload_hashes"]["CLMMINT"].startswith("sha256:")
 
 
 # ---------------------------------------------------------------------------

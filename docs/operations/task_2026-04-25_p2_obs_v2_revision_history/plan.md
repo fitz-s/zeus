@@ -3,7 +3,7 @@
 Date: 2026-04-25
 Branch: `midstream_remediation`
 Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus`
-Status: in progress
+Status: closed
 
 ## Background
 
@@ -121,3 +121,9 @@ human-readable mirror._
   seam.
 - Stop if existing schema assumptions require a broad migration/cutover instead
   of additive idempotent DDL.
+
+## Closeout
+
+- Implementation commit: `0837afc` (`Preserve obs v2 evidence when payloads drift`)
+- Pushed to `origin/midstream_remediation`.
+- Follow-up packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`

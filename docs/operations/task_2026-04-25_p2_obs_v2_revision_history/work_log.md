@@ -8,7 +8,7 @@ Task: P2 4.4.A1 obs_v2 hash-checked revision history
 Changed files: src/state/schema/v2_schema.py; src/data/observation_instants_v2_writer.py; scripts/backfill_obs_v2.py; tests/test_obs_v2_writer.py; tests/test_backfill_scripts_match_live_config.py; architecture/docs_registry.yaml; architecture/topology.yaml; docs/AGENTS.md; docs/README.md; docs/operations/AGENTS.md; docs/operations/current_state.md; docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md; docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md; docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml; docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json; docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md; docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md; docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml; docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
 Summary: Add schema-backed obs_v2 revision capture and replace silent replace-on-conflict writer behavior with hash-checked idempotence.
 Verification: py_compile passed; obs_v2 writer tests passed; trusted data writer tests passed; architecture/truth surface tests passed; topology tests/scripts/planning-lock/map/freshness/current-state gates passed.
-Next: Commit and push this packet before opening daily-observation A2 history work.
+Next: Closed at `0837afc`; continue with daily-observation A2 history work.
 
 ## 2026-04-25 -- packet started
 - Created via `zpkt start`.
@@ -51,3 +51,4 @@ Next: Commit and push this packet before opening daily-observation A2 history wo
   mismatch for the `observation_instants_v2` `local_hour` contract field
   transport; this packet did not add new raw time-semantics logic and did not
   expand scope to linter-rule maintenance.
+- Closed and pushed in commit `0837afc`.

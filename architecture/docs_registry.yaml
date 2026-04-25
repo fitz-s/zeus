@@ -604,10 +604,10 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P2 4.4.A1 obs_v2 revision-history packet plan
+  current_role: closed P2 4.4.A1 obs_v2 revision-history packet plan
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -616,16 +616,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P2 4.4.A1 obs_v2 revision-history work log
+  current_role: closed P2 4.4.A1 obs_v2 revision-history work log
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -634,13 +634,49 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P2 4.4.A1 obs_v2 revision-history scope sidecar
+  current_role: closed P2 4.4.A1 obs_v2 revision-history scope sidecar
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed P2 4.4.A1 obs_v2 revision-history receipt
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: closed
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A2 daily observation revision-history packet plan
   canonical_replaced_by: []
   next_action: retain_as_evidence
   lifecycle_state: active
@@ -654,11 +690,47 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
+- path: docs/operations/task_2026-04-25_p2_daily_observation_revision_history/work_log.md
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P2 4.4.A1 obs_v2 revision-history receipt
+  current_role: active P2 4.4.A2 daily observation revision-history work log
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_daily_observation_revision_history/scope.yaml
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A2 daily observation revision-history scope sidecar
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_daily_observation_revision_history/receipt.json
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A2 daily observation revision-history receipt
   canonical_replaced_by: []
   next_action: retain_as_evidence
   lifecycle_state: active

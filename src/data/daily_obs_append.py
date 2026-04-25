@@ -68,6 +68,7 @@ import requests
 
 from src.calibration.manager import season_from_date
 from src.config import cities_by_name
+from src.data.daily_observation_writer import insert_or_update_current_observation
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected
 from src.signal.diurnal import _is_missing_local_hour
 from src.state.data_coverage import (
@@ -554,85 +555,7 @@ def _write_atom_with_coverage(
     sp = f"sp_write_{id(atom_high)}"
     conn.execute(f"SAVEPOINT {sp}")
     try:
-        conn.execute(
-            """
-            INSERT INTO observations (
-                city, target_date, source, high_temp, low_temp, unit, station_id, fetched_at,
-                high_raw_value, high_raw_unit, high_target_unit,
-                low_raw_value, low_raw_unit, low_target_unit,
-                high_fetch_utc, high_local_time, high_collection_window_start_utc, high_collection_window_end_utc,
-                low_fetch_utc, low_local_time, low_collection_window_start_utc, low_collection_window_end_utc,
-                timezone, utc_offset_minutes, dst_active,
-                is_ambiguous_local_hour, is_missing_local_hour,
-                hemisphere, season, month,
-                rebuild_run_id, data_source_version,
-                authority, high_provenance_metadata, low_provenance_metadata
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?,
-                ?, ?, ?,
-                ?, ?,
-                ?, ?, ?
-            )
-            ON CONFLICT(city, target_date, source) DO UPDATE SET
-                high_temp = excluded.high_temp,
-                low_temp = excluded.low_temp,
-                unit = excluded.unit,
-                station_id = excluded.station_id,
-                fetched_at = excluded.fetched_at,
-                high_raw_value = excluded.high_raw_value,
-                high_raw_unit = excluded.high_raw_unit,
-                high_target_unit = excluded.high_target_unit,
-                low_raw_value = excluded.low_raw_value,
-                low_raw_unit = excluded.low_raw_unit,
-                low_target_unit = excluded.low_target_unit,
-                high_fetch_utc = excluded.high_fetch_utc,
-                high_local_time = excluded.high_local_time,
-                high_collection_window_start_utc = excluded.high_collection_window_start_utc,
-                high_collection_window_end_utc = excluded.high_collection_window_end_utc,
-                low_fetch_utc = excluded.low_fetch_utc,
-                low_local_time = excluded.low_local_time,
-                low_collection_window_start_utc = excluded.low_collection_window_start_utc,
-                low_collection_window_end_utc = excluded.low_collection_window_end_utc,
-                timezone = excluded.timezone,
-                utc_offset_minutes = excluded.utc_offset_minutes,
-                dst_active = excluded.dst_active,
-                is_ambiguous_local_hour = excluded.is_ambiguous_local_hour,
-                is_missing_local_hour = excluded.is_missing_local_hour,
-                hemisphere = excluded.hemisphere,
-                season = excluded.season,
-                month = excluded.month,
-                rebuild_run_id = excluded.rebuild_run_id,
-                data_source_version = excluded.data_source_version,
-                authority = excluded.authority,
-                high_provenance_metadata = excluded.high_provenance_metadata,
-                low_provenance_metadata = excluded.low_provenance_metadata
-            """,
-            (
-                atom_high.city, atom_high.target_date.isoformat(), atom_high.source,
-                atom_high.value, atom_low.value, atom_high.target_unit,
-                atom_high.station_id, atom_high.fetch_utc.isoformat(),
-                atom_high.raw_value, atom_high.raw_unit, atom_high.target_unit,
-                atom_low.raw_value, atom_low.raw_unit, atom_low.target_unit,
-                atom_high.fetch_utc.isoformat(), atom_high.local_time.isoformat(),
-                atom_high.collection_window_start_utc.isoformat(),
-                atom_high.collection_window_end_utc.isoformat(),
-                atom_low.fetch_utc.isoformat(), atom_low.local_time.isoformat(),
-                atom_low.collection_window_start_utc.isoformat(),
-                atom_low.collection_window_end_utc.isoformat(),
-                atom_high.timezone, atom_high.utc_offset_minutes, int(atom_high.dst_active),
-                int(atom_high.is_ambiguous_local_hour), int(atom_high.is_missing_local_hour),
-                atom_high.hemisphere, atom_high.season, atom_high.month,
-                atom_high.rebuild_run_id, atom_high.data_source_version,
-                atom_high.authority, json.dumps(atom_high.provenance_metadata),
-                json.dumps(atom_low.provenance_metadata),
-            ),
-        )
+        insert_or_update_current_observation(conn, atom_high, atom_low)
         record_written(
             conn,
             data_table=DataTable.OBSERVATIONS,

@@ -228,6 +228,28 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, target_date, source)
         );
 
+        CREATE TABLE IF NOT EXISTS daily_observation_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            natural_key_json TEXT NOT NULL DEFAULT '{}',
+            existing_row_id INTEGER NOT NULL,
+            existing_combined_payload_hash TEXT,
+            incoming_combined_payload_hash TEXT NOT NULL,
+            existing_high_payload_hash TEXT,
+            existing_low_payload_hash TEXT,
+            incoming_high_payload_hash TEXT NOT NULL,
+            incoming_low_payload_hash TEXT NOT NULL,
+            reason TEXT NOT NULL CHECK (
+                reason IN ('payload_hash_mismatch', 'missing_existing_payload_hash')
+            ),
+            writer TEXT NOT NULL,
+            existing_row_json TEXT NOT NULL,
+            incoming_row_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Inherited: market structure and token IDs
         CREATE TABLE IF NOT EXISTS market_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -716,6 +738,12 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON settlements(city, target_date);
         CREATE INDEX IF NOT EXISTS idx_observations_city_date
             ON observations(city, target_date, source);
+        CREATE INDEX IF NOT EXISTS idx_daily_observation_revisions_lookup
+            ON daily_observation_revisions(city, target_date, source, recorded_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_daily_observation_revisions_payload
+            ON daily_observation_revisions(
+                city, target_date, source, incoming_combined_payload_hash, reason
+            );
         CREATE INDEX IF NOT EXISTS idx_observation_instants_city_date
             ON observation_instants(city, target_date, utc_timestamp);
         CREATE INDEX IF NOT EXISTS idx_observation_instants_source

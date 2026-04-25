@@ -1,3 +1,9 @@
+# Created: 2026-03-30
+# Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Protect DB schema bootstrap contracts and daily revision-history DDL.
+# Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet.
 """Tests for database schema initialization."""
 
 import json
@@ -147,9 +153,77 @@ def test_init_schema_creates_all_tables():
         "settlements", "observations", "market_events", "token_price_log",
         "ensemble_snapshots", "calibration_pairs", "platt_models",
         "trade_decisions", "shadow_signals", "probability_trace_fact", "chronicle", "position_events", "solar_daily",
-        "observation_instants", "diurnal_peak_prob"
+        "observation_instants", "diurnal_peak_prob", "daily_observation_revisions"
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
+    conn.close()
+
+
+def test_init_schema_creates_daily_observation_revision_indexes():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    indexes = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    conn.close()
+
+    assert "idx_daily_observation_revisions_lookup" in indexes
+    assert "ux_daily_observation_revisions_payload" in indexes
+
+
+def test_init_schema_enforces_daily_observation_revision_constraints():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    base_values = {
+        "city": "Chicago",
+        "target_date": "2026-04-10",
+        "source": "wu_icao_history",
+        "natural_key_json": "{}",
+        "existing_row_id": 1,
+        "existing_combined_payload_hash": "sha256:" + "a" * 64,
+        "incoming_combined_payload_hash": "sha256:" + "b" * 64,
+        "existing_high_payload_hash": "sha256:" + "a" * 64,
+        "existing_low_payload_hash": "sha256:" + "a" * 64,
+        "incoming_high_payload_hash": "sha256:" + "b" * 64,
+        "incoming_low_payload_hash": "sha256:" + "b" * 64,
+        "reason": "payload_hash_mismatch",
+        "writer": "tests.test_db",
+        "existing_row_json": "{}",
+        "incoming_row_json": "{}",
+    }
+
+    columns = ", ".join(base_values)
+    placeholders = ", ".join("?" for _ in base_values)
+    conn.execute(
+        f"INSERT INTO daily_observation_revisions ({columns}) VALUES ({placeholders})",
+        tuple(base_values.values()),
+    )
+
+    bad_reason = dict(base_values)
+    bad_reason["incoming_combined_payload_hash"] = "sha256:" + "c" * 64
+    bad_reason["reason"] = "silent_overwrite"
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            f"INSERT INTO daily_observation_revisions ({columns}) VALUES ({placeholders})",
+            tuple(bad_reason.values()),
+        )
+
+    missing_existing_row = dict(base_values)
+    missing_existing_row["incoming_combined_payload_hash"] = "sha256:" + "d" * 64
+    missing_existing_row["existing_row_id"] = None
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            f"INSERT INTO daily_observation_revisions ({columns}) VALUES ({placeholders})",
+            tuple(missing_existing_row.values()),
+        )
+
     conn.close()
 
 

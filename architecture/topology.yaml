@@ -494,6 +494,7 @@ active_operations_registry:
     - docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md
     - docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md
     - docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md
+    - docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md
     - docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md
     - docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md
 
@@ -1160,6 +1161,7 @@ digest_profiles:
       - "DB commits must precede derived JSON export writes."
     allowed_files:
       - "src/data/daily_obs_append.py"
+      - "src/data/daily_observation_writer.py"
       - "src/data/hourly_instants_append.py"
       - "src/data/ingestion_guard.py"
       - "src/data/tier_resolver.py"

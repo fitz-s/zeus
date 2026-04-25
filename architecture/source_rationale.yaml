@@ -164,6 +164,7 @@ files:
     - src/contracts/calibration_bins.py
     - src/control/control_plane.py
     - src/data/daily_obs_append.py
+    - src/data/daily_observation_writer.py
     - src/data/ecmwf_open_data.py
     - src/data/ensemble_client.py
     - src/data/forecasts_append.py
@@ -529,8 +530,17 @@ files:
     authority_role: live_daily_observation_append
     why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard.
     downstream:
+    - src/data/daily_observation_writer.py
     - src/data/wu_hourly_client.py
     - src/main.py
+  src/data/daily_observation_writer.py:
+    zone: K2_runtime
+    authority_role: daily_observation_write_contract
+    why: Builds canonical high/low observations rows and protects packet-approved daily backfill reruns with revision-preserving hash checks.
+    downstream:
+    - scripts/backfill_hko_daily.py
+    - scripts/backfill_wu_daily_all.py
+    - src/data/daily_obs_append.py
   src/data/forecasts_append.py:
     zone: K2_runtime
     authority_role: live_forecast_append

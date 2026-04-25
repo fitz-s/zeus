@@ -47,7 +47,8 @@ body or bundle.
 | `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` | Closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` | Closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` | Closed POST_AUDIT 4.4.B-lite backfill completeness guardrail packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p2_obs_v2_revision_history/` | Active POST_AUDIT 4.4.A1 obs_v2 revision-history packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_p2_obs_v2_revision_history/` | Closed POST_AUDIT 4.4.A1 obs_v2 revision-history packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_p2_daily_observation_revision_history/` | Active POST_AUDIT 4.4.A2 daily observation backfill revision-history packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` | Closed POST_AUDIT 4.5.A settlement metric-read linter closeout packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p3_usage_path_residual_guards/` | Closed P3 residual usage-path guard packet; route through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |

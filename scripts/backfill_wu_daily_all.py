@@ -16,7 +16,6 @@ Usage:
 """
 from __future__ import annotations
 
-import json
 import hashlib
 import logging
 import os
@@ -33,6 +32,11 @@ import requests
 
 from src.state.db import get_world_connection, init_schema
 from src.config import cities_by_name
+from src.data.daily_observation_writer import (
+    INSERTED,
+    NOOP,
+    write_daily_observation_with_revision,
+)
 from src.data.ingestion_guard import IngestionGuard
 from src.types.observation_atom import ObservationAtom, IngestionRejected
 from src.calibration.manager import hemisphere_for_lat, season_from_date
@@ -49,7 +53,7 @@ def _write_atom_to_observations(
     conn,
     atom: ObservationAtom,
     atom_low: ObservationAtom | None = None,
-) -> None:
+) -> str:
     """Single authoritative write path for observations. Uses K1 atom schema.
 
     When `atom_low` is provided, writes BOTH high and low values to the same
@@ -61,64 +65,36 @@ def _write_atom_to_observations(
     `src/engine/monitor_refresh.py` and `src/signal/day0_signal.py` — omitting
     low was a K1-C oversight fixed 2026-04-13 in the WU rebuild.
 
-    When `atom_low` is None (legacy single-value path), `low_temp` is NULL.
+    Same-key payload drift is recorded in `daily_observation_revisions` rather
+    than replacing the current row.
     """
-    if atom_low is not None:
-        assert atom.value_type == "high", (
-            f"expected high atom, got value_type={atom.value_type!r}"
-        )
-        assert atom_low.value_type == "low", (
-            f"expected low atom, got value_type={atom_low.value_type!r}"
-        )
-        assert atom.city == atom_low.city, (
-            f"city mismatch: {atom.city} vs {atom_low.city}"
-        )
-        assert atom.target_date == atom_low.target_date, (
-            f"target_date mismatch: {atom.target_date} vs {atom_low.target_date}"
-        )
-        assert atom.source == atom_low.source, (
-            f"source mismatch: {atom.source} vs {atom_low.source}"
-        )
-        assert atom.target_unit == atom_low.target_unit, (
-            f"target_unit mismatch: {atom.target_unit} vs {atom_low.target_unit}"
-        )
-        low_temp_value = atom_low.value
-    else:
-        low_temp_value = None
+    if atom_low is None:
+        raise ValueError("daily observations backfill requires both high and low atoms")
+    assert atom.value_type == "high", (
+        f"expected high atom, got value_type={atom.value_type!r}"
+    )
+    assert atom_low.value_type == "low", (
+        f"expected low atom, got value_type={atom_low.value_type!r}"
+    )
+    assert atom.city == atom_low.city, (
+        f"city mismatch: {atom.city} vs {atom_low.city}"
+    )
+    assert atom.target_date == atom_low.target_date, (
+        f"target_date mismatch: {atom.target_date} vs {atom_low.target_date}"
+    )
+    assert atom.source == atom_low.source, (
+        f"source mismatch: {atom.source} vs {atom_low.source}"
+    )
+    assert atom.target_unit == atom_low.target_unit, (
+        f"target_unit mismatch: {atom.target_unit} vs {atom_low.target_unit}"
+    )
 
-    conn.execute("""
-        INSERT OR REPLACE INTO observations (
-            city, target_date, source, high_temp, low_temp, unit, station_id, fetched_at,
-            raw_value, raw_unit, target_unit, value_type,
-            fetch_utc, local_time, collection_window_start_utc, collection_window_end_utc,
-            timezone, utc_offset_minutes, dst_active,
-            is_ambiguous_local_hour, is_missing_local_hour,
-            hemisphere, season, month,
-            rebuild_run_id, data_source_version,
-            authority, provenance_metadata
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?,
-            ?, ?, ?,
-            ?, ?,
-            ?, ?
-        )
-    """, (
-        atom.city, atom.target_date.isoformat(), atom.source,
-        atom.value, low_temp_value, atom.target_unit,
-        atom.station_id, atom.fetch_utc.isoformat(),
-        atom.raw_value, atom.raw_unit, atom.target_unit, atom.value_type,
-        atom.fetch_utc.isoformat(), atom.local_time.isoformat(),
-        atom.collection_window_start_utc.isoformat(), atom.collection_window_end_utc.isoformat(),
-        atom.timezone, atom.utc_offset_minutes, int(atom.dst_active),
-        int(atom.is_ambiguous_local_hour), int(atom.is_missing_local_hour),
-        atom.hemisphere, atom.season, atom.month,
-        atom.rebuild_run_id, atom.data_source_version,
-        atom.authority, json.dumps(atom.provenance_metadata),
-    ))
+    return write_daily_observation_with_revision(
+        conn,
+        atom,
+        atom_low,
+        writer="scripts.backfill_wu_daily_all._write_atom_to_observations",
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +484,11 @@ def backfill_city(
             # Settlement derivation moved to K4 rebuild_settlements.py (Revision 3 plan)
 
             existing = conn.execute(
-                "SELECT high_temp FROM observations WHERE city = ? AND target_date = ? AND source = 'wu_icao_history'",
+                """
+                SELECT 1
+                FROM observations
+                WHERE city = ? AND target_date = ? AND source = 'wu_icao_history'
+                """,
                 (city_name, target_str),
             ).fetchone()
 
@@ -643,9 +623,11 @@ def backfill_city(
             )
 
             if not dry_run:
-                _write_atom_to_observations(conn, atom_high, atom_low=atom_low)
+                outcome = _write_atom_to_observations(conn, atom_high, atom_low=atom_low)
+            else:
+                outcome = INSERTED if existing is None else NOOP
 
-            if existing is None:
+            if outcome == INSERTED:
                 collected += 1
             else:
                 skip_count += 1
