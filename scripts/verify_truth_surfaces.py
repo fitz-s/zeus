@@ -42,9 +42,29 @@ WARN = "WARN"
 READY = "READY"
 NOT_READY = "NOT_READY"
 ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
-    "settlement_truth",
     "historical_hourly",
 })
+LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS = (
+    "market_slug",
+)
+LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS = (
+    "settlement_source",
+    "settlement_source_type",
+    "provenance_json",
+)
+LEGACY_SETTLEMENT_VALUE_COLUMNS = (
+    "settlement_value",
+    "winning_bin",
+    "temperature_metric",
+    "unit",
+    "provenance_json",
+)
+SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS = (
+    "city",
+    "target_date",
+    "temperature_metric",
+    "market_slug",
+)
 
 
 def _scalar(cur, sql, *params):
@@ -81,6 +101,23 @@ def _count(cur: sqlite3.Cursor, table: str, where: str | None = None) -> int:
     if where:
         sql += f" WHERE {where}"
     return int(_scalar(cur, sql) or 0)
+
+
+def _blank_or_empty_json_sql(column: str) -> str:
+    value = f"TRIM(COALESCE(CAST({column} AS TEXT), ''))"
+    compact = (
+        "REPLACE(REPLACE(REPLACE(REPLACE("
+        f"{value}, ' ', ''), char(9), ''), char(10), ''), char(13), '')"
+    )
+    return f"({value} = '' OR {compact} IN ('{{}}', '[]'))"
+
+
+def _any_blank_sql(columns: tuple[str, ...]) -> str:
+    return " OR ".join(_blank_or_empty_json_sql(column) for column in columns)
+
+
+def _all_blank_sql(columns: tuple[str, ...]) -> str:
+    return " AND ".join(_blank_or_empty_json_sql(column) for column in columns)
 
 
 def _check_entry(
@@ -225,6 +262,289 @@ def _add_required_identity_check(
         )
 
 
+def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
+    check_id = "observation_instants_v2.payload_identity_present"
+    table = "observation_instants_v2"
+    if not _table_exists(cur, table):
+        _add_missing_table_check(
+            report,
+            check_id=check_id,
+            table=table,
+            detail="observation_instants_v2 table is missing",
+        )
+        return
+
+    columns = _columns(cur, table)
+    source_columns = tuple(
+        column for column in ("source_url", "source_file") if column in columns
+    )
+    station_columns = tuple(
+        column
+        for column in ("station_registry_version", "station_registry_hash")
+        if column in columns
+    )
+    required_columns = tuple(
+        column for column in ("payload_hash", "parser_version") if column in columns
+    )
+
+    if len(required_columns) < 2 or not source_columns or not station_columns:
+        report["checks"][check_id] = _check_entry(
+            check_id=check_id,
+            status=PASS,
+            detail=(
+                "payload identity columns not present as a complete contract; "
+                "no rows checkable"
+            ),
+            count=0,
+            threshold=0,
+            met=True,
+        )
+        return
+
+    identity_missing_where = " OR ".join(
+        (
+            _any_blank_sql(required_columns),
+            f"({_all_blank_sql(source_columns)})",
+            f"({_all_blank_sql(station_columns)})",
+        )
+    )
+    count = _count(
+        cur,
+        table,
+        f"""
+        COALESCE(training_allowed, 0) = 1
+        AND ({identity_missing_where})
+        """,
+    )
+    met = count == 0
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=f"training-allowed observation_instants_v2 rows missing payload identity={count}",
+        count=count,
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append(
+            {"code": "payload_identity_missing", "table": table, "count": count}
+        )
+
+
+def _add_legacy_settlement_check_result(
+    report: dict,
+    *,
+    check_id: str,
+    code: str,
+    count: int,
+    detail: str,
+    table: str = "settlements",
+) -> None:
+    met = count == 0
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=detail,
+        count=count,
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append({"code": code, "table": table, "count": count})
+
+
+def _settlements_v2_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]:
+    table = "settlements_v2"
+    if not _table_exists(cur, table):
+        return True, "settlements_v2 table is missing"
+
+    row_count = _count(cur, table)
+    if row_count == 0:
+        return True, "settlements_v2 rows=0"
+
+    columns = _columns(cur, table)
+    missing_columns = [
+        column
+        for column in SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS
+        if column not in columns
+    ]
+    if missing_columns:
+        return (
+            True,
+            "settlements_v2 lacks identity columns: " + ", ".join(missing_columns),
+        )
+
+    missing_identity = _count(
+        cur,
+        table,
+        _any_blank_sql(SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS),
+    )
+    if missing_identity:
+        return (
+            True,
+            f"settlements_v2 rows with incomplete market identity={missing_identity}",
+        )
+
+    return False, f"settlements_v2 market identity rows={row_count}"
+
+
+def _add_legacy_settlement_evidence_checks(
+    report: dict,
+    cur: sqlite3.Cursor,
+) -> None:
+    table = "settlements"
+    checks = report["checks"]
+
+    if not _table_exists(cur, table):
+        detail = "legacy settlements table is absent; no legacy rows to classify"
+        for check_id in (
+            "settlements.legacy_market_identity_present",
+            "settlements.legacy_finalization_policy_present",
+            "settlements.legacy_value_complete",
+            "settlements.legacy_evidence_only",
+        ):
+            checks[check_id] = _check_entry(
+                check_id=check_id,
+                status=PASS,
+                detail=detail,
+                count=0,
+                threshold=0,
+                met=True,
+            )
+        return
+
+    row_count = _count(cur, table)
+    if row_count == 0:
+        detail = "legacy settlements rows=0"
+        for check_id in (
+            "settlements.legacy_market_identity_present",
+            "settlements.legacy_finalization_policy_present",
+            "settlements.legacy_value_complete",
+            "settlements.legacy_evidence_only",
+        ):
+            checks[check_id] = _check_entry(
+                check_id=check_id,
+                status=PASS,
+                detail=detail,
+                count=0,
+                threshold=0,
+                met=True,
+            )
+        return
+
+    columns = _columns(cur, table)
+
+    identity_columns = tuple(
+        column
+        for column in LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS
+        if column in columns
+    )
+    if identity_columns:
+        market_identity_missing = _count(cur, table, _all_blank_sql(identity_columns))
+        market_detail = (
+            "legacy settlements rows with no accepted market identity="
+            f"{market_identity_missing}; accepted columns="
+            + ", ".join(identity_columns)
+        )
+    else:
+        market_identity_missing = row_count
+        market_detail = (
+            "legacy settlements has rows but lacks accepted market identity "
+            "columns: " + ", ".join(LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS)
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_market_identity_present",
+        code="settlements.legacy_market_identity_missing",
+        count=market_identity_missing,
+        detail=market_detail,
+    )
+
+    missing_source_columns = [
+        column
+        for column in LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS
+        if column not in columns
+    ]
+    if missing_source_columns:
+        source_evidence_missing = row_count
+    else:
+        source_evidence_missing = _count(
+            cur,
+            table,
+            " OR ".join(
+                (
+                    _any_blank_sql(LEGACY_SETTLEMENT_SOURCE_EVIDENCE_COLUMNS),
+                    "json_extract(provenance_json, '$.rounding_rule') IS NULL",
+                    "TRIM(CAST(json_extract(provenance_json, '$.rounding_rule') AS TEXT)) = ''",
+                )
+            ),
+        )
+    finalization_detail = (
+        "legacy settlements lacks explicit source-finalization timestamp, "
+        "revision/finalization policy, and market-rule version; settled_at is "
+        "a local write timestamp and is not accepted as source finalization "
+        f"proof; current source/rounding evidence missing rows={source_evidence_missing}"
+    )
+    if missing_source_columns:
+        finalization_detail += (
+            "; missing current evidence columns=" + ", ".join(missing_source_columns)
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_finalization_policy_present",
+        code="settlements.legacy_finalization_policy_missing",
+        count=row_count,
+        detail=finalization_detail,
+    )
+
+    missing_value_columns = [
+        column for column in LEGACY_SETTLEMENT_VALUE_COLUMNS if column not in columns
+    ]
+    if missing_value_columns:
+        value_incomplete = (
+            _count(cur, table, "authority = 'VERIFIED'")
+            if "authority" in columns
+            else row_count
+        )
+        value_detail = (
+            "legacy settlements table shape lacks value evidence columns: "
+            + ", ".join(missing_value_columns)
+            + "; value completeness only gates VERIFIED rows"
+        )
+    else:
+        value_where = _any_blank_sql(LEGACY_SETTLEMENT_VALUE_COLUMNS)
+        authority_where = (
+            "authority = 'VERIFIED'"
+            if "authority" in columns
+            else "1 = 1"
+        )
+        value_incomplete = _count(cur, table, f"{authority_where} AND ({value_where})")
+        value_detail = (
+            "VERIFIED legacy settlements rows missing settlement value, bin, metric, unit, "
+            f"or provenance={value_incomplete}"
+        )
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_value_complete",
+        code="settlements.legacy_value_incomplete",
+        count=value_incomplete,
+        detail=value_detail,
+    )
+
+    v2_incomplete, v2_detail = _settlements_v2_identity_incomplete(cur)
+    evidence_only_count = row_count if v2_incomplete else 0
+    _add_legacy_settlement_check_result(
+        report,
+        check_id="settlements.legacy_evidence_only",
+        code="settlements.legacy_evidence_only",
+        count=evidence_only_count,
+        detail=(
+            f"legacy settlements rows={row_count}; {v2_detail}; "
+            "legacy rows are evidence-only until canonical v2 market identity is ready"
+        ),
+    )
+
+
 def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
     """Return a read-only P0 training-readiness report for the world DB.
 
@@ -308,6 +628,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             check_id="market_price_history.market_identity_present",
             columns=("market_slug", "token_id"),
         )
+        _add_legacy_settlement_evidence_checks(report, cur)
 
         if _table_exists(cur, "observation_instants_v2"):
             columns = _columns(cur, "observation_instants_v2")
@@ -356,10 +677,10 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                     """,
                 )
                 detail = (
-                    "training-allowed observation_instants_v2 rows without an "
-                    f"eligible source_role={count}"
+                    "training-allowed observation_instants_v2 rows with unsafe "
+                    f"source_role={count}"
                 )
-                code = "fallback_source_role"
+                code = "observation_instants_v2.training_role_unsafe"
             else:
                 count = -1
                 detail = "observation_instants_v2 lacks training_allowed/source_role columns"
@@ -380,8 +701,8 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                     }
                 )
             met = count == 0
-            checks["observation_instants_v2.source_role_canonical"] = _check_entry(
-                check_id="observation_instants_v2.source_role_canonical",
+            checks["observation_instants_v2.training_role_unsafe"] = _check_entry(
+                check_id="observation_instants_v2.training_role_unsafe",
                 status=PASS if met else FAIL,
                 detail=detail,
                 count=max(count, 0),
@@ -399,10 +720,69 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         else:
             _add_missing_table_check(
                 report,
-                check_id="observation_instants_v2.source_role_canonical",
+                check_id="observation_instants_v2.training_role_unsafe",
                 table="observation_instants_v2",
                 detail="observation_instants_v2 table is missing",
             )
+
+        if _table_exists(cur, "observation_instants_v2"):
+            columns = _columns(cur, "observation_instants_v2")
+            if {"training_allowed", "causality_status"}.issubset(columns):
+                count = _count(
+                    cur,
+                    "observation_instants_v2",
+                    """
+                    COALESCE(training_allowed, 0) = 1
+                    AND (
+                        causality_status IS NULL
+                        OR TRIM(CAST(causality_status AS TEXT)) = ''
+                        OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
+                    )
+                    """,
+                )
+                detail = (
+                    "training-allowed observation_instants_v2 rows with unsafe "
+                    f"causality_status={count}"
+                )
+            elif "training_allowed" in columns:
+                count = _count(
+                    cur,
+                    "observation_instants_v2",
+                    "COALESCE(training_allowed, 0) = 1",
+                )
+                detail = (
+                    "observation_instants_v2 lacks causality_status column for "
+                    f"training_allowed rows={count}"
+                )
+            else:
+                count = 0
+                detail = "observation_instants_v2 lacks training_allowed/causality_status columns"
+            met = count == 0
+            checks["observation_instants_v2.causality_unsafe"] = _check_entry(
+                check_id="observation_instants_v2.causality_unsafe",
+                status=PASS if met else FAIL,
+                detail=detail,
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                blockers.append(
+                    {
+                        "code": "observation_instants_v2.causality_unsafe",
+                        "table": "observation_instants_v2",
+                        "count": count,
+                    }
+                )
+        else:
+            _add_missing_table_check(
+                report,
+                check_id="observation_instants_v2.causality_unsafe",
+                table="observation_instants_v2",
+                detail="observation_instants_v2 table is missing",
+            )
+
+        _add_payload_identity_check(report, cur)
 
         if _table_exists(cur, "ensemble_snapshots_v2"):
             columns = _columns(cur, "ensemble_snapshots_v2")
@@ -504,24 +884,37 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 )
 
             if "authority" in columns and "provenance_metadata" in columns:
-                where = "authority = 'VERIFIED' AND COALESCE(provenance_metadata, '') = ''"
+                provenance_where = _blank_or_empty_json_sql("provenance_metadata")
+                where = f"authority = 'VERIFIED' AND {provenance_where}"
+                wu_where = (
+                    "authority = 'VERIFIED' "
+                    "AND LOWER(COALESCE(source, '')) LIKE 'wu%' "
+                    f"AND {provenance_where}"
+                )
                 missing_provenance_columns = False
             elif "authority" in columns and {"high_provenance_metadata", "low_provenance_metadata"}.issubset(columns):
+                provenance_where = _any_blank_sql(
+                    ("high_provenance_metadata", "low_provenance_metadata")
+                )
                 where = """
                     authority = 'VERIFIED'
-                    AND (
-                        COALESCE(high_provenance_metadata, '') = ''
-                        OR COALESCE(low_provenance_metadata, '') = ''
-                    )
+                    AND ({provenance_where})
                 """
+                where = where.format(provenance_where=provenance_where)
+                wu_where = (
+                    "authority = 'VERIFIED' "
+                    "AND LOWER(COALESCE(source, '')) LIKE 'wu%' "
+                    f"AND ({provenance_where})"
+                )
                 missing_provenance_columns = False
             else:
                 where = "1 = 0"
+                wu_where = "1 = 0"
                 missing_provenance_columns = True
             count = _count(cur, "observations", where)
             met = count == 0 and not missing_provenance_columns
             detail = f"VERIFIED observations without provenance={count}"
-            code = "empty_observation_provenance"
+            code = "observations.verified_without_provenance"
             if missing_provenance_columns:
                 detail = "observations lacks provenance metadata columns"
                 code = "missing_observation_provenance_columns"
@@ -541,6 +934,25 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                         "count": count,
                     }
                 )
+            if not missing_provenance_columns and "source" in columns:
+                wu_count = _count(cur, "observations", wu_where)
+                wu_met = wu_count == 0
+                checks["observations.wu_provenance_present"] = _check_entry(
+                    check_id="observations.wu_provenance_present",
+                    status=PASS if wu_met else FAIL,
+                    detail=f"WU VERIFIED observations without provenance={wu_count}",
+                    count=wu_count,
+                    threshold=0,
+                    met=wu_met,
+                )
+                if not wu_met:
+                    blockers.append(
+                        {
+                            "code": "observations.wu_empty_provenance",
+                            "table": "observations",
+                            "count": wu_count,
+                        }
+                    )
         else:
             _add_missing_table_check(
                 report,

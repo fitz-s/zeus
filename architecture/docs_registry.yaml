@@ -514,7 +514,7 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: false
-  current_role: active or closed packet directories, including the current P1.3 unsafe-observation quarantine packet while active; route through current_state
+  current_role: active or closed packet directories, including the current P1.5 eligibility/preflight planning packet while active; route through current_state
   canonical_replaced_by: []
   next_action: archive_after_closeout
   lifecycle_state: transitional

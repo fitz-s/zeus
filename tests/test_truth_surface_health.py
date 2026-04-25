@@ -137,16 +137,110 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         """
     )
     conn.execute(
-        "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
+        """
+        CREATE TABLE observation_instants_v2 (
+            training_allowed INTEGER,
+            source_role TEXT,
+            causality_status TEXT
+        )
+        """
     )
     conn.execute(
-        "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'historical_hourly')"
+        """
+        INSERT INTO observation_instants_v2 (
+            training_allowed, source_role, causality_status
+        ) VALUES (1, 'historical_hourly', 'OK')
+        """
     )
     if seed_observations:
         conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
         conn.execute(
-            "INSERT INTO observations (authority, provenance_metadata) VALUES ('VERIFIED', '{}')"
+            """
+            INSERT INTO observations (
+                authority, provenance_metadata
+            ) VALUES ('VERIFIED', '{"source":"wu","payload_hash":"hash"}')
+            """
         )
+
+
+def _create_legacy_settlements_table(conn):
+    columns = [
+        "id INTEGER PRIMARY KEY",
+        "city TEXT",
+        "target_date TEXT",
+        "market_slug TEXT",
+        "winning_bin TEXT",
+        "settlement_value REAL",
+        "settlement_source TEXT",
+        "settlement_source_type TEXT",
+        "settled_at TEXT",
+        "authority TEXT",
+        "unit TEXT",
+        "temperature_metric TEXT",
+        "provenance_json TEXT",
+    ]
+    conn.execute(
+        f"""
+        CREATE TABLE settlements (
+            {", ".join(columns)}
+        )
+        """
+    )
+
+
+def _add_legacy_settlement_alias_columns(conn):
+    for column in (
+        "source_url",
+        "source_page",
+        "finalized_at",
+        "finalization_policy",
+        "revision_policy",
+        "late_update_policy",
+        "market_rule_version",
+        "settlement_rule_version",
+        "oracle_transform",
+    ):
+        conn.execute(f"ALTER TABLE settlements ADD COLUMN {column} TEXT")
+
+
+def _insert_legacy_settlement(
+    conn,
+    *,
+    market_slug="market-slug",
+    settlement_value=72.0,
+    winning_bin="72F",
+    unit="F",
+    temperature_metric="high",
+    provenance_json='{"source":"wu","payload_hash":"hash","rounding_rule":"wmo_half_up"}',
+    settlement_source="https://www.wunderground.com/history/daily/us/ny/new-york/KNYC",
+    settlement_source_type="WU",
+    settled_at="2026-04-23T19:50:34+00:00",
+    authority="VERIFIED",
+):
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(settlements)").fetchall()]
+    values = {
+        "city": "NYC",
+        "target_date": "2026-04-23",
+        "market_slug": market_slug,
+        "winning_bin": winning_bin,
+        "settlement_value": settlement_value,
+        "settlement_source": settlement_source,
+        "settlement_source_type": settlement_source_type,
+        "settled_at": settled_at,
+        "authority": authority,
+        "unit": unit,
+        "temperature_metric": temperature_metric,
+        "provenance_json": provenance_json,
+    }
+    insert_columns = [column for column in values if column in columns]
+    placeholders = ", ".join("?" for _ in insert_columns)
+    conn.execute(
+        f"""
+        INSERT INTO settlements ({", ".join(insert_columns)})
+        VALUES ({placeholders})
+        """,
+        [values[column] for column in insert_columns],
+    )
 
 
 class TestTrainingReadinessP0:
@@ -301,7 +395,11 @@ class TestTrainingReadinessP0:
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute("DELETE FROM observation_instants_v2")
         conn.execute(
-            "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (1, 'banana')"
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'banana', 'OK')
+            """
         )
         conn.commit()
         conn.close()
@@ -310,8 +408,30 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_training_eligible_observations" in _blocker_codes(report)
-        assert "fallback_source_role" in _blocker_codes(report)
-        assert report["checks"]["observation_instants_v2.source_role_canonical"]["count"] == 1
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
+
+    def test_training_readiness_fails_when_source_role_is_settlement_truth(self, tmp_path):
+        db_path = tmp_path / "settlement-truth-source-role-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'settlement_truth', 'OK')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "empty_training_eligible_observations" in _blocker_codes(report)
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
 
     def test_training_readiness_fails_when_observations_have_no_verified_rows(self, tmp_path):
         db_path = tmp_path / "no-verified-observations-world.db"
@@ -358,10 +478,81 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert report["ready"] is False
-        assert "empty_observation_provenance" in _blocker_codes(report)
+        assert "observations.verified_without_provenance" in _blocker_codes(report)
         check = report["checks"]["observations.provenance_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
+
+    @pytest.mark.parametrize("provenance", ["{}", "[]", " { } ", " [ ] "])
+    def test_training_readiness_fails_when_verified_provenance_is_empty_json(
+        self, tmp_path, provenance
+    ):
+        db_path = tmp_path / "empty-json-provenance-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute(
+            """
+            CREATE TABLE observations (
+                source TEXT,
+                authority TEXT,
+                provenance_metadata TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observations (
+                source, authority, provenance_metadata
+            ) VALUES ('ogimet_metar_llbg', 'VERIFIED', ?)
+            """,
+            (provenance,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observations.verified_without_provenance" in _blocker_codes(report)
+        check = report["checks"]["observations.provenance_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_reports_wu_empty_provenance_separately(self, tmp_path):
+        db_path = tmp_path / "wu-empty-provenance-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=False)
+        conn.execute(
+            """
+            CREATE TABLE observations (
+                source TEXT,
+                authority TEXT,
+                provenance_metadata TEXT
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO observations (
+                source, authority, provenance_metadata
+            ) VALUES (?, 'VERIFIED', ?)
+            """,
+            [
+                ("wu_icao_history", "{}"),
+                ("ogimet_metar_llbg", "{}"),
+                ("hko_daily_api", '{"source":"hko","payload_hash":"hash"}'),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "observations.verified_without_provenance" in blockers
+        assert "observations.wu_empty_provenance" in blockers
+        assert report["checks"]["observations.provenance_present"]["count"] == 2
+        assert report["checks"]["observations.wu_provenance_present"]["count"] == 1
 
     def test_training_readiness_fails_when_required_eligibility_tables_are_missing(self, tmp_path):
         db_path = tmp_path / "raw-world.db"
@@ -372,7 +563,8 @@ class TestTrainingReadinessP0:
         assert report["ready"] is False
         checks = report["checks"]
         for check_id in [
-            "observation_instants_v2.source_role_canonical",
+            "observation_instants_v2.training_role_unsafe",
+            "observation_instants_v2.causality_unsafe",
             "historical_forecasts_v2.available_at_not_reconstructed",
             "observations.provenance_present",
         ]:
@@ -401,6 +593,169 @@ class TestTrainingReadinessP0:
         check = report["checks"]["settlements_v2.market_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
+
+    def test_training_readiness_ignores_absent_legacy_settlements_table(self, tmp_path):
+        db_path = tmp_path / "no-legacy-settlements-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert not {
+            "settlements.legacy_market_identity_missing",
+            "settlements.legacy_finalization_policy_missing",
+            "settlements.legacy_value_incomplete",
+            "settlements.legacy_evidence_only",
+        } & _blocker_codes(report)
+        assert report["checks"]["settlements.legacy_evidence_only"]["status"] == "PASS"
+
+    def test_training_readiness_fails_when_legacy_settlements_lack_market_identity(self, tmp_path):
+        db_path = tmp_path / "legacy-missing-market-identity-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn, market_slug=None)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_market_identity_missing" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_market_identity_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_legacy_finalization_contract_is_absent(self, tmp_path):
+        db_path = tmp_path / "legacy-missing-finalization-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_finalization_policy_missing" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_finalization_policy_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_rejects_ad_hoc_legacy_finalization_aliases(self, tmp_path):
+        db_path = tmp_path / "legacy-ad-hoc-finalization-alias-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _add_legacy_settlement_alias_columns(conn)
+        _insert_legacy_settlement(conn)
+        conn.execute(
+            """
+            UPDATE settlements
+            SET source_url = settlement_source,
+                source_page = settlement_source,
+                finalized_at = settled_at,
+                finalization_policy = 'synthetic-policy',
+                revision_policy = 'synthetic-revision-policy',
+                late_update_policy = 'synthetic-late-update-policy',
+                market_rule_version = 'synthetic-market-rule-v1',
+                settlement_rule_version = 'synthetic-settlement-rule-v1',
+                oracle_transform = 'synthetic-transform'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "settlements.legacy_finalization_policy_missing" in blockers
+        check = report["checks"]["settlements.legacy_finalization_policy_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_legacy_value_evidence_is_incomplete(self, tmp_path):
+        db_path = tmp_path / "legacy-incomplete-value-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(
+            conn,
+            settlement_value=None,
+            winning_bin="",
+            unit=None,
+            provenance_json="{}",
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_value_incomplete" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_value_complete"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_does_not_count_quarantined_legacy_value_gaps(self, tmp_path):
+        db_path = tmp_path / "legacy-quarantined-value-gap-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(
+            conn,
+            authority="QUARANTINED",
+            settlement_value=None,
+            winning_bin=None,
+            unit=None,
+            provenance_json='{"source":"wu","rounding_rule":"wmo_half_up"}',
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_value_incomplete" not in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_value_complete"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
+
+    def test_training_readiness_reports_legacy_evidence_only_when_v2_is_empty(self, tmp_path):
+        db_path = tmp_path / "legacy-evidence-only-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM settlements_v2")
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "settlements.legacy_evidence_only" in _blocker_codes(report)
+        check = report["checks"]["settlements.legacy_evidence_only"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_closed_on_legacy_finalization_even_when_v2_identity_is_ready(self, tmp_path):
+        db_path = tmp_path / "legacy-complete-evidence-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        _create_legacy_settlements_table(conn)
+        _insert_legacy_settlement(conn)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert report["ready"] is False
+        assert "settlements.legacy_finalization_policy_missing" in blockers
+        assert "settlements.legacy_market_identity_missing" not in blockers
+        assert "settlements.legacy_value_incomplete" not in blockers
+        assert "settlements.legacy_evidence_only" not in blockers
+        assert report["checks"]["settlements.legacy_finalization_policy_present"]["count"] == 1
 
     def test_training_readiness_fails_when_market_identity_columns_are_missing(self, tmp_path):
         db_path = tmp_path / "missing-market-identity-columns-world.db"
@@ -459,8 +814,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "fallback_source_role" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -485,8 +840,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "fallback_source_role" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -500,8 +855,147 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "missing_source_role_columns" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.source_role_canonical"]
+        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
         assert check["status"] == "FAIL"
+
+    @pytest.mark.parametrize("causality_status", [None, "", "STALE", "N/A_CAUSAL_DAY_STARTED"])
+    def test_training_readiness_fails_when_causality_status_is_unsafe(
+        self, tmp_path, causality_status
+    ):
+        db_path = tmp_path / "unsafe-causality-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role, causality_status
+            ) VALUES (1, 'historical_hourly', ?)
+            """,
+            (causality_status,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_fails_when_causality_status_column_is_missing(self, tmp_path):
+        db_path = tmp_path / "missing-causality-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("DROP TABLE observation_instants_v2")
+        conn.execute(
+            """
+            CREATE TABLE observation_instants_v2 (
+                training_allowed INTEGER,
+                source_role TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                training_allowed, source_role
+            ) VALUES (1, 'historical_hourly')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_passes_payload_identity_when_contract_is_absent(self, tmp_path):
+        db_path = tmp_path / "no-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert "payload_identity_missing" not in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_payload_identity_contract_is_incomplete(self, tmp_path):
+        db_path = tmp_path / "incomplete-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        for column in (
+            "payload_hash",
+            "parser_version",
+            "source_file",
+            "station_registry_hash",
+        ):
+            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET payload_hash = '',
+                parser_version = 'parser-v1',
+                source_file = 'observations/raw.json',
+                station_registry_hash = 'station-registry-v1'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "payload_identity_missing" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_accepts_payload_identity_alternative_columns(self, tmp_path):
+        db_path = tmp_path / "payload-alternatives-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        for column in (
+            "payload_hash",
+            "parser_version",
+            "source_url",
+            "source_file",
+            "station_registry_version",
+            "station_registry_hash",
+        ):
+            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET payload_hash = 'payload-hash',
+                parser_version = 'parser-v1',
+                source_url = '',
+                source_file = 'observations/raw.json',
+                station_registry_version = '',
+                station_registry_hash = 'station-registry-hash'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert "payload_identity_missing" not in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
 
     @pytest.mark.parametrize("missing_column", ["issue_time", "available_at", "fetch_time"])
     def test_training_readiness_fails_when_ensemble_snapshots_v2_time_is_missing(
@@ -655,7 +1149,7 @@ class TestSettlementFreshness:
     def test_settlement_freshness(self):
         """Latest settlement activity must be within 48h.
 
-        Checks decision_log settlement artifacts and calibration_pairs,
+        Checks decision_log settlement artifacts and calibration_pairs_v2,
         not the deprecated legacy settlements table.
         """
         conn = get_connection()
@@ -663,12 +1157,13 @@ class TestSettlementFreshness:
             "SELECT MAX(timestamp) FROM decision_log WHERE mode = 'settlement'"
         ).fetchone()[0]
 
+        calibration_table = "calibration_pairs_v2"
         max_cal_target = conn.execute(
-            "SELECT MAX(target_date) FROM calibration_pairs"
+            f"SELECT MAX(target_date) FROM {calibration_table}"
         ).fetchone()[0]
 
         assert max_settled is not None or max_cal_target is not None, (
-            "No settlement activity found in decision_log or calibration_pairs"
+            "No settlement activity found in decision_log or calibration_pairs_v2"
         )
 
         if max_settled:
@@ -696,7 +1191,7 @@ def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monke
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
@@ -740,7 +1235,7 @@ def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypa
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'US-South', '2099-04-07', '76-77°F',
+            'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'Dallas', '2099-04-07', '76-77°F',
             'buy_no', 'F', 1.18, 1.28, 1.18, 0.92, 0.55,
             'snap-1', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-07T10:58:44.847407+00:00'
@@ -784,7 +1279,7 @@ def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shado
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
+            'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
             'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
