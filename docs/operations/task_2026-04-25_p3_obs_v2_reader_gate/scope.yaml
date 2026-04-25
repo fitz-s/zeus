@@ -1,0 +1,42 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-25_p3_obs_v2_reader_gate
+status: in_progress
+branch: midstream_remediation
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+in_scope:
+- docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/**
+- docs/operations/current_state.md
+- docs/operations/AGENTS.md
+- docs/AGENTS.md
+- docs/README.md
+- architecture/docs_registry.yaml
+- architecture/topology.yaml
+- docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md
+- docs/operations/task_2026-04-25_p2_daily_observation_revision_history/work_log.md
+- docs/operations/task_2026-04-25_p2_daily_observation_revision_history/scope.yaml
+- docs/operations/task_2026-04-25_p2_daily_observation_revision_history/receipt.json
+- scripts/etl_diurnal_curves.py
+- scripts/verify_truth_surfaces.py
+- tests/test_truth_surface_health.py
+- tests/test_obs_v2_reader_gate.py
+- architecture/test_topology.yaml
+- architecture/script_manifest.yaml
+- scripts/semantic_linter.py
+- tests/test_semantic_linter.py
+allow_companions:
+- architecture/script_manifest.yaml
+- architecture/test_topology.yaml
+- architecture/docs_registry.yaml
+- AGENTS.md
+- README.md
+- docs/operations/current_state.md
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- src/state/schema/v2_schema.py
+- scripts/etl_hourly_observations.py
+- src/data/observation_instants_v2_writer.py
+- observation_instants_current_view_policy
+- observation_instants_v2_metric_identity_population
+- daily_observations_v2

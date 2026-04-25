@@ -270,7 +270,7 @@ def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
         return []
 
     violations = []
-    pattern = re.compile(r'FROM\s+calibration_pairs', re.IGNORECASE)
+    pattern = re.compile(r'FROM\s+calibration_pairs\b', re.IGNORECASE)
     for lineno, line in enumerate(content.splitlines(), 1):
         # Strip Python inline comments (#) and SQL inline comments (--)
         stripped = line.split("#")[0].split("--")[0]

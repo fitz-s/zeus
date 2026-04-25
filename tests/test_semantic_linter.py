@@ -68,6 +68,16 @@ def test_linter_allows_store_py(tmp_path):
     assert violations == []
 
 
+def test_linter_does_not_confuse_calibration_pairs_v2_with_legacy_table(tmp_path):
+    """K2_struct targets the legacy calibration_pairs table, not v2 tables."""
+    file_path = tmp_path / "v2_query.py"
+    file_path.write_text(
+        'conn.execute("DELETE FROM calibration_pairs_v2 WHERE target_date = ?")\n'
+    )
+    violations = _check_calibration_pairs_select(file_path, file_path.read_text())
+    assert violations == []
+
+
 def test_linter_allows_migrations_dir(tmp_path):
     """_check_calibration_pairs_select does not fire for files inside migrations/."""
     migrations_dir = tmp_path / "migrations"

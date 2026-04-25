@@ -58,6 +58,7 @@ test_trust_policy:
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-23"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_obs_v2_reader_gate.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_phase4_5_extractor.py: {created: "2026-04-16", last_used: "2026-04-16"}
@@ -144,6 +145,7 @@ categories:
     - tests/test_diurnal_curves_empty_hk_handled.py
     - tests/test_hk_rejects_vhhh_source.py
     - tests/test_hourly_clients_parse.py
+    - tests/test_obs_v2_reader_gate.py
     - tests/test_obs_v2_writer.py
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
@@ -623,6 +625,16 @@ test_metadata:
     notes: >
       Protects v2 writer antibodies around authority fields, provenance, and
       per-city source routing.
+  tests/test_obs_v2_reader_gate.py:
+    modules: [scripts, data]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    notes: >
+      Protects P3 reader-side gates so canonical diurnal analytics do not
+      consume observation_instants_v2 rows that are not reader-safe.
   tests/test_hk_rejects_vhhh_source.py:
     modules: [data]
     category: antibody_impossibility

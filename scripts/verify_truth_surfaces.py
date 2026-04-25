@@ -45,6 +45,10 @@ NOT_READY = "NOT_READY"
 ELIGIBLE_OBSERVATION_SOURCE_ROLES = frozenset({
     "historical_hourly",
 })
+ELIGIBLE_OBSERVATION_READER_AUTHORITIES = frozenset({
+    "ICAO_STATION_NATIVE",
+    "VERIFIED",
+})
 LEGACY_SETTLEMENT_MARKET_IDENTITY_COLUMNS = (
     "market_slug",
 )
@@ -482,6 +486,72 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
         )
 
 
+def _add_observation_reader_identity_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+) -> None:
+    check_id = "observation_instants_v2.reader_identity_unsafe"
+    table = "observation_instants_v2"
+    if not _table_exists(cur, table):
+        _add_missing_table_check(
+            report,
+            check_id=check_id,
+            table=table,
+            detail="observation_instants_v2 table is missing",
+        )
+        return
+
+    columns = _columns(cur, table)
+    required_columns = {"training_allowed", "authority", "data_version"}
+    if required_columns.issubset(columns):
+        quoted_authorities = ", ".join(
+            f"'{authority}'"
+            for authority in sorted(ELIGIBLE_OBSERVATION_READER_AUTHORITIES)
+        )
+        count = _count(
+            cur,
+            table,
+            f"""
+            COALESCE(training_allowed, 0) = 1
+            AND (
+                authority IS NULL
+                OR authority NOT IN ({quoted_authorities})
+                OR data_version IS NULL
+                OR TRIM(CAST(data_version AS TEXT)) = ''
+                OR TRIM(CAST(data_version AS TEXT)) = 'v0'
+                OR TRIM(CAST(data_version AS TEXT)) NOT LIKE 'v1.%'
+            )
+            """,
+        )
+        detail = (
+            "training-allowed observation_instants_v2 rows with unsafe "
+            f"reader authority/data_version={count}"
+        )
+        code = check_id
+    else:
+        count = _count(cur, table)
+        missing = ", ".join(sorted(required_columns - columns))
+        detail = (
+            "observation_instants_v2 lacks reader identity columns: "
+            f"{missing or 'unknown'}"
+        )
+        code = "missing_reader_identity_columns"
+
+    met = count == 0
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=detail,
+        count=count,
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append(
+            {"code": code, "table": table, "count": count}
+        )
+
+
 def _json_text_blank_sql(json_column: str, key: str) -> str:
     return (
         f"json_extract({json_column}, '$.{key}') IS NULL "
@@ -744,6 +814,7 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
         for check_id in (
             "observation_instants_v2.training_role_unsafe",
             "observation_instants_v2.causality_unsafe",
+            "observation_instants_v2.reader_identity_unsafe",
         ):
             _add_missing_table_check(
                 report,
@@ -844,6 +915,7 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
         )
 
     _add_payload_identity_check(report, cur)
+    _add_observation_reader_identity_check(report, cur)
 
 
 def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
@@ -1639,6 +1711,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             )
 
         _add_payload_identity_check(report, cur)
+        _add_observation_reader_identity_check(report, cur)
 
         if _table_exists(cur, "ensemble_snapshots_v2"):
             columns = _columns(cur, "ensemble_snapshots_v2")

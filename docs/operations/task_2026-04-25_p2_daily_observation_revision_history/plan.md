@@ -3,7 +3,7 @@
 Date: 2026-04-25
 Branch: `midstream_remediation`
 Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus`
-Status: in progress
+Status: closed
 
 ## Background
 
@@ -116,3 +116,14 @@ the current row.
   change.
 - Stop if script counters require production data mutation or replay reruns to
   prove correctness.
+
+## Closeout
+
+- Implementation commit: `91d2a35`
+- Pushed branch: `origin/midstream_remediation`
+- Runtime projection follow-up commits: `9ea3c1f`, `edc6bb6`
+- Result: WU/HKO daily backfills now preserve same-key payload drift in
+  `daily_observation_revisions` and leave the current `observations` row
+  unchanged; same-payload reruns are idempotent by payload identity.
+- Deferred: Ogimet daily revision history, live daily ingest revision behavior,
+  historical row quarantine/backfill, P3 reader-gate design, and P4 population.

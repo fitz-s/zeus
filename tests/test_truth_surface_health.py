@@ -210,6 +210,8 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     conn.execute(
         """
         CREATE TABLE observation_instants_v2 (
+            authority TEXT,
+            data_version TEXT,
             training_allowed INTEGER,
             source_role TEXT,
             causality_status TEXT
@@ -219,8 +221,9 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     conn.execute(
         """
         INSERT INTO observation_instants_v2 (
-            training_allowed, source_role, causality_status
-        ) VALUES (1, 'historical_hourly', 'OK')
+            authority, data_version, training_allowed, source_role,
+            causality_status
+        ) VALUES ('VERIFIED', 'v1.wu-native', 1, 'historical_hourly', 'OK')
         """
     )
     if seed_observations:
@@ -240,13 +243,13 @@ def _seed_safe_observation_instant(conn):
         INSERT INTO observation_instants_v2 (
             city, target_date, source, timezone_name, local_timestamp,
             utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
-            imported_at, training_allowed, source_role, causality_status,
-            provenance_json
+            imported_at, authority, data_version, training_allowed,
+            source_role, causality_status, provenance_json
         ) VALUES (
             'NYC', '2026-04-23', 'wu_icao_history', 'America/New_York',
             '2026-04-23T10:00:00-04:00', '2026-04-23T14:00:00Z',
             -240, 'hourly', 'F', '2026-04-23T14:05:00Z',
-            1, 'historical_hourly', 'OK',
+            'VERIFIED', 'v1.wu-native', 1, 'historical_hourly', 'OK',
             '{"tier":"WU_ICAO","station_id":"KNYC","payload_hash":"sha256:fixture","source_url":"https://api.weather.com/v1/location/KNYC:9:US/observations/historical.json?apiKey=REDACTED","parser_version":"test_truth_surface_health_v1"}'
         )
         """
@@ -1239,6 +1242,48 @@ class TestTrainingReadinessP0:
 
         assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
         check = report["checks"]["observation_instants_v2.training_role_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    @pytest.mark.parametrize("authority", [None, "", "UNVERIFIED", "QUARANTINED"])
+    def test_training_readiness_fails_when_observation_instants_v2_authority_is_unsafe(
+        self, tmp_path, authority
+    ):
+        db_path = tmp_path / "unsafe-observation-authority-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute(
+            "UPDATE observation_instants_v2 SET authority = ?",
+            (authority,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "observation_instants_v2.reader_identity_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.reader_identity_unsafe"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    @pytest.mark.parametrize("data_version", [None, "", "v0", "wu-native", "v2.future"])
+    def test_training_readiness_fails_when_observation_instants_v2_data_version_is_unsafe(
+        self, tmp_path, data_version
+    ):
+        db_path = tmp_path / "unsafe-observation-data-version-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute(
+            "UPDATE observation_instants_v2 SET data_version = ?",
+            (data_version,),
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert "observation_instants_v2.reader_identity_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.reader_identity_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
