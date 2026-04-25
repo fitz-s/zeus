@@ -1854,11 +1854,16 @@ def test_blocking_modes_drives_navigation_lane_policy(monkeypatch):
         lambda: topology_doctor.StrictResult(ok=False, issues=[advisory_source_issue]),
     )
 
-    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"], issue_schema_version="2")
+    payload = topology_doctor.run_navigation(
+        "edit replay fidelity",
+        ["src/engine/replay.py"],
+        issue_schema_version="2",
+    )
 
     assert payload["ok"] is True
     assert payload["direct_blockers"] == []
     assert payload["repo_health_warnings"][0]["blocking_modes"] == ["global_health"]
+    assert payload["admission"]["status"] == "admitted"
 
 
 def test_issue_schema_drift_guard():
@@ -2091,12 +2096,17 @@ def test_context_pack_handles_missing_graph_db_gracefully(monkeypatch):
 
 
 def test_navigation_aggregates_default_health_and_digest():
+    # Use a settlement-profile-aligned file to validate the happy-path navigation
+    # aggregation. ("src/engine/replay.py" is a downstream file for the settlement
+    # profile, not an allowed write target, so use the canonical settlement file
+    # to exercise the admitted path.)
     payload = topology_doctor.run_navigation(
-        "fix settlement rounding in replay",
-        ["src/engine/replay.py"],
+        "fix settlement rounding",
+        ["src/contracts/settlement_semantics.py"],
     )
 
     assert_navigation_ok(payload)
+    assert payload["admission"]["status"] == "admitted"
     assert payload["digest"]["profile"] == "change settlement rounding"
     assert payload["checks"]["context_budget"]["ok"]
     assert payload["checks"]["agents_coherence"]["ok"]
@@ -2136,9 +2146,13 @@ def test_navigation_unrelated_docs_issue_does_not_block_source_route(monkeypatch
         monkeypatch.setattr(topology_doctor, name, ok_result)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
 
-    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+    payload = topology_doctor.run_navigation(
+        "edit replay fidelity",
+        ["src/engine/replay.py"],
+    )
 
     assert payload["ok"] is True
+    assert payload["admission"]["status"] == "admitted"
     assert payload["direct_blockers"] == []
     assert payload["repo_health_warnings"][0]["lane"] == "docs"
     assert payload["global_health_counts"]["docs"]["blocking_count"] == 1
@@ -2262,9 +2276,13 @@ def test_navigation_synthetic_global_issue_is_advisory_without_strict_health(mon
         monkeypatch.setattr(topology_doctor, name, ok_result)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
 
-    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+    payload = topology_doctor.run_navigation(
+        "edit replay fidelity",
+        ["src/engine/replay.py"],
+    )
 
     assert payload["ok"] is True
+    assert payload["admission"]["status"] == "admitted"
     assert payload["direct_blockers"] == []
     assert payload["repo_health_warnings"][0]["path"] == "<docs-global>"
 
@@ -2607,7 +2625,7 @@ def test_reference_artifact_digest_routes_to_reference_profile():
     assert digest["profile"] == "reference artifact extraction"
     assert "architecture/reference_replacement.yaml" in digest["allowed_files"]
     assert any("Claim proofs point" in law for law in digest["required_law"])
-    assert "python scripts/topology_doctor.py --reference-replacement" in digest["gates"]
+    assert "python3 scripts/topology_doctor.py --reference-replacement" in digest["gates"]
 
 
 def test_lore_digest_routes_discovery_mode_tasks():
@@ -2864,7 +2882,7 @@ def test_script_digest_routes_agents_to_lifecycle_law():
     assert "packet_ephemeral" in script_lifecycle["allowed_lifecycles"]
     assert "audit_" in script_lifecycle["long_lived_naming"]["allowed_prefixes"]
     assert "audit_replay_fidelity.py" in script_lifecycle["existing_scripts"]
-    assert "python scripts/topology_doctor.py --scripts" in digest["gates"]
+    assert "python3 scripts/topology_doctor.py --scripts" in digest["gates"]
     assert any("delete_by=YYYY-MM-DD" in law for law in digest["required_law"])
     assert any(card["id"] == "SCRIPT_LIFECYCLE_REUSE_BEFORE_NEW_TOOL" for card in digest["history_lore"])
 
@@ -2889,7 +2907,7 @@ def test_lore_digest_routes_history_tasks_to_density_policy():
     assert digest["profile"] == "extract historical lore"
     assert "HISTORICAL_LORE_DENSITY_POLICY" in lore_ids
     assert any("not default reading material" in law for law in digest["required_law"])
-    assert "python scripts/topology_doctor.py --history-lore" in digest["gates"]
+    assert "python3 scripts/topology_doctor.py --history-lore" in digest["gates"]
 
 
 def test_lore_digest_routes_alpha_tasks_to_profit_safety_lessons():
@@ -2965,7 +2983,7 @@ def test_history_lore_mode_rejects_stale_antibody_reference(monkeypatch):
             "antibodies": {
                 "code": ["src/does/not/exist.py"],
                 "tests": ["tests/test_runtime_guards.py"],
-                "gates": ["python scripts/topology_doctor.py --history-lore"],
+                "gates": ["python3 scripts/topology_doctor.py --history-lore"],
             },
         }
     ]

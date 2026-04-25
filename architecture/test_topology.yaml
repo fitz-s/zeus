@@ -30,7 +30,7 @@ test_trust_policy:
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
-    tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -47,7 +47,7 @@ test_trust_policy:
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-23"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-23"}
-    tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
@@ -55,7 +55,7 @@ test_trust_policy:
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-23"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
-    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_phase4_5_extractor.py: {created: "2026-04-16", last_used: "2026-04-16"}
     tests/test_phase5_gate_d_low_purity.py: {created: "2026-04-17", last_used: "2026-04-17"}
@@ -65,6 +65,10 @@ test_trust_policy:
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-21"}
+    tests/test_digest_admission_policy.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_digest_profile_matching.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_digest_regression_false_positive.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_admission_kernel_hardening.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_decision_evidence_runtime_invocation.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_exit_evidence_audit.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_harvester_dr33_live_enablement.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -135,6 +139,10 @@ categories:
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
     - tests/test_topology_doctor.py
+    - tests/test_digest_admission_policy.py
+    - tests/test_digest_profile_matching.py
+    - tests/test_digest_regression_false_positive.py
+    - tests/test_admission_kernel_hardening.py
     - tests/test_truth_surface_health.py
     - tests/test_tigge_snapshot_p_raw_backfill.py
     - tests/test_wallet_source.py

@@ -641,7 +641,29 @@ core_map_profiles:
 
 digest_profiles:
   - id: "change settlement rounding"
+    # Migrated to typed match_policy 2026-04-25: blocks substring-collisions
+    # like "hko" matching "shock" or "oracle" matching "oracle_truncate" in
+    # unrelated cleanup tasks via negative_phrases.
+    match_policy:
+      strong_phrases:
+        - "settlement rounding"
+        - "oracle_truncate"
+        - "wmo asymmetric half-up"
+        - "hko rounding"
+      weak_terms:
+        - "rounding"
+        - "oracle"
+        - "hko"
+        - "wmo"
+      negative_phrases:
+        - "oracle account"
+        - "oracle cloud"
+        - "shock"
+      single_terms_can_select: false
+      min_confidence: 0.5
     match:
+      # Legacy mirror, kept for backward-compatible callers that still read
+      # `profile.match` directly. New code MUST read `match_policy`.
       - "settlement rounding"
       - "wmo"
       - "rounding"
@@ -680,6 +702,24 @@ digest_profiles:
       - "Any DB rewrite or rebuild request belongs to a separate data-rebuild packet."
       - "Any broad cleanup belongs to a separate cleanup packet."
   - id: "edit replay fidelity"
+    # Migrated to typed match_policy 2026-04-25: "backtest" alone is too
+    # broad (matches portfolio backtests, hypothetical sims, etc.). The
+    # strong phrase "replay fidelity" is required for high-confidence
+    # selection; "backtest" remains as a weak_term that needs a file-pattern
+    # co-signal to drive selection.
+    match_policy:
+      strong_phrases:
+        - "replay fidelity"
+        - "audit replay"
+        - "replay determinism"
+      weak_terms:
+        - "backtest"
+        - "replay"
+      negative_phrases:
+        - "replay attack"
+        - "market replay buffer"
+      single_terms_can_select: false
+      min_confidence: 0.5
     match:
       - "replay fidelity"
       - "backtest"
@@ -844,11 +884,13 @@ digest_profiles:
       - "scripts/topology_doctor.py"
       - "tests/test_topology_doctor.py"
     forbidden_files:
+      # NOTE: scripts/** intentionally NOT forbidden here; allowed_files already
+      # narrows kernel-script writes to scripts/topology_doctor.py only.
+      # Including scripts/** historically caused route_contract_conflict.
       - "docs/reference/*.md content rewrites"
       - "docs/archives/work_packets/**"
       - ".omx/**"
       - "state/*.db"
-      - "scripts/**"
     gates:
       - "python3 scripts/topology_doctor.py --reference-replacement"
       - "python3 scripts/topology_doctor.py --context-budget"
@@ -860,6 +902,46 @@ digest_profiles:
     stop_conditions:
       - "Do not broaden this package into stale scripts, state artifacts, DB cleanup, or active data-improvement work."
       - "Do not set delete_allowed=true for a reference doc while unique_remaining is nonempty."
+  - id: "modify topology kernel"
+    match:
+      - "topology kernel"
+      - "admission kernel"
+      - "topology doctor"
+      - "topology_doctor"
+      - "admission policy"
+      - "topology admission"
+      - "digest profile"
+      - "match_policy"
+    required_law:
+      - "The topology admission kernel is fail-closed; never widen forbidden patterns or allow caller-supplied paths to bypass admission."
+      - "Profile selection (intent) and admission (authority) MUST stay separate; do not collapse them."
+      - "Generic fallback NEVER admits caller files (no-echo invariant)."
+      - "Schema changes require updates to architecture/topology_schema.yaml in the same packet."
+    allowed_files:
+      - "scripts/topology_doctor.py"
+      - "scripts/topology_doctor_digest.py"
+      - "architecture/topology.yaml"
+      - "architecture/topology_schema.yaml"
+      - "architecture/test_topology.yaml"
+      - "tests/test_topology_doctor.py"
+      - "tests/test_digest_admission_policy.py"
+      - "tests/test_digest_profile_matching.py"
+      - "tests/test_digest_regression_false_positive.py"
+    forbidden_files:
+      - "state/*.db"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+      - "docs/archives/**"
+    gates:
+      - "pytest -q tests/test_digest_admission_policy.py tests/test_digest_profile_matching.py tests/test_digest_regression_false_positive.py"
+      - "pytest -q tests/test_topology_doctor.py -k 'navigation or digest or admission'"
+      - "python3 scripts/topology_doctor.py --schema"
+    downstream:
+      - "scripts/topology_doctor.py"
+      - "tests/test_topology_doctor.py"
+    stop_conditions:
+      - "Stop and plan if changes weaken forbidden-wins, no-echo, or ambiguity-detection invariants."
+      - "Stop and plan if profile resolver is allowed to admit files not declared in profile.allowed_files."
   - id: "modify pipeline logic"
     match:
       - "evaluator"

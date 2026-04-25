@@ -52,6 +52,7 @@ issue_json_contract:
       - extract_law_to_book
       - propose_owner_manifest
       - refresh_graph
+      - scope_expansion
       - none
     maturity:
       - stable
@@ -68,6 +69,57 @@ issue_json_contract:
       - closeout
       - strict_full_repo
       - global_health
+      - admission
+
+admission_envelope:
+  schema_version: 2
+  purpose: >
+    The admission envelope is the canonical authority for write authorization
+    in topology digest output. It separates route suggestion (profile_id and
+    profile_suggested_files) from the admission decision (admitted_files,
+    out_of_scope_files, forbidden_hits, status). Downstream consumers MUST
+    treat admission.status as the sole signal for write authority. The legacy
+    top-level `allowed_files` field is preserved for backward compatibility
+    only and is marked legacy_advisory.
+  required_fields:
+    - schema_version
+    - status
+    - admitted_files
+    - out_of_scope_files
+    - forbidden_hits
+    - profile_id
+    - profile_suggested_files
+    - decision_basis
+    - match_policy
+  status_enum:
+    - admitted              # all requested files are admitted by the resolved profile
+    - advisory_only         # generic profile resolution; nothing is admitted, caller may proceed read-only
+    - scope_expansion_required  # one or more requested files lie outside the resolved profile
+    - blocked               # one or more requested files match forbidden_files
+    - route_contract_conflict   # task evidence and file evidence resolve to incompatible profiles
+    - ambiguous             # multiple profiles match with equal confidence
+  decision_basis_enum:
+    - profile_match
+    - generic_fallback
+    - forbidden_hit
+    - out_of_scope
+    - veto
+    - conflict
+  match_policy:
+    word_boundary: true
+    negative_phrase_veto: true
+    global_denylist_tokens:
+      - source
+      - test
+      - script
+      - data
+      - signal
+      - state
+  ok_semantics:
+    description: >
+      Top-level `ok` denotes command success (no exception raised by the digest
+      tool). It MUST NOT be used as write authorization. Authorization is
+      governed by admission.status alone.
 
 ownership:
   maturity_values:
@@ -363,3 +415,8 @@ strict_issue_codes:
   - map_maintenance_missing_path_glob
   - map_maintenance_missing_companion
   - map_maintenance_companion_missing
+  - navigation_admission_blocked
+  - navigation_scope_expansion_required
+  - navigation_route_contract_conflict
+  - navigation_route_ambiguous
+  - navigation_admission_denied

@@ -111,6 +111,7 @@ ISSUE_REPAIR_KINDS = {
     "propose_owner_manifest",
     "refresh_graph",
     "none",
+    "scope_expansion",
 }
 ISSUE_MATURITY_VALUES = {"stable", "provisional", "placeholder"}
 ISSUE_AUTHORITY_STATUSES = {"authority", "derived", "evidence", "unknown"}
@@ -122,6 +123,7 @@ _NAVIGATION_MODE_POLICY = {
     "closeout": "changed_file_scoped",
     "strict_full_repo": "all_errors_block",
     "global_health": "advisory_counts",
+    "admission": "block_on_invalid",
 }
 
 ISSUE_BLOCKING_MODES = tuple(_NAVIGATION_MODE_POLICY)
@@ -1422,6 +1424,8 @@ def run_navigation(
     }
     requested_paths = files or []
     digest = build_digest(task, requested_paths)
+    admission = digest.get("admission") or {}
+    admission_status = admission.get("status", "advisory_only")
     route_issues = _navigation_requested_file_issues(requested_paths)
     health_issues = [
         _issue_with_lane(lane, issue, issue_schema_version)
@@ -1434,6 +1438,9 @@ def run_navigation(
         for issue in result.issues
     ]
     issues = health_issues + route_issues
+    admission_issue = _admission_typed_issue(admission, issue_schema_version)
+    if admission_issue is not None:
+        issues = issues + [admission_issue]
     direct_health_blocker_indexes = {
         index
         for index, issue in enumerate(health_policy_issues)
@@ -1442,21 +1449,36 @@ def run_navigation(
     direct_blockers = route_issues + [
         issue for index, issue in enumerate(health_issues) if index in direct_health_blocker_indexes
     ]
+    if admission_issue is not None:
+        direct_blockers = direct_blockers + [admission_issue]
     repo_health_warnings = [issue for issue in issues if issue not in direct_blockers]
     legacy_blocking = [issue for issue in issues if issue.get("severity") == "error"]
     route_context = {
         "mode": "navigation_strict_health" if strict_health else "navigation",
         "policy": _NAVIGATION_MODE_POLICY["navigation_strict_health" if strict_health else "navigation"],
         "requested_files": requested_paths,
+        "admitted_files": admission.get("admitted_files", []),
+        "profile_suggested_files": admission.get("profile_suggested_files", []),
+        "out_of_scope_files": admission.get("out_of_scope_files", []),
+        "forbidden_hits": admission.get("forbidden_hits", []),
         "allowed_files": digest.get("allowed_files", []),
+        "legacy_advisory": True,
         "forbidden_files": digest.get("forbidden_files", []),
         "gates": digest.get("gates", []),
         "stop_conditions": digest.get("stop_conditions", []),
     }
+    admission_ok = admission_status in {"admitted", "advisory_only"}
+    if strict_health:
+        nav_ok = (not legacy_blocking) and admission_ok
+    else:
+        nav_ok = (not direct_blockers) and admission_ok
     return {
-        "ok": not legacy_blocking if strict_health else not direct_blockers,
+        "ok": nav_ok,
+        "command_ok": True,
+        "ok_semantics": "command_success_only_not_write_authorization",
         "task": task,
         "digest": digest,
+        "admission": admission,
         "context_assumption": digest.get("context_assumption", {}),
         "checks": {
             lane: {
@@ -1478,6 +1500,51 @@ def run_navigation(
             "planning_lock": "requires caller-supplied --changed-files and optional --plan-evidence",
         },
     }
+
+
+def _admission_typed_issue(
+    admission: dict[str, Any], schema_version: str
+) -> dict[str, Any] | None:
+    """Translate an admission denial into a navigation typed issue.
+
+    Returns None when admission is admitted/advisory_only; otherwise emits
+    a typed issue (severity=error) so closeout / CI consumers see the
+    route-admission denial alongside repo-health issues.
+    """
+    status = admission.get("status", "advisory_only")
+    if status in {"admitted", "advisory_only"}:
+        return None
+    code_map = {
+        "blocked": "navigation_admission_blocked",
+        "scope_expansion_required": "navigation_scope_expansion_required",
+        "route_contract_conflict": "navigation_route_contract_conflict",
+        "ambiguous": "navigation_route_ambiguous",
+    }
+    code = code_map.get(status, "navigation_admission_denied")
+    out_of_scope = list(admission.get("out_of_scope_files") or [])
+    forbidden_hits = list(admission.get("forbidden_hits") or [])
+    primary_path = (
+        forbidden_hits[0]
+        if forbidden_hits
+        else (out_of_scope[0] if out_of_scope else "<no path>")
+    )
+    profile_id = admission.get("profile_id") or "generic"
+    message_parts = [f"admission status={status}", f"profile={profile_id}"]
+    if forbidden_hits:
+        message_parts.append(f"forbidden_hits={forbidden_hits}")
+    if out_of_scope:
+        message_parts.append(f"out_of_scope={out_of_scope}")
+    issue: dict[str, Any] = {
+        "severity": "error",
+        "lane": "navigation",
+        "code": code,
+        "path": primary_path,
+        "message": "; ".join(message_parts),
+    }
+    if schema_version != "1":
+        issue["owner_manifest"] = "architecture/topology.yaml"
+        issue["repair_kind"] = "scope_expansion"
+    return issue
 
 
 
