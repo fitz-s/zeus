@@ -1,0 +1,43 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-25_post_p3_p4_preflight
+status: closed
+branch: midstream_remediation
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+in_scope:
+- docs/operations/task_2026-04-25_post_p3_p4_preflight/**
+- docs/operations/current_state.md
+- docs/operations/AGENTS.md
+- docs/AGENTS.md
+- docs/README.md
+- architecture/docs_registry.yaml
+- architecture/topology.yaml
+allow_companions:
+- AGENTS.md
+- workspace_map.md
+- docs/operations/current_data_state.md
+- docs/operations/current_source_validity.md
+- docs/operations/known_gaps.md
+- docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md
+- docs/authority/zeus_current_architecture.md
+- docs/authority/zeus_current_delivery.md
+- docs/reference/zeus_domain_model.md
+- docs/reference/zeus_market_settlement_reference.md
+- docs/reference/zeus_data_and_replay_reference.md
+- architecture/task_boot_profiles.yaml
+- architecture/fatal_misreads.yaml
+- architecture/docs_registry.yaml
+- architecture/topology.yaml
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- state/*.db
+- production DB mutation
+- settlements_v2 population
+- market_events_v2 population
+- ensemble_snapshots_v2 population
+- calibration_pairs_v2 rebuild
+- hourly metric-layer decision
+- source routing changes
+- launch environment changes
+- auto_pause tombstone changes

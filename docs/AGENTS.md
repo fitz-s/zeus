@@ -49,6 +49,7 @@ body or bundle.
 | `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` | Closed POST_AUDIT 4.4.B-lite backfill completeness guardrail packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p2_obs_v2_revision_history/` | Closed POST_AUDIT 4.4.A1 obs_v2 revision-history packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p2_daily_observation_revision_history/` | Closed POST_AUDIT 4.4.A2 daily observation backfill revision-history packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_post_p3_p4_preflight/` | Closed post-P3/P4 preflight evidence packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p3_obs_v2_reader_gate/` | Closed POST_AUDIT 4.5.B-lite obs_v2 reader-gate consumer-hardening packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` | Closed POST_AUDIT 4.5.A settlement metric-read linter closeout packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p3_usage_path_residual_guards/` | Closed P3 residual usage-path guard packet; route through `operations/current_state.md` |
