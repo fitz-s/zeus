@@ -4,28 +4,32 @@ Role: single live control pointer for the repo.
 
 ## Active program
 
-- Branch: `data-improve`
-- Mainline task: **Post-audit P1.3 unsafe observation quarantine planning — active 2026-04-24**
-- Active package source: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- Active execution packet: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- Branch: `post-audit-remediation-mainline`
+- Mainline task: **Post-audit remediation mainline — P1.5 planning active**
+- Active package source: `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
-  `16292e2`. P1.3 is a planning-only packet; implementation must not start
-  until this plan is reviewed, pushed, and post-close critic/verifier pass.
+  `16292e2`. P1.3 implemented read-only training-readiness quarantine
+  diagnostics and tests for unsafe observation role/provenance/causality
+  blockers at `7a3524e`. P1.4 planning was pushed at `da1662f`; P1.4
+  implementation was pushed at `df9ece5`, adding read-only legacy
+  `settlements` evidence-only readiness blockers and focused regression tests;
+  P1.4 control surfaces were closed at `50cd713`. P1.5 planning is now active
+  as a planning-only packet for script-side eligibility/preflight adapters.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
 ## Freeze point
 
-- Current freeze: P1.3 planning may change only the active packet files,
-  operations routing, required docs/topology registry companions, and P1.2
-  closeout bookkeeping listed in the P1.3 receipt. No source, schema, DB,
-  current-fact, calibration, replay, or live consumer changes are authorized by
-  this planning packet.
+- Current freeze: this P1.5 packet may change only planning/control-surface
+  docs. No implementation, production DB mutation, `src/state/**` schema/view
+  DDL, replay/live/runtime consumer rewiring, `settlements_v2` population,
+  market-identity backfill, or legacy-settlement promotion is authorized.
 
 ## Current fact companions
 
@@ -40,7 +44,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Architect, critic, and verifier reviews completed with required fixes
-  applied. Commit and push the planning packet only. Future P1.3
-  implementation starts only after post-close review.
+- Complete P1.5 planning closeout for script-side eligibility/preflight
+  adapters. Before any implementation, reread `AGENTS.md`, run topology,
+  lock the exact preflight mode contracts, and obtain critic/verifier PASS.
 - Preserve unrelated dirty work and concurrent in-flight edits.

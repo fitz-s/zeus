@@ -43,7 +43,7 @@ body or bundle.
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
-| `operations/task_2026-04-24_p1_unsafe_observation_quarantine/` | Active P1.3 planning packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-24_p1_eligibility_views_training_preflight/` | Active P1.5 planning packet; route through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |

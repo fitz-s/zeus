@@ -1,0 +1,115 @@
+{
+  "task": "P1.5 eligibility views/adapters and training preflight planning",
+  "packet": "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md"
+  ],
+  "packet_status": "planning_only_active",
+  "prior_commits": {
+    "p1_4_planning": "da1662f",
+    "p1_4_implementation": "df9ece5",
+    "p1_4_control_surface_closeout": "50cd713"
+  },
+  "required_law": [
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+    "docs/operations/known_gaps.md",
+    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/11_data_readiness_ruling.md",
+    "docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/17_apply_order.md",
+    "architecture/AGENTS.md",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md",
+    "src/state/AGENTS.md",
+    "src/calibration/AGENTS.md"
+  ],
+  "allowed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".code-review-graph/graph.db",
+    "src/**",
+    "src/state/**",
+    "src/calibration/**",
+    "src/engine/**",
+    "src/execution/**",
+    "docs/authority/**",
+    "architecture/** except architecture/topology.yaml and architecture/docs_registry.yaml companion registry updates",
+    "production DBs",
+    "generated runtime JSON",
+    "graph artifacts"
+  ],
+  "changed_files": [
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+  ],
+  "future_implementation_candidates": [
+    "scripts/verify_truth_surfaces.py",
+    "scripts/rebuild_calibration_pairs_v2.py",
+    "scripts/refit_platt_v2.py",
+    "tests/test_truth_surface_health.py",
+    "tests/test_phase7a_metric_cutover.py",
+    "tests/test_calibration_bins_canonical.py"
+  ],
+  "planning_decisions": [
+    "P1.5 planning commit is docs/control-surface only",
+    "future implementation starts with script-side preflight/adapters, not K0 state-schema views",
+    "preflight modes must separate full training readiness from calibration-pair rebuild preflight and Platt-refit preflight",
+    "src/state schema/view DDL, including observation_instants_current semantics, requires a separate state-schema packet",
+    "broad replay/live/runtime consumer rewiring remains P3",
+    "settlements_v2 and market_events_v2 population or legacy settlement promotion remains P4"
+  ],
+  "subagent_reviews": [
+    {
+      "role": "scout",
+      "verdict": "mapped implementation seams and contract risks"
+    },
+    {
+      "role": "architect",
+      "verdict": "PASS planning-only; BLOCK implementation-first, K0 schema-first, P3-widened, or P4-widened variants"
+    }
+  ],
+  "tests_evidence": [
+    "python3 scripts/topology_doctor.py --task-boot-profiles --json -> ok",
+    "python3 scripts/topology_doctor.py --fatal-misreads --json -> ok",
+    "python3 scripts/topology_doctor.py --navigation --task \"P1.5 eligibility views adapters training preflight planning\" --files <planning files> --json -> scoped allowed files plus known global docs/source/history-lore red context",
+    "python3 scripts/topology_doctor.py --navigation --task \"P1.5 planning packet map maintenance companions\" --files <expanded planning files> --json -> companion registry files allowed plus known global red context",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <expanded planning files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <expanded planning files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <expanded planning files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+    "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <expanded planning files> --json -> ok",
+    "python3 -m json.tool docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json -> ok",
+    "git diff --check -> ok",
+    "architect review -> PASS planning-only",
+    "critic review -> PASS",
+    "verifier review -> PASS"
+  ],
+  "known_red_context": [
+    "topology navigation reports pre-existing global docs/source/history-lore issues",
+    "Code Review Graph is stale/branch-mismatched derived context and not authority",
+    "state/daemon-heartbeat.json and state/status_summary.json are dirty runtime artifacts and forbidden for this packet",
+    "current production world DB is expected to remain NOT_READY until later P/P4 work clears blockers"
+  ]
+}
