@@ -78,6 +78,48 @@ SETTLEMENTS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     "src/state/db.py",                     # schema migration queries are metric-agnostic by design
 })
 
+# Scripts are not globally under H3 yet because the directory contains many
+# diagnostic and repair tools that intentionally inspect settlements across
+# metrics. These scripts are replay/training/live consumers where city/date
+# settlement reads must be metric-pinned.
+SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED: frozenset[str] = frozenset({
+    "scripts/backfill_ens.py",
+    "scripts/backfill_observations_from_settlements.py",
+    "scripts/bridge_oracle_to_calibration.py",
+    "scripts/etl_forecast_skill_from_forecasts.py",
+    "scripts/etl_historical_forecasts.py",
+    "scripts/investigate_ecmwf_bias.py",
+    "scripts/validate_dynamic_alpha.py",
+})
+
+_SQL_IDENTIFIER_RE = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]+"|`[^`]+`|\[[^\]]+\])'
+_SETTLEMENTS_TABLE_REF_RE = re.compile(
+    rf"""
+    \b(?P<op>FROM|JOIN)\s+
+    (?:(?P<schema>{_SQL_IDENTIFIER_RE})\s*\.\s*)?
+    (?P<table>"settlements"|`settlements`|\[settlements\]|settlements(?![A-Za-z0-9_$]))
+    (?P<tail>\s+(?:AS\s+)?(?P<alias>[A-Za-z_][A-Za-z0-9_$]*))?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_SQL_ALIAS_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "CROSS",
+        "FULL",
+        "GROUP",
+        "INNER",
+        "JOIN",
+        "LEFT",
+        "LIMIT",
+        "ON",
+        "ORDER",
+        "RIGHT",
+        "UNION",
+        "WHERE",
+    }
+)
+_METRIC_COMPARISON_OP_RE = r"(?:=|IN\s*\()"
+
 
 class SemanticAnalyzer(ast.NodeVisitor):
     def __init__(self, filepath: Path):
@@ -550,13 +592,11 @@ def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
     are exempt. The allowlist covers writer modules and intentional cross-
     metric audit tooling.
 
-    Detection approach: scan stripped SQL regions for `\bFROM settlements\b`
-    or `\bJOIN settlements\b` (excluding partial matches like
-    `settlements_authority_monotonic`), and within the same SQL literal /
-    near vicinity require a `temperature_metric` token. The heuristic is
-    conservative — it matches on the SQL literal text, not on the full
-    query AST — but it catches the four pre-H3 bare-JOIN sites and does
-    not fire false positives on writer INSERT paths.
+    Detection approach: scan SQL literal arguments for settlements table
+    references, including quoted or schema-qualified shapes, then require an
+    actual `temperature_metric = ...` or `temperature_metric IN (...)`
+    predicate in the same SQL literal. A projected `temperature_metric` column
+    is not enough; the query must constrain the metric axis.
     """
     try:
         repo_relative = py_file.resolve().relative_to(Path(__file__).resolve().parents[1]).as_posix()
@@ -566,26 +606,13 @@ def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
         return []
     if "migrations" in py_file.parts or "tests" in py_file.parts:
         return []
-    # H3 is a canonical-path rule. scripts/ contains operator-run audit,
-    # backfill, and migration tools that legitimately inspect settlements
-    # rows cross-metric. scripts/ is carved out (same pattern as K2_struct
-    # at `_check_calibration_pairs_select`); the 4 training-path scripts
-    # pre-hardened by the S3 slice (etl_historical_forecasts,
-    # etl_forecast_skill_from_forecasts, validate_dynamic_alpha, and
-    # monitor_refresh's FROM settlements in src/engine/) carry the metric
-    # filter inline. Future training-path scripts/rebuild_*.py /
-    # scripts/refit_*.py should be promoted into the rule via an
-    # explicit training-path allowlist extension.
-    if "scripts" in py_file.parts:
+    # H3 is a canonical-path rule. Most scripts are operator-run audit,
+    # backfill, or migration tools that may intentionally inspect settlements
+    # rows cross-metric. Only scripts promoted into
+    # SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED are checked here.
+    if "scripts" in py_file.parts and repo_relative not in SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED:
         return []
 
-    # Match bare `FROM settlements` / `JOIN settlements` but not
-    # `settlements_xxx` composites. The word-boundary (?!\w) ensures a
-    # non-word character follows.
-    pattern = re.compile(
-        r"\b(FROM|JOIN)\s+settlements(?!\w)",
-        re.IGNORECASE,
-    )
     violations: list[str] = []
     source_lines = content.splitlines()
 
@@ -593,11 +620,15 @@ def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
     # actual `.execute(...)` / `.executemany(...)` / `executescript(...)`
     # literal argument. Docstrings, module prose, and comments cannot
     # hit a DB, so they're excluded. Same-literal `temperature_metric`
-    # token satisfies the predicate requirement; cross-literal reference
-    # does not (each query must defend itself).
+    # comparison satisfies the predicate requirement; cross-literal reference
+    # does not, and selecting/projecting the metric column does not.
     for start_lineno, end_lineno, sql in _sql_call_literal_args(content):
         normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-        if pattern.search(normalized_sql) and "temperature_metric" not in normalized_sql:
+        aliases = _settlements_table_aliases(normalized_sql)
+        if aliases and not _has_settlements_metric_predicate(
+            normalized_sql,
+            aliases,
+        ):
             line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
             violations.append(
                 f"{py_file}:{start_lineno}:\n"
@@ -609,6 +640,36 @@ def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
             )
 
     return violations
+
+
+def _settlements_table_aliases(sql: str) -> list[str | None]:
+    aliases: list[str | None] = []
+    for match in _SETTLEMENTS_TABLE_REF_RE.finditer(sql):
+        alias = match.group("alias")
+        if alias and alias.upper() in _SQL_ALIAS_STOPWORDS:
+            alias = None
+        aliases.append(alias)
+    return aliases
+
+
+def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bool:
+    unqualified = re.compile(
+        rf"(?<![A-Za-z0-9_$.])temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
+        re.IGNORECASE,
+    )
+    if unqualified.search(sql):
+        return True
+
+    candidate_aliases = {"settlements"}
+    candidate_aliases.update(alias for alias in aliases if alias)
+    for alias in candidate_aliases:
+        alias_pattern = re.compile(
+            rf"\b{re.escape(alias)}\s*\.\s*temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
+            re.IGNORECASE,
+        )
+        if alias_pattern.search(sql):
+            return True
+    return False
 
 
 def _python_files_for_target(target: Path) -> list[Path]:

@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.semantic_linter import (
+    SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED,
     _check_calibration_pairs_select,
     _check_legacy_hourly_observations_select,
     _check_settlements_metric_filter,
@@ -603,8 +604,8 @@ def test_h3_skips_migrations_directory(tmp_path):
     assert violations == [], "migrations/ is dir-level exempt from H3"
 
 
-def test_h3_skips_scripts_directory(tmp_path):
-    """scripts/ is dir-level carve-out per T2-S3 scope decision."""
+def test_h3_skips_non_enforced_scripts_directory(tmp_path):
+    """Diagnostic scripts outside the enforced H3 set remain exempt."""
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     audit_file = scripts_dir / "investigate_settlements.py"
@@ -618,6 +619,105 @@ def test_h3_skips_scripts_directory(tmp_path):
         audit_file, audit_file.read_text()
     )
     assert violations == [], (
-        "scripts/ is carved out at directory level; canonical-path "
-        "training scripts will be promoted via T2-S3-followup-SCRIPTS"
+        "non-enforced scripts may intentionally inspect settlements "
+        "cross-metric"
     )
+
+
+def test_h3_flags_enforced_script_without_metric_filter():
+    """Replay/training/live scripts promoted into H3 cannot read bare settlements."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    bad_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT s.city, s.target_date\n'
+        '    FROM settlements s\n'
+        '    WHERE s.target_date >= ?\n'
+        '""", (cutoff,)).fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, bad_content)
+    assert len(violations) == 1, violations
+    assert "temperature_metric" in violations[0]
+
+
+def test_h3_flags_projected_metric_without_filter():
+    """Selecting temperature_metric is not the same as constraining it."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    bad_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT temperature_metric, city\n'
+        '    FROM settlements\n'
+        '    WHERE city = ?\n'
+        '""", ("NYC",)).fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, bad_content)
+    assert len(violations) == 1, violations
+
+
+def test_h3_flags_schema_qualified_settlements_without_metric_filter():
+    """Schema-qualified settlements reads still need a metric predicate."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    bad_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT city\n'
+        '    FROM main.settlements\n'
+        '    WHERE target_date = ?\n'
+        '""", ("2026-04-24",)).fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, bad_content)
+    assert len(violations) == 1, violations
+
+
+def test_h3_flags_quoted_settlements_without_metric_filter():
+    """Quoted settlements table names are not a linter escape hatch."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    bad_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT city\n'
+        '    FROM "settlements"\n'
+        '    WHERE target_date = ?\n'
+        '""", ("2026-04-24",)).fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, bad_content)
+    assert len(violations) == 1, violations
+
+
+def test_h3_rejects_other_table_metric_as_filter():
+    """Filtering only an ensemble metric does not constrain settlements."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    bad_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT s.city\n'
+        '    FROM settlements s\n'
+        '    JOIN ensemble_snapshots e ON s.city = e.city\n'
+        '     AND e.temperature_metric = \'high\'\n'
+        '""").fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, bad_content)
+    assert len(violations) == 1, violations
+
+
+def test_h3_accepts_schema_qualified_settlements_with_alias_metric_filter():
+    """Alias-qualified metric predicates satisfy H3."""
+    enforced_file = PROJECT_ROOT / "scripts/backfill_ens.py"
+    good_content = (
+        'rows = conn.execute("""\n'
+        '    SELECT s.city\n'
+        '    FROM main.settlements s\n'
+        '    WHERE s.temperature_metric = \'high\'\n'
+        '""").fetchall()\n'
+    )
+    violations = _check_settlements_metric_filter(enforced_file, good_content)
+    assert violations == []
+
+
+def test_h3_enforced_script_set_is_clean():
+    """Every script in the enforced H3 set carries its own metric predicate."""
+    violations = []
+    for repo_path in sorted(SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED):
+        py_file = PROJECT_ROOT / repo_path
+        assert py_file.exists(), repo_path
+        violations.extend(
+            _check_settlements_metric_filter(py_file, py_file.read_text())
+        )
+
+    assert violations == []
