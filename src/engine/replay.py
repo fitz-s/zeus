@@ -15,6 +15,7 @@ derived lanes write to zeus_backtest.db with diagnostic_non_promotion authority.
 import json
 import logging
 import math
+import sqlite3
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -43,6 +44,10 @@ DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
+
+
+class ReplayPreflightError(RuntimeError):
+    """Raised when replay cannot safely produce diagnostic output."""
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +233,6 @@ class ReplayContext:
         self.allow_snapshot_only_reference = allow_snapshot_only_reference
         self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
-        import sqlite3
         try:
             self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
             self._sp = "world."  # world DB attached
@@ -1596,6 +1600,83 @@ def _typed_bins_for_city_date(ctx: ReplayContext, city: City, target_date: str) 
     return bins
 
 
+def _assert_market_events_ready_for_replay(
+    ctx: ReplayContext,
+    settlement_rows,
+    *,
+    start_date: str,
+    end_date: str,
+    lane: str,
+) -> None:
+    """Fail closed when strict replay subjects lack market identity rows."""
+    if ctx.allow_snapshot_only_reference:
+        return
+
+    required_subjects = sorted({
+        (str(row["city"]), str(row["target_date"]), str(row["winning_bin"] or ""))
+        for row in settlement_rows
+        if row["city"]
+        and row["target_date"]
+        and str(row["city"]) in cities_by_name
+    })
+    if not required_subjects:
+        return
+
+    try:
+        market_rows = ctx.conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, range_label
+            FROM {ctx._sp}market_events
+            WHERE target_date >= ?
+              AND target_date <= ?
+              AND range_label IS NOT NULL
+              AND range_label != ''
+            """,
+            (start_date, end_date),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ReplayPreflightError(
+            "no_market_events: replay requires market_events range labels "
+            f"for {lane} subjects before diagnostic output can be trusted"
+        ) from exc
+
+    available_pairs = {
+        (str(row["city"]), str(row["target_date"]))
+        for row in market_rows
+    }
+    available_labeled_subjects = {
+        (
+            str(row["city"]),
+            str(row["target_date"]),
+            str(row["range_label"]),
+        )
+        for row in market_rows
+    }
+    missing_subjects = [
+        subject for subject in required_subjects
+        if (
+            subject not in available_labeled_subjects
+            if subject[2]
+            else (subject[0], subject[1]) not in available_pairs
+        )
+    ]
+    if not missing_subjects:
+        return
+
+    sample = ", ".join(
+        f"{city}:{target_date}:{range_label}" if range_label else f"{city}:{target_date}"
+        for city, target_date, range_label in missing_subjects[:5]
+    )
+    if len(missing_subjects) > 5:
+        sample = f"{sample}, ..."
+    raise ReplayPreflightError(
+        "no_market_events: replay requires market_events range labels "
+        f"for {len(missing_subjects)}/{len(required_subjects)} {lane} settlement subjects "
+        f"in {start_date}..{end_date}; missing={sample}; "
+        "use allow_snapshot_only_reference=True only for diagnostic fallback"
+    )
+
+
 def run_wu_settlement_sweep(
     start_date: str,
     end_date: str,
@@ -1609,9 +1690,6 @@ def run_wu_settlement_sweep(
         conn,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
-    backtest_conn = get_backtest_connection()
-    init_backtest_schema(backtest_conn)
-
     rows = conn.execute(
         f"""
         SELECT city, target_date, settlement_value, winning_bin
@@ -1622,6 +1700,21 @@ def run_wu_settlement_sweep(
         """,
         (start_date, end_date),
     ).fetchall()
+    try:
+        _assert_market_events_ready_for_replay(
+            ctx,
+            rows,
+            start_date=start_date,
+            end_date=end_date,
+            lane=WU_SWEEP_LANE,
+        )
+    except ReplayPreflightError:
+        conn.close()
+        raise
+
+    backtest_conn = get_backtest_connection()
+    init_backtest_schema(backtest_conn)
+
     summary = ReplaySummary(
         run_id=run_id,
         mode=WU_SWEEP_LANE,
@@ -2067,6 +2160,17 @@ def run_replay(
           AND settlement_value IS NOT NULL
         ORDER BY target_date, city
     """, (start_date, end_date)).fetchall()
+    try:
+        _assert_market_events_ready_for_replay(
+            ctx,
+            settlements,
+            start_date=start_date,
+            end_date=end_date,
+            lane=mode,
+        )
+    except ReplayPreflightError:
+        conn.close()
+        raise
 
     summary = ReplaySummary(
         run_id=run_id,

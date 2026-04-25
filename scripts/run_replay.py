@@ -245,7 +245,7 @@ def main():
 
     overrides = _parse_overrides(args.override) if args.override else None
 
-    from src.engine.replay import run_replay
+    from src.engine.replay import ReplayPreflightError, run_replay
 
     print(f"\n{'='*80}")
     print(f"Decision Replay Engine — {args.mode.upper()}")
@@ -254,14 +254,18 @@ def main():
         print(f"Overrides: {overrides}")
     print(f"{'='*80}\n")
 
-    summary = run_replay(
-        start_date=args.start,
-        end_date=args.end,
-        mode=args.mode,
-        overrides=overrides,
-        allow_snapshot_only_reference=args.allow_snapshot_only_reference,
-        temperature_metric=args.temperature_metric,  # Phase 9C B1
-    )
+    try:
+        summary = run_replay(
+            start_date=args.start,
+            end_date=args.end,
+            mode=args.mode,
+            overrides=overrides,
+            allow_snapshot_only_reference=args.allow_snapshot_only_reference,
+            temperature_metric=args.temperature_metric,  # Phase 9C B1
+        )
+    except ReplayPreflightError as exc:
+        print(f"Replay preflight failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
     # Report
     print(f"Run ID:       {summary.run_id}")

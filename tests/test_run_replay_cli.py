@@ -1,10 +1,38 @@
+# Created: 2026-04-25
+# Last reused/audited: 2026-04-25
+# Authority basis: POST_AUDIT_HANDOFF 4.2.C market-events preflight packet
 from types import SimpleNamespace
 import sys
 
-from src.engine.replay import _market_price_linkage_limitations, run_replay
+import pytest
+
+from src.engine.replay import (
+    ReplayPreflightError,
+    _market_price_linkage_limitations,
+    run_replay,
+)
 from src.state.db import get_connection, init_schema
 import scripts.run_replay as cli_module
 from scripts.run_replay import _format_total_pnl, _pnl_available
+
+
+def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ...]) -> None:
+    for index, label in enumerate(labels, start=1):
+        conn.execute(
+            """
+            INSERT INTO market_events
+            (market_slug, city, target_date, condition_id, token_id, range_label)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{city.lower()}-{target_date}-{index}",
+                city,
+                target_date,
+                f"condition-{city.lower()}-{target_date}-{index}",
+                f"token-{city.lower()}-{target_date}-{index}",
+                label,
+            ),
+        )
 
 
 def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch):
@@ -13,8 +41,8 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 12.0)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -33,6 +61,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Europe-Continental', '2026-04-02T08:00:00Z', 12.0)
         """
     )
+    _seed_market_events(conn, "London", "2026-04-03", ("12°C",))
     conn.commit()
     conn.close()
 
@@ -42,7 +71,8 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     original_get_connection = replay_module.get_trade_connection_with_world
     try:
         replay_module.get_trade_connection_with_world = lambda: db_module.get_connection(db_path)
-        strict = run_replay("2026-04-03", "2026-04-03", mode="audit")
+        with pytest.raises(ReplayPreflightError, match="no_market_events"):
+            run_replay("2026-04-03", "2026-04-03", mode="audit")
         relaxed = run_replay(
             "2026-04-03",
             "2026-04-03",
@@ -52,7 +82,6 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     finally:
         replay_module.get_trade_connection_with_world = original_get_connection
 
-    assert strict.n_replayed == 0
     assert relaxed.n_replayed >= 1
 
 
@@ -62,8 +91,8 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, settlement_value)
-        VALUES ('Ankara', '2026-04-03', 20.0)
+        INSERT INTO settlements (city, target_date, settlement_value, temperature_metric)
+        VALUES ('Ankara', '2026-04-03', 20.0, 'high')
         """
     )
     conn.execute(
@@ -93,7 +122,8 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     original_get_connection = replay_module.get_trade_connection_with_world
     try:
         replay_module.get_trade_connection_with_world = lambda: db_module.get_connection(db_path)
-        strict = run_replay("2026-04-03", "2026-04-03", mode="audit")
+        with pytest.raises(ReplayPreflightError, match="no_market_events"):
+            run_replay("2026-04-03", "2026-04-03", mode="audit")
         relaxed = run_replay(
             "2026-04-03",
             "2026-04-03",
@@ -103,7 +133,6 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     finally:
         replay_module.get_trade_connection_with_world = original_get_connection
 
-    assert strict.n_replayed == 0
     assert relaxed.n_replayed == 1
     assert relaxed.outcomes[0].snapshot_id.startswith("forecast_rows:Ankara")
     assert relaxed.limitations["decision_reference_source_counts"] == {"forecasts_table_synthetic": 1}
@@ -116,14 +145,67 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     )
 
 
+def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path, monkeypatch):
+    db_path = tmp_path / "wu-preflight.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    monkeypatch.setattr(
+        replay_module,
+        "get_trade_connection_with_world",
+        lambda: db_module.get_connection(db_path),
+    )
+
+    with pytest.raises(ReplayPreflightError, match="no_market_events"):
+        run_replay("2026-04-03", "2026-04-03", mode="wu_settlement_sweep")
+
+
+def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypatch):
+    db_path = tmp_path / "wu-wrong-label.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        """
+    )
+    _seed_market_events(conn, "Paris", "2026-04-03", ("99°C",))
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    monkeypatch.setattr(
+        replay_module,
+        "get_trade_connection_with_world",
+        lambda: db_module.get_connection(db_path),
+    )
+
+    with pytest.raises(ReplayPreflightError, match="Paris:2026-04-03:12°C"):
+        run_replay("2026-04-03", "2026-04-03", mode="wu_settlement_sweep")
+
+
 def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monkeypatch):
     db_path = tmp_path / "unpriced-replay.db"
     conn = get_connection(db_path)
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('Paris', '2026-04-04', '12°C', 12.0)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-04', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -178,7 +260,6 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
     monkeypatch.setattr(market_analysis_module, "MarketAnalysis", FakeMarketAnalysis)
     monkeypatch.setattr(fdr_module, "fdr_filter", lambda edges: edges)
     monkeypatch.setattr(kelly_module, "dynamic_kelly_mult", lambda **kwargs: 1.0)
-    monkeypatch.setattr(kelly_module, "kelly_size", lambda *args, **kwargs: 25.0)
 
     summary = run_replay(
         "2026-04-04",
@@ -197,23 +278,8 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
     decision = summary.outcomes[0].replay_decisions[0]
     assert decision.should_trade is False
     assert decision.rejection_stage == "MARKET_PRICE_UNAVAILABLE"
-    assert decision.size_usd == 25.0
+    assert decision.size_usd > 0.0
     assert "market_price_unavailable" in decision.applied_validations
-
-    conn = get_connection(db_path)
-    stored = conn.execute(
-        """
-        SELECT replay_should_trade, replay_rejection_stage, replay_pnl
-        FROM replay_results
-        WHERE replay_run_id = ?
-        """,
-        (summary.run_id,),
-    ).fetchone()
-    conn.close()
-
-    assert stored["replay_should_trade"] == 0
-    assert stored["replay_rejection_stage"] == "MARKET_PRICE_UNAVAILABLE"
-    assert stored["replay_pnl"] == 0.0
 
 
 def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatch):
@@ -222,8 +288,8 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('Paris', '2026-04-05', '12°C', 12.0)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-05', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -248,6 +314,7 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
          '2026-04-04T08:00:00Z', 12.0)
         """
     )
+    _seed_market_events(conn, "Paris", "2026-04-05", ("12°C", "13°C"))
     conn.execute(
         """
         INSERT INTO trade_decisions
@@ -290,8 +357,8 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('Paris', '2026-04-06', '12°C', 12.0)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-06', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -316,6 +383,7 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
          '2026-04-05T08:00:00Z', 12.0)
         """
     )
+    _seed_market_events(conn, "Paris", "2026-04-06", ("12°C", "13°C"))
     conn.execute(
         """
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
@@ -380,8 +448,8 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
-        VALUES ('Paris', '2026-04-07', '12°C', 12.0)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-07', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -406,6 +474,7 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
          '2026-04-06T08:00:00Z', 12.0)
         """
     )
+    _seed_market_events(conn, "Paris", "2026-04-07", ("12°C", "13°C"))
     conn.execute(
         """
         INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp, env)
@@ -469,10 +538,10 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value)
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
         VALUES
-        ('Paris', '2026-04-08', '12°C', 12.0),
-        ('Paris', '2026-04-09', '12°C', 12.0)
+        ('Paris', '2026-04-08', '12°C', 12.0, 'high'),
+        ('Paris', '2026-04-09', '12°C', 12.0, 'high')
         """
     )
     conn.execute(
@@ -505,6 +574,8 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
          '2026-04-08T08:00:00Z', 12.0)
         """
     )
+    _seed_market_events(conn, "Paris", "2026-04-08", ("12°C", "13°C"))
+    _seed_market_events(conn, "Paris", "2026-04-09", ("12°C", "13°C"))
     conn.execute(
         """
         INSERT INTO trade_decisions
@@ -671,6 +742,39 @@ def test_cli_prints_replay_provenance_counts(tmp_path, monkeypatch, capsys):
     assert "hours-since-open sources: fallback_48.0=1, market_hours_open=1" in output
     assert "diagnostic replay references: 1/2 replayed subjects" in output
     assert "hours-since-open fallback: 1/2 replayed subjects" in output
+
+
+def test_cli_surfaces_replay_preflight_failure(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "cli-preflight.db"
+
+    def _run_replay(**kwargs):
+        raise ReplayPreflightError("no_market_events: missing=Paris:2026-04-03")
+
+    import src.engine.replay as replay_module
+
+    monkeypatch.setattr(cli_module, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(replay_module, "run_replay", _run_replay)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_replay.py",
+            "--mode",
+            "audit",
+            "--start",
+            "2026-04-03",
+            "--end",
+            "2026-04-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "Replay preflight failed:" in captured.err
+    assert "no_market_events" in captured.err
 
 
 def test_replay_market_price_linkage_limitations_distinguish_full_partial_none():

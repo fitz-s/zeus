@@ -2,7 +2,7 @@
 
 Date: 2026-04-25
 Branch: `midstream_remediation`
-Status: docs-only planning packet verified; ready to commit.
+Status: implementation verified; ready for critic closeout and commit.
 
 Task: POST_AUDIT_HANDOFF 4.2.C market-events empty-table preflight for replay
 consumers.
@@ -16,19 +16,50 @@ Changed files:
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md`
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json`
-- `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
+- `src/engine/replay.py`
+- `scripts/run_replay.py`
+- `tests/test_run_replay_cli.py`
 
 Summary:
-- Create a docs-only 4.2.C planning packet after 4.2.B commit `3e1bda7`.
-- Correct the stale handoff replay-path wording to
+- Commit `8e94f4a` created and pushed a docs-only 4.2.C planning packet after
+  4.2.B commit `3e1bda7`.
+- Open the implementation slice at the actual replay seam:
   `src/engine/replay.py`.
-- Keep the next implementation scoped to replay-first fail-closed preflight
-  planning, without P1/P3/P4 drift or executor-local DB authority.
+- Keep implementation scoped to replay-first fail-closed preflight plus CLI
+  surfacing and focused antibodies, without P1/P3/P4 drift or executor-local
+  DB authority.
+- Implemented a strict replay/WU-sweep preflight that requires matching
+  `market_events.range_label` coverage for every replayed `(city, target_date)`
+  settlement subject unless the effective replay context is in diagnostic
+  snapshot-only fallback.
+- Added CLI surfacing for `ReplayPreflightError` with exit code 1.
+- Updated focused replay CLI antibodies for strict empty-market blocking,
+  unrelated-market false-pass protection, WU-sweep coverage, seeded strict
+  replay, explicit fallback, and current settlement fixture metric law.
 
 Verification:
-- Planning and topology gates are being run after packet registration.
-- No source-code tests are required for this docs-only planning packet.
+- Planning and topology gates are rerun after moving the packet from planning
+  to implementation-active.
+- Source-code gates are required before closeout.
+- `.venv/bin/python -m py_compile src/engine/replay.py scripts/run_replay.py`
+  -> passed.
+- `.venv/bin/python -m pytest -q tests/test_run_replay_cli.py`
+  -> `17 passed`.
+- `.venv/bin/python -m pytest -q tests/test_architecture_contracts.py tests/test_run_replay_cli.py`
+  -> `89 passed, 22 skipped`.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.C implementation files> --plan-evidence docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md --json`
+  -> `{"ok": true, "issues": []}`.
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.C implementation files> --work-record-path docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md --json`
+  -> `{"ok": true, "issues": []}`.
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.C implementation files> --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+  -> `{"ok": true, "issues": []}`.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+  -> `{"ok": true, "issues": []}`.
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.C implementation files> --json`
+  -> `{"ok": true, "issues": []}`.
+- `git diff --check -- <4.2.C implementation files>`
+  -> passed.
 - Critic review passed after confirming P0 scope, historical P1.5 anchor
   posture, replay-first boundary, and no executor-local DB authority.
 - Topology planning-lock, work-record, change-receipts, map-maintenance, and
@@ -115,7 +146,42 @@ Closeout verification:
 
 ## Next Steps
 
-- Run critic review on this docs-only 4.2.C plan.
-- Address plan findings.
-- Commit and push the planning/control packet only.
-- Begin implementation only after a fresh 4.2.C phase-entry pass.
+- Run planning-lock with this implementation packet as evidence.
+- Implement replay preflight and CLI blocker surfacing.
+- Add focused replay CLI antibodies and freshness headers.
+- Run critic/verifier review, topology closeout, commit, and push.
+
+Implementation notes:
+
+- The preflight checks the legacy `market_events` surface because replay
+  currently consumes legacy `market_events`, not `market_events_v2`.
+- The check is subject-specific, not a global row count: an unrelated
+  market-event row does not satisfy a Paris replay subject.
+- Critic found a same-city/date wrong-label false pass in the first
+  implementation. The fix now requires exact `(city, target_date,
+  winning_bin)` coverage when `winning_bin` is present, and at least
+  `(city, target_date)` market-event coverage when legacy settlement rows lack
+  `winning_bin`. A wrong-label WU sweep antibody was added.
+- Critic re-review verdict: PASS. The prior false-pass repro now fails closed
+  with `missing=Paris:2026-04-03:12°C`; no P1/P3/P4 or executor drift found.
+- The bypass uses `ReplayContext.allow_snapshot_only_reference`, preserving
+  the current non-audit/fallback behavior without redefining replay modes.
+- The test file had stale fixtures after the post-audit settlement metric law
+  made `settlements.temperature_metric` non-null; this packet updated only the
+  reused fixtures in `tests/test_run_replay_cli.py`.
+- The old unpriced-PnL test also asserted a removed `kelly_size` call and a
+  `replay_results` table absent from current schema. Those stale assertions
+  were narrowed back to the active contract: no market-price linkage means no
+  replay trade and no PnL promotion.
+
+## Implementation Reentry
+
+Fresh phase-entry after planning commit:
+
+- Reread `AGENTS.md`, `docs/operations/current_state.md`, and this packet.
+- Reread scoped `src/engine/AGENTS.md`, `scripts/AGENTS.md`, and
+  `tests/AGENTS.md`.
+- Reran implementation topology navigation, which correctly required packet
+  scope expansion before source edits because the prior receipt was docs-only.
+- Updated the receipt/control surfaces to authorize the replay-first
+  implementation file set.

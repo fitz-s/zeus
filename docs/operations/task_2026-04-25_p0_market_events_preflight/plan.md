@@ -2,12 +2,12 @@
 
 Date: 2026-04-25
 Branch: `midstream_remediation`
-Status: docs-only planning packet for POST_AUDIT_HANDOFF 4.2.C.
+Status: implementation-active packet for POST_AUDIT_HANDOFF 4.2.C.
 
 ## Task
 
-Close POST_AUDIT_HANDOFF 4.2.C by adding a market-events preflight plan before
-any replay or live consumer changes.
+Close POST_AUDIT_HANDOFF 4.2.C by adding a replay-first market-events preflight
+before replay can produce diagnostic outcomes from absent market identity.
 
 4.2.C is a P0 containment slice. It must fail closed when market-event truth
 needed for replay is absent, without drifting into P1 provenance hardening, P3
@@ -15,7 +15,7 @@ safe-view migration, or P4 data population.
 
 ## Phase Entry Context
 
-Completed before this planning packet:
+Completed before this implementation packet:
 
 - Reread root `AGENTS.md`.
 - Reread `docs/operations/current_state.md` and the POST_AUDIT handoff.
@@ -32,6 +32,10 @@ Completed before this planning packet:
 - Architect reviewed the seam and recommended a docs-only planning commit
   before implementation because 4.2.C mixes replay, market-event source
   identity, and a live-money executor seam.
+- Commit `8e94f4a` closed and pushed the docs-only planning/control packet.
+- Reread root `AGENTS.md`, `docs/operations/current_state.md`, this plan,
+  `src/engine/AGENTS.md`, `scripts/AGENTS.md`, and `tests/AGENTS.md` before
+  opening implementation.
 
 ## RALPLAN-DR Summary
 
@@ -76,7 +80,7 @@ actuation gate instead of an executor-local DB read.
 
 ## Scope
 
-Allowed planning/control files:
+Allowed implementation/control files:
 
 - `docs/AGENTS.md`
 - `docs/README.md`
@@ -85,33 +89,31 @@ Allowed planning/control files:
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md`
 - `docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json`
-- `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
+- `src/engine/replay.py`
+- `scripts/run_replay.py`
+- `tests/test_run_replay_cli.py`
 
-Likely implementation files for the next code packet:
+Deferred unless a later packet explicitly widens scope:
 
-- Definite:
-  - `src/engine/replay.py`
-  - `tests/test_run_replay_cli.py`
-- Conditional if shared blocker/report semantics are reused:
-  - `scripts/audit_city_data_readiness.py`
-  - `tests/test_audit_city_data_readiness.py`
-  - `scripts/verify_truth_surfaces.py`
-  - `tests/test_truth_surface_health.py`
-- Conditional only after explicit scope expansion:
-  - `src/execution/executor.py`
-  - `tests/test_executor.py`
+- `architecture/topology.yaml`
+- `scripts/audit_city_data_readiness.py`
+- `tests/test_audit_city_data_readiness.py`
+- `scripts/verify_truth_surfaces.py`
+- `tests/test_truth_surface_health.py`
+- `src/execution/executor.py`
+- `tests/test_executor.py`
 
-Forbidden for this planning packet:
+Forbidden for this implementation packet:
 
-- source-code implementation
 - production DB mutation or generated runtime JSON
 - market-event backfill or v2 population
 - safe-view-only consumer migration
 - provenance/source-role/eligibility hardening
 - settlement identity repair
+- live executor DB reads or actuation-boundary changes
 
-## Implementation Plan For Next Packet
+## Implementation Plan
 
 1. Add a replay-readiness preflight before replay starts producing diagnostic
    outcomes. It should detect an empty market-event surface and fail closed with
@@ -155,8 +157,8 @@ Forbidden for this planning packet:
 ## Acceptance
 
 - 4.2.B is recorded closed at commit `3e1bda7`.
-- 4.2.C is the active P0 planning packet.
+- 4.2.C is the active P0 implementation packet.
 - P1.5 remains a historical topology anchor in `current_state.md`, not active
   work.
-- The next implementation packet has a bounded replay-first plan and does not
+- The implementation packet has a bounded replay-first plan and does not
   authorize executor-local DB authority.
