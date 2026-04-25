@@ -249,7 +249,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
                 print("repo_health_warnings:")
                 for issue in payload["repo_health_warnings"]:
                     print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-            elif payload["issues"]:
+            elif not payload.get("direct_blockers") and payload["issues"]:
                 print("issues:")
                 for issue in payload["issues"]:
                     print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")

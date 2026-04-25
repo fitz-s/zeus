@@ -87,7 +87,7 @@ def normalized_issue_path(path: str) -> str:
 def issue_in_scope(issue_path: str, changed_files: list[str]) -> bool:
     normalized = normalized_issue_path(issue_path)
     if normalized.startswith("<"):
-        return True
+        return False
     for path in changed_files:
         scoped = path.rstrip("/")
         if normalized == scoped:
