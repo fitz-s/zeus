@@ -8,7 +8,7 @@ NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 Usage:
     python scripts/verify_truth_surfaces.py
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-25; last_reused=2026-04-25
 # Purpose: Diagnose truth-surface integrity and P0 training-readiness blockers.
 # Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
 
@@ -411,6 +411,34 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
     )
 
     if len(required_columns) < 2 or not source_columns or not station_columns:
+        if "provenance_json" in columns:
+            identity_missing_where = _obs_v2_provenance_identity_missing_sql()
+            count = _count(
+                cur,
+                table,
+                f"""
+                COALESCE(training_allowed, 0) = 1
+                AND ({identity_missing_where})
+                """,
+            )
+            met = count == 0
+            report["checks"][check_id] = _check_entry(
+                check_id=check_id,
+                status=PASS if met else FAIL,
+                detail=(
+                    "training-allowed observation_instants_v2 rows missing "
+                    f"provenance_json payload identity={count}"
+                ),
+                count=count,
+                threshold=0,
+                met=met,
+            )
+            if not met:
+                report["blockers"].append(
+                    {"code": "payload_identity_missing", "table": table, "count": count}
+                )
+            return
+
         report["checks"][check_id] = _check_entry(
             check_id=check_id,
             status=PASS,
@@ -452,6 +480,41 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
         report["blockers"].append(
             {"code": "payload_identity_missing", "table": table, "count": count}
         )
+
+
+def _json_text_blank_sql(json_column: str, key: str) -> str:
+    return (
+        f"json_extract({json_column}, '$.{key}') IS NULL "
+        f"OR TRIM(CAST(json_extract({json_column}, '$.{key}') AS TEXT)) = ''"
+    )
+
+
+def _obs_v2_provenance_identity_missing_sql() -> str:
+    source_missing = " AND ".join(
+        _json_text_blank_sql("provenance_json", key)
+        for key in ("source_url", "source_file")
+    )
+    station_missing = " AND ".join(
+        _json_text_blank_sql("provenance_json", key)
+        for key in ("station_id", "station_registry_version", "station_registry_hash")
+    )
+    required_missing = " OR ".join(
+        _json_text_blank_sql("provenance_json", key)
+        for key in ("payload_hash", "parser_version")
+    )
+    return f"""
+        CASE
+          WHEN provenance_json IS NULL
+            OR TRIM(CAST(provenance_json AS TEXT)) = ''
+            OR json_valid(provenance_json) = 0
+          THEN 1
+          WHEN {required_missing}
+            OR ({source_missing})
+            OR ({station_missing})
+          THEN 1
+          ELSE 0
+        END = 1
+    """
 
 
 def _add_legacy_settlement_check_result(

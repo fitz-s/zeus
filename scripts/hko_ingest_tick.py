@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Ingest HKO accumulator readings and project them into observation_instants_v2.
+# Reuse: Keep HKO source identity separate from WU/VHHH and preserve writer provenance identity.
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-25
 # Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 1
 #                  L95 ("HK: no backfill; write accumulator-forward-only
 #                  starting now with data_version='v1.wu-native' + authority=
@@ -44,6 +47,7 @@ utc_timestamp)`` via INSERT OR REPLACE in the writer.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sqlite3
@@ -70,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "hko_ingest_log.jsonl"
+HKO_ACCUMULATOR_PARSER_VERSION = "hko_hourly_accumulator_projection_v2"
 
 HK_CITY_NAME = "Hong Kong"
 HK_TIMEZONE = "Asia/Hong_Kong"
@@ -150,6 +155,18 @@ def _build_v2_row(
             "source_table": "hko_hourly_accumulator",
             "accumulator_fetched_at": fetched_at,
             "note": "hourly_history_gap_pre_deploy",
+            "payload_hash": _sha256_json(
+                {
+                    "target_date": target_date,
+                    "hour_utc": hour_utc,
+                    "temperature_c": temperature_c,
+                    "fetched_at": fetched_at,
+                    "source_table": "hko_hourly_accumulator",
+                }
+            ),
+            "payload_scope": "hko_accumulator_row_source_identity",
+            "source_file": "hko_hourly_accumulator",
+            "parser_version": HKO_ACCUMULATOR_PARSER_VERSION,
         },
         separators=(",", ":"),
     )
@@ -237,6 +254,13 @@ def project_accumulator_to_v2(
     log_entry["written"] = written
     _append_log(log_path, log_entry)
     return {"candidates": len(candidates), "written": written, "build_errors": build_errors}
+
+
+def _sha256_json(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def tick_accumulator(

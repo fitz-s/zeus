@@ -1,7 +1,9 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
-# Authority basis: plan v3 antibody A6 (.omc/plans/observation-instants-
-#                  migration-iter3.md L124); step2 Phase 0 file #10.
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Pin the Hong Kong HKO-vs-VHHH category-error boundary for obs_v2 writes.
+# Reuse: Reconfirm current_source_validity and HKO station semantics before editing.
+# Last reused/audited: 2026-04-25
+# Authority basis: plan v3 antibody A6; P1 obs_v2 provenance identity packet.
 """Antibody A6: Hong Kong rows can NEVER be routed through a WU ICAO or
 OpenMeteo grid-snap source.
 
@@ -31,6 +33,19 @@ from src.data.observation_instants_v2_writer import (
 from src.data.tier_resolver import Tier, allowed_sources_for_tier, tier_for_city
 
 
+def _hk_provenance() -> str:
+    return json.dumps(
+        {
+            "tier": "HKO_NATIVE",
+            "station_id": "HKO",
+            "payload_hash": "sha256:" + "b" * 64,
+            "source_file": "hko_hourly_accumulator",
+            "parser_version": "test_hk_rejects_vhhh_source_v1",
+        },
+        sort_keys=True,
+    )
+
+
 def _hk_kwargs(**overrides) -> dict:
     """HK row with legal defaults; individual tests override to test failure."""
     base = dict(
@@ -46,7 +61,7 @@ def _hk_kwargs(**overrides) -> dict:
         imported_at="2026-04-21T23:30:00+00:00",
         authority="ICAO_STATION_NATIVE",
         data_version="v1.hk-accumulator.forward",
-        provenance_json=json.dumps({"tier": "HKO_NATIVE", "station": "HKO"}),
+        provenance_json=_hk_provenance(),
         temp_current=22.5,
         station_id="HKO",
     )

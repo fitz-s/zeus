@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-25
+# Authority basis: Venus sensing audit findings; P1 obs_v2 provenance identity packet.
 """Truth-surface health tests — antibodies for Venus sensing audit findings.
 
 These tests verify cross-surface invariants that Venus detected as broken.
@@ -237,12 +240,14 @@ def _seed_safe_observation_instant(conn):
         INSERT INTO observation_instants_v2 (
             city, target_date, source, timezone_name, local_timestamp,
             utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
-            imported_at, training_allowed, source_role, causality_status
+            imported_at, training_allowed, source_role, causality_status,
+            provenance_json
         ) VALUES (
             'NYC', '2026-04-23', 'wu_icao_history', 'America/New_York',
             '2026-04-23T10:00:00-04:00', '2026-04-23T14:00:00Z',
             -240, 'hourly', 'F', '2026-04-23T14:05:00Z',
-            1, 'historical_hourly', 'OK'
+            1, 'historical_hourly', 'OK',
+            '{"tier":"WU_ICAO","station_id":"KNYC","payload_hash":"sha256:fixture","source_url":"https://api.weather.com/v1/location/KNYC:9:US/observations/historical.json?apiKey=REDACTED","parser_version":"test_truth_surface_health_v1"}'
         )
         """
     )
@@ -1312,6 +1317,60 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "no-payload-contract-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is True
+        assert "payload_identity_missing" not in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "PASS"
+        assert check["count"] == 0
+
+    def test_training_readiness_fails_when_provenance_json_payload_identity_is_incomplete(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "incomplete-json-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET provenance_json = '{"tier":"WU_ICAO","station_id":"KORD","payload_hash":"sha256:x"}'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_training_readiness_report(db_path)
+
+        assert report["ready"] is False
+        assert "payload_identity_missing" in _blocker_codes(report)
+        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        assert check["status"] == "FAIL"
+        assert check["count"] == 1
+
+    def test_training_readiness_accepts_provenance_json_payload_identity(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "json-payload-contract-world.db"
+        conn = sqlite3.connect(db_path)
+        _seed_minimal_ready_training_tables(conn, seed_observations=True)
+        conn.execute("ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT")
+        conn.execute(
+            """
+            UPDATE observation_instants_v2
+            SET provenance_json = '{
+                "tier":"WU_ICAO",
+                "station_id":"KORD",
+                "payload_hash":"sha256:x",
+                "source_url":"https://api.weather.com/redacted",
+                "parser_version":"parser-v1"
+            }'
+            """
+        )
         conn.commit()
         conn.close()
 

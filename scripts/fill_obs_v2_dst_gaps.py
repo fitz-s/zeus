@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-22; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Fill observation_instants_v2 WU DST/pilot-boundary gaps through Ogimet fallback rows.
+# Reuse: Verify source-role fallback law and writer provenance identity before changing row construction.
 # Created: 2026-04-22
-# Last reused/audited: 2026-04-22
+# Last reused/audited: 2026-04-25
 # Authority basis: critic 2026-04-22 C1 finding; plan v3 extremum-preservation
 #                  contract.
 """Fill observation_instants_v2 gaps on WU DST-spring-forward days via Ogimet.
@@ -39,6 +42,7 @@ has a known permanent hourly-history gap per plan v3 L31.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sqlite3
@@ -70,6 +74,7 @@ DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "obs_v2_dst_fill_log.jsonl"
 
 # Per-day distinct-UTC-hour threshold: under this counts as a gap.
 _MIN_HOURS_PER_DAY = 22
+OBS_V2_DST_GAP_FILL_PARSER_VERSION = "obs_v2_dst_gap_fill_ogimet_v2"
 
 
 def _find_gaps(
@@ -230,6 +235,25 @@ def _fill_one_date(
                                 if tier_label == "WU_ICAO_OGIMET_FALLBACK"
                                 else "ogimet_pilot_boundary"
                             ),
+                            "payload_hash": _sha256_json(
+                                {
+                                    "city": obs.city,
+                                    "target_date": obs.target_date,
+                                    "source": source_tag,
+                                    "station_id": obs.station_id,
+                                    "utc_timestamp": obs.utc_timestamp,
+                                    "hour_max_raw_ts": obs.hour_max_raw_ts,
+                                    "hour_min_raw_ts": obs.hour_min_raw_ts,
+                                    "observation_count": obs.observation_count,
+                                    "fill_target_date": target_date.isoformat(),
+                                }
+                            ),
+                            "payload_scope": "obs_v2_dst_gap_hour_bucket_source_identity",
+                            "source_url": (
+                                "https://www.ogimet.com/cgi-bin/getmetar"
+                                f"?icao={obs.station_id}&targetDate={target_date.isoformat()}"
+                            ),
+                            "parser_version": OBS_V2_DST_GAP_FILL_PARSER_VERSION,
                         },
                         separators=(",", ":"),
                     ),
@@ -257,6 +281,13 @@ def _append_log(path: Path, entry: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+def _sha256_json(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:

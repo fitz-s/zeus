@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-24
+# Last reused/audited: 2026-04-25
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
 """Typed writer for observation_instants_v2 with A1/A2/A6 enforcement.
@@ -87,6 +87,13 @@ _ALLOWED_TEMP_UNITS: frozenset[str] = frozenset({"F", "C"})
 _CAUSALITY_OK = "OK"
 _CAUSALITY_RUNTIME_ONLY_FALLBACK = "RUNTIME_ONLY_FALLBACK"
 _CAUSALITY_REQUIRES_SOURCE_REAUDIT = "REQUIRES_SOURCE_REAUDIT"
+_PROVENANCE_SOURCE_KEYS: frozenset[str] = frozenset({"source_url", "source_file"})
+_PROVENANCE_STATION_KEYS: frozenset[str] = frozenset(
+    {"station_id", "station_registry_version", "station_registry_hash"}
+)
+_PROVENANCE_REQUIRED_SCALAR_KEYS: frozenset[str] = frozenset(
+    {"payload_hash", "parser_version"}
+)
 
 
 class InvalidObsV2RowError(ValueError):
@@ -184,6 +191,13 @@ class ObsV2Row:
                 "contain a 'tier' key per plan v3 P3 (row-level provenance "
                 "contract)."
             )
+        missing_identity = _missing_payload_identity_keys(parsed)
+        if missing_identity:
+            raise InvalidObsV2RowError(
+                f"A1 violation (city={self.city}): provenance_json must "
+                "carry payload identity for obs_v2 writes; missing "
+                f"{', '.join(missing_identity)}."
+            )
 
         # A2: source must be in the per-city allowed set (primary +
         # fallback). Tier 1 WU cities accept either ``wu_icao_history``
@@ -260,6 +274,24 @@ def _looks_like_iso_datetime(s: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+def _has_non_empty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _missing_payload_identity_keys(provenance: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for key in sorted(_PROVENANCE_REQUIRED_SCALAR_KEYS):
+        if not _has_non_empty_text(provenance.get(key)):
+            missing.append(key)
+    if not any(_has_non_empty_text(provenance.get(key)) for key in _PROVENANCE_SOURCE_KEYS):
+        missing.append("source_url|source_file")
+    if not any(
+        _has_non_empty_text(provenance.get(key)) for key in _PROVENANCE_STATION_KEYS
+    ):
+        missing.append("station_id|station_registry_version|station_registry_hash")
+    return missing
 
 
 # ----------------------------------------------------------------------

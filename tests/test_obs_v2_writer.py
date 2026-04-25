@@ -1,4 +1,7 @@
-# Lifecycle: created=2026-04-21; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Created: 2026-04-21
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Last reused/audited: 2026-04-25
+# Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet.
 # Purpose: Pin observation_instants_v2 writer provenance and source-role semantics.
 # Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
 # Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
@@ -30,6 +33,18 @@ from src.data.tier_resolver import (
 from src.state.schema.v2_schema import apply_v2_schema
 
 
+def _valid_provenance(**overrides) -> str:
+    data = {
+        "tier": "WU_ICAO",
+        "station_id": "KORD",
+        "payload_hash": "sha256:" + "a" * 64,
+        "source_url": "https://api.weather.com/v1/location/KORD:9:US/observations/historical.json?apiKey=REDACTED",
+        "parser_version": "test_obs_v2_writer_v1",
+    }
+    data.update(overrides)
+    return json.dumps(data, sort_keys=True)
+
+
 def _minimal_valid_kwargs(**overrides) -> dict:
     """A Chicago WU row that passes all validators; tests override one field."""
     base = dict(
@@ -45,7 +60,7 @@ def _minimal_valid_kwargs(**overrides) -> dict:
         imported_at="2026-04-21T23:30:00+00:00",
         authority="VERIFIED",
         data_version="v1.wu-native.pilot",
-        provenance_json=json.dumps({"tier": "WU_ICAO", "icao": "KORD"}),
+        provenance_json=_valid_provenance(),
         temp_current=32.0,
         running_max=34.0,
         station_id="KORD",
@@ -110,7 +125,12 @@ def test_a1_accepts_icao_station_native():
             city="Hong Kong",
             source="hko_hourly_accumulator",
             authority="ICAO_STATION_NATIVE",
-            provenance_json=json.dumps({"tier": "HKO_NATIVE", "note": "accumulator"}),
+            provenance_json=_valid_provenance(
+                tier="HKO_NATIVE",
+                station_id="HKO",
+                source_file="hko_hourly_accumulator",
+                source_url="",
+            ),
             station_id="HKO",
             timezone_name="Asia/Hong_Kong",
             local_timestamp="2024-01-15T22:00:00+08:00",
@@ -179,6 +199,20 @@ def test_a1_rejects_provenance_without_tier_key():
         _make_row(provenance_json=json.dumps({"icao": "KORD"}))
 
 
+@pytest.mark.parametrize(
+    "provenance, missing",
+    [
+        ({"tier": "WU_ICAO", "station_id": "KORD", "source_url": "url", "parser_version": "parser"}, "payload_hash"),
+        ({"tier": "WU_ICAO", "station_id": "KORD", "payload_hash": "sha256:x", "parser_version": "parser"}, "source_url\\|source_file"),
+        ({"tier": "WU_ICAO", "payload_hash": "sha256:x", "source_url": "url", "parser_version": "parser"}, "station_id\\|station_registry_version\\|station_registry_hash"),
+        ({"tier": "WU_ICAO", "station_id": "KORD", "payload_hash": "sha256:x", "source_url": "url"}, "parser_version"),
+    ],
+)
+def test_a1_rejects_provenance_missing_payload_identity(provenance, missing):
+    with pytest.raises(InvalidObsV2RowError, match=missing):
+        _make_row(provenance_json=json.dumps(provenance))
+
+
 # ----------------------------------------------------------------------
 # A2: source-tier consistency
 # ----------------------------------------------------------------------
@@ -204,7 +238,12 @@ def test_a2_ogimet_city_accepts_correct_source():
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=180,
         station_id="UUWW",
-        provenance_json=json.dumps({"tier": "OGIMET_METAR", "station": "UUWW"}),
+        provenance_json=_valid_provenance(
+            tier="OGIMET_METAR",
+            station_id="UUWW",
+            source_url="https://www.ogimet.com/cgi-bin/getmetar?icao=UUWW",
+            parser_version="test_obs_v2_writer_ogimet_v1",
+        ),
     )
     assert tier_for_city(row.city) is Tier.OGIMET_METAR
 
@@ -307,7 +346,9 @@ def test_insert_rows_round_trip_preserves_provenance(mem_db):
     assert dv == "v1.wu-native.pilot"
     parsed = json.loads(prov)
     assert parsed["tier"] == "WU_ICAO"
-    assert parsed["icao"] == "KORD"
+    assert parsed["station_id"] == "KORD"
+    assert parsed["payload_hash"].startswith("sha256:")
+    assert parsed["parser_version"] == "test_obs_v2_writer_v1"
 
 
 def test_insert_rows_round_trip_primary_wu_persists_source_role_training_ok(mem_db):
@@ -332,7 +373,12 @@ def test_insert_rows_round_trip_primary_ogimet_city_persists_source_role_trainin
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=180,
         station_id="UUWW",
-        provenance_json=json.dumps({"tier": "OGIMET_METAR", "station": "UUWW"}),
+        provenance_json=_valid_provenance(
+            tier="OGIMET_METAR",
+            station_id="UUWW",
+            source_url="https://www.ogimet.com/cgi-bin/getmetar?icao=UUWW",
+            parser_version="test_obs_v2_writer_ogimet_v1",
+        ),
     )
     insert_rows(mem_db, [row])
 
@@ -353,8 +399,9 @@ def test_insert_rows_round_trip_wu_fallback_persists_runtime_only_source_role(
 ):
     row = _make_row(
         source=fallback_source,
-        provenance_json=json.dumps(
-            {"tier": "WU_ICAO", "fallback": fallback_source, "station": "KORD"}
+        provenance_json=_valid_provenance(
+            fallback=fallback_source,
+            source_url=f"https://example.invalid/{fallback_source}",
         ),
     )
     insert_rows(mem_db, [row])
@@ -373,7 +420,13 @@ def test_insert_rows_round_trip_hko_persists_source_reaudit_status(mem_db):
             source="hko_hourly_accumulator",
             authority="ICAO_STATION_NATIVE",
             data_version="v1.hk-accumulator.forward",
-            provenance_json=json.dumps({"tier": "HKO_NATIVE", "station": "HKO"}),
+            provenance_json=_valid_provenance(
+                tier="HKO_NATIVE",
+                station_id="HKO",
+                source_file="hko_hourly_accumulator",
+                source_url="",
+                parser_version="test_obs_v2_writer_hko_v1",
+            ),
             station_id="HKO",
             timezone_name="Asia/Hong_Kong",
             local_timestamp="2024-01-15T22:00:00+08:00",

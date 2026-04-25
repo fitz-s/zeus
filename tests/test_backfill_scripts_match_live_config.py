@@ -1,7 +1,9 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
-# Authority basis: plan v3 antibody A7 (.omc/plans/observation-instants-
-#                  migration-iter3.md L125); step2 Phase 0 file #11.
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Keep backfill scripts aligned with live config and obs_v2 provenance identity contracts.
+# Reuse: Inspect config/cities.json, tier_resolver, script manifest, and current source-validity posture first.
+# Last reused/audited: 2026-04-25
+# Authority basis: plan v3 antibody A7; P1 obs_v2 provenance identity packet.
 """Antibody A7: backfill scripts must match the live config.
 
 Phase -1 (commit d9c998f) removed 4 stale entries whose tier no longer
@@ -22,17 +24,32 @@ re-opens the exact DRIFT category Phase -1 closed.
 from __future__ import annotations
 
 import importlib.util
+import json
+import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from src.config import cities_by_name
+from src.data.wu_hourly_client import HourlyObservation
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WU_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_wu_daily_all.py"
 OGIMET_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_ogimet_metar.py"
+OBS_V2_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_obs_v2.py"
+OBS_V2_DST_GAP_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_dst_gaps.py"
+OBS_V2_METEOSTAT_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_meteostat.py"
+HKO_INGEST_TICK_PATH = REPO_ROOT / "scripts" / "hko_ingest_tick.py"
+OBS_V2_PRODUCER_PATHS = [
+    OBS_V2_BACKFILL_PATH,
+    OBS_V2_DST_GAP_FILL_PATH,
+    OBS_V2_METEOSTAT_FILL_PATH,
+    HKO_INGEST_TICK_PATH,
+]
 
 
 def _load_module_by_path(path: Path, name: str):
@@ -63,6 +80,59 @@ def wu_backfill_module():
 @pytest.fixture(scope="module")
 def ogimet_backfill_module():
     return _load_module_by_path(OGIMET_BACKFILL_PATH, "zeus_backfill_ogimet_metar")
+
+
+@pytest.fixture(scope="module")
+def obs_v2_backfill_module():
+    return _load_module_by_path(OBS_V2_BACKFILL_PATH, "zeus_backfill_obs_v2_identity")
+
+
+@pytest.fixture(scope="module")
+def hko_ingest_tick_module():
+    return _load_module_by_path(HKO_INGEST_TICK_PATH, "zeus_hko_ingest_tick_identity")
+
+
+@pytest.fixture(scope="module")
+def obs_v2_dst_gap_fill_module():
+    return _load_module_by_path(
+        OBS_V2_DST_GAP_FILL_PATH,
+        "zeus_fill_obs_v2_dst_gaps_identity",
+    )
+
+
+@pytest.fixture(scope="module")
+def obs_v2_meteostat_fill_module():
+    return _load_module_by_path(
+        OBS_V2_METEOSTAT_FILL_PATH,
+        "zeus_fill_obs_v2_meteostat_identity",
+    )
+
+
+def _hourly_observation(
+    *,
+    city: str,
+    station_id: str,
+    target_date: str = "2026-04-23",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        city=city,
+        target_date=target_date,
+        local_hour=8.0,
+        local_timestamp=f"{target_date}T08:00:00-05:00",
+        utc_timestamp=f"{target_date}T13:00:00+00:00",
+        utc_offset_minutes=-300,
+        dst_active=1,
+        is_ambiguous_local_hour=0,
+        is_missing_local_hour=0,
+        time_basis="utc_hour_bucket_extremum",
+        hour_max_temp=71.0,
+        hour_min_temp=69.0,
+        hour_max_raw_ts=f"{target_date}T13:45:00+00:00",
+        hour_min_raw_ts=f"{target_date}T13:05:00+00:00",
+        temp_unit="F",
+        station_id=station_id,
+        observation_count=4,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -169,3 +239,170 @@ def test_tel_aviv_not_in_wu_backfill(wu_backfill_module):
 def test_stale_cities_not_in_ogimet_backfill(ogimet_backfill_module, stale_city):
     """Phase -1 deleted Taipei/Cape Town/Lucknow; must stay gone."""
     assert stale_city not in ogimet_backfill_module.OGIMET_TARGETS
+
+
+@pytest.mark.parametrize("path", OBS_V2_PRODUCER_PATHS, ids=lambda p: p.name)
+def test_obs_v2_producers_stamp_payload_identity_keys(path):
+    source = path.read_text(encoding="utf-8")
+    for required in (
+        '"payload_hash"',
+        '"parser_version"',
+        '"payload_scope"',
+    ):
+        assert required in source, f"{path.name} must stamp {required}"
+    assert (
+        '"source_url"' in source or '"source_file"' in source
+    ), f"{path.name} must stamp source_url or source_file"
+    assert (
+        '"station_id"' in source
+        or '"station_registry_version"' in source
+        or '"station_registry_hash"' in source
+    ), f"{path.name} must stamp station identity"
+
+
+def test_obs_v2_backfill_row_stamps_provenance_identity(obs_v2_backfill_module):
+    row = obs_v2_backfill_module._hourly_obs_to_v2_row(
+        HourlyObservation(
+            city="Chicago",
+            target_date="2026-04-23",
+            local_hour=8.0,
+            local_timestamp="2026-04-23T08:00:00-05:00",
+            utc_timestamp="2026-04-23T13:00:00+00:00",
+            utc_offset_minutes=-300,
+            dst_active=1,
+            is_ambiguous_local_hour=0,
+            is_missing_local_hour=0,
+            time_basis="utc_hour_bucket_extremum",
+            hour_max_temp=71.0,
+            hour_min_temp=69.0,
+            hour_max_raw_ts="2026-04-23T13:45:00+00:00",
+            hour_min_raw_ts="2026-04-23T13:05:00+00:00",
+            temp_unit="F",
+            station_id="KORD",
+            observation_count=4,
+        ),
+        data_version="v1.wu-native.pilot",
+        imported_at="2026-04-25T12:00:00+00:00",
+        tier_name="WU_ICAO",
+    )
+
+    provenance = json.loads(row.provenance_json)
+    assert provenance["payload_hash"].startswith("sha256:")
+    assert provenance["payload_scope"] == "obs_v2_hour_bucket_source_identity"
+    assert provenance["parser_version"] == "obs_v2_backfill_hourly_extremum_v2"
+    assert provenance["station_id"] == "KORD"
+    assert "apiKey=REDACTED" in provenance["source_url"]
+
+
+def test_hko_ingest_row_stamps_provenance_identity(hko_ingest_tick_module):
+    row = hko_ingest_tick_module._build_v2_row(
+        target_date="2026-04-23",
+        hour_utc="2026-04-23T13:00Z",
+        temperature_c=24.5,
+        fetched_at="2026-04-23T13:05:00Z",
+        data_version="v1.hk-accumulator.forward",
+        imported_at="2026-04-25T12:00:00+00:00",
+    )
+
+    provenance = json.loads(row.provenance_json)
+    assert provenance["payload_hash"].startswith("sha256:")
+    assert provenance["payload_scope"] == "hko_accumulator_row_source_identity"
+    assert provenance["parser_version"] == "hko_hourly_accumulator_projection_v2"
+    assert provenance["source_file"] == "hko_hourly_accumulator"
+    assert provenance["station_id"] == "HKO"
+
+
+def test_dst_gap_fill_row_stamps_provenance_identity(
+    obs_v2_dst_gap_fill_module,
+    tmp_path,
+    monkeypatch,
+):
+    captured_rows = []
+
+    def fake_fetch_ogimet_hourly(**_kwargs):
+        return SimpleNamespace(
+            failed=False,
+            failure_reason=None,
+            error=None,
+            raw_metar_count=1,
+            observations=[_hourly_observation(city="Chicago", station_id="KORD")],
+        )
+
+    def fake_insert_rows(_conn, rows):
+        captured_rows.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(
+        obs_v2_dst_gap_fill_module,
+        "fetch_ogimet_hourly",
+        fake_fetch_ogimet_hourly,
+    )
+    monkeypatch.setattr(obs_v2_dst_gap_fill_module, "insert_rows", fake_insert_rows)
+    conn = sqlite3.connect(":memory:")
+    try:
+        written = obs_v2_dst_gap_fill_module._fill_one_date(
+            conn,
+            "Chicago",
+            date(2026, 4, 23),
+            "v1.wu-native.pilot",
+            tmp_path / "dst-gap-log.jsonl",
+            dry_run=False,
+        )
+    finally:
+        conn.close()
+
+    assert written == 1
+    provenance = json.loads(captured_rows[0].provenance_json)
+    assert provenance["payload_hash"].startswith("sha256:")
+    assert provenance["payload_scope"] == "obs_v2_dst_gap_hour_bucket_source_identity"
+    assert provenance["parser_version"] == "obs_v2_dst_gap_fill_ogimet_v2"
+    assert provenance["station_id"] == "KORD"
+    assert provenance["source_url"].startswith("https://www.ogimet.com/")
+
+
+def test_meteostat_fill_row_stamps_provenance_identity(
+    obs_v2_meteostat_fill_module,
+    tmp_path,
+    monkeypatch,
+):
+    captured_rows = []
+
+    def fake_fetch_meteostat_bulk(**_kwargs):
+        return SimpleNamespace(
+            failed=False,
+            failure_reason=None,
+            raw_row_count=1,
+            observations=[_hourly_observation(city="Amsterdam", station_id="EHAM")],
+        )
+
+    def fake_insert_rows(_conn, rows):
+        captured_rows.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(
+        obs_v2_meteostat_fill_module,
+        "fetch_meteostat_bulk",
+        fake_fetch_meteostat_bulk,
+    )
+    monkeypatch.setattr(obs_v2_meteostat_fill_module, "insert_rows", fake_insert_rows)
+    conn = sqlite3.connect(":memory:")
+    try:
+        written, raw, failure = obs_v2_meteostat_fill_module._fill_one_city(
+            conn,
+            "Amsterdam",
+            date(2026, 4, 23),
+            date(2026, 4, 23),
+            "v1.wu-native.pilot",
+            tmp_path / "meteostat-log.jsonl",
+            dry_run=False,
+        )
+    finally:
+        conn.close()
+
+    assert (written, raw, failure) == (1, 1, None)
+    provenance = json.loads(captured_rows[0].provenance_json)
+    assert provenance["payload_hash"].startswith("sha256:")
+    assert provenance["payload_scope"] == "obs_v2_meteostat_hour_bucket_source_identity"
+    assert provenance["parser_version"] == "obs_v2_meteostat_bulk_fill_v2"
+    assert provenance["station_id"] == "EHAM"
+    assert provenance["source_url"].startswith("https://bulk.meteostat.net/")

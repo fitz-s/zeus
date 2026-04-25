@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Build and write observation_instants_v2 hourly backfill rows through the typed writer.
+# Reuse: Re-run topology and current source/data state before changing source or provenance semantics.
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-04-25
 # Authority basis: plan v3 Phase 0 file #6 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
 """Multi-tier backfill driver for observation_instants_v2.
@@ -58,6 +61,7 @@ Safety
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -110,6 +114,7 @@ WU_WINDOW_DAYS = 30
 OGIMET_WINDOW_DAYS = 60
 
 _DATA_VERSION_SAFE_RE = re.compile(r"^v1\.[a-z0-9\-\._]+$")
+OBS_V2_BACKFILL_PARSER_VERSION = "obs_v2_backfill_hourly_extremum_v2"
 
 
 @dataclass(frozen=True)
@@ -170,6 +175,11 @@ def _hourly_obs_to_v2_row(
     Phase 1 HK rows will use 'ICAO_STATION_NATIVE' via a separate code
     path (accumulator, not this driver).
     """
+    source_tag = expected_source_for_city(obs.city)
+    provenance_source = _source_locator_for_hourly_obs(
+        obs,
+        source_tag=source_tag,
+    )
     provenance = {
         "tier": tier_name,
         "station_id": obs.station_id,
@@ -177,11 +187,26 @@ def _hourly_obs_to_v2_row(
         "hour_min_raw_ts": obs.hour_min_raw_ts,
         "raw_obs_count": obs.observation_count,
         "aggregation": "utc_hour_bucket_extremum",
+        "payload_hash": _sha256_json(
+            {
+                "city": obs.city,
+                "target_date": obs.target_date,
+                "source": source_tag,
+                "station_id": obs.station_id,
+                "utc_timestamp": obs.utc_timestamp,
+                "hour_max_raw_ts": obs.hour_max_raw_ts,
+                "hour_min_raw_ts": obs.hour_min_raw_ts,
+                "observation_count": obs.observation_count,
+            }
+        ),
+        "payload_scope": "obs_v2_hour_bucket_source_identity",
+        "source_url": provenance_source,
+        "parser_version": OBS_V2_BACKFILL_PARSER_VERSION,
     }
     return ObsV2Row(
         city=obs.city,
         target_date=obs.target_date,
-        source=expected_source_for_city(obs.city),
+        source=source_tag,
         timezone_name=cities_by_name[obs.city].timezone,
         local_hour=obs.local_hour,
         local_timestamp=obs.local_timestamp,
@@ -202,6 +227,30 @@ def _hourly_obs_to_v2_row(
         data_version=data_version,
         provenance_json=json.dumps(provenance, separators=(",", ":")),
     )
+
+
+def _sha256_json(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _source_locator_for_hourly_obs(obs: HourlyObservation, *, source_tag: str) -> str:
+    city = cities_by_name[obs.city]
+    if source_tag == "wu_icao_history":
+        unit_code = "m" if city.settlement_unit == "C" else "e"
+        return (
+            "https://api.weather.com/v1/location/"
+            f"{obs.station_id}:9:{city.country_code}/observations/historical.json"
+            f"?units={unit_code}&targetDate={obs.target_date}&apiKey=REDACTED"
+        )
+    if source_tag.startswith("ogimet_metar_"):
+        return (
+            "https://www.ogimet.com/cgi-bin/getmetar"
+            f"?icao={obs.station_id}&targetDate={obs.target_date}"
+        )
+    return f"source:{source_tag}:{obs.station_id}:{obs.target_date}"
 
 
 # ----------------------------------------------------------------------
