@@ -293,6 +293,37 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_observation_instants_v2_city_ts
                 ON observation_instants_v2(city, target_date, utc_timestamp)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS observation_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL
+                    CHECK (table_name IN ('observation_instants_v2', 'observations')),
+                city TEXT NOT NULL,
+                target_date TEXT,
+                source TEXT NOT NULL,
+                utc_timestamp TEXT,
+                natural_key_json TEXT NOT NULL DEFAULT '{}',
+                existing_row_id INTEGER,
+                existing_payload_hash TEXT,
+                incoming_payload_hash TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                writer TEXT NOT NULL,
+                existing_row_json TEXT NOT NULL,
+                incoming_row_json TEXT NOT NULL,
+                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_observation_revisions_obs_v2_lookup
+                ON observation_revisions(table_name, city, source, utc_timestamp, recorded_at)
+        """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_observation_revisions_payload
+                ON observation_revisions(
+                    table_name, city, source, target_date, utc_timestamp,
+                    incoming_payload_hash, reason
+                )
+        """)
         # Gate F Step 2 / Phase 0: authority + data_version + provenance_json
         # columns for existing DBs (idempotent).
         #

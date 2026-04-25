@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -71,6 +72,13 @@ def _minimal_valid_kwargs(**overrides) -> dict:
 
 def _make_row(**overrides) -> ObsV2Row:
     return ObsV2Row(**_minimal_valid_kwargs(**overrides))
+
+
+def _make_row_with_payload_hash(payload_hash: str, **overrides) -> ObsV2Row:
+    return _make_row(
+        provenance_json=_valid_provenance(payload_hash=payload_hash),
+        **overrides,
+    )
 
 
 def _source_semantics(
@@ -320,20 +328,167 @@ def test_insert_rows_empty_batch_is_noop(mem_db):
     assert n == 0
 
 
-def test_insert_rows_upserts_on_unique_collision(mem_db):
-    """INSERT OR REPLACE: same (city, source, utc_timestamp) = update, not dupe."""
-    r1 = _make_row(temp_current=30.0)
-    r2 = _make_row(temp_current=35.0)  # same key, different value
-    insert_rows(mem_db, [r1])
-    insert_rows(mem_db, [r2])
+def test_apply_v2_schema_creates_obs_v2_revision_surfaces(mem_db):
+    tables = {
+        row[0]
+        for row in mem_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    indexes = {
+        row[0]
+        for row in mem_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+
+    assert "observation_revisions" in tables
+    assert "idx_observation_revisions_obs_v2_lookup" in indexes
+    assert "ux_observation_revisions_payload" in indexes
+
+
+def test_apply_v2_schema_is_idempotent_with_existing_obs_v2_revision_rows(mem_db):
+    mem_db.execute(
+        """
+        INSERT INTO observation_revisions (
+            table_name, city, target_date, source, utc_timestamp,
+            existing_row_id, existing_payload_hash, incoming_payload_hash,
+            reason, writer, existing_row_json, incoming_row_json
+        ) VALUES (
+            'observation_instants_v2', 'Chicago', '2024-01-15',
+            'wu_icao_history', '2024-01-15T14:00:00+00:00',
+            1, 'sha256:old', 'sha256:new',
+            'payload_hash_mismatch', 'unit-test', '{}', '{}'
+        )
+        """
+    )
+    mem_db.commit()
+
+    apply_v2_schema(mem_db)
+
+    (count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_revisions"
+    ).fetchone()
+    assert count == 1
+
+
+def test_insert_rows_duplicate_payload_hash_is_noop(mem_db):
+    """Same natural key + same payload hash is an idempotent rerun."""
+    payload_hash = "sha256:" + "a" * 64
+    r1 = _make_row_with_payload_hash(
+        payload_hash,
+        temp_current=30.0,
+        imported_at="2026-04-21T23:30:00+00:00",
+    )
+    r2 = _make_row_with_payload_hash(
+        payload_hash,
+        temp_current=30.0,
+        imported_at="2026-04-22T00:00:00+00:00",
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    (first_id,) = mem_db.execute(
+        "SELECT id FROM observation_instants_v2"
+    ).fetchone()
+    assert insert_rows(mem_db, [r2]) == 0
+
+    row = mem_db.execute(
+        "SELECT id, temp_current, imported_at FROM observation_instants_v2"
+    ).fetchone()
+    (revision_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_revisions"
+    ).fetchone()
+
+    assert row == (first_id, 30.0, "2026-04-21T23:30:00+00:00")
+    assert revision_count == 0
+
+
+def test_insert_rows_changed_payload_hash_records_revision_without_overwrite(mem_db):
+    """Different hash on the same key is history, not a silent overwrite."""
+    r1 = _make_row_with_payload_hash("sha256:" + "a" * 64, temp_current=30.0)
+    r2 = _make_row_with_payload_hash("sha256:" + "b" * 64, temp_current=35.0)
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0
+
     (count,) = mem_db.execute(
         "SELECT COUNT(*) FROM observation_instants_v2"
     ).fetchone()
     assert count == 1
+    current = mem_db.execute(
+        "SELECT temp_current, provenance_json FROM observation_instants_v2"
+    ).fetchone()
+    assert current[0] == 30.0
+    assert json.loads(current[1])["payload_hash"] == "sha256:" + "a" * 64
+
+    revision = mem_db.execute(
+        """
+        SELECT existing_payload_hash, incoming_payload_hash,
+               existing_row_json, incoming_row_json
+        FROM observation_revisions
+        WHERE table_name='observation_instants_v2'
+        """
+    ).fetchone()
+    assert revision is not None
+    assert revision[0] == "sha256:" + "a" * 64
+    assert revision[1] == "sha256:" + "b" * 64
+    assert json.loads(revision[2])["temp_current"] == 30.0
+    assert json.loads(revision[3])["temp_current"] == 35.0
+
+
+def test_insert_rows_rejects_reused_payload_hash_with_changed_material_fields(mem_db):
+    payload_hash = "sha256:" + "a" * 64
+    r1 = _make_row_with_payload_hash(payload_hash, temp_current=30.0)
+    r2 = _make_row_with_payload_hash(payload_hash, temp_current=35.0)
+
+    insert_rows(mem_db, [r1])
+    with pytest.raises(InvalidObsV2RowError, match="payload_hash.*material"):
+        insert_rows(mem_db, [r2])
+
     (temp,) = mem_db.execute(
         "SELECT temp_current FROM observation_instants_v2"
     ).fetchone()
-    assert temp == 35.0
+    (revision_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_revisions"
+    ).fetchone()
+    assert temp == 30.0
+    assert revision_count == 0
+
+
+def test_insert_rows_rolls_back_revision_history_on_failure(mem_db):
+    r1 = _make_row_with_payload_hash("sha256:" + "a" * 64, temp_current=30.0)
+    r2 = _make_row_with_payload_hash("sha256:" + "b" * 64, temp_current=35.0)
+
+    insert_rows(mem_db, [r1])
+    mem_db.execute(
+        """
+        CREATE TRIGGER fail_revision_insert
+        BEFORE INSERT ON observation_revisions
+        BEGIN
+            SELECT RAISE(FAIL, 'forced revision failure');
+        END
+        """
+    )
+
+    with pytest.raises(sqlite3.Error, match="forced revision failure"):
+        insert_rows(mem_db, [r2])
+
+    (temp,) = mem_db.execute(
+        "SELECT temp_current FROM observation_instants_v2"
+    ).fetchone()
+    (revision_count,) = mem_db.execute(
+        "SELECT COUNT(*) FROM observation_revisions"
+    ).fetchone()
+    assert temp == 30.0
+    assert revision_count == 0
+
+
+def test_obs_v2_writer_source_contains_no_insert_or_replace():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "data"
+        / "observation_instants_v2_writer.py"
+    ).read_text(encoding="utf-8")
+    assert "INSERT OR REPLACE" not in source.upper()
 
 
 def test_insert_rows_round_trip_preserves_provenance(mem_db):

@@ -600,6 +600,78 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A1 obs_v2 revision-history packet plan
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A1 obs_v2 revision-history work log
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A1 obs_v2 revision-history scope sidecar
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active P2 4.4.A1 obs_v2 revision-history receipt
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md
   doc_class: operations
   default_read: false
@@ -658,10 +730,10 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 residual usage-path guard packet plan
+  current_role: closed P3 residual usage-path guard packet plan
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -670,16 +742,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 residual usage-path guard work log
+  current_role: closed P3 residual usage-path guard work log
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -688,16 +760,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 residual usage-path guard scope sidecar
+  current_role: closed P3 residual usage-path guard scope sidecar
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -706,16 +778,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 residual usage-path guard receipt
+  current_role: closed P3 residual usage-path guard receipt
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -724,7 +796,7 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_*.md
   doc_class: operations

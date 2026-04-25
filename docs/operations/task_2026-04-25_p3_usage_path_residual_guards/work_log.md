@@ -40,8 +40,7 @@ Verification:
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
 - `git diff --check -- <packet files>`
 
-Next: critic/reviewer pass, then commit and push this residual repair before
-opening P2 4.4.A as a dedicated planning-locked writer-history packet.
+Next: closed; P2 4.4.A1 obs_v2 revision-history packet is the active follow-up.
 
 ## 2026-04-25
 
@@ -91,3 +90,7 @@ opening P2 4.4.A as a dedicated planning-locked writer-history packet.
   - `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md` -> ok
   - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>` -> ok
   - `git diff --check -- <packet files>` -> ok
+- Closeout:
+  - Implementation commit `3e8056b` pushed to `origin/midstream_remediation`.
+  - Post-packet runtime projection snapshots were committed separately.
+  - Follow-up P2 4.4.A1 packet opened after closeout.

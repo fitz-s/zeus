@@ -35,6 +35,7 @@ import pytest
 
 from src.config import cities_by_name
 from src.data.wu_hourly_client import HourlyObservation
+from src.state.schema.v2_schema import apply_v2_schema
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -326,6 +327,54 @@ def test_obs_v2_backfill_row_stamps_provenance_identity(obs_v2_backfill_module):
     assert provenance["parser_version"] == "obs_v2_backfill_hourly_extremum_v2"
     assert provenance["station_id"] == "KORD"
     assert "apiKey=REDACTED" in provenance["source_url"]
+
+
+def test_obs_v2_backfill_rerun_reports_zero_rows_written(
+    obs_v2_backfill_module,
+    tmp_path,
+    monkeypatch,
+):
+    """Writer no-op reruns must not inflate backfill rows_written counters."""
+    fetch_result = SimpleNamespace(
+        failed=False,
+        retryable=False,
+        failure_reason=None,
+        raw_observation_count=1,
+        observations=[_hourly_observation(city="Chicago", station_id="KORD")],
+    )
+    monkeypatch.setattr(
+        obs_v2_backfill_module,
+        "fetch_wu_hourly",
+        lambda **_kwargs: fetch_result,
+    )
+    monkeypatch.setattr(obs_v2_backfill_module.time, "sleep", lambda _seconds: None)
+    conn = sqlite3.connect(":memory:")
+    try:
+        apply_v2_schema(conn)
+        first = obs_v2_backfill_module._backfill_wu_city(
+            conn,
+            "Chicago",
+            date(2026, 4, 23),
+            date(2026, 4, 23),
+            "v1.wu-native.pilot",
+            tmp_path / "obs-v2-log.jsonl",
+            dry_run=False,
+        )
+        second = obs_v2_backfill_module._backfill_wu_city(
+            conn,
+            "Chicago",
+            date(2026, 4, 23),
+            date(2026, 4, 23),
+            "v1.wu-native.pilot",
+            tmp_path / "obs-v2-log.jsonl",
+            dry_run=False,
+        )
+    finally:
+        conn.close()
+
+    assert first.rows_written == 1
+    assert second.rows_written == 0
+    assert second.rows_ready == 1
 
 
 def test_hko_ingest_row_stamps_provenance_identity(hko_ingest_tick_module):

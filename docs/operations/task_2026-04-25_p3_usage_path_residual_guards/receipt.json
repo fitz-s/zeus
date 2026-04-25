@@ -59,7 +59,7 @@
     "P3 4.5.B observation_instants_v2 reader gate design",
     "P4 data population"
   ],
-  "status": "implementation_verified_pending_commit",
+  "status": "closed_committed_pushed",
   "changed_files": [
     "src/engine/replay.py",
     "tests/test_semantic_linter.py",
@@ -99,8 +99,14 @@
     "git diff --check -- <packet files> -> ok"
   ],
   "known_gaps": [
-    "P2 4.4.A hash-checked upsert/revision-history remains the next high-value mainline packet.",
+    "P2 4.4.A hash-checked upsert/revision-history opened next as the dedicated obs_v2 A1 packet.",
     "P3 4.5.B observation_instants_v2 reader-gate design remains blocked by the unresolved metric-layer decision.",
     "audit_replay_fidelity still reports low historical replay coverage because source data/population gaps remain outside this packet."
-  ]
+  ],
+  "closeout": {
+    "implementation_commit": "3e8056b",
+    "pushed_to": "origin/midstream_remediation",
+    "closed_at": "2026-04-25",
+    "follow_up_packet": "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md"
+  }
 }

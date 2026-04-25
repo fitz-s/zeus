@@ -3,7 +3,7 @@
 Date: 2026-04-25
 Branch: `midstream_remediation`
 Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus`
-Status: in progress
+Status: closed
 
 ## Background
 
@@ -94,3 +94,9 @@ The machine-readable list lives in `scope.yaml`.
 - Stop if the replay fix requires a source-routing decision.
 - Stop if the change expands into observation_instants_v2 metric-layer design.
 - Stop if a DB migration or production data mutation becomes necessary.
+
+## Closeout
+
+Closed on branch `midstream_remediation` in implementation commit `3e8056b`.
+Runtime projection snapshots after verification were committed separately so the
+packet diff stayed scoped to replay/linter/control surfaces.

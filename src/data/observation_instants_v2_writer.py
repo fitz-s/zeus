@@ -32,7 +32,7 @@ Construction-time validation: every ``ObsV2Row`` is validated in its
 the failure at *row construction time*, not deep inside a batch insert
 — a failing row never enters the insert path.
 
-The INSERT is all-or-nothing per batch: one bad row inside a batch
+The write is all-or-nothing per batch: one bad row inside a batch
 raises ``InvalidObsV2RowError`` before any row is written. This keeps
 partial-batch states out of the database.
 
@@ -298,22 +298,65 @@ def _missing_payload_identity_keys(provenance: dict[str, Any]) -> list[str]:
 # Batch insert
 # ----------------------------------------------------------------------
 
-# Column order for the INSERT must match the tuple order below. Cached
-# at module load to avoid recomputation per batch.
-_INSERT_SQL = """
-    INSERT OR REPLACE INTO observation_instants_v2 (
-        city, target_date, source, timezone_name, local_hour,
-        local_timestamp, utc_timestamp, utc_offset_minutes, dst_active,
-        is_ambiguous_local_hour, is_missing_local_hour, time_basis,
-        temp_current, running_max, running_min, delta_rate_per_h,
-        temp_unit, station_id, observation_count, raw_response,
-        source_file, imported_at, authority, data_version,
-        provenance_json, training_allowed, causality_status, source_role
+# Column order for the write path must match the tuple order below. Cached at
+# module load to avoid recomputation per batch.
+_INSERT_COLUMNS: tuple[str, ...] = (
+    "city",
+    "target_date",
+    "source",
+    "timezone_name",
+    "local_hour",
+    "local_timestamp",
+    "utc_timestamp",
+    "utc_offset_minutes",
+    "dst_active",
+    "is_ambiguous_local_hour",
+    "is_missing_local_hour",
+    "time_basis",
+    "temp_current",
+    "running_max",
+    "running_min",
+    "delta_rate_per_h",
+    "temp_unit",
+    "station_id",
+    "observation_count",
+    "raw_response",
+    "source_file",
+    "imported_at",
+    "authority",
+    "data_version",
+    "provenance_json",
+    "training_allowed",
+    "causality_status",
+    "source_role",
+)
+_INSERT_SQL = f"""
+    INSERT INTO observation_instants_v2 (
+        {", ".join(_INSERT_COLUMNS)}
     ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?
+        {", ".join("?" for _ in _INSERT_COLUMNS)}
     )
 """
+_SELECT_EXISTING_SQL = f"""
+    SELECT id, {", ".join(_INSERT_COLUMNS)}
+    FROM observation_instants_v2
+    WHERE city = ? AND source = ? AND utc_timestamp = ?
+"""
+_REVISION_INSERT_SQL = """
+    INSERT OR IGNORE INTO observation_revisions (
+        table_name, city, target_date, source, utc_timestamp,
+        natural_key_json, existing_row_id, existing_payload_hash,
+        incoming_payload_hash, reason, writer, existing_row_json,
+        incoming_row_json
+    ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?,
+        ?
+    )
+"""
+_REVISION_WRITER = "src.data.observation_instants_v2_writer.insert_rows"
+_MATERIAL_COMPARISON_EXEMPT_COLUMNS: frozenset[str] = frozenset({"imported_at"})
 
 
 def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
@@ -351,40 +394,130 @@ def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
     )
 
 
-def _row_to_tuple(row: ObsV2Row) -> tuple[Any, ...]:
-    """Serialize an ObsV2Row into the parameter tuple matching _INSERT_SQL."""
+def _row_to_dict(row: ObsV2Row) -> dict[str, Any]:
+    """Serialize an ObsV2Row into the mapping matching ``_INSERT_COLUMNS``."""
     training_allowed, causality_status, source_role = (
         _derive_insert_source_fields(row)
     )
-    return (
-        row.city,
-        row.target_date,
-        row.source,
-        row.timezone_name,
-        row.local_hour,
-        row.local_timestamp,
-        row.utc_timestamp,
-        row.utc_offset_minutes,
-        row.dst_active,
-        row.is_ambiguous_local_hour,
-        row.is_missing_local_hour,
-        row.time_basis,
-        row.temp_current,
-        row.running_max,
-        row.running_min,
-        row.delta_rate_per_h,
-        row.temp_unit,
-        row.station_id,
-        row.observation_count,
-        row.raw_response,
-        row.source_file,
-        row.imported_at,
-        row.authority,
-        row.data_version,
-        row.provenance_json,
-        training_allowed,
-        causality_status,
-        source_role,
+    return {
+        "city": row.city,
+        "target_date": row.target_date,
+        "source": row.source,
+        "timezone_name": row.timezone_name,
+        "local_hour": row.local_hour,
+        "local_timestamp": row.local_timestamp,
+        "utc_timestamp": row.utc_timestamp,
+        "utc_offset_minutes": row.utc_offset_minutes,
+        "dst_active": row.dst_active,
+        "is_ambiguous_local_hour": row.is_ambiguous_local_hour,
+        "is_missing_local_hour": row.is_missing_local_hour,
+        "time_basis": row.time_basis,
+        "temp_current": row.temp_current,
+        "running_max": row.running_max,
+        "running_min": row.running_min,
+        "delta_rate_per_h": row.delta_rate_per_h,
+        "temp_unit": row.temp_unit,
+        "station_id": row.station_id,
+        "observation_count": row.observation_count,
+        "raw_response": row.raw_response,
+        "source_file": row.source_file,
+        "imported_at": row.imported_at,
+        "authority": row.authority,
+        "data_version": row.data_version,
+        "provenance_json": row.provenance_json,
+        "training_allowed": training_allowed,
+        "causality_status": causality_status,
+        "source_role": source_role,
+    }
+
+
+def _payload_hash_from_provenance(provenance_json: Any) -> str | None:
+    try:
+        parsed = json.loads(provenance_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    payload_hash = parsed.get("payload_hash")
+    if not isinstance(payload_hash, str):
+        return None
+    payload_hash = payload_hash.strip()
+    return payload_hash or None
+
+
+def _normalize_material_value(column: str, value: Any) -> Any:
+    if column == "provenance_json" and isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _material_differences(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> list[str]:
+    differences: list[str] = []
+    for column in _INSERT_COLUMNS:
+        if column in _MATERIAL_COMPARISON_EXEMPT_COLUMNS:
+            continue
+        existing_value = _normalize_material_value(column, existing.get(column))
+        incoming_value = _normalize_material_value(column, incoming.get(column))
+        if existing_value != incoming_value:
+            differences.append(column)
+    return differences
+
+
+def _json_dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _fetch_existing(
+    conn: sqlite3.Connection,
+    row_dict: dict[str, Any],
+) -> dict[str, Any] | None:
+    cursor = conn.execute(
+        _SELECT_EXISTING_SQL,
+        (row_dict["city"], row_dict["source"], row_dict["utc_timestamp"]),
+    )
+    result = cursor.fetchone()
+    if result is None:
+        return None
+    names = [description[0] for description in cursor.description]
+    return dict(zip(names, result))
+
+
+def _insert_revision(
+    conn: sqlite3.Connection,
+    *,
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    existing_payload_hash: str | None,
+    incoming_payload_hash: str,
+) -> None:
+    natural_key = {
+        "city": incoming["city"],
+        "source": incoming["source"],
+        "utc_timestamp": incoming["utc_timestamp"],
+    }
+    conn.execute(
+        _REVISION_INSERT_SQL,
+        (
+            "observation_instants_v2",
+            incoming["city"],
+            incoming["target_date"],
+            incoming["source"],
+            incoming["utc_timestamp"],
+            _json_dumps(natural_key),
+            existing.get("id"),
+            existing_payload_hash,
+            incoming_payload_hash,
+            "payload_hash_mismatch",
+            _REVISION_WRITER,
+            _json_dumps(existing),
+            _json_dumps(incoming),
+        ),
     )
 
 
@@ -393,14 +526,20 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
 
     Because ``ObsV2Row`` validates at construction, any row that reaches
     this function has already passed A1/A2/A6. This function therefore
-    focuses on the SQL side: single transaction, INSERT OR REPLACE (the
-    UNIQUE(city, source, utc_timestamp) index dedupes).
+    focuses on the SQL side: single transaction and hash-checked idempotence
+    over the UNIQUE(city, source, utc_timestamp) key.
+
+    If the natural key already exists with the same payload hash, the write is
+    treated as an idempotent rerun and the current row is preserved. Reusing
+    the same payload hash with different material fields is rejected as a
+    provenance violation. If the payload hash differs, the incoming row is
+    recorded in ``observation_revisions`` and the current row is not overwritten.
 
     Returns
     -------
     int
-        Number of rows inserted (len of the input iterable after
-        materialization).
+        Number of new rows inserted into the current obs_v2 surface.
+        Same-hash reruns and divergent-payload revision records do not count.
 
     Raises
     ------
@@ -409,8 +548,57 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
         caller is responsible for retry/rollback semantics outside the
         row-level invariants this module protects.
     """
-    tuples = [_row_to_tuple(r) for r in rows]
-    if not tuples:
+    row_dicts = [_row_to_dict(r) for r in rows]
+    if not row_dicts:
         return 0
-    conn.executemany(_INSERT_SQL, tuples)
-    return len(tuples)
+    inserted_current_rows = 0
+    savepoint = f"sp_obs_v2_insert_rows_{id(row_dicts)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        for row_dict in row_dicts:
+            existing = _fetch_existing(conn, row_dict)
+            if existing is None:
+                conn.execute(
+                    _INSERT_SQL,
+                    tuple(row_dict[column] for column in _INSERT_COLUMNS),
+                )
+                inserted_current_rows += 1
+                continue
+
+            incoming_payload_hash = _payload_hash_from_provenance(
+                row_dict["provenance_json"]
+            )
+            if incoming_payload_hash is None:
+                raise InvalidObsV2RowError(
+                    "A1 violation: incoming obs_v2 row reached insert_rows "
+                    "without payload_hash despite construction-time validation."
+                )
+            existing_payload_hash = _payload_hash_from_provenance(
+                existing.get("provenance_json")
+            )
+
+            if existing_payload_hash == incoming_payload_hash:
+                differences = _material_differences(existing, row_dict)
+                if differences:
+                    raise InvalidObsV2RowError(
+                        "obs_v2 payload_hash reused with changed material "
+                        f"fields for city={row_dict['city']!r}, "
+                        f"source={row_dict['source']!r}, "
+                        f"utc_timestamp={row_dict['utc_timestamp']!r}: "
+                        f"{', '.join(differences)}"
+                    )
+                continue
+
+            _insert_revision(
+                conn,
+                existing=existing,
+                incoming=row_dict,
+                existing_payload_hash=existing_payload_hash,
+                incoming_payload_hash=incoming_payload_hash,
+            )
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return inserted_current_rows

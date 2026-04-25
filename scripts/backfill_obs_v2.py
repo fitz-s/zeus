@@ -25,10 +25,13 @@ Default usage (Phase 0 pilot)
 
 Idempotency
 -----------
-``INSERT OR REPLACE`` on ``UNIQUE(city, source, utc_timestamp)`` — running
-the same command twice is a no-op on every row that already matched.
-Re-running with a different ``--data-version`` writes a second parallel
-corpus (Phase 0 pilot and Phase 1 fleet coexist by data_version).
+Hash-checked idempotence on ``UNIQUE(city, source, utc_timestamp)`` — running
+the same command twice is a no-op on every row whose payload hash already
+matched. A different payload hash for the same natural key is recorded by the
+typed writer as revision evidence instead of replacing the current row.
+Changing ``--data-version`` for an existing natural key is material drift, not
+an alternate keyed dataset; representing that requires a future schema/key
+decision outside this backfill driver.
 
 Observability
 -------------
@@ -291,9 +294,10 @@ def _backfill_wu_city(
     boundary local-date (e.g. UTC 2024-02-29 21:00 in Moscow tz = local
     2024-03-01 00:00 — the filter rejects it under window [2024-01-01,
     2024-02-29] and the NEXT window starting UTC 2024-03-01 00:00 = local
-    03:00 doesn't retrieve the missing 00-02 local hours). Overlap + INSERT
-    OR REPLACE re-fetches the boundary UTC hours under the next window's
-    filter, so every local hour of every local date is captured.
+    03:00 doesn't retrieve the missing 00-02 local hours). Overlap plus the
+    typed writer's hash-checked idempotence re-fetches the boundary UTC hours
+    under the next window's filter, so every local hour of every local date is
+    captured without replacing current rows on payload drift.
     """
     city = cities_by_name[city_name]
     icao = city.wu_station
@@ -353,7 +357,7 @@ def _backfill_wu_city(
             windows_failed += 1
             if window_end >= end_date:
                 break
-            cursor_date = window_end  # C2 fix: overlap by 1 day (INSERT OR REPLACE dedupes)
+            cursor_date = window_end  # C2 fix: overlap by 1 day; writer dedupes
             continue
 
         total_raw += result.raw_observation_count

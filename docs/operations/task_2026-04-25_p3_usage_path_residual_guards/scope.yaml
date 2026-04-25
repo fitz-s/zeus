@@ -1,7 +1,7 @@
 $schema: ../../../architecture/scope_schema.json
 schema_version: 1
 packet: task_2026-04-25_p3_usage_path_residual_guards
-status: in_progress
+status: closed
 branch: midstream_remediation
 worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
 in_scope:
