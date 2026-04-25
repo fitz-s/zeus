@@ -1097,6 +1097,8 @@ def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str])
     normalized = issue_path.split(":", 1)[0].rstrip("/")
     for requested in requested_paths:
         scoped = requested.rstrip("/")
+        # Navigation scopes both directory-level issues for requested files and
+        # file-level issues under requested directories.
         if normalized == scoped:
             return True
         if issue_path.startswith(f"{scoped}:"):

@@ -1742,6 +1742,10 @@ def test_navigation_aggregates_default_health_and_digest():
 
 def test_navigation_unrelated_docs_drift_does_not_block_source_route(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
     docs_result = topology_doctor.StrictResult(
         ok=False,
         issues=[
@@ -1762,7 +1766,7 @@ def test_navigation_unrelated_docs_drift_does_not_block_source_route(monkeypatch
         "run_runtime_modes",
         "run_reference_replacement",
     ):
-        monkeypatch.setattr(topology_doctor, name, lambda: ok)
+        monkeypatch.setattr(topology_doctor, name, ok_result)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
 
     payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
@@ -1776,6 +1780,10 @@ def test_navigation_unrelated_docs_drift_does_not_block_source_route(monkeypatch
 
 def test_navigation_requested_file_issue_blocks_route(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
     source_result = topology_doctor.StrictResult(
         ok=False,
         issues=[
@@ -1796,7 +1804,7 @@ def test_navigation_requested_file_issue_blocks_route(monkeypatch):
         "run_runtime_modes",
         "run_reference_replacement",
     ):
-        monkeypatch.setattr(topology_doctor, name, lambda: ok)
+        monkeypatch.setattr(topology_doctor, name, ok_result)
     monkeypatch.setattr(topology_doctor, "run_source", lambda: source_result)
 
     payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
@@ -1808,6 +1816,10 @@ def test_navigation_requested_file_issue_blocks_route(monkeypatch):
 
 def test_navigation_strict_health_re_enables_global_blocking(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
     docs_result = topology_doctor.StrictResult(
         ok=False,
         issues=[
@@ -1828,7 +1840,7 @@ def test_navigation_strict_health_re_enables_global_blocking(monkeypatch):
         "run_runtime_modes",
         "run_reference_replacement",
     ):
-        monkeypatch.setattr(topology_doctor, name, lambda: ok)
+        monkeypatch.setattr(topology_doctor, name, ok_result)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
 
     payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"], strict_health=True)
