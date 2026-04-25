@@ -552,6 +552,29 @@ def test_cli_json_parity_for_closeout_command(monkeypatch):
     assert run_cli_json(["closeout", "--json"]) == payload
 
 
+def test_closeout_summary_prints_global_health_sidecar(monkeypatch):
+    payload = {
+        "ok": True,
+        "authority_status": "generated_closeout_not_authority",
+        "changed_files": ["docs/README.md"],
+        "selected_lanes": {"docs": True},
+        "lanes": {"docs": {"ok": True, "issue_count": 0, "blocking_count": 0, "warning_count": 0, "issues": []}},
+        "global_health": {"code_review_graph": {"ok": False, "issue_count": 1, "blocking_count": 1, "warning_count": 0}},
+        "telemetry": {"dark_write_target_count": 0, "broken_visible_route_count": 0, "unclassified_docs_artifact_count": 0},
+        "blocking_issues": [],
+        "warning_issues": [],
+    }
+    monkeypatch.setattr(topology_doctor, "run_closeout", lambda **kwargs: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["closeout", "--summary-only"])
+
+    assert exit_code == 0
+    assert "global_health:" in buffer.getvalue()
+    assert "- code_review_graph: (blocking=1, warnings=0)" in buffer.getvalue()
+
+
 def test_freshness_metadata_rejects_changed_script_without_header(monkeypatch, tmp_path):
     root = tmp_path
     script = root / "scripts" / "legacy_probe.py"
@@ -1814,6 +1837,43 @@ def test_navigation_strict_health_re_enables_global_blocking(monkeypatch):
     assert payload["route_context"]["mode"] == "navigation_strict_health"
     assert payload["direct_blockers"][0]["lane"] == "docs"
     assert payload["repo_health_warnings"] == []
+
+
+def test_navigation_human_output_splits_blockers_and_warnings(monkeypatch):
+    payload = {
+        "ok": True,
+        "task": "source task",
+        "digest": {"profile": "generic"},
+        "issues": [
+            {
+                "lane": "docs",
+                "code": "docs_unregistered_subtree",
+                "path": "docs/operations/unrelated_packet",
+                "message": "unrelated docs issue",
+                "severity": "error",
+            }
+        ],
+        "direct_blockers": [],
+        "repo_health_warnings": [
+            {
+                "lane": "docs",
+                "code": "docs_unregistered_subtree",
+                "path": "docs/operations/unrelated_packet",
+                "message": "unrelated docs issue",
+                "severity": "error",
+            }
+        ],
+        "excluded_lanes": {},
+    }
+    monkeypatch.setattr(topology_doctor, "run_navigation", lambda task, files, strict_health=False: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["--navigation", "--task", "source task", "--files", "src/engine/replay.py"])
+
+    assert exit_code == 0
+    assert "repo_health_warnings:" in buffer.getvalue()
+    assert "direct_blockers:" not in buffer.getvalue()
 
 
 def test_agents_coherence_rejects_prose_zone_that_lowers_manifest(monkeypatch):
