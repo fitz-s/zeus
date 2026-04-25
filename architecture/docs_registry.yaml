@@ -960,6 +960,60 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: code_and_manifest
+- path: docs/reference/modules/topology_doctor_system.md
+  doc_class: module_reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: dense topology-doctor system reference for lanes, issue models, and closeout seams
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
+- path: docs/reference/modules/manifests_system.md
+  doc_class: module_reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: dense manifest-system reference for fact ownership and repair routing
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
+- path: docs/reference/modules/closeout_and_receipts_system.md
+  doc_class: module_reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: dense closeout and receipts system reference for scoped gates, work evidence, and deferrals
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
 - path: docs/reference/zeus_architecture_reference.md
   doc_class: reference
   default_read: false

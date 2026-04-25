@@ -1824,6 +1824,55 @@ def test_issue_schema_drift_guard():
     assert tuple(schema["enums"]["blocking_modes"]) == topology_doctor.ISSUE_BLOCKING_MODES
 
 
+def test_system_books_have_required_headings():
+    required_headings = [
+        "> Status:",
+        "## Purpose",
+        "## Authority anchors",
+        "## How it works",
+        "## Hidden obligations",
+        "## Failure modes",
+        "## Repair routes",
+        "## Cross-links",
+    ]
+    books = [
+        "docs/reference/modules/topology_system.md",
+        "docs/reference/modules/code_review_graph.md",
+        "docs/reference/modules/docs_system.md",
+        "docs/reference/modules/manifests_system.md",
+        "docs/reference/modules/topology_doctor_system.md",
+        "docs/reference/modules/closeout_and_receipts_system.md",
+    ]
+
+    for book in books:
+        text = (topology_doctor.ROOT / book).read_text(encoding="utf-8")
+        assert text.startswith("# "), book
+        for heading in required_headings:
+            assert heading in text, f"{book} missing {heading}"
+
+
+def test_progress_handoff_allows_reference_module_closeout_book(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/reference/modules/closeout_and_receipts_system.md"],
+    )
+
+    assert topology_doctor._docs_checks().check_progress_handoff_paths(topology_doctor) == []
+
+
+def test_progress_handoff_rejects_other_reference_module_handoff_names(monkeypatch):
+    monkeypatch.setattr(
+        topology_doctor,
+        "_git_visible_files",
+        lambda: ["docs/reference/modules/random_handoff.md"],
+    )
+
+    issues = topology_doctor._docs_checks().check_progress_handoff_paths(topology_doctor)
+
+    assert [issue.code for issue in issues] == ["progress_handoff_path_violation"]
+
+
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(
         "fix settlement rounding in replay",
