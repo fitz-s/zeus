@@ -552,6 +552,29 @@ def test_cli_json_parity_for_closeout_command(monkeypatch):
     assert run_cli_json(["closeout", "--json"]) == payload
 
 
+def test_closeout_summary_prints_global_health_sidecar(monkeypatch):
+    payload = {
+        "ok": True,
+        "authority_status": "generated_closeout_not_authority",
+        "changed_files": ["docs/README.md"],
+        "selected_lanes": {"docs": True},
+        "lanes": {"docs": {"ok": True, "issue_count": 0, "blocking_count": 0, "warning_count": 0, "issues": []}},
+        "global_health": {"code_review_graph": {"ok": False, "issue_count": 1, "blocking_count": 1, "warning_count": 0}},
+        "telemetry": {"dark_write_target_count": 0, "broken_visible_route_count": 0, "unclassified_docs_artifact_count": 0},
+        "blocking_issues": [],
+        "warning_issues": [],
+    }
+    monkeypatch.setattr(topology_doctor, "run_closeout", lambda **kwargs: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["closeout", "--summary-only"])
+
+    assert exit_code == 0
+    assert "global_health:" in buffer.getvalue()
+    assert "- code_review_graph: (blocking=1, warnings=0)" in buffer.getvalue()
+
+
 def test_freshness_metadata_rejects_changed_script_without_header(monkeypatch, tmp_path):
     root = tmp_path
     script = root / "scripts" / "legacy_probe.py"
@@ -1717,6 +1740,218 @@ def test_navigation_aggregates_default_health_and_digest():
     assert any(card["id"] == "WMO_ROUNDING_BANKER_FAILURE" for card in payload["digest"]["history_lore"])
 
 
+def test_navigation_unrelated_docs_issue_does_not_block_source_route(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="docs_unregistered_subtree",
+                path="docs/operations/unrelated_packet",
+                message="unrelated docs issue",
+            )
+        ],
+    )
+    for name in (
+        "run_context_budget",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+
+    assert payload["ok"] is True
+    assert payload["direct_blockers"] == []
+    assert payload["repo_health_warnings"][0]["lane"] == "docs"
+    assert payload["global_health_counts"]["docs"]["blocking_count"] == 1
+    assert payload["route_context"]["mode"] == "navigation"
+
+
+def test_navigation_requested_file_issue_blocks_route(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    source_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="source_rationale_missing",
+                path="src/engine/replay.py",
+                message="requested source issue",
+            )
+        ],
+    )
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_source", lambda: source_result)
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+
+    assert payload["ok"] is False
+    assert payload["direct_blockers"][0]["code"] == "source_rationale_missing"
+    assert payload["repo_health_warnings"] == []
+
+
+def test_navigation_synthetic_global_issue_is_advisory_without_strict_health(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="global_docs_issue",
+                path="<docs-global>",
+                message="synthetic global issue",
+            )
+        ],
+    )
+    for name in (
+        "run_context_budget",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+
+    assert payload["ok"] is True
+    assert payload["direct_blockers"] == []
+    assert payload["repo_health_warnings"][0]["path"] == "<docs-global>"
+
+
+def test_navigation_strict_health_re_enables_global_blocking(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="docs_unregistered_subtree",
+                path="docs/operations/unrelated_packet",
+                message="unrelated docs issue",
+            )
+        ],
+    )
+    for name in (
+        "run_context_budget",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"], strict_health=True)
+
+    assert payload["ok"] is False
+    assert payload["route_context"]["mode"] == "navigation_strict_health"
+    assert payload["direct_blockers"][0]["lane"] == "docs"
+    assert payload["repo_health_warnings"] == []
+
+
+def test_navigation_human_output_splits_blockers_and_warnings(monkeypatch):
+    payload = {
+        "ok": True,
+        "task": "source task",
+        "digest": {"profile": "generic"},
+        "issues": [
+            {
+                "lane": "docs",
+                "code": "docs_unregistered_subtree",
+                "path": "docs/operations/unrelated_packet",
+                "message": "unrelated docs issue",
+                "severity": "error",
+            }
+        ],
+        "direct_blockers": [],
+        "repo_health_warnings": [
+            {
+                "lane": "docs",
+                "code": "docs_unregistered_subtree",
+                "path": "docs/operations/unrelated_packet",
+                "message": "unrelated docs issue",
+                "severity": "error",
+            }
+        ],
+        "excluded_lanes": {},
+    }
+    monkeypatch.setattr(topology_doctor, "run_navigation", lambda task, files, strict_health=False: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["--navigation", "--task", "source task", "--files", "src/engine/replay.py"])
+
+    assert exit_code == 0
+    assert "repo_health_warnings:" in buffer.getvalue()
+    assert "direct_blockers:" not in buffer.getvalue()
+
+
+def test_navigation_human_output_does_not_duplicate_direct_blockers(monkeypatch):
+    issue = {
+        "lane": "source",
+        "code": "source_rationale_missing",
+        "path": "src/engine/replay.py",
+        "message": "requested source issue",
+        "severity": "error",
+    }
+    payload = {
+        "ok": False,
+        "task": "source task",
+        "digest": {"profile": "generic"},
+        "issues": [issue],
+        "direct_blockers": [issue],
+        "repo_health_warnings": [],
+        "excluded_lanes": {},
+    }
+    monkeypatch.setattr(topology_doctor, "run_navigation", lambda task, files, strict_health=False: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["--navigation", "--task", "source task", "--files", "src/engine/replay.py"])
+
+    assert exit_code == 1
+    assert "direct_blockers:" in buffer.getvalue()
+    assert "issues:" not in buffer.getvalue()
+
+
 def test_agents_coherence_rejects_prose_zone_that_lowers_manifest(monkeypatch):
     rationale = topology_doctor.load_source_rationale()
     rationale["package_defaults"]["src/observability"] = {
@@ -2780,6 +3015,9 @@ def test_closeout_compiles_selected_lanes(monkeypatch):
     monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
     monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
     monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
     monkeypatch.setattr(topology_doctor, "run_source", lambda: ok)
     monkeypatch.setattr(topology_doctor, "run_tests", lambda: ok)
@@ -2839,6 +3077,9 @@ def test_closeout_filters_repo_global_lane_noise(monkeypatch):
     monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
     monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
     monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
     monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
     monkeypatch.setattr(
@@ -2851,6 +3092,86 @@ def test_closeout_filters_repo_global_lane_noise(monkeypatch):
 
     assert payload["ok"] is True
     assert payload["lanes"]["docs"]["issue_count"] == 0
+    assert payload["global_health"]["docs"]["issue_count"] == 1
+
+
+def test_closeout_changed_source_missing_rationale_still_blocks(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    source_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="source_rationale_missing",
+                path="src/contracts/tick_size.py",
+                message="changed source missing rationale",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"src/contracts/tick_size.py": "modified"},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_source", lambda: source_result)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["src/contracts/tick_size.py"])
+
+    assert payload["ok"] is False
+    assert payload["blocking_issues"][0]["lane"] == "source"
+    assert payload["blocking_issues"][0]["code"] == "source_rationale_missing"
+
+
+def test_closeout_synthetic_global_issue_stays_in_global_health(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="docs_global_issue",
+                path="<docs-global>",
+                message="synthetic global docs issue",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {"docs/README.md": "modified"},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["docs/README.md"])
+
+    assert payload["ok"] is True
+    assert payload["lanes"]["docs"]["issue_count"] == 0
+    assert payload["global_health"]["docs"]["blocking_count"] == 1
 
 
 def test_closeout_prefers_staged_files_when_changed_files_omitted(monkeypatch):
@@ -2872,6 +3193,9 @@ def test_closeout_prefers_staged_files_when_changed_files_omitted(monkeypatch):
     monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
     monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
     monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
     monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
     monkeypatch.setattr(
@@ -2902,6 +3226,9 @@ def test_closeout_falls_back_to_receipt_when_clean(monkeypatch, tmp_path):
     monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
     monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
     monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: ok)
     monkeypatch.setattr(topology_doctor, "run_docs", lambda: ok)
     monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
     monkeypatch.setattr(
