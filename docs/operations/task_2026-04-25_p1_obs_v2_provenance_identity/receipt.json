@@ -60,6 +60,8 @@
     "row-level quarantine or production DB mutation"
   ],
   "status": "closed",
+  "implementation_commit": "11c6315",
+  "implementation_commit_note": "Commit 11c6315 is already pushed to origin/midstream_remediation and contains this packet plus a concurrent pytest.ini test-isolation change; history was not rewritten.",
   "changed_files": [
     "architecture/topology.yaml",
     "architecture/docs_registry.yaml",
