@@ -5,12 +5,11 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P0 4.2.A closed; 4.2.B pending phase-entry**
+- Mainline task: **Post-audit remediation mainline — P0 4.2.B legacy hourly evidence-view active**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: none frozen; next packet pending phase-entry
-- Closeout evidence packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
-- Prior closeout evidence packet: `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
+- Prior closeout evidence packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -27,14 +26,19 @@ Role: single live control pointer for the repo.
   Commit `c274230` removed the stale 4.1.A-C next-packet pointer. Commit
   `0b61261` closed and pushed the P0 4.2.A readiness-guard normalization
   follow-up, making full training-readiness inherit per-metric snapshot
-  eligibility and Platt mature-bucket preflights. No execution packet is
-  currently frozen for the next slice.
+  eligibility and Platt mature-bucket preflights. Commit `b8c6307` closed the
+  4.2.A control pointer. The active slice is now 4.2.B evidence-only legacy
+  hourly observations view plus canonical-path bare-table lint proof. Critic
+  review found two closeout blockers: over-broad linter DDL exemption and a
+  live health test reading the wrong DB authority surface. Both were closed
+  inside the 4.2.B packet with narrow tests and gate reruns; final critic and
+  verifier review passed.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
+- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
+- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
 
 ## Freeze point
 
@@ -43,12 +47,16 @@ Role: single live control pointer for the repo.
   closed in `docs/operations/task_2026-04-23_midstream_remediation/work_log.md`
   (`P-1 Pre-P0 Post-Audit Cleanup -- 2026-04-24`), and 4.2.A closed at
   `0b61261`, so neither must be re-opened as the next execution packet without
-  new evidence. The next candidate is POST_AUDIT_HANDOFF 4.2.B
-  evidence-only legacy hourly observations views plus canonical-path bare-table
-  lint, but no 4.2.B code scope is authorized until fresh phase-entry rereads
-  AGENTS/topology and freezes the packet. This pointer does not authorize
-  production DB mutation, `settlements_v2` population, market-identity backfill,
-  replay/live/runtime consumer rewiring, or legacy-settlement promotion.
+  new evidence. The active 4.2.B code scope is `src/state/db.py`
+  schema-view DDL for `v_evidence_hourly_observations`,
+  `tests/test_architecture_contracts.py` coverage, a narrow
+  `scripts/semantic_linter.py` evidence-view DDL exemption with
+  `tests/test_semantic_linter.py` antibodies, and the
+  `tests/test_truth_surface_health.py` DB-authority connection correction
+  needed to run the required state gate. This pointer does not authorize
+  production DB mutation, `settlements_v2` population,
+  market-identity backfill, replay/live/runtime consumer rewiring, or
+  legacy-settlement promotion.
 
 ## Current fact companions
 
@@ -63,7 +71,5 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Open the 4.2.B phase-entry only after rereading `AGENTS.md`, operations
-  routing, the POST_AUDIT 4.2.B handoff text, scoped state/script/test guidance,
-  and topology output for the proposed files.
+- Commit and push only 4.2.B receipt-bound files.
 - Preserve unrelated dirty work and concurrent in-flight edits.

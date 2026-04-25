@@ -621,6 +621,20 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             UNIQUE(city, obs_date, obs_hour, source)
         );
 
+        -- Evidence-only adapter for legacy hourly rows. This view deliberately
+        -- mirrors legacy columns without claiming UTC/timezone/provenance safety.
+        DROP VIEW IF EXISTS v_evidence_hourly_observations;
+        CREATE VIEW v_evidence_hourly_observations AS
+            SELECT
+                id,
+                city,
+                obs_date,
+                obs_hour,
+                temp,
+                temp_unit,
+                source
+            FROM hourly_observations;
+
         -- Daily sunrise/sunset context for Day0 and DST-aware timing
         CREATE TABLE IF NOT EXISTS solar_daily (
             city TEXT NOT NULL,
