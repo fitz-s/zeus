@@ -80,6 +80,8 @@ test_trust_policy:
     tests/test_settlements_verified_row_integrity.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
+    tests/test_zpkt.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
 
 categories:
   core_law_antibody:
@@ -276,6 +278,14 @@ categories:
 
   stale_obsolete: []
   reverse_antibody_dangerous: []
+
+  # Packet runtime tooling tests — protect the agent-runtime CLI
+  # (`scripts/zpkt.py`) and the soft-warn pre-commit hook
+  # (`.zeus-githooks/pre-commit`). Not core law antibodies (no INV/law
+  # protected), but they gate adoption of the packet workflow itself.
+  tooling_runtime:
+    - tests/test_zpkt.py
+    - tests/test_pscb_hook.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent

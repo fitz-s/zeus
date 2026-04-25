@@ -82,6 +82,20 @@ Role: single live control pointer for the repo.
 - Use `docs/operations/AGENTS.md` for non-default packet/package routing.
 - Use `docs/archive_registry.md` for archived packet lookup.
 
+## Parallel infrastructure packet
+
+- Branch: `p2-packet-runtime` (worktree-isolated; not on `midstream_remediation`)
+- Scope: Packet Runtime (`zpkt`) — `scripts/zpkt.py`, `scripts/_zpkt_scope.py`,
+  `.zeus-githooks/pre-commit`, `architecture/scope_schema.json`, soft-warn
+  pre-commit hook, `tooling_runtime` test category, and
+  `docs/operations/packet_scope_protocol.md`.
+- Status: Implementation complete; awaiting `zpkt close` landing entry, fast-forward
+  to mainline, and follow-up bypass telemetry review.
+- Authority footprint: Tooling/process only; does not touch pricing, settlement,
+  observation, calibration, or DB authority. Mainline P1/P2/P3 sequencing is
+  unaffected.
+
+
 ## Next action
 
 - Rebuild phase-entry context before the next packet: reread `AGENTS.md`, run
@@ -89,3 +103,4 @@ Role: single live control pointer for the repo.
   P1/P2/P3 sequence against the current branch facts before any new code
   implementation.
 - Preserve unrelated dirty work and concurrent in-flight edits.
+- 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->

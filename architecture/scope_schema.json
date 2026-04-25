@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeus.local/schema/scope.yaml.json",
+  "title": "Zeus Packet Scope (scope.yaml)",
+  "description": "Machine-readable scope sidecar for a Zeus development packet. Lives at docs/operations/<packet>/scope.yaml. Read by the packet runtime (zpkt) and the pre-commit hook. Authoritative for the question 'is this file in scope for this packet?'",
+  "type": "object",
+  "required": ["schema_version", "packet", "in_scope"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor support."
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Bumps when the schema breaks compat."
+    },
+    "packet": {
+      "type": "string",
+      "pattern": "^task_\\d{4}-\\d{2}-\\d{2}_[a-z0-9_]+$",
+      "description": "Packet folder basename. Must match docs/operations/<packet>."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["planned", "in_progress", "in_review", "landed", "abandoned"],
+      "description": "Lifecycle status. Updated by `zpkt close`."
+    },
+    "branch": {
+      "type": "string",
+      "description": "Git branch the packet is developed on."
+    },
+    "worktree": {
+      "type": "string",
+      "description": "Absolute path of the worktree (informational; not enforced)."
+    },
+    "in_scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Glob patterns of files this packet may modify. Matched against staged file paths via fnmatchcase semantics."
+    },
+    "allow_companions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Glob patterns of registry/mesh-maintenance files that may be touched as side effects (manifest updates, README hits, AGENTS.md routing). Soft-warn does NOT fire for these."
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Glob patterns explicitly forbidden. Always trigger soft-warn even if they coincidentally match in_scope. Forbidden-wins."
+    }
+  }
+}

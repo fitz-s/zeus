@@ -447,3 +447,28 @@ scripts:
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
   bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
   code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}
+  zpkt.py:
+    class: runtime_support
+    module_owner: scripts
+    canonical_command: "python3 scripts/zpkt.py <subcommand>"
+    reason: >
+      Packet Runtime (zpkt) — unified agent-runtime CLI for packet lifecycle
+      management (start, status, scope, commit, setup, close, audit-bypass,
+      park, unpark). Owns scope.yaml-driven soft-warn enforcement and creates
+      isolated git worktrees for concurrent packet work. Writes only to packet
+      directories under docs/operations/, .zpkt-cache/ status digests, and the
+      configured githooks path; does not touch canonical DBs.
+    read_targets: [repo, docs/operations, .zpkt-cache]
+    write_targets: [docs/operations, .zpkt-cache, .git/config (core.hooksPath via setup), stdout]
+    required_helpers: [scripts._zpkt_scope]
+    required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py]
+  _zpkt_scope.py:
+    class: utility
+    module_owner: scripts
+    canonical_command: DO_NOT_RUN
+    reason: >
+      Stdlib helper imported by scripts/zpkt.py and the soft-warn pre-commit
+      hook (.zeus-githooks/pre-commit) to load and validate scope.yaml sidecars
+      and classify staged files against declared packet scope. No write
+      authority; no external inputs.
+    required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py]
