@@ -1,9 +1,17 @@
+# Lifecycle: created=2026-04-24; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Enforce test topology classification, law-gate, and skip-debt metadata.
+# Reuse: Inspect architecture/test_topology.yaml before changing classification rules.
+
 """Test topology checker family for topology_doctor."""
 
 from __future__ import annotations
 
 import ast
 from typing import Any
+
+OVERLAY_CATEGORIES = {
+    "midstream_guardian_panel",
+}
 
 
 def protected_path_exists(api: Any, path: str) -> bool:
@@ -26,6 +34,11 @@ def run_tests(api: Any) -> Any:
     issues: list[Any] = []
 
     for category, paths in categories.items():
+        if category in OVERLAY_CATEGORIES:
+            for path in paths or []:
+                if path not in actual:
+                    issues.append(api._issue("test_topology_stale", path, "classified test file is absent"))
+            continue
         for path in paths or []:
             if path in classified:
                 issues.append(

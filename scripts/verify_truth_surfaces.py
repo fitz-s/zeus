@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config import STATE_DIR
+from src.calibration.metric_specs import METRIC_SPECS
+from src.config import STATE_DIR, calibration_maturity_thresholds
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
 SHARED_DB = STATE_DIR / "zeus-world.db"
@@ -65,6 +66,43 @@ SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS = (
     "temperature_metric",
     "market_slug",
 )
+ENSEMBLE_SNAPSHOT_PREFLIGHT_COLUMNS = (
+    "city",
+    "target_date",
+    "temperature_metric",
+    "physical_quantity",
+    "observation_field",
+    "issue_time",
+    "available_at",
+    "fetch_time",
+    "lead_hours",
+    "members_json",
+    "data_version",
+    "training_allowed",
+    "causality_status",
+    "authority",
+)
+OBSERVATION_PREFLIGHT_BASE_COLUMNS = (
+    "city",
+    "target_date",
+    "authority",
+)
+CALIBRATION_PAIR_PREFLIGHT_COLUMNS = (
+    "temperature_metric",
+    "observation_field",
+    "range_label",
+    "p_raw",
+    "outcome",
+    "lead_days",
+    "season",
+    "cluster",
+    "data_version",
+    "training_allowed",
+    "causality_status",
+    "authority",
+    "decision_group_id",
+)
+_, _, MIN_PLATT_DECISION_GROUPS = calibration_maturity_thresholds()
 
 
 def _scalar(cur, sql, *params):
@@ -101,6 +139,17 @@ def _count(cur: sqlite3.Cursor, table: str, where: str | None = None) -> int:
     if where:
         sql += f" WHERE {where}"
     return int(_scalar(cur, sql) or 0)
+
+
+def _count_params(
+    cur: sqlite3.Cursor,
+    table: str,
+    where: str,
+    params: tuple[object, ...],
+) -> int:
+    cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params)
+    row = cur.fetchone()
+    return int(row[0] if row else 0)
 
 
 def _blank_or_empty_json_sql(column: str) -> str:
@@ -201,6 +250,80 @@ def _add_missing_table_check(
     blocker = {"code": code, "table": table, "count": 0}
     if blocker not in report["blockers"]:
         report["blockers"].append(blocker)
+
+
+def _new_report(mode: str, world_db: Path) -> dict:
+    return {
+        "mode": mode,
+        "database": str(world_db),
+        "status": NOT_READY,
+        "ready": False,
+        "checks": {},
+        "blockers": [],
+    }
+
+
+def _add_database_missing(report: dict, world_db: Path) -> None:
+    report["checks"]["database_exists"] = _check_entry(
+        check_id="database_exists",
+        status=FAIL,
+        detail=f"{world_db} not found",
+        met=False,
+    )
+    report["blockers"].append(
+        {"code": "missing_database", "table": None, "count": 0}
+    )
+
+
+def _finalize_report(report: dict) -> dict:
+    ready = not report["blockers"]
+    report["ready"] = ready
+    report["status"] = READY if ready else NOT_READY
+    return report
+
+
+def _add_required_columns_check(
+    report: dict,
+    cur: sqlite3.Cursor,
+    *,
+    table: str,
+    check_id: str,
+    columns: tuple[str, ...],
+) -> bool:
+    if not _table_exists(cur, table):
+        _add_missing_table_check(
+            report,
+            check_id=check_id,
+            table=table,
+            detail=f"{table} table is missing",
+        )
+        return False
+
+    existing_columns = _columns(cur, table)
+    missing_columns = [column for column in columns if column not in existing_columns]
+    met = not missing_columns
+    report["checks"][check_id] = _check_entry(
+        check_id=check_id,
+        status=PASS if met else FAIL,
+        detail=(
+            f"{table} required columns present"
+            if met
+            else f"{table} lacks required columns: " + ", ".join(missing_columns)
+        ),
+        count=len(missing_columns),
+        threshold=0,
+        met=met,
+    )
+    if not met:
+        report["blockers"].append(
+            {
+                "code": "missing_required_columns",
+                "table": table,
+                "count": len(missing_columns),
+                "columns": missing_columns,
+            }
+        )
+    return met
 
 
 def _add_required_identity_check(
@@ -543,6 +666,671 @@ def _add_legacy_settlement_evidence_checks(
             "legacy rows are evidence-only until canonical v2 market identity is ready"
         ),
     )
+
+
+def _metric_allowed_versions() -> dict[str, str]:
+    return {
+        spec.identity.temperature_metric: spec.allowed_data_version
+        for spec in METRIC_SPECS
+    }
+
+
+def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -> None:
+    table = "observation_instants_v2"
+    if not _table_exists(cur, table):
+        for check_id in (
+            "observation_instants_v2.training_role_unsafe",
+            "observation_instants_v2.causality_unsafe",
+        ):
+            _add_missing_table_check(
+                report,
+                check_id=check_id,
+                table=table,
+                detail="observation_instants_v2 table is missing",
+            )
+        _add_payload_identity_check(report, cur)
+        return
+
+    columns = _columns(cur, table)
+    quoted_roles = ", ".join(
+        f"'{role}'" for role in sorted(ELIGIBLE_OBSERVATION_SOURCE_ROLES)
+    )
+
+    if {"training_allowed", "source_role"}.issubset(columns):
+        role_count = _count(
+            cur,
+            table,
+            f"""
+            COALESCE(training_allowed, 0) = 1
+            AND (
+                source_role IS NULL
+                OR source_role = ''
+                OR source_role NOT IN ({quoted_roles})
+            )
+            """,
+        )
+        role_detail = (
+            "training-allowed observation_instants_v2 rows with unsafe "
+            f"source_role={role_count}"
+        )
+        role_code = "observation_instants_v2.training_role_unsafe"
+    else:
+        role_count = _count(cur, table)
+        role_detail = "observation_instants_v2 lacks training_allowed/source_role columns"
+        role_code = "missing_source_role_columns"
+    role_met = role_count == 0
+    report["checks"]["observation_instants_v2.training_role_unsafe"] = _check_entry(
+        check_id="observation_instants_v2.training_role_unsafe",
+        status=PASS if role_met else FAIL,
+        detail=role_detail,
+        count=role_count,
+        threshold=0,
+        met=role_met,
+    )
+    if not role_met:
+        report["blockers"].append(
+            {"code": role_code, "table": table, "count": role_count}
+        )
+
+    if {"training_allowed", "causality_status"}.issubset(columns):
+        causality_count = _count(
+            cur,
+            table,
+            """
+            COALESCE(training_allowed, 0) = 1
+            AND (
+                causality_status IS NULL
+                OR TRIM(CAST(causality_status AS TEXT)) = ''
+                OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
+            )
+            """,
+        )
+        causality_detail = (
+            "training-allowed observation_instants_v2 rows with unsafe "
+            f"causality_status={causality_count}"
+        )
+    elif "training_allowed" in columns:
+        causality_count = _count(
+            cur,
+            table,
+            "COALESCE(training_allowed, 0) = 1",
+        )
+        causality_detail = (
+            "observation_instants_v2 lacks causality_status column for "
+            f"training_allowed rows={causality_count}"
+        )
+    else:
+        causality_count = _count(cur, table)
+        causality_detail = "observation_instants_v2 lacks training_allowed/causality_status columns"
+    causality_met = causality_count == 0
+    report["checks"]["observation_instants_v2.causality_unsafe"] = _check_entry(
+        check_id="observation_instants_v2.causality_unsafe",
+        status=PASS if causality_met else FAIL,
+        detail=causality_detail,
+        count=causality_count,
+        threshold=0,
+        met=causality_met,
+    )
+    if not causality_met:
+        report["blockers"].append(
+            {
+                "code": "observation_instants_v2.causality_unsafe",
+                "table": table,
+                "count": causality_count,
+            }
+        )
+
+    _add_payload_identity_check(report, cur)
+
+
+def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
+    table = "ensemble_snapshots_v2"
+    if not _add_required_columns_check(
+        report,
+        cur,
+        table=table,
+        check_id="ensemble_snapshots_v2.preflight_columns_present",
+        columns=ENSEMBLE_SNAPSHOT_PREFLIGHT_COLUMNS,
+    ):
+        return
+
+    allowed_versions = _metric_allowed_versions()
+    metric_names = tuple(allowed_versions)
+    quoted_metrics = ", ".join(f"'{metric}'" for metric in metric_names)
+    invalid_metric_count = _count(
+        cur,
+        table,
+        f"""
+        COALESCE(training_allowed, 0) = 1
+        AND (
+            temperature_metric IS NULL
+            OR TRIM(CAST(temperature_metric AS TEXT)) = ''
+            OR temperature_metric NOT IN ({quoted_metrics})
+        )
+        """,
+    )
+    invalid_metric_met = invalid_metric_count == 0
+    report["checks"]["ensemble_snapshots_v2.metric_scope_safe"] = _check_entry(
+        check_id="ensemble_snapshots_v2.metric_scope_safe",
+        status=PASS if invalid_metric_met else FAIL,
+        detail=(
+            "training-allowed ensemble_snapshots_v2 rows with invalid "
+            f"temperature_metric={invalid_metric_count}"
+        ),
+        count=invalid_metric_count,
+        threshold=0,
+        met=invalid_metric_met,
+    )
+    if not invalid_metric_met:
+        report["blockers"].append(
+            {
+                "code": "ensemble_snapshots_v2.metric_scope_unsafe",
+                "table": table,
+                "count": invalid_metric_count,
+            }
+        )
+
+    for spec in METRIC_SPECS:
+        identity = spec.identity
+        metric = identity.temperature_metric
+        eligible_where = """
+            temperature_metric = ?
+            AND physical_quantity = ?
+            AND observation_field = ?
+            AND data_version = ?
+            AND COALESCE(training_allowed, 0) = 1
+            AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
+            AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
+            AND city IS NOT NULL AND TRIM(CAST(city AS TEXT)) != ''
+            AND target_date IS NOT NULL AND TRIM(CAST(target_date AS TEXT)) != ''
+            AND issue_time IS NOT NULL AND TRIM(CAST(issue_time AS TEXT)) != ''
+            AND available_at IS NOT NULL AND TRIM(CAST(available_at AS TEXT)) != ''
+            AND fetch_time IS NOT NULL AND TRIM(CAST(fetch_time AS TEXT)) != ''
+            AND LOWER(CAST(issue_time AS TEXT)) NOT LIKE '%reconstruct%'
+            AND LOWER(CAST(available_at AS TEXT)) NOT LIKE '%reconstruct%'
+            AND LOWER(CAST(fetch_time AS TEXT)) NOT LIKE '%reconstruct%'
+            AND members_json IS NOT NULL AND TRIM(CAST(members_json AS TEXT)) != ''
+        """
+        eligible_count = _count_params(
+            cur,
+            table,
+            eligible_where,
+            (
+                metric,
+                identity.physical_quantity,
+                identity.observation_field,
+                spec.allowed_data_version,
+            ),
+        )
+        eligible_met = eligible_count >= 1
+        eligible_check_id = f"ensemble_snapshots_v2.{metric}.rebuild_eligible_present"
+        report["checks"][eligible_check_id] = _check_entry(
+            check_id=eligible_check_id,
+            status=PASS if eligible_met else FAIL,
+            detail=f"{metric} rebuild-eligible ensemble_snapshots_v2 rows={eligible_count}",
+            count=eligible_count,
+            threshold=1,
+            met=eligible_met,
+        )
+        if not eligible_met:
+            report["blockers"].append(
+                {
+                    "code": "empty_rebuild_eligible_snapshots",
+                    "table": table,
+                    "count": eligible_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+        unsafe_where = """
+            temperature_metric = ?
+            AND COALESCE(training_allowed, 0) = 1
+            AND (
+                physical_quantity IS NULL
+                OR physical_quantity != ?
+                OR observation_field IS NULL
+                OR observation_field != ?
+                OR data_version IS NULL
+                OR data_version != ?
+                OR UPPER(TRIM(CAST(authority AS TEXT))) != 'VERIFIED'
+                OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
+                OR city IS NULL OR TRIM(CAST(city AS TEXT)) = ''
+                OR target_date IS NULL OR TRIM(CAST(target_date AS TEXT)) = ''
+                OR issue_time IS NULL OR TRIM(CAST(issue_time AS TEXT)) = ''
+                OR available_at IS NULL OR TRIM(CAST(available_at AS TEXT)) = ''
+                OR fetch_time IS NULL OR TRIM(CAST(fetch_time AS TEXT)) = ''
+                OR LOWER(CAST(issue_time AS TEXT)) LIKE '%reconstruct%'
+                OR LOWER(CAST(available_at AS TEXT)) LIKE '%reconstruct%'
+                OR LOWER(CAST(fetch_time AS TEXT)) LIKE '%reconstruct%'
+                OR members_json IS NULL OR TRIM(CAST(members_json AS TEXT)) = ''
+            )
+        """
+        unsafe_count = _count_params(
+            cur,
+            table,
+            unsafe_where,
+            (
+                metric,
+                identity.physical_quantity,
+                identity.observation_field,
+                spec.allowed_data_version,
+            ),
+        )
+        unsafe_met = unsafe_count == 0
+        unsafe_check_id = f"ensemble_snapshots_v2.{metric}.rebuild_input_safe"
+        report["checks"][unsafe_check_id] = _check_entry(
+            check_id=unsafe_check_id,
+            status=PASS if unsafe_met else FAIL,
+            detail=f"{metric} training-allowed snapshot rows with unsafe rebuild input={unsafe_count}",
+            count=unsafe_count,
+            threshold=0,
+            met=unsafe_met,
+        )
+        if not unsafe_met:
+            report["blockers"].append(
+                {
+                    "code": "ensemble_snapshots_v2.rebuild_input_unsafe",
+                    "table": table,
+                    "count": unsafe_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+
+def _observation_provenance_column(columns: set[str], metric: str) -> str | None:
+    if "provenance_metadata" in columns:
+        return "provenance_metadata"
+    split_column = (
+        "high_provenance_metadata"
+        if metric == "high"
+        else "low_provenance_metadata"
+    )
+    if split_column in columns:
+        return split_column
+    return None
+
+
+def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
+    table = "observations"
+    required_columns = OBSERVATION_PREFLIGHT_BASE_COLUMNS + tuple(
+        spec.identity.observation_field for spec in METRIC_SPECS
+    )
+    if not _add_required_columns_check(
+        report,
+        cur,
+        table=table,
+        check_id="observations.preflight_columns_present",
+        columns=required_columns,
+    ):
+        return
+
+    columns = _columns(cur, table)
+    has_source = "source" in columns
+    has_city = "city" in columns
+    for spec in METRIC_SPECS:
+        metric = spec.identity.temperature_metric
+        obs_column = spec.identity.observation_field
+        label_where = f"""
+            authority = 'VERIFIED'
+            AND {obs_column} IS NOT NULL
+        """
+        label_count = _count(cur, table, label_where)
+        label_met = label_count >= 1
+        label_check_id = f"observations.{metric}.verified_labels_present"
+        report["checks"][label_check_id] = _check_entry(
+            check_id=label_check_id,
+            status=PASS if label_met else FAIL,
+            detail=f"{metric} VERIFIED observation label rows={label_count}",
+            count=label_count,
+            threshold=1,
+            met=label_met,
+        )
+        if not label_met:
+            report["blockers"].append(
+                {
+                    "code": "empty_verified_observation_labels",
+                    "table": table,
+                    "count": label_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+        provenance_column = _observation_provenance_column(columns, metric)
+        if provenance_column is None:
+            report["checks"][f"observations.{metric}.provenance_present"] = _check_entry(
+                check_id=f"observations.{metric}.provenance_present",
+                status=FAIL,
+                detail="observations lacks provenance metadata columns",
+                count=0,
+                threshold=0,
+                met=False,
+            )
+            report["blockers"].append(
+                {
+                    "code": "missing_observation_provenance_columns",
+                    "table": table,
+                    "count": 0,
+                    "temperature_metric": metric,
+                }
+            )
+            continue
+
+        provenance_where = f"{label_where} AND {_blank_or_empty_json_sql(provenance_column)}"
+        provenance_count = _count(cur, table, provenance_where)
+        provenance_met = provenance_count == 0
+        provenance_check_id = f"observations.{metric}.provenance_present"
+        report["checks"][provenance_check_id] = _check_entry(
+            check_id=provenance_check_id,
+            status=PASS if provenance_met else FAIL,
+            detail=f"{metric} VERIFIED observation labels without provenance={provenance_count}",
+            count=provenance_count,
+            threshold=0,
+            met=provenance_met,
+        )
+        if not provenance_met:
+            report["blockers"].append(
+                {
+                    "code": "observations.verified_without_provenance",
+                    "table": table,
+                    "count": provenance_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+        if has_source:
+            wu_where = (
+                f"{provenance_where} "
+                "AND LOWER(COALESCE(source, '')) LIKE 'wu%'"
+            )
+            wu_count = _count(cur, table, wu_where)
+            wu_met = wu_count == 0
+            wu_check_id = f"observations.{metric}.wu_provenance_present"
+            report["checks"][wu_check_id] = _check_entry(
+                check_id=wu_check_id,
+                status=PASS if wu_met else FAIL,
+                detail=f"{metric} WU VERIFIED observation labels without provenance={wu_count}",
+                count=wu_count,
+                threshold=0,
+                met=wu_met,
+            )
+            if not wu_met:
+                report["blockers"].append(
+                    {
+                        "code": "observations.wu_empty_provenance",
+                        "table": table,
+                        "count": wu_count,
+                        "temperature_metric": metric,
+                    }
+                )
+
+        hko_predicates = []
+        if has_source:
+            hko_predicates.append("LOWER(COALESCE(source, '')) LIKE 'hko%'")
+        if has_city:
+            hko_predicates.append(
+                "LOWER(COALESCE(city, '')) IN ('hong kong', 'hong_kong', 'hk', 'hkg')"
+            )
+        if hko_predicates:
+            hko_where = f"{label_where} AND ({' OR '.join(hko_predicates)})"
+            hko_count = _count(cur, table, hko_where)
+            hko_met = hko_count == 0
+            hko_check_id = f"observations.{metric}.hko_training_blocked"
+            report["checks"][hko_check_id] = _check_entry(
+                check_id=hko_check_id,
+                status=PASS if hko_met else FAIL,
+                detail=(
+                    f"{metric} HKO/Hong Kong VERIFIED labels requiring fresh "
+                    f"source audit={hko_count}"
+                ),
+                count=hko_count,
+                threshold=0,
+                met=hko_met,
+            )
+            if not hko_met:
+                report["blockers"].append(
+                    {
+                        "code": "observations.hko_requires_fresh_source_audit",
+                        "table": table,
+                        "count": hko_count,
+                        "temperature_metric": metric,
+                    }
+                )
+
+
+def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
+    table = "calibration_pairs_v2"
+    if not _add_required_columns_check(
+        report,
+        cur,
+        table=table,
+        check_id="calibration_pairs_v2.preflight_columns_present",
+        columns=CALIBRATION_PAIR_PREFLIGHT_COLUMNS,
+    ):
+        return
+
+    pair_quality_checks = (
+        (
+            "calibration_pairs_v2.authority_safe",
+            "calibration_pairs_v2.authority_unsafe",
+            """
+            COALESCE(training_allowed, 0) = 1
+            AND (
+                authority IS NULL
+                OR TRIM(CAST(authority AS TEXT)) = ''
+                OR UPPER(TRIM(CAST(authority AS TEXT))) != 'VERIFIED'
+            )
+            """,
+            "training-allowed calibration pair rows with non-VERIFIED authority",
+        ),
+        (
+            "calibration_pairs_v2.causality_safe",
+            "calibration_pairs_v2.causality_unsafe",
+            """
+            COALESCE(training_allowed, 0) = 1
+            AND (
+                causality_status IS NULL
+                OR TRIM(CAST(causality_status AS TEXT)) = ''
+                OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
+            )
+            """,
+            "training-allowed calibration pair rows with unsafe causality_status",
+        ),
+        (
+            "calibration_pairs_v2.decision_group_present",
+            "calibration_pairs_v2.decision_group_missing",
+            """
+            COALESCE(training_allowed, 0) = 1
+            AND authority = 'VERIFIED'
+            AND (decision_group_id IS NULL OR TRIM(CAST(decision_group_id AS TEXT)) = '')
+            """,
+            "VERIFIED training-allowed calibration pair rows missing decision_group_id",
+        ),
+        (
+            "calibration_pairs_v2.p_raw_domain_safe",
+            "calibration_pairs_v2.p_raw_domain_unsafe",
+            """
+            COALESCE(training_allowed, 0) = 1
+            AND authority = 'VERIFIED'
+            AND (p_raw IS NULL OR p_raw < 0.0 OR p_raw > 1.0)
+            """,
+            "VERIFIED training-allowed calibration pair rows with p_raw outside [0, 1]",
+        ),
+        (
+            "calibration_pairs_v2.required_values_present",
+            "calibration_pairs_v2.required_values_missing",
+            f"""
+            COALESCE(training_allowed, 0) = 1
+            AND authority = 'VERIFIED'
+            AND (
+                {_any_blank_sql(('range_label', 'season', 'cluster', 'data_version'))}
+                OR lead_days IS NULL
+                OR outcome IS NULL
+                OR outcome NOT IN (0, 1)
+            )
+            """,
+            "VERIFIED training-allowed calibration pair rows missing fit values",
+        ),
+    )
+    for check_id, code, where, detail_prefix in pair_quality_checks:
+        count = _count(cur, table, where)
+        met = count == 0
+        report["checks"][check_id] = _check_entry(
+            check_id=check_id,
+            status=PASS if met else FAIL,
+            detail=f"{detail_prefix}={count}",
+            count=count,
+            threshold=0,
+            met=met,
+        )
+        if not met:
+            report["blockers"].append({"code": code, "table": table, "count": count})
+
+    for spec in METRIC_SPECS:
+        identity = spec.identity
+        metric = identity.temperature_metric
+        mismatch_count = _count_params(
+            cur,
+            table,
+            """
+            temperature_metric = ?
+            AND COALESCE(training_allowed, 0) = 1
+            AND (
+                observation_field IS NULL
+                OR observation_field != ?
+                OR data_version IS NULL
+                OR data_version != ?
+            )
+            """,
+            (metric, identity.observation_field, spec.allowed_data_version),
+        )
+        mismatch_met = mismatch_count == 0
+        mismatch_check_id = f"calibration_pairs_v2.{metric}.identity_safe"
+        report["checks"][mismatch_check_id] = _check_entry(
+            check_id=mismatch_check_id,
+            status=PASS if mismatch_met else FAIL,
+            detail=f"{metric} training-allowed calibration pair rows with identity mismatch={mismatch_count}",
+            count=mismatch_count,
+            threshold=0,
+            met=mismatch_met,
+        )
+        if not mismatch_met:
+            report["blockers"].append(
+                {
+                    "code": "calibration_pairs_v2.identity_mismatch",
+                    "table": table,
+                    "count": mismatch_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT cluster, season, data_version,
+                       COUNT(DISTINCT decision_group_id) AS n_eff
+                FROM calibration_pairs_v2
+                WHERE temperature_metric = ?
+                  AND observation_field = ?
+                  AND data_version = ?
+                  AND COALESCE(training_allowed, 0) = 1
+                  AND authority = 'VERIFIED'
+                  AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
+                  AND decision_group_id IS NOT NULL
+                  AND TRIM(CAST(decision_group_id AS TEXT)) != ''
+                  AND p_raw IS NOT NULL
+                  AND p_raw >= 0.0
+                  AND p_raw <= 1.0
+                  AND cluster IS NOT NULL
+                  AND TRIM(CAST(cluster AS TEXT)) != ''
+                  AND season IS NOT NULL
+                  AND TRIM(CAST(season AS TEXT)) != ''
+                  AND range_label IS NOT NULL
+                  AND TRIM(CAST(range_label AS TEXT)) != ''
+                  AND lead_days IS NOT NULL
+                  AND outcome IN (0, 1)
+                GROUP BY cluster, season, data_version
+                HAVING n_eff >= ?
+            )
+            """,
+            (
+                metric,
+                identity.observation_field,
+                spec.allowed_data_version,
+                MIN_PLATT_DECISION_GROUPS,
+            ),
+        )
+        bucket_row = cur.fetchone()
+        bucket_count = int(bucket_row[0] if bucket_row else 0)
+        bucket_met = bucket_count >= 1
+        bucket_check_id = f"calibration_pairs_v2.{metric}.mature_bucket_present"
+        report["checks"][bucket_check_id] = _check_entry(
+            check_id=bucket_check_id,
+            status=PASS if bucket_met else FAIL,
+            detail=(
+                f"{metric} Platt-refit buckets with n_eff>="
+                f"{MIN_PLATT_DECISION_GROUPS}: {bucket_count}"
+            ),
+            count=bucket_count,
+            threshold=1,
+            met=bucket_met,
+        )
+        if not bucket_met:
+            report["blockers"].append(
+                {
+                    "code": "empty_platt_refit_bucket",
+                    "table": table,
+                    "count": bucket_count,
+                    "temperature_metric": metric,
+                }
+            )
+
+
+def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) -> dict:
+    """Return a read-only input preflight for calibration_pairs_v2 rebuilds.
+
+    This is narrower than full training readiness: it checks only upstream
+    rebuild inputs and intentionally does not require calibration_pairs_v2,
+    platt_models_v2, market_events_v2, market_price_history, or settlements_v2.
+    """
+    report = _new_report("calibration-pair-rebuild-preflight", world_db)
+    if not world_db.exists():
+        _add_database_missing(report, world_db)
+        return report
+
+    uri = f"file:{world_db}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    cur = conn.cursor()
+    try:
+        _add_rebuild_snapshot_preflight_checks(report, cur)
+        _add_rebuild_observation_preflight_checks(report, cur)
+        _add_observation_instants_safety_checks(report, cur)
+    finally:
+        conn.close()
+
+    return _finalize_report(report)
+
+
+def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
+    """Return a read-only input preflight for platt_models_v2 refits.
+
+    This validates calibration_pairs_v2 as the refit input and intentionally
+    does not require platt_models_v2 to already be populated.
+    """
+    report = _new_report("platt-refit-preflight", world_db)
+    if not world_db.exists():
+        _add_database_missing(report, world_db)
+        return report
+
+    uri = f"file:{world_db}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    cur = conn.cursor()
+    try:
+        _add_platt_pair_preflight_checks(report, cur)
+    finally:
+        conn.close()
+
+    return _finalize_report(report)
 
 
 def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
@@ -982,6 +1770,40 @@ def run_training_readiness(*, world_db: Path = SHARED_DB, json_output: bool = Fa
     return 0 if report["ready"] else 1
 
 
+def run_calibration_pair_rebuild_preflight(
+    *,
+    world_db: Path = SHARED_DB,
+    json_output: bool = False,
+) -> int:
+    report = build_calibration_pair_rebuild_preflight_report(world_db)
+    if json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("Calibration-pair rebuild preflight:")
+        for check_id, check in report["checks"].items():
+            print(f"  [{check['status']}] {check_id}: {check['detail']}")
+        print()
+        print(f"RESULT: {report['status']}")
+    return 0 if report["ready"] else 1
+
+
+def run_platt_refit_preflight(
+    *,
+    world_db: Path = SHARED_DB,
+    json_output: bool = False,
+) -> int:
+    report = build_platt_refit_preflight_report(world_db)
+    if json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("Platt-refit preflight:")
+        for check_id, check in report["checks"].items():
+            print(f"  [{check['status']}] {check_id}: {check['detail']}")
+        print()
+        print(f"RESULT: {report['status']}")
+    return 0 if report["ready"] else 1
+
+
 # ---------------------------------------------------------------------------
 # Individual checks — all accept a sqlite3.Cursor for the main zeus.db
 # ---------------------------------------------------------------------------
@@ -1252,7 +2074,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("truth-surfaces", "training-readiness"),
+        choices=(
+            "truth-surfaces",
+            "training-readiness",
+            "calibration-pair-rebuild-preflight",
+            "platt-refit-preflight",
+        ),
         default="truth-surfaces",
         help="Diagnostic mode to run.",
     )
@@ -1271,4 +2098,13 @@ if __name__ == "__main__":
 
     if args.mode == "training-readiness":
         sys.exit(run_training_readiness(world_db=args.world_db, json_output=args.json))
+    if args.mode == "calibration-pair-rebuild-preflight":
+        sys.exit(
+            run_calibration_pair_rebuild_preflight(
+                world_db=args.world_db,
+                json_output=args.json,
+            )
+        )
+    if args.mode == "platt-refit-preflight":
+        sys.exit(run_platt_refit_preflight(world_db=args.world_db, json_output=args.json))
     sys.exit(run_checks())

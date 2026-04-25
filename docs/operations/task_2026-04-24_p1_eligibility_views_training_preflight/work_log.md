@@ -1,32 +1,37 @@
 # P1.5 Eligibility Views And Training Preflight Work Log
 
 Date: 2026-04-24
-Branch: `post-audit-remediation-mainline`
-Status: planning-only active.
+Branch: `midstream_remediation`
+Status: P1.5a implementation ready to commit.
 
-Task: Plan P1.5 script-side eligibility/preflight adapters without
-implementation authorization.
+Task: Implement the first P1.5 script-side eligibility/preflight adapter slice
+without schema, DB, runtime consumer, or P4 market/settlement widening.
 
 Changed files:
-- `docs/AGENTS.md`
-- `docs/README.md`
-- `architecture/topology.yaml`
-- `architecture/docs_registry.yaml`
-- `docs/operations/AGENTS.md`
+- `architecture/naming_conventions.yaml`
+- `architecture/test_topology.yaml`
+- `scripts/verify_truth_surfaces.py`
+- `scripts/rebuild_calibration_pairs_v2.py`
+- `scripts/refit_platt_v2.py`
+- `scripts/topology_doctor_test_checks.py`
+- `tests/test_truth_surface_health.py`
 - `docs/operations/current_state.md`
 - `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
 - `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
 - `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
-Summary: Opened the P1.5 planning packet, updated live routing/registries, and
-locked script-side preflight/adapters as the future first implementation seam.
+Summary: Restored and adapted read-only calibration-pair rebuild and
+Platt-refit preflight modes, then wired repair script CLI live-write entry
+points to fail closed when their preflight is `NOT_READY`. Also applied small
+topology hygiene fixes needed by the post-merge topology-reform gates.
 
-Verification: Planning-lock, work-record, change-receipts,
-current-state-receipt-bound, map-maintenance, receipt JSON, and `git diff
---check` passed after companion registry and receipt corrections. Architect,
-critic, and verifier reviews passed.
+Verification: Focused pytest, py_compile, semantic linter, topology
+planning-lock, topology map-maintenance advisory, script/test topology gates,
+freshness metadata, and `git diff --check` passed. Production world DB
+preflight/readiness commands remain read-only and return expected `NOT_READY`
+blockers.
 
-Next: Commit and push only the planning/control-surface files.
+Next: Commit and push this implementation slice.
 
 ## Planning Entry
 
@@ -34,7 +39,7 @@ Context rebuilt:
 
 - Reread `AGENTS.md`, `workspace_map.md`,
   `docs/operations/current_state.md`, and `docs/operations/AGENTS.md`.
-- Confirmed branch HEAD `50cd713` matches
+- At planning entry, confirmed prior branch HEAD `50cd713` matched
   `origin/post-audit-remediation-mainline`; only unrelated runtime
   `state/**` files are dirty.
 - Read current fact companions:
@@ -101,7 +106,181 @@ Process change:
 
 ## Next
 
-- Run planning closeout gates.
-- Dispatch critic/verifier on the planning packet.
-- Commit and push only the five planning/control-surface docs files if gates
-  and reviews pass.
+- Dispatch critic/verifier on the P1.5a implementation packet.
+- Run closeout gates and commit/push only the receipt-listed files if gates and
+  reviews pass.
+
+## P1.5a Implementation Entry
+
+Context rebuilt again before code edits:
+
+- Reread root `AGENTS.md`, `docs/operations/current_state.md`, this plan,
+  this work log, `docs/operations/AGENTS.md`, `scripts/AGENTS.md`, and
+  `tests/AGENTS.md`.
+- Read current-fact companions:
+  `docs/operations/current_data_state.md`,
+  `docs/operations/current_source_validity.md`, and
+  `docs/operations/known_gaps.md`.
+- Ran semantic boot and fatal-misread checks successfully.
+- Ran topology navigation twice: the first task wording misrouted to the data
+  backfill profile, so the implementation task was narrowed to read-only
+  diagnostic modes. The narrowed digest allowed
+  `scripts/verify_truth_surfaces.py` and `tests/test_truth_surface_health.py`;
+  the expanded navigation allowed the active packet docs/current-state
+  closeout files, while reporting known global docs/source/history-lore red
+  issues as context.
+- Checked script/test manifests. `verify_truth_surfaces.py` is registered as
+  diagnostic; `rebuild_calibration_pairs_v2.py` and `refit_platt_v2.py` are
+  dangerous repair scripts with `--force` live-write gates; the touched test
+  file is the existing truth-surface health antibody surface.
+- Scout mapped exact function seams and schema/test helper expectations.
+- Architect verdict: PASS for additive read-only preflight modes plus live CLI
+  guards; BLOCK state-schema views, runtime/replay consumer rewiring, P4
+  market/settlement population, and full `training-readiness` as the rebuild
+  or refit gate.
+
+## P1.5a Implementation
+
+Implemented:
+
+- `scripts/verify_truth_surfaces.py`
+  - Added `calibration-pair-rebuild-preflight`.
+  - Added `platt-refit-preflight`.
+  - Preserved existing `training-readiness` as the full end-to-end readiness
+    verdict.
+- `scripts/rebuild_calibration_pairs_v2.py`
+  - Added a `--no-dry-run --force` CLI preflight guard using
+    `calibration-pair-rebuild-preflight`.
+- `scripts/refit_platt_v2.py`
+  - Added a `--no-dry-run --force` CLI preflight guard using
+    `platt-refit-preflight`.
+- `tests/test_truth_surface_health.py`
+  - Added tests that rebuild preflight does not require
+    `calibration_pairs_v2`/`platt_models_v2`.
+  - Added tests for unsafe snapshot identity, WU empty provenance, unsafe
+    observation instants, unsafe calibration pair inputs, no circular
+    `platt_models_v2` dependency, and live CLI guard refusal.
+
+Implementation adjustment:
+
+- The first live-guard draft placed preflight inside internal
+  `rebuild_v2/refit_v2` functions. That would have broken existing unit-level
+  regression tests that intentionally call those functions on minimal or
+  in-memory DBs. The guard was moved to the operator CLI entry points, which
+  matches the `--no-dry-run --force` repair-script boundary while preserving
+  direct function testability.
+
+## P1.5a Verification
+
+Commands run:
+
+- `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py scripts/rebuild_calibration_pairs_v2.py scripts/refit_platt_v2.py`
+- `.venv/bin/python -m pytest -q tests/test_truth_surface_health.py::TestTrainingReadinessP0`
+  -> `50 passed`
+- `.venv/bin/python scripts/semantic_linter.py --check scripts/verify_truth_surfaces.py scripts/rebuild_calibration_pairs_v2.py scripts/refit_platt_v2.py tests/test_truth_surface_health.py`
+  -> pass
+- `.venv/bin/python scripts/verify_truth_surfaces.py --mode calibration-pair-rebuild-preflight --world-db state/zeus-world.db --json`
+  -> `NOT_READY` as expected; blockers include empty rebuild-eligible
+  snapshots, WU provenance gaps, HKO fresh-audit blockers, and unsafe
+  observation source roles.
+- `.venv/bin/python scripts/verify_truth_surfaces.py --mode platt-refit-preflight --world-db state/zeus-world.db --json`
+  -> `NOT_READY` as expected; blockers are missing mature high/low Platt
+  refit buckets.
+- `.venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json`
+  -> `NOT_READY` as expected; full readiness still requires downstream
+  artifacts and P4 settlement/market surfaces.
+- `.venv/bin/python scripts/semantic_linter.py --check <touched files>`
+  replaced `python3 scripts/semantic_linter.py` because system `python3`
+  cannot parse the script's modern type-union syntax in this environment.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json`
+  -> ok
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <P1.5a files> --json`
+  -> ok
+- `git diff --check` -> ok
+
+Known red context:
+
+- Production DB remains `NOT_READY`; this is expected and not a P1.5a failure.
+- Code Review Graph remains stale/branch-mismatched derived context, not
+  authority.
+- Unrelated runtime files under `state/**` were preserved in local stash
+  entries and remain forbidden for this packet.
+
+## Branch Recovery
+
+After the old mainline branch was merged into `main`, created
+`midstream_remediation` from the merged HEAD and carried the in-progress P1.5a
+working tree forward without staging or resetting unrelated runtime artifacts.
+
+After the accidental merge/topology reform landed, re-read `AGENTS.md`,
+`docs/AGENTS.md`, `docs/operations/AGENTS.md`, `scripts/AGENTS.md`,
+`tests/AGENTS.md`, and `architecture/AGENTS.md`, then reran topology
+navigation for both the restored P1.5a files and the small topology-health
+repair files. The restored P1.5a implementation remained in-bounds, but the
+new gates required:
+
+- Lifecycle freshness headers on the touched repair scripts.
+- `architecture/naming_conventions.yaml` exceptions for existing
+  `snapshot_checksum.py` and `test_currency_audit.py`.
+- `scripts/topology_doctor_test_checks.py` to treat
+  `midstream_guardian_panel` as an overlay, not an exclusive classification.
+- `architecture/test_topology.yaml` skip-count/reason metadata refreshed for
+  `tests/test_provenance_enforcement.py` and
+  `tests/test_live_safety_invariants.py`.
+
+Additional verification after these fixes:
+
+- `python3 scripts/topology_doctor.py --scripts --json` -> ok
+- `python3 scripts/topology_doctor.py --tests --json` -> ok
+- `python3 scripts/topology_doctor.py --naming-conventions --json` -> ok
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <touched script/test files> --json` -> ok
+- `.venv/bin/python -m py_compile scripts/topology_doctor_test_checks.py` -> ok
+- `.venv/bin/python -m pytest -q tests/test_topology_doctor.py -k "scripts or tests_mode"` -> `16 passed, 226 deselected`
+- `.venv/bin/python -m pytest -q tests/test_topology_doctor.py` was also
+  attempted and still fails 13 unrelated live-topology/global-health cases
+  (docs/source/history-lore repo-health, optional `fastmcp`, and stale
+  topology-reform expectations). This full suite is not used as closeout
+  evidence for P1.5a; the relevant script/test topology gates above are green.
+
+Parallel/unrelated WIP handling:
+
+- `state/daemon-heartbeat.json` and `state/status_summary.json` were stashed
+  in local runtime-preservation entries and are not part of the submit diff.
+- Unrelated topology WIP in `scripts/topology_doctor_digest.py`,
+  `scripts/topology_doctor.py`, and `tests/test_topology_doctor.py` was
+  reviewed, found not ready for this packet, and stashed separately before
+  final P1.5a verification.
+- Critic requested changes while runtime `state/**` artifacts were still in
+  the diff. Both `state/daemon-heartbeat.json` and
+  `state/status_summary.json` were excluded from the closeout diff with local
+  skip-worktree handling after stash preservation; final diff exact-set check
+  matched the 11 receipt files and had no `state/**` entries.
+- Follow-up verifier PASS: current diff exactly matches the 11 receipt files;
+  `git diff --check`, py_compile, focused truth-surface tests, focused
+  topology tests, topology closeout gates, and receipt JSON parsing passed.
+- Follow-up critic PASS for code/topology logic after runtime artifact
+  exclusion; no remaining blocking issue in the receipt-covered slice.
+
+## P1.5a Process Note
+
+What worked:
+
+- The wrong-profile topology result was treated as a signal to narrow task
+  wording, not as a reason to stop or widen scope.
+- Scout and architect ran before edits, and the architect result materially
+  changed the slice from diagnostic-only to diagnostic plus CLI live guard.
+- The implementation caught and corrected a real testability issue before
+  review: live guards belong at the operator CLI boundary, not inside every
+  direct unit-call function.
+
+What did not work:
+
+- The first implementation of the guard was too deep in the call graph. That
+  would have slowed future CI/debug loops by forcing unrelated unit tests to
+  construct full preflight-ready production fixtures.
+
+Process change:
+
+- For every future small package, include an explicit "existing tests likely
+  calling this public function directly?" check before placing fail-closed
+  guards inside reusable internals.

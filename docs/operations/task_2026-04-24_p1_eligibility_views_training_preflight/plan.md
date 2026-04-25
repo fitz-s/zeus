@@ -1,10 +1,11 @@
 # P1.5 Eligibility Views And Training Preflight Ralplan Packet
 
 Date: 2026-04-24
-Branch: `post-audit-remediation-mainline`
-Status: planning-only packet. P1.4 implementation closed at `df9ece5`; P1.4
-control surfaces closed at `50cd713`. No implementation, schema, DB, replay,
-live, or settlement-v2 population change is authorized by this planning commit.
+Branch: `midstream_remediation`
+Status: P1.5 planning was pushed at `07c86d8`. P1.5a implementation is the
+first script-side preflight/adapters slice. No schema, DB, replay/live
+consumer rewiring, settlement-v2 population, or P4 market-identity work is
+authorized.
 
 ## Task
 
@@ -14,7 +15,7 @@ calibration/training-preflight cutover.
 P1.5 exists because P1.1-P1.4 now expose fail-closed provenance, observation,
 and settlement blockers, but training/calibration entry points still need a
 single contract they must consume before writing or fitting training artifacts.
-This packet plans that contract; it does not implement it.
+This packet records the contract and the first implementation slice.
 
 ## Required Phase Entry
 
@@ -146,6 +147,20 @@ post-close reviewed, and a fresh phase-entry is completed:
   `tests/test_phase7a_metric_cutover.py` and
   `tests/test_calibration_bins_canonical.py`
 
+P1.5a implementation files:
+
+- `architecture/naming_conventions.yaml` (topology hygiene companion only)
+- `architecture/test_topology.yaml` (topology hygiene companion only)
+- `scripts/verify_truth_surfaces.py`
+- `scripts/rebuild_calibration_pairs_v2.py`
+- `scripts/refit_platt_v2.py`
+- `scripts/topology_doctor_test_checks.py` (topology hygiene companion only)
+- `tests/test_truth_surface_health.py`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+
 Optional future closeout bookkeeping:
 
 - `docs/operations/AGENTS.md`
@@ -165,7 +180,9 @@ Forbidden files for this planning packet:
 - `src/execution/**`
 - `docs/authority/**`
 - `architecture/**` except `architecture/topology.yaml` and
-  `architecture/docs_registry.yaml` companion registry updates named above
+  `architecture/docs_registry.yaml` planning companion registry updates named
+  above, and the P1.5a recovery topology hygiene edits explicitly listed in
+  the implementation file list
 - production DBs, generated runtime JSON, and graph artifacts
 
 ## Planned Implementation Shape
@@ -185,6 +202,36 @@ Future P1.5 implementation should:
    correct preflight mode without creating circular blockers.
 5. Preserve existing `training-readiness` behavior as the full end-to-end
    readiness verdict. New mode names must make phase scope explicit.
+
+## P1.5a Implementation
+
+P1.5a implements the first future slice above:
+
+- Added `calibration-pair-rebuild-preflight` to
+  `scripts/verify_truth_surfaces.py`. It opens the world DB read-only and
+  checks only rebuild inputs: metric-scoped `ensemble_snapshots_v2`,
+  verified/provenanced `observations` labels, and existing
+  `observation_instants_v2` source-role/causality/payload blockers.
+- Added `platt-refit-preflight` to `scripts/verify_truth_surfaces.py`. It
+  checks `calibration_pairs_v2` as the refit input, including metric identity,
+  `training_allowed=1`, `authority='VERIFIED'`, `causality_status='OK'`,
+  non-empty `decision_group_id`, p_raw domain, and mature bucket presence.
+- Kept full `training-readiness` semantics unchanged; it still requires
+  populated downstream artifacts for end-to-end readiness.
+- Added `--no-dry-run --force` CLI guards in
+  `scripts/rebuild_calibration_pairs_v2.py` and
+  `scripts/refit_platt_v2.py`. These guard operator live-write entry points
+  before connecting for live work; internal function-level regression tests
+  remain directly testable.
+- Added focused tests proving the preflight modes avoid circular target-artifact
+  blockers, fail on unsafe inputs, and refuse live CLI writes when preflight is
+  `NOT_READY`.
+- After branch recovery onto the topology-reform HEAD, applied small topology
+  hygiene fixes so the restored packet satisfies current gates: lifecycle
+  headers for touched repair scripts, naming exceptions for two established
+  scripts, `midstream_guardian_panel` treated as an overlay instead of an
+  exclusive test category, and refreshed high-sensitivity skip metadata for
+  two existing tests.
 
 ## Rejected Options
 
@@ -222,10 +269,13 @@ Future implementation must run at minimum:
 - `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py scripts/rebuild_calibration_pairs_v2.py scripts/refit_platt_v2.py`
 - focused pytest for `tests/test_truth_surface_health.py::TestTrainingReadinessP0`
   plus rebuild/refit contract tests routed by topology
+- `python3 scripts/topology_doctor.py --scripts --json`
+- `python3 scripts/topology_doctor.py --tests --json`
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <touched script/test files> --json`
 - `.venv/bin/python scripts/verify_truth_surfaces.py --mode training-readiness --world-db state/zeus-world.db --json`
   as read-only evidence; current production DB is expected to remain
   `NOT_READY` until later P/P4 work clears blockers.
-- `python3 scripts/semantic_linter.py --check <touched scripts/tests>`
+- `.venv/bin/python scripts/semantic_linter.py --check <touched scripts/tests>`
 - receipt/work-record/current-state/map-maintenance gates and `git diff --check`
 
 ## Acceptance For This Planning Packet

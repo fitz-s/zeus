@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Purpose: Rebuild metric-aware calibration_pairs_v2 behind dry-run and preflight gates.
+# Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
+
 """Rebuild calibration_pairs_v2 from ensemble_snapshots_v2 (high track).
 
 Phase 4C — reads high-track canonical snapshots from ``ensemble_snapshots_v2``
@@ -76,6 +80,10 @@ from src.state.db import get_world_connection, init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
+from scripts.verify_truth_surfaces import (
+    SHARED_DB,
+    build_calibration_pair_rebuild_preflight_report,
+)
 
 
 def iter_training_snapshots(conn: sqlite3.Connection, spec: CalibrationMetricSpec):
@@ -197,6 +205,16 @@ def _delete_canonical_v2_slice(conn: sqlite3.Connection, *, spec: CalibrationMet
         "DELETE FROM calibration_pairs_v2 WHERE bin_source = ? AND temperature_metric = ?",
         (CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric),
     )
+
+
+def _assert_rebuild_preflight_ready(db_path: Path) -> None:
+    report = build_calibration_pair_rebuild_preflight_report(db_path)
+    if not report["ready"]:
+        blocker_codes = sorted({item["code"] for item in report["blockers"]})
+        raise RuntimeError(
+            "Refusing live v2 rebuild: calibration-pair rebuild preflight is "
+            f"{report['status']} ({', '.join(blocker_codes)})"
+        )
 
 
 def _process_snapshot_v2(
@@ -560,6 +578,14 @@ def main() -> int:
         help="Monte Carlo iterations per snapshot (default: ensemble_n_mc() = 10,000).",
     )
     args = parser.parse_args()
+
+    db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
+    if not args.dry_run:
+        try:
+            _assert_rebuild_preflight_ready(db_path_for_preflight)
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
 
     if args.db_path:
         conn = sqlite3.connect(args.db_path)

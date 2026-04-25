@@ -417,9 +417,8 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Provenance registry law skips only when registry YAML or PyYAML is unavailable.
-    skip_count: 8
+    skip_count: 4
     reason_patterns:
-      - "Registry YAML not yet created"
       - "PyYAML not installed"
     sunset: Remove once provenance registry dependency is always present in test env.
   tests/test_wu_scheduler.py:
@@ -451,11 +450,10 @@ high_sensitivity_skips:
     owner: topology-program
     packet: Packet 5
     reason: Canonical write path and contamination-guard relocation skips remain safety-sensitive.
-    skip_count: 8
+    skip_count: 3
     reason_patterns:
-      - "P9: requires canonical write path setup"
-      - "Phase2: paper mode removed"
-      - "P4: contamination guard"
+      - "paper-mode was removed in Phase2"
+      - "_load_portfolio_from_json_data contamination-guard path are deleted"
     sunset: Must have replacement live-safety antibodies before deletion.
   tests/test_truth_surface_health.py:
     owner: topology-program
