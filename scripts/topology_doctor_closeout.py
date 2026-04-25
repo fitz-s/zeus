@@ -155,6 +155,20 @@ def selected_lanes(api: Any, changed_files: list[str]) -> dict[str, Any]:
     }
 
 
+def ensure_global_health_lanes(api: Any, unscoped_lanes: dict[str, Any]) -> None:
+    runners = {
+        "docs": api.run_docs,
+        "source": api.run_source,
+        "tests": api.run_tests,
+        "scripts": api.run_scripts,
+        "data_rebuild": api.run_data_rebuild,
+        "context_budget": api.run_context_budget,
+    }
+    for lane, runner in runners.items():
+        if lane not in unscoped_lanes:
+            unscoped_lanes[lane] = runner()
+
+
 def run_closeout(
     api: Any,
     *,
@@ -206,6 +220,7 @@ def run_closeout(
             lanes["context_budget"] = unscoped_lanes["context_budget"]
         else:
             lanes["context_budget"] = scoped_result(api, unscoped_lanes["context_budget"], actual_changed)
+    ensure_global_health_lanes(api, unscoped_lanes)
 
     blocking_issues = [
         {"lane": lane, **api.asdict(issue)}

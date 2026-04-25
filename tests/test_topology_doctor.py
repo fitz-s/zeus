@@ -1814,6 +1814,32 @@ def test_navigation_requested_file_issue_blocks_route(monkeypatch):
     assert payload["repo_health_warnings"] == []
 
 
+def test_navigation_unclassified_requested_file_blocks_route(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation("source task", ["does/not/exist.py"])
+
+    assert payload["ok"] is False
+    assert payload["direct_blockers"][0]["lane"] == "navigation"
+    assert payload["direct_blockers"][0]["code"] == "navigation_requested_file_unclassified"
+
+
 def test_navigation_synthetic_global_issue_is_advisory_without_strict_health(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 
@@ -3093,6 +3119,9 @@ def test_closeout_filters_repo_global_lane_noise(monkeypatch):
     assert payload["ok"] is True
     assert payload["lanes"]["docs"]["issue_count"] == 0
     assert payload["global_health"]["docs"]["issue_count"] == 1
+    assert "source" in payload["global_health"]
+    assert "tests" in payload["global_health"]
+    assert "scripts" in payload["global_health"]
 
 
 def test_closeout_changed_source_missing_rationale_still_blocks(monkeypatch):
