@@ -1092,20 +1092,19 @@ def build_digest(task: str, files: list[str] | None = None) -> dict[str, Any]:
 def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str]) -> bool:
     if not requested_paths:
         return False
-    if issue_path.startswith("<"):
-        return True
     normalized = issue_path.split(":", 1)[0].rstrip("/")
     for requested in requested_paths:
         scoped = requested.rstrip("/")
-        # Navigation scopes both directory-level issues for requested files and
-        # file-level issues under requested directories.
-        if normalized == scoped:
-            return True
-        if issue_path.startswith(f"{scoped}:"):
-            return True
-        if scoped.startswith(f"{normalized}/"):
-            return True
-        if normalized.startswith(f"{scoped}/"):
+        same_path = normalized == scoped
+        annotated_requested_file = issue_path.startswith(f"{scoped}:")
+        issue_directory_contains_requested_file = scoped.startswith(f"{normalized}/")
+        requested_directory_contains_issue_file = normalized.startswith(f"{scoped}/")
+        if (
+            same_path
+            or annotated_requested_file
+            or issue_directory_contains_requested_file
+            or requested_directory_contains_issue_file
+        ):
             return True
     return False
 

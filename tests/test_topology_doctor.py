@@ -1740,7 +1740,7 @@ def test_navigation_aggregates_default_health_and_digest():
     assert any(card["id"] == "WMO_ROUNDING_BANKER_FAILURE" for card in payload["digest"]["history_lore"])
 
 
-def test_navigation_unrelated_docs_drift_does_not_block_source_route(monkeypatch):
+def test_navigation_unrelated_docs_issue_does_not_block_source_route(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 
     def ok_result():
@@ -1812,6 +1812,42 @@ def test_navigation_requested_file_issue_blocks_route(monkeypatch):
     assert payload["ok"] is False
     assert payload["direct_blockers"][0]["code"] == "source_rationale_missing"
     assert payload["repo_health_warnings"] == []
+
+
+def test_navigation_synthetic_global_issue_is_advisory_without_strict_health(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    docs_result = topology_doctor.StrictResult(
+        ok=False,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="global_docs_issue",
+                path="<docs-global>",
+                message="synthetic global issue",
+            )
+        ],
+    )
+    for name in (
+        "run_context_budget",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: docs_result)
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"])
+
+    assert payload["ok"] is True
+    assert payload["direct_blockers"] == []
+    assert payload["repo_health_warnings"][0]["path"] == "<docs-global>"
 
 
 def test_navigation_strict_health_re_enables_global_blocking(monkeypatch):
