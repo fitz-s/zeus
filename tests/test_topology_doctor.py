@@ -1723,6 +1723,107 @@ def test_format_issues_lists_each_issue_on_its_own_line():
     assert "2. [warning:code_b] b.py: second" in text
 
 
+def test_issue_legacy_json_keys_preserved():
+    issue = topology_doctor.issue(
+        "source_rationale_missing",
+        "src/example.py",
+        "tracked src file has no rationale entry",
+    )
+
+    payload = topology_doctor.asdict(issue)
+
+    assert list(payload) == ["code", "path", "message", "severity"]
+    assert payload["code"] == "source_rationale_missing"
+
+
+def test_issue_v2_emits_owner_manifest_when_present():
+    issue = topology_doctor.issue(
+        "source_rationale_missing",
+        "src/example.py",
+        "tracked src file has no rationale entry",
+    )
+
+    payload = topology_doctor._issue_to_json(issue, "2")
+
+    assert payload["owner_manifest"] == "architecture/source_rationale.yaml"
+    assert payload["repair_kind"] == "add_registry_row"
+    assert "navigation" in payload["blocking_modes"]
+
+
+def test_issue_factories_set_blocking_modes():
+    advisory = topology_doctor.advisory("docs_registry_missing", "docs/a.md", "advisory")
+    blocking = topology_doctor.blocking("script_manifest_missing", "scripts/a.py", "blocking")
+    legacy = topology_doctor.legacy_issue("script_manifest_missing", "scripts/a.py", "legacy")
+
+    assert advisory.severity == "warning"
+    assert advisory.blocking_modes == ("global_health",)
+    assert blocking.severity == "error"
+    assert "closeout" in blocking.blocking_modes
+    assert legacy.owner_manifest is None
+    assert legacy.blocking_modes is None
+
+
+def test_renderer_groups_by_repair_kind():
+    issues = [
+        topology_doctor.issue("source_rationale_missing", "src/a.py", "missing"),
+        topology_doctor.issue("script_manifest_missing", "scripts/a.py", "missing"),
+    ]
+
+    summary = topology_doctor.summarize_issues(issues)
+    formatted = topology_doctor.format_issues(issues)
+
+    assert "by owner/repair:" in summary
+    assert "architecture/source_rationale.yaml:add_registry_row: 1" in summary
+    assert "(architecture/script_manifest.yaml; add_registry_row)" in formatted
+
+
+def test_blocking_modes_drives_navigation_lane_policy(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    advisory_source_issue = topology_doctor.TopologyIssue(
+        code="source_rationale_missing",
+        path="src/engine/replay.py",
+        message="global-only advisory",
+        blocking_modes=("global_health",),
+    )
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(
+        topology_doctor,
+        "run_source",
+        lambda: topology_doctor.StrictResult(ok=False, issues=[advisory_source_issue]),
+    )
+
+    payload = topology_doctor.run_navigation("source task", ["src/engine/replay.py"], issue_schema_version="2")
+
+    assert payload["ok"] is True
+    assert payload["direct_blockers"] == []
+    assert payload["repo_health_warnings"][0]["blocking_modes"] == ["global_health"]
+
+
+def test_issue_schema_drift_guard():
+    schema = topology_doctor.load_schema()["issue_json_contract"]
+    expected = set(schema["legacy_fields"]) | set(schema["typed_fields"])
+
+    assert set(topology_doctor.topology_issue_field_names()) == expected
+    assert set(schema["enums"]["repair_kind"]) == topology_doctor.ISSUE_REPAIR_KINDS
+    assert set(schema["enums"]["maturity"]) == topology_doctor.ISSUE_MATURITY_VALUES
+    assert set(schema["enums"]["authority_status"]) == topology_doctor.ISSUE_AUTHORITY_STATUSES
+    assert tuple(schema["enums"]["blocking_modes"]) == topology_doctor.ISSUE_BLOCKING_MODES
+
+
 def test_navigation_aggregates_default_health_and_digest():
     payload = topology_doctor.run_navigation(
         "fix settlement rounding in replay",

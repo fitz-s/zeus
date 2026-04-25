@@ -23,6 +23,52 @@ node_required_fields:
   - authority_role
   - forbidden_misread
 
+issue_json_contract:
+  schema_versions:
+    "1": "legacy issue keys only"
+    "2": "legacy keys plus optional typed metadata"
+  legacy_fields:
+    code: string
+    path: string
+    message: string
+    severity: string
+  typed_fields:
+    lane: string
+    scope: string
+    owner_manifest: string
+    repair_kind: string
+    blocking_modes: list[string]
+    related_paths: list[string]
+    companion_of: string
+    maturity: string
+    expires_at: string
+    confidence: string_or_number
+    authority_status: string
+    repair_hint: string
+  enums:
+    repair_kind:
+      - add_registry_row
+      - update_companion
+      - extract_law_to_book
+      - propose_owner_manifest
+      - refresh_graph
+      - none
+    maturity:
+      - stable
+      - provisional
+      - placeholder
+    authority_status:
+      - authority
+      - derived
+      - evidence
+      - unknown
+    blocking_modes:
+      - navigation
+      - navigation_strict_health
+      - closeout
+      - strict_full_repo
+      - global_health
+
 enums:
   status:
     - active

@@ -12,7 +12,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict as dataclass_asdict, dataclass, fields
 from datetime import date
 from fnmatch import fnmatch
 from pathlib import Path
@@ -74,14 +74,116 @@ class TopologyIssue:
     path: str
     message: str
     severity: str = "error"
+    lane: str | None = None
+    scope: str | None = None
+    owner_manifest: str | None = None
+    repair_kind: str | None = None
+    blocking_modes: tuple[str, ...] | None = None
+    related_paths: tuple[str, ...] | None = None
+    companion_of: str | None = None
+    maturity: str | None = None
+    expires_at: str | None = None
+    confidence: str | float | None = None
+    authority_status: str | None = None
+    repair_hint: str | None = None
+
+
+ISSUE_SCHEMA_VERSIONS = {"1", "2"}
+ISSUE_LEGACY_FIELDS = ("code", "path", "message", "severity")
+ISSUE_TYPED_FIELDS = (
+    "lane",
+    "scope",
+    "owner_manifest",
+    "repair_kind",
+    "blocking_modes",
+    "related_paths",
+    "companion_of",
+    "maturity",
+    "expires_at",
+    "confidence",
+    "authority_status",
+    "repair_hint",
+)
+ISSUE_REPAIR_KINDS = {
+    "add_registry_row",
+    "update_companion",
+    "extract_law_to_book",
+    "propose_owner_manifest",
+    "refresh_graph",
+    "none",
+}
+ISSUE_MATURITY_VALUES = {"stable", "provisional", "placeholder"}
+ISSUE_AUTHORITY_STATUSES = {"authority", "derived", "evidence", "unknown"}
 
 
 _NAVIGATION_MODE_POLICY = {
     "navigation": "requested_file_scoped",
     "navigation_strict_health": "all_errors_block",
+    "closeout": "changed_file_scoped",
     "strict_full_repo": "all_errors_block",
     "global_health": "advisory_counts",
 }
+
+ISSUE_BLOCKING_MODES = tuple(_NAVIGATION_MODE_POLICY)
+
+
+def topology_issue_field_names() -> tuple[str, ...]:
+    return tuple(field.name for field in fields(TopologyIssue))
+
+
+def _normalize_issue_sequence(value: tuple[str, ...] | list[str] | set[str] | str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value)
+
+
+def _issue_metadata_for_code(code: str, path: str) -> dict[str, Any]:
+    del path
+    families = (
+        ("docs_registry", "docs", "architecture/docs_registry.yaml", "add_registry_row"),
+        ("operations_", "docs", "architecture/docs_registry.yaml", "update_companion"),
+        ("current_state_", "docs", "docs/operations/current_state.md", "update_companion"),
+        ("source_", "source", "architecture/source_rationale.yaml", "add_registry_row"),
+        ("test_", "tests", "architecture/test_topology.yaml", "add_registry_row"),
+        ("script_", "scripts", "architecture/script_manifest.yaml", "add_registry_row"),
+        ("map_maintenance", "map_maintenance", "architecture/map_maintenance.yaml", "update_companion"),
+        ("code_review_graph", "code_review_graph", "architecture/code_review_graph_protocol.yaml", "refresh_graph"),
+        ("module_book", "module_books", "architecture/module_manifest.yaml", "update_companion"),
+        ("module_manifest", "module_books", "architecture/module_manifest.yaml", "update_companion"),
+    )
+    for prefix, lane, owner_manifest, repair_kind in families:
+        if code.startswith(prefix):
+            return {
+                "lane": lane,
+                "scope": "changed_file",
+                "owner_manifest": owner_manifest,
+                "repair_kind": repair_kind,
+                "blocking_modes": ISSUE_BLOCKING_MODES,
+                "maturity": "stable",
+                "authority_status": "authority",
+            }
+    return {}
+
+
+def _issue_to_json(issue: TopologyIssue, schema_version: str = "1") -> dict[str, Any]:
+    if schema_version not in ISSUE_SCHEMA_VERSIONS:
+        raise ValueError(f"unsupported issue schema version: {schema_version}")
+    payload: dict[str, Any] = {field: getattr(issue, field) for field in ISSUE_LEGACY_FIELDS}
+    if schema_version == "2":
+        for field in ISSUE_TYPED_FIELDS:
+            value = getattr(issue, field)
+            if value is None:
+                continue
+            payload[field] = list(value) if isinstance(value, tuple) else value
+    return payload
+
+
+def asdict(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, TopologyIssue):
+        return _issue_to_json(obj)
+    return dataclass_asdict(obj)
 
 
 @dataclass(frozen=True)
@@ -213,12 +315,101 @@ def _git_visible_files() -> list[str]:
     return sorted(line for line in proc.stdout.splitlines() if line)
 
 
+def _make_issue(
+    code: str,
+    path: str,
+    message: str,
+    *,
+    severity: str = "error",
+    lane: str | None = None,
+    scope: str | None = None,
+    owner_manifest: str | None = None,
+    repair_kind: str | None = None,
+    blocking_modes: tuple[str, ...] | list[str] | set[str] | str | None = None,
+    related_paths: tuple[str, ...] | list[str] | set[str] | str | None = None,
+    companion_of: str | None = None,
+    maturity: str | None = None,
+    expires_at: str | None = None,
+    confidence: str | float | None = None,
+    authority_status: str | None = None,
+    repair_hint: str | None = None,
+    annotate: bool = True,
+) -> TopologyIssue:
+    metadata = _issue_metadata_for_code(code, path) if annotate else {}
+    metadata.update(
+        {
+            key: value
+            for key, value in {
+                "lane": lane,
+                "scope": scope,
+                "owner_manifest": owner_manifest,
+                "repair_kind": repair_kind,
+                "blocking_modes": blocking_modes,
+                "related_paths": related_paths,
+                "companion_of": companion_of,
+                "maturity": maturity,
+                "expires_at": expires_at,
+                "confidence": confidence,
+                "authority_status": authority_status,
+                "repair_hint": repair_hint,
+            }.items()
+            if value is not None
+        }
+    )
+    return TopologyIssue(
+        code=code,
+        path=path,
+        message=message,
+        severity=severity,
+        lane=metadata.get("lane"),
+        scope=metadata.get("scope"),
+        owner_manifest=metadata.get("owner_manifest"),
+        repair_kind=metadata.get("repair_kind"),
+        blocking_modes=_normalize_issue_sequence(metadata.get("blocking_modes")),
+        related_paths=_normalize_issue_sequence(metadata.get("related_paths")),
+        companion_of=metadata.get("companion_of"),
+        maturity=metadata.get("maturity"),
+        expires_at=metadata.get("expires_at"),
+        confidence=metadata.get("confidence"),
+        authority_status=metadata.get("authority_status"),
+        repair_hint=metadata.get("repair_hint"),
+    )
+
+
+def issue(code: str, path: str, message: str, **metadata: Any) -> TopologyIssue:
+    return _make_issue(code, path, message, **metadata)
+
+
+def warning(code: str, path: str, message: str, **metadata: Any) -> TopologyIssue:
+    return _make_issue(code, path, message, severity="warning", **metadata)
+
+
+def advisory(code: str, path: str, message: str, **metadata: Any) -> TopologyIssue:
+    metadata.setdefault("blocking_modes", ("global_health",))
+    return _make_issue(code, path, message, severity="warning", **metadata)
+
+
+def blocking(code: str, path: str, message: str, **metadata: Any) -> TopologyIssue:
+    metadata.setdefault("blocking_modes", ISSUE_BLOCKING_MODES)
+    return _make_issue(code, path, message, severity="error", **metadata)
+
+
+def global_drift(code: str, path: str, message: str, **metadata: Any) -> TopologyIssue:
+    metadata.setdefault("scope", "global")
+    metadata.setdefault("blocking_modes", ("global_health",))
+    return _make_issue(code, path, message, severity="warning", **metadata)
+
+
+def legacy_issue(code: str, path: str, message: str, severity: str = "error") -> TopologyIssue:
+    return _make_issue(code, path, message, severity=severity, annotate=False)
+
+
 def _issue(code: str, path: str, message: str) -> TopologyIssue:
-    return TopologyIssue(code=code, path=path, message=message)
+    return issue(code, path, message)
 
 
 def _warning(code: str, path: str, message: str) -> TopologyIssue:
-    return TopologyIssue(code=code, path=path, message=message, severity="warning")
+    return warning(code, path, message)
 
 
 def _registry_checks():
@@ -890,6 +1081,7 @@ def run_closeout(
     plan_evidence: str | None = None,
     work_record_path: str | None = None,
     receipt_path: str | None = None,
+    issue_schema_version: str = "1",
 ) -> dict[str, Any]:
     return _closeout_checks().run_closeout(
         sys.modules[__name__],
@@ -897,6 +1089,7 @@ def run_closeout(
         plan_evidence=plan_evidence,
         work_record_path=work_record_path,
         receipt_path=receipt_path,
+        issue_schema_version=issue_schema_version,
     )
 
 
@@ -1109,11 +1302,19 @@ def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str])
     return False
 
 
+def _issue_blocks_mode(issue: dict[str, Any], mode: str) -> bool:
+    blocking_modes = issue.get("blocking_modes")
+    if not blocking_modes:
+        return True
+    return mode in blocking_modes
+
+
 def _navigation_direct_blockers(issues: list[dict[str, Any]], requested_paths: list[str]) -> list[dict[str, Any]]:
     return [
         issue
         for issue in issues
         if issue.get("severity") == "error"
+        and _issue_blocks_mode(issue, "navigation")
         and _navigation_issue_path_in_scope(str(issue.get("path", "")), requested_paths)
     ]
 
@@ -1149,7 +1350,19 @@ def _global_health_counts(checks: dict[str, StrictResult]) -> dict[str, dict[str
     }
 
 
-def run_navigation(task: str, files: list[str] | None = None, *, strict_health: bool = False) -> dict[str, Any]:
+def _issue_with_lane(lane: str, issue: TopologyIssue, schema_version: str = "1") -> dict[str, Any]:
+    payload = _issue_to_json(issue, schema_version)
+    payload["lane"] = payload.get("lane") or lane
+    return payload
+
+
+def run_navigation(
+    task: str,
+    files: list[str] | None = None,
+    *,
+    strict_health: bool = False,
+    issue_schema_version: str = "1",
+) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
         "docs": run_docs(),
@@ -1165,12 +1378,24 @@ def run_navigation(task: str, files: list[str] | None = None, *, strict_health: 
     digest = build_digest(task, requested_paths)
     route_issues = _navigation_requested_file_issues(requested_paths)
     health_issues = [
-        {"lane": lane, **asdict(issue)}
+        _issue_with_lane(lane, issue, issue_schema_version)
+        for lane, result in checks.items()
+        for issue in result.issues
+    ]
+    health_policy_issues = [
+        _issue_with_lane(lane, issue, "2")
         for lane, result in checks.items()
         for issue in result.issues
     ]
     issues = health_issues + route_issues
-    direct_blockers = route_issues + _navigation_direct_blockers(health_issues, requested_paths)
+    direct_health_blocker_indexes = {
+        index
+        for index, issue in enumerate(health_policy_issues)
+        if issue in _navigation_direct_blockers([issue], requested_paths)
+    }
+    direct_blockers = route_issues + [
+        issue for index, issue in enumerate(health_issues) if index in direct_health_blocker_indexes
+    ]
     repo_health_warnings = [issue for issue in issues if issue not in direct_blockers]
     legacy_blocking = [issue for issue in issues if issue.get("severity") == "error"]
     route_context = {
@@ -1219,7 +1444,12 @@ def format_issues(issues: list[TopologyIssue]) -> str:
         return "no topology issues"
     lines = [f"{len(issues)} topology issue(s):"]
     for index, issue in enumerate(issues, 1):
-        lines.append(f"{index}. [{issue.severity}:{issue.code}] {issue.path}: {issue.message}")
+        typed = ""
+        if issue.owner_manifest or issue.repair_kind:
+            owner = issue.owner_manifest or "unknown_owner"
+            repair = issue.repair_kind or "unknown_repair"
+            typed = f" ({owner}; {repair})"
+        lines.append(f"{index}. [{issue.severity}:{issue.code}] {issue.path}: {issue.message}{typed}")
     return "\n".join(lines)
 
 
@@ -1227,12 +1457,20 @@ def summarize_issues(issues: list[TopologyIssue]) -> str:
     if not issues:
         return "no topology issues"
     counts: dict[tuple[str, str], int] = {}
+    repair_counts: dict[tuple[str, str], int] = {}
     for issue in issues:
         key = (issue.severity, issue.code)
         counts[key] = counts.get(key, 0) + 1
+        if issue.owner_manifest or issue.repair_kind:
+            repair_key = (issue.owner_manifest or "unknown_owner", issue.repair_kind or "unknown_repair")
+            repair_counts[repair_key] = repair_counts.get(repair_key, 0) + 1
     lines = [f"{len(issues)} topology issue(s)"]
     for (severity, code), count in sorted(counts.items()):
         lines.append(f"- {severity}:{code}: {count}")
+    if repair_counts:
+        lines.append("by owner/repair:")
+        for (owner, repair), count in sorted(repair_counts.items()):
+            lines.append(f"- {owner}:{repair}: {count}")
     return "\n".join(lines)
 
 
@@ -1241,9 +1479,10 @@ def _print_strict(
     *,
     as_json: bool = False,
     summary_only: bool = False,
+    issue_schema_version: str = "1",
 ) -> None:
     if as_json:
-        payload = {"ok": result.ok, "issues": [asdict(i) for i in result.issues]}
+        payload = {"ok": result.ok, "issues": [_issue_to_json(i, issue_schema_version) for i in result.issues]}
         if result.details is not None:
             payload["details"] = result.details
         print(json.dumps(payload, indent=2))
