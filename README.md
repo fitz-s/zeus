@@ -121,17 +121,6 @@ High and low temperature markets share city/date geometry but are **separate sem
 
 ---
 
-## Getting started
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 -m pytest tests/
-```
-
-Some runtime paths require local databases, venue credentials, provider data, or operator configuration that are not committed. Data-dependent tests skip gracefully when local state is absent.
-
 ### Runtime entry points
 
 | Entry point | Purpose |
@@ -178,3 +167,5 @@ This repository is maintained by AI coding agents with a structured change-contr
 
 MUST READ `AGENTS.md` and `workspace_map.md` 
 Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
+
+You may need to install new environment in your virtual machine or test may fail.
