@@ -3,7 +3,12 @@
   "packet": "docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md",
   "scope": "docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/scope.yaml",
   "route_source": "manual_packet",
-  "status": "review_fixes_applied",
+  "status": "closed_committed_pushed",
+  "implementation_commit": "cdec77d",
+  "implementation_pushed": true,
+  "runtime_followup_commits": [
+    "c653d03"
+  ],
   "route_evidence": [
     "docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md",
     "docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/work_log.md",

@@ -3,7 +3,7 @@
 Date: 2026-04-25
 Branch: `midstream_remediation`
 Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus`
-Status: in progress
+Status: closed
 
 ## Background
 
@@ -105,6 +105,17 @@ human-readable mirror._
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
 - `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json`
 - `git diff --check -- <packet files>`
+
+## Closeout
+
+- Implementation commit: `cdec77d` pushed to `origin/midstream_remediation`.
+- Runtime heartbeat follow-up: `c653d03` pushed separately.
+- Reviewer loop: scout and architect narrowed the scope before implementation;
+  code reviewer requested freshness-header and predicate-coverage repairs; the
+  repairs were applied and verifier passed.
+- Outcome: consumer-local non-metric obs_v2 reader gates and readiness
+  diagnostics are closed. The hourly high/low metric-layer decision remains
+  out of scope and unresolved.
 
 ## Stop Conditions
 

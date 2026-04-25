@@ -748,10 +748,10 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 4.5.B-lite obs_v2 reader-gate packet plan
+  current_role: closed P3 4.5.B-lite obs_v2 reader-gate packet plan
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -760,16 +760,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/work_log.md
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 4.5.B-lite obs_v2 reader-gate work log
+  current_role: closed P3 4.5.B-lite obs_v2 reader-gate work log
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -778,16 +778,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/scope.yaml
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 4.5.B-lite obs_v2 reader-gate scope sidecar
+  current_role: closed P3 4.5.B-lite obs_v2 reader-gate scope sidecar
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -796,16 +796,16 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active P3 4.5.B-lite obs_v2 reader-gate receipt
+  current_role: closed P3 4.5.B-lite obs_v2 reader-gate receipt
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: closed
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: package_input
@@ -814,7 +814,7 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: false
-  current_tense_allowed: true
+  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md
   doc_class: operations

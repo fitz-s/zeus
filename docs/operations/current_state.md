@@ -5,9 +5,10 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P3 4.5.B-lite obs_v2 reader gate active**
+- Mainline task: **Post-audit remediation mainline — P3 4.5.B-lite obs_v2 reader gate closed; next packet pending phase-entry**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
+- Active execution packet: none frozen; next packet pending phase-entry
+- Closeout evidence packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
 - Prior P2 A2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
 - Prior P2 A1 closeout evidence packet: `docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
 - Prior P3 residual closeout evidence packet: `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
@@ -67,13 +68,14 @@ Role: single live control pointer for the repo.
   path with hash-checked idempotence. P2 4.4.A2 closed at `91d2a35`, adding a
   daily-specific revision sink for WU/HKO `observations` backfill payload drift;
   Ogimet daily revision history remains deferred until a stable payload-identity
-  contract is planned. The active packet is now P3 4.5.B-lite: add non-metric
-  reader gates to the canonical `observation_instants_current` analytics
-  consumer and training-readiness diagnostics without changing shared view
-  semantics or deciding hourly high/low metric placement. Legacy
-  `observation_instants`, live daily ingest revision behavior, production DB
-  mutation, row-level quarantine, full P3 4.5.B metric-layer design, and P4
-  data population remain out of scope.
+  contract is planned. P3 4.5.B-lite closed at implementation commit
+  `cdec77d`, adding non-metric reader gates to the canonical
+  `observation_instants_current` analytics consumer and training-readiness
+  diagnostics without changing shared view semantics or deciding hourly
+  high/low metric placement. Runtime heartbeat follow-up `c653d03` was pushed
+  separately. Legacy `observation_instants`, live daily ingest revision
+  behavior, production DB mutation, row-level quarantine, full P3 4.5.B
+  metric-layer design, and P4 data population remain out of scope.
 
 ## Required evidence
 
@@ -95,10 +97,10 @@ Role: single live control pointer for the repo.
   remains a historical topology anchor only; it is not the active slice.
   WU/HKO daily observation writer provenance identity, obs_v2 provenance
   identity, P2 4.4.B-lite backfill completeness guardrails, P2 4.4.A1/A2
-  revision history, P3 4.5.A settlement metric-read enforcement, and the P3
-  residual replay usage-path guard are closed. The active implementation scope
-  is P3 4.5.B-lite obs_v2 reader-gate consumer hardening only. This pointer
-  does not authorize production DB mutation,
+  revision history, P3 4.5.A settlement metric-read enforcement, the P3
+  residual replay usage-path guard, and P3 4.5.B-lite obs_v2 reader-gate
+  consumer hardening are closed. No next execution packet is frozen yet. This
+  pointer does not authorize production DB mutation,
   `settlements_v2` population, market-identity backfill, live executor DB
   authority, legacy-settlement promotion, broad P1 source-role/view work,
   row-level quarantine, live daily ingest changes, shared obs_v2 view redesign,
@@ -132,7 +134,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Implement, review, verify, commit, and push the active P3 4.5.B-lite
-  obs_v2 reader-gate packet.
+- Run phase-entry reassessment against `POST_AUDIT_HANDOFF_2026-04-24.md`,
+  current fact surfaces, and topology before freezing the next packet.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->
