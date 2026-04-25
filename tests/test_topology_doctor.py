@@ -43,6 +43,7 @@ def run_cli_json(args):
     return json.loads(buffer.getvalue())
 
 
+@pytest.mark.live_topology
 def test_topology_strict_passes_after_residual_classification(monkeypatch):
     visible = topology_doctor._git_visible_files()
     monkeypatch.setattr(
@@ -64,12 +65,14 @@ def test_topology_strict_passes_after_residual_classification(monkeypatch):
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_docs_mode_passes_with_active_data_package_excluded():
     result = topology_doctor.run_docs()
 
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_cli_json_parity_for_docs_mode():
     payload = run_cli_json(["--docs", "--json"])
     result = topology_doctor.run_docs()
@@ -140,6 +143,7 @@ def test_cli_json_parity_for_semantic_bootstrap_command():
     )
 
 
+@pytest.mark.live_topology
 def test_cli_json_parity_for_current_state_candidate_command():
     receipt = "docs/operations/task_2026-04-23_guidance_kernel_semantic_boot/receipt.json"
     payload = run_cli_json(["current-state", "--from-receipt", receipt, "--json"])
@@ -434,6 +438,7 @@ def test_code_review_graph_status_reports_path_mode_and_absent_sidecar(monkeypat
     }
 
 
+@pytest.mark.live_topology
 def test_code_review_graph_mcp_repo_resolution_avoids_workstation_default(monkeypatch, tmp_path):
     from scripts import code_review_graph_mcp_readonly
 
@@ -1275,12 +1280,14 @@ def test_config_agents_allows_artifact_pointer_without_dated_snapshot(monkeypatc
     assert issues == []
 
 
+@pytest.mark.live_topology
 def test_topology_source_mode_covers_all_tracked_src_files():
     result = topology_doctor.run_source()
 
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_tests_mode_classifies_actual_suite_and_law_gate():
     result = topology_doctor.run_tests()
 
@@ -1398,6 +1405,7 @@ def test_tests_mode_rejects_high_sensitivity_skip_count_drift(monkeypatch):
     )
 
 
+@pytest.mark.live_topology
 def test_topology_scripts_mode_covers_all_top_level_scripts():
     result = topology_doctor.run_scripts()
 
@@ -1410,6 +1418,7 @@ def test_topology_data_rebuild_mode_encodes_certification_blockers():
     assert_topology_ok(result)
 
 
+@pytest.mark.live_topology
 def test_topology_history_lore_mode_validates_dense_cards():
     result = topology_doctor.run_history_lore()
 
@@ -1526,6 +1535,7 @@ def test_map_maintenance_requires_docs_mesh_for_top_level_artifact(monkeypatch):
     assert any("docs/README.md" in issue.message for issue in result.issues)
 
 
+@pytest.mark.live_topology
 def test_map_maintenance_requires_reports_registry_for_new_report(monkeypatch):
     original_exists = topology_doctor.Path.exists
     monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/reports/AGENTS.md"])
@@ -2552,6 +2562,7 @@ def test_reference_replacement_delete_requires_final_claim_status(monkeypatch):
     assert any(issue.code == "reference_replacement_delete_unsafe" and "final claim" in issue.message for issue in result.issues)
 
 
+@pytest.mark.live_topology
 def test_reference_artifact_digest_routes_to_reference_profile():
     digest = topology_doctor.build_digest("reference artifact claim extraction for zeus_math_spec fact spec")
 
@@ -2806,6 +2817,7 @@ def test_data_backfill_digest_includes_row_contract_and_replay_coverage():
     assert "calibration model activation" in data_topology["diagnostic_non_promotion"]["forbidden_promotions"]
 
 
+@pytest.mark.live_topology
 def test_script_digest_routes_agents_to_lifecycle_law():
     digest = topology_doctor.build_digest("add a replay diagnostic script")
     script_lifecycle = digest["script_lifecycle"]
@@ -2831,6 +2843,7 @@ def test_lore_digest_routes_rounding_tasks_to_wmo_lesson():
     assert "UNCOMMITTED_AGENT_EDIT_LOSS" not in lore_ids
 
 
+@pytest.mark.live_topology
 def test_lore_digest_routes_history_tasks_to_density_policy():
     digest = topology_doctor.build_digest("extract lore from historical work packets")
     lore_ids = {card["id"] for card in digest["history_lore"]}
@@ -3708,6 +3721,7 @@ def test_impact_reports_write_routes_and_tests_for_store():
     assert impact["context_assumption"]["planning_lock_independent"] is True
 
 
+@pytest.mark.live_topology
 def test_impact_marks_missing_relations_provisional_for_platt():
     impact = topology_doctor.build_impact(["src/calibration/platt.py"])
     entry = impact["entries"][0]
@@ -3889,6 +3903,7 @@ def test_debug_context_pack_shapes_single_file_symptom():
     assert "complete_understanding" not in text
 
 
+@pytest.mark.live_topology
 def test_debug_context_pack_marks_provisional_boundaries():
     packet = topology_doctor.build_context_pack(
         "debug",
@@ -4089,6 +4104,7 @@ def test_core_map_probability_chain_is_proof_backed_and_bounded():
     assert not payload["invalid"]
 
 
+@pytest.mark.live_topology
 def test_compiled_topology_is_derived_read_model():
     payload = topology_doctor.build_compiled_topology()
 

@@ -4,7 +4,7 @@
 
 Prevent topology_doctor code changes from failing because the live repo has unrelated drift.
 
-## Proposed markers
+## Active marker
 
 ```ini
 [pytest]
@@ -42,9 +42,14 @@ Keep live tests for:
 ## Commands
 
 ```bash
-pytest -q tests/test_topology_doctor.py -m "not live_topology"
-pytest -q tests/test_topology_doctor.py -m live_topology
+python3 -m pytest -q tests/test_topology_doctor.py -m "not live_topology"
+python3 -m pytest -q tests/test_topology_doctor.py -m live_topology
 ```
+
+Default PR validation should run `not live_topology`. The live lane remains
+visible for reviewer opt-in (`topology-live-health`) or nightly/scheduled
+repo-health review; failures there are current repo drift unless a packet owns
+the relevant manifest repair.
 
 ## Acceptance
 
