@@ -3,8 +3,8 @@
 Date: 2026-04-24
 Original branch: `data-improve`
 Active follow-up branch: `midstream_remediation`
-Status: reopened for POST_AUDIT_HANDOFF 4.2.A readiness guard normalization
-follow-up; the original P0 Ralph slice below is historical packet context.
+Status: closed for POST_AUDIT_HANDOFF 4.2.A readiness guard normalization at
+`0b61261`; the original P0 Ralph slice below is historical packet context.
 
 ## Task
 
@@ -67,7 +67,7 @@ Forbidden files:
 
 ## 4.2.A Follow-up Plan
 
-Status: active follow-up on `midstream_remediation`.
+Status: closed follow-up on `midstream_remediation` at `0b61261`.
 
 This follow-up reuses the existing P0 packet instead of creating
 `scripts/zeus_readiness_check.py`. `scripts/verify_truth_surfaces.py` is already

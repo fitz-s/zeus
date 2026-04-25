@@ -98,8 +98,8 @@ Verification:
   current branch state.
 
 Next:
-- Run topology gates, critic/verifier review, then commit and push the scoped
-  P0 follow-up files only.
+- Original P0 containment was superseded by the 4.2.A follow-up below; the next
+  executable slice is not authorized from this historical Next pointer.
 
 ## 4.2.A Readiness Guard Normalization Follow-up — 2026-04-24
 
@@ -158,5 +158,40 @@ Verification:
 - `git diff --check -- <4.2.A files>` -> clean.
 
 Next:
-- Run critic/verifier review, address any findings, then commit and push only
-  the scoped files.
+- Critic/verifier review passed; commit `0b61261` was pushed to
+  `origin/midstream_remediation`.
+- A docs-only control-surface closeout now marks 4.2.A closed and points the
+  mainline at 4.2.B phase-entry. 4.2.B is not active until a fresh packet is
+  frozen from current topology/context.
+
+## 4.2.A Control-Surface Closeout — 2026-04-25
+
+Date: 2026-04-25
+Branch: `midstream_remediation`
+Task: close the operations pointers after 4.2.A implementation commit
+`0b61261` and keep 4.2.B pending phase-entry.
+Changed files:
+- `docs/operations/AGENTS.md`
+- `docs/operations/current_state.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
+
+Verification:
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout docs> --plan-evidence docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --work-record --changed-files <closeout docs> --work-record-path docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout docs> --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+  -> `{ok: true, issues: []}`.
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout docs> --json`
+  -> `{ok: true, issues: []}`.
+- `.venv/bin/python -m pytest -q tests/test_topology_doctor.py -k current_state_receipt_bound`
+  -> 4 passed, 239 deselected.
+- Verifier subagent review -> PASS; 4.2.B remains candidate/pending only and no
+  code scope is authorized until a fresh phase-entry freezes a packet.
+- `git diff --check -- <closeout docs>` -> clean.
+
+Next:
+- Open POST_AUDIT_HANDOFF 4.2.B phase-entry from fresh AGENTS/topology context.

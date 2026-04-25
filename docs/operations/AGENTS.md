@@ -34,16 +34,21 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-The active execution packet is
-`task_2026-04-24_p0_data_audit_containment/plan.md`, reopened only for the
+No active execution packet is currently frozen. The latest closeout evidence is
+`task_2026-04-24_p0_data_audit_containment/plan.md` for the closed
 POST_AUDIT_HANDOFF 4.2.A readiness-query / fail-closed guard normalization
-follow-up named by `current_state.md`. Branch facts show the Immediate 4.1.A-C
-group in `task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-is already landed and closed in the midstream work log; do not reuse 4.1.A-C as
-an execution packet without new evidence. This active P0 follow-up does not
-authorize production DB mutation, canonical v2 population, market-identity
-backfill, replay/live/runtime consumer rewiring, or legacy-settlement
-promotion.
+follow-up named by `current_state.md`.
+
+Branch facts show the Immediate 4.1.A-C group in
+`task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md` is
+already landed and closed in the midstream work log, and 4.2.A closed at commit
+`0b61261`; do not reuse either slice as an execution packet without new
+evidence. The next candidate is POST_AUDIT_HANDOFF 4.2.B evidence-only legacy
+hourly observations views plus canonical-path bare-table lint, but it is not
+active until `current_state.md` names a packet after fresh phase-entry. This
+router does not authorize production DB mutation, canonical v2 population,
+market-identity backfill, replay/live/runtime consumer rewiring, or
+legacy-settlement promotion.
 
 ### Packet Evidence
 

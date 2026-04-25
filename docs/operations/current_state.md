@@ -5,9 +5,10 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P0 4.2.A readiness guard normalization active**
+- Mainline task: **Post-audit remediation mainline — P0 4.2.A closed; 4.2.B pending phase-entry**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- Active execution packet: none frozen; next packet pending phase-entry
+- Closeout evidence packet: `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
 - Receipt-bound source: `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
 - Prior closeout evidence packet: `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
 - Status: P1.2 writer provenance gates are closed at implementation commit
@@ -23,9 +24,11 @@ Role: single live control pointer for the repo.
   the submit diff. Implementation commit `99c4ac3` was pushed to
   `origin/midstream_remediation`. Post-close review found no code regression
   and required control-surface alignment before freezing the next packet.
-  Commit `c274230` removed the stale 4.1.A-C next-packet pointer. The existing
-  P0 data-audit containment packet is now active only for a small 4.2.A
-  readiness-guard normalization follow-up.
+  Commit `c274230` removed the stale 4.1.A-C next-packet pointer. Commit
+  `0b61261` closed and pushed the P0 4.2.A readiness-guard normalization
+  follow-up, making full training-readiness inherit per-metric snapshot
+  eligibility and Platt mature-bucket preflights. No execution packet is
+  currently frozen for the next slice.
 
 ## Required evidence
 
@@ -35,18 +38,17 @@ Role: single live control pointer for the repo.
 
 ## Freeze point
 
-- Current freeze: P1.5a and POST_AUDIT_HANDOFF Immediate 4.1.A-C are closed.
-  Current branch facts show Immediate 4.1.A-C already landed and closed in
-  `docs/operations/task_2026-04-23_midstream_remediation/work_log.md`
-  (`P-1 Pre-P0 Post-Audit Cleanup -- 2026-04-24`), so it must not be
-  re-opened as the next execution packet without new evidence. The only active
-  code scope is POST_AUDIT_HANDOFF 4.2.A readiness-query / fail-closed guard
-  normalization in `scripts/verify_truth_surfaces.py` and
-  `tests/test_truth_surface_health.py`, plus the P0 packet docs and live
-  operations pointer. No new script, production DB mutation,
-  `settlements_v2` population, market-identity backfill, replay/live/runtime
-  consumer rewiring, or legacy-settlement promotion is authorized by this
-  pointer.
+- Current freeze: P1.5a, POST_AUDIT_HANDOFF Immediate 4.1.A-C, and P0 4.2.A
+  are closed. Current branch facts show Immediate 4.1.A-C already landed and
+  closed in `docs/operations/task_2026-04-23_midstream_remediation/work_log.md`
+  (`P-1 Pre-P0 Post-Audit Cleanup -- 2026-04-24`), and 4.2.A closed at
+  `0b61261`, so neither must be re-opened as the next execution packet without
+  new evidence. The next candidate is POST_AUDIT_HANDOFF 4.2.B
+  evidence-only legacy hourly observations views plus canonical-path bare-table
+  lint, but no 4.2.B code scope is authorized until fresh phase-entry rereads
+  AGENTS/topology and freezes the packet. This pointer does not authorize
+  production DB mutation, `settlements_v2` population, market-identity backfill,
+  replay/live/runtime consumer rewiring, or legacy-settlement promotion.
 
 ## Current fact companions
 
@@ -61,6 +63,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Complete review/closeout for the active 4.2.A follow-up: address
-  critic/verifier findings, then commit and push only the scoped files.
+- Open the 4.2.B phase-entry only after rereading `AGENTS.md`, operations
+  routing, the POST_AUDIT 4.2.B handoff text, scoped state/script/test guidance,
+  and topology output for the proposed files.
 - Preserve unrelated dirty work and concurrent in-flight edits.
