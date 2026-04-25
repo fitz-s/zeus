@@ -2,7 +2,7 @@
 
 Date: 2026-04-25
 Branch: `midstream_remediation`
-Status: implementation verified; ready for critic closeout and commit.
+Status: closed and pushed at implementation commit `1411017`.
 
 Task: POST_AUDIT_HANDOFF 4.2.C market-events empty-table preflight for replay
 consumers.
@@ -66,8 +66,8 @@ Verification:
   current-state receipt binding returned ok.
 
 Next:
-- Run critic review on this docs-only 4.2.C plan.
-- Commit and push only receipt-bound planning files after gates pass.
+- Reassess the mainline plan against remaining post-audit P1/P2/P3 work before
+  selecting the next packet.
 
 ## Phase Entry
 
@@ -146,10 +146,8 @@ Closeout verification:
 
 ## Next Steps
 
-- Run planning-lock with this implementation packet as evidence.
-- Implement replay preflight and CLI blocker surfacing.
-- Add focused replay CLI antibodies and freshness headers.
-- Run critic/verifier review, topology closeout, commit, and push.
+- Reassess the mainline plan against remaining post-audit P1/P2/P3 work before
+  selecting the next packet.
 
 Implementation notes:
 
@@ -164,6 +162,9 @@ Implementation notes:
   `winning_bin`. A wrong-label WU sweep antibody was added.
 - Critic re-review verdict: PASS. The prior false-pass repro now fails closed
   with `missing=Paris:2026-04-03:12°C`; no P1/P3/P4 or executor drift found.
+- Commit `1411017` pushed `midstream_remediation` to GitHub with the verified
+  implementation. Follow-up control closeout updates the live pointer so the
+  next packet starts from a clean P0-closed state.
 - The bypass uses `ReplayContext.allow_snapshot_only_reference`, preserving
   the current non-audit/fallback behavior without redefining replay modes.
 - The test file had stale fixtures after the post-audit settlement metric law
