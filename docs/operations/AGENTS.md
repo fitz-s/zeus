@@ -27,6 +27,7 @@ index, or archive catalog.
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `runtime_artifact_inventory.md` | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
+| `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 
 Current-fact files must stay summary-only, receipt/evidence-backed,
 expiry-bound, and fail-closed when stale. They are planning truth, not durable
@@ -90,6 +91,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `runtime_artifact_inventory.md` | active support | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
+| `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `task_2026-04-21_docs_reclassification_reference_extraction/` | packet evidence | Closed docs reclassification/reference extraction packet |
 | `task_2026-04-22_docs_truth_refresh/` | packet evidence | Closed docs truth refresh / stale-reference purge packet |
 | `task_2026-04-23_guidance_kernel_semantic_boot/` | packet evidence | Closed guidance-kernel semantic boot refactor packet |
@@ -125,6 +127,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-25_p0_market_events_preflight/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.2.C implementation packet for market-events empty-table replay preflight |
 | `task_2026-04-25_p1_daily_observation_writer_provenance/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B-lite packet for WU/HKO daily observation writer provenance identity |
 | `task_2026-04-25_p1_obs_v2_provenance_identity/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B packet for observation_instants_v2 provenance identity and active obs_v2 producer stamps |
+| `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, scope.yaml schema, and tooling_runtime test category |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
