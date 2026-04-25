@@ -241,7 +241,15 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         else:
             print(f"navigation ok: {payload['ok']}")
             print(f"profile: {payload['digest']['profile']}")
-            if payload["issues"]:
+            if payload.get("direct_blockers"):
+                print("direct_blockers:")
+                for issue in payload["direct_blockers"]:
+                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            if payload.get("repo_health_warnings"):
+                print("repo_health_warnings:")
+                for issue in payload["repo_health_warnings"]:
+                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            elif payload["issues"]:
                 print("issues:")
                 for issue in payload["issues"]:
                     print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
@@ -302,6 +310,13 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                     f"- {lane}: {state} "
                     f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
                 )
+            if payload.get("global_health"):
+                print("global_health:")
+                for lane, summary in payload["global_health"].items():
+                    print(
+                        f"- {lane}: "
+                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                    )
             telemetry = payload.get("telemetry") or {}
             print(
                 f"telemetry: dark_write_targets={telemetry.get('dark_write_target_count', 0)}, "
@@ -323,6 +338,13 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                 for issue in summary["issues"]:
                     print(
                         f"  - [{issue['severity']}:{issue['code']}] {issue['path']}: {issue['message']}"
+                    )
+            if payload.get("global_health"):
+                print("global_health:")
+                for lane, summary in payload["global_health"].items():
+                    print(
+                        f"- {lane}: "
+                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
                     )
         return 0 if payload["ok"] else 1
     if args.command == "context-pack":
