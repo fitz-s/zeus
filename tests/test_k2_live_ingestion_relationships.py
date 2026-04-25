@@ -1,3 +1,6 @@
+# Created: 2026-04-13
+# Last reused/audited: 2026-04-25
+# Authority basis: K2 live-ingestion packet; P1 daily observation writer provenance packet.
 """K2 live-ingestion packet — relationship tests.
 
 These tests enforce cross-module invariants that the K2 packet depends on.
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -541,6 +545,250 @@ def test_R8_data_source_version_matches_backfill_hko() -> None:
     script_path = PROJECT_ROOT / "scripts" / "backfill_hko_daily.py"
     script_source = script_path.read_text()
     assert '"hko_opendata_v1_2026"' in script_source
+
+
+def _load_script_module(script_name: str, module_name: str):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        module_name, PROJECT_ROOT / "scripts" / script_name,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _assert_provenance_identity(provenance: dict) -> None:
+    required = {
+        "payload_hash",
+        "source_url",
+        "parser_version",
+        "source",
+        "station_id",
+        "target_date",
+    }
+    missing = required - set(provenance)
+    assert not missing, f"missing provenance keys: {sorted(missing)}"
+    for key in required:
+        assert provenance[key], f"empty provenance key: {key}"
+    assert str(provenance["payload_hash"]).startswith("sha256:")
+
+
+def _legacy_observations_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            high_temp REAL,
+            low_temp REAL,
+            unit TEXT,
+            station_id TEXT,
+            fetched_at TEXT,
+            raw_value REAL,
+            raw_unit TEXT,
+            target_unit TEXT,
+            value_type TEXT,
+            fetch_utc TEXT,
+            local_time TEXT,
+            collection_window_start_utc TEXT,
+            collection_window_end_utc TEXT,
+            timezone TEXT,
+            utc_offset_minutes INTEGER,
+            dst_active INTEGER,
+            is_ambiguous_local_hour INTEGER,
+            is_missing_local_hour INTEGER,
+            hemisphere TEXT,
+            season TEXT,
+            month INTEGER,
+            rebuild_run_id TEXT,
+            data_source_version TEXT,
+            authority TEXT,
+            provenance_metadata TEXT,
+            UNIQUE(city, target_date, source)
+        )
+        """
+    )
+    return conn
+
+
+def test_R8_wu_backfill_writes_non_empty_provenance_identity() -> None:
+    mod = _load_script_module("backfill_wu_daily_all.py", "_backfill_wu_provenance")
+    source_url = mod._build_wu_source_url(
+        icao="KORD",
+        cc="US",
+        unit_code="e",
+        start_date=date(2026, 4, 1),
+        end_date=date(2026, 4, 3),
+    )
+    provenance = mod._build_wu_daily_provenance(
+        icao="KORD",
+        cc="US",
+        unit="F",
+        unit_code="e",
+        start_date=date(2026, 4, 1),
+        end_date=date(2026, 4, 3),
+        target_date=date(2026, 4, 2),
+        payload_hash="sha256:" + "a" * 64,
+        source_url=source_url,
+    )
+
+    _assert_provenance_identity(provenance)
+    assert provenance["source"] == "wu_icao_history"
+    assert provenance["station_id"] == "KORD"
+    assert "apiKey=" not in provenance["source_url"]
+    assert provenance["api_key_redacted"] is True
+
+    script_source = (PROJECT_ROOT / "scripts" / "backfill_wu_daily_all.py").read_text()
+    assert "provenance_metadata={}" not in script_source
+    assert "provenance_metadata=provenance" in script_source
+
+
+def test_R8_wu_backfill_persists_provenance_identity(monkeypatch) -> None:
+    mod = _load_script_module("backfill_wu_daily_all.py", "_backfill_wu_writer")
+    conn = _legacy_observations_conn()
+
+    def fake_fetch(icao, cc, start_date, end_date, unit, timezone_name):
+        unit_code = "m" if unit == "C" else "e"
+        source_url = mod._build_wu_source_url(
+            icao=icao,
+            cc=cc,
+            unit_code=unit_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        target_date = start_date
+        return {
+            target_date.isoformat(): (
+                75.0,
+                62.0,
+                mod._build_wu_daily_provenance(
+                    icao=icao,
+                    cc=cc,
+                    unit=unit,
+                    unit_code=unit_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    target_date=target_date,
+                    payload_hash="sha256:" + "d" * 64,
+                    source_url=source_url,
+                ),
+            )
+        }
+
+    monkeypatch.setattr(mod, "_fetch_wu_icao_daily_highs_lows", fake_fetch)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    stats = mod.backfill_city(
+        "Chicago",
+        days_back=1,
+        conn=conn,
+        chunk_days=1,
+        sleep_seconds=0,
+    )
+    assert stats["collected"] == 1
+
+    row = conn.execute(
+        """
+        SELECT authority, source, station_id, provenance_metadata
+        FROM observations
+        WHERE city = 'Chicago' AND source = 'wu_icao_history'
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["authority"] == "VERIFIED"
+    provenance = json.loads(row["provenance_metadata"])
+    _assert_provenance_identity(provenance)
+    assert provenance["station_id"] == row["station_id"] == "KORD"
+    assert "apiKey=" not in provenance["source_url"]
+    assert provenance["api_key_redacted"] is True
+
+
+def test_R8_hko_backfill_writes_non_empty_provenance_identity() -> None:
+    mod = _load_script_module("backfill_hko_daily.py", "_backfill_hko_provenance")
+    high_identity = mod._build_hko_payload_identity(
+        year=2026,
+        month=4,
+        data_type="CLMMAXT",
+        payload_hash="sha256:" + "b" * 64,
+    )
+    low_identity = mod._build_hko_payload_identity(
+        year=2026,
+        month=4,
+        data_type="CLMMINT",
+        payload_hash="sha256:" + "c" * 64,
+    )
+    provenance = mod._build_hko_daily_provenance(
+        target_date=date(2026, 4, 2),
+        high_identity=high_identity,
+        low_identity=low_identity,
+    )
+
+    _assert_provenance_identity(provenance)
+    assert provenance["source"] == "hko_daily_api"
+    assert provenance["station_id"] == "HKO"
+    assert (
+        provenance["component_payload_hashes"]["CLMMAXT"]
+        == high_identity["payload_hash"]
+    )
+    assert (
+        provenance["component_payload_hashes"]["CLMMINT"]
+        == low_identity["payload_hash"]
+    )
+
+    script_source = (PROJECT_ROOT / "scripts" / "backfill_hko_daily.py").read_text()
+    assert (
+        'provenance_metadata={"station": HKO_STATION, '
+        '"dataType": ["CLMMAXT", "CLMMINT"]}'
+        not in script_source
+    )
+    assert "provenance_metadata=_build_hko_daily_provenance(" in script_source
+
+
+def test_R8_hko_backfill_persists_provenance_identity(monkeypatch) -> None:
+    mod = _load_script_module("backfill_hko_daily.py", "_backfill_hko_writer")
+    conn = _legacy_observations_conn()
+
+    def fake_fetch(year, month, data_type):
+        value = 27.0 if data_type == "CLMMAXT" else 22.0
+        payload_hash = "sha256:" + ("e" if data_type == "CLMMAXT" else "f") * 64
+        identity = mod._build_hko_payload_identity(
+            year=year,
+            month=month,
+            data_type=data_type,
+            payload_hash=payload_hash,
+        )
+        return {(year, month, 2): (value, "C", identity)}, None
+
+    monkeypatch.setattr(mod, "_fetch_hko_month_with_retry", fake_fetch)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    stats = mod.run_backfill(
+        date(2026, 4, 2),
+        date(2026, 4, 2),
+        conn=conn,
+        rebuild_run_id="test_hko_provenance",
+        sleep_seconds=0,
+    )
+    assert stats["inserted"] == 1
+
+    row = conn.execute(
+        """
+        SELECT authority, source, station_id, provenance_metadata
+        FROM observations
+        WHERE city = 'Hong Kong' AND source = 'hko_daily_api'
+        """
+    ).fetchone()
+    assert row is not None
+    assert row["authority"] == "VERIFIED"
+    provenance = json.loads(row["provenance_metadata"])
+    _assert_provenance_identity(provenance)
+    assert provenance["station_id"] == row["station_id"] == "HKO"
+    assert provenance["component_payload_hashes"]["CLMMAXT"].startswith("sha256:")
+    assert provenance["component_payload_hashes"]["CLMMINT"].startswith("sha256:")
 
 
 # ---------------------------------------------------------------------------

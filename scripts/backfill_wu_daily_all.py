@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import sys
@@ -125,6 +126,7 @@ def _require_wu_api_key() -> None:
     assert WU_API_KEY, "WU_API_KEY resolved empty; _WU_PUBLIC_WEB_KEY fallback broken?"
 # Default preserves existing behavior; set WU_API_KEY env var to override.
 WU_ICAO_HISTORY_URL = "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
+WU_DAILY_PARSER_VERSION = "wu_icao_daily_backfill_v2"
 
 # Module-level guard instance (loads config/city_monthly_bounds.json once)
 _GUARD = IngestionGuard()
@@ -213,11 +215,11 @@ def _fetch_wu_icao_daily_highs_lows(
     end_date: date,
     unit: str,
     timezone_name: str,
-) -> dict[str, tuple[float, float]]:
+) -> dict[str, tuple[float, float, dict[str, object]]]:
     """Fetch local-date daily (high, low) from WU ICAO station history.
 
-    Returns dict keyed by ISO date string → (high, low) tuple in the
-    requested unit. Both values are derived from the same hourly observation
+    Returns dict keyed by ISO date string → (high, low, provenance) tuple in
+    the requested unit. Both values are derived from the same hourly observation
     series for the day; dates with a single observation will have high==low.
 
     Daily low is required by `src/engine/monitor_refresh.py:419` (day0
@@ -226,6 +228,13 @@ def _fetch_wu_icao_daily_highs_lows(
     """
     url = WU_ICAO_HISTORY_URL.format(icao=icao, cc=cc)
     unit_code = "m" if unit == "C" else "e"
+    source_url = _build_wu_source_url(
+        icao=icao,
+        cc=cc,
+        unit_code=unit_code,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     try:
         resp = requests.get(
@@ -237,6 +246,7 @@ def _fetch_wu_icao_daily_highs_lows(
         )
         if resp.status_code != 200:
             return {}
+        payload_hash = _sha256_payload(resp.content)
 
         observations = resp.json().get("observations", [])
         if not observations:
@@ -258,16 +268,80 @@ def _fetch_wu_icao_daily_highs_lows(
             highs[key] = max(highs.get(key, float("-inf")), t)
             lows[key] = min(lows.get(key, float("inf")), t)
 
-        result: dict[str, tuple[float, float]] = {}
+        result: dict[str, tuple[float, float, dict[str, object]]] = {}
         for key, high in highs.items():
             low = lows[key]
             if high != float("-inf") and low != float("inf"):
-                result[key] = (high, low)
+                target_date = date.fromisoformat(key)
+                result[key] = (
+                    high,
+                    low,
+                    _build_wu_daily_provenance(
+                        icao=icao,
+                        cc=cc,
+                        unit=unit,
+                        unit_code=unit_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        target_date=target_date,
+                        payload_hash=payload_hash,
+                        source_url=source_url,
+                    ),
+                )
         return result
 
     except Exception as e:
         logger.debug("WU ICAO fetch failed %s:%s %s..%s: %s", icao, cc, start_date, end_date, e)
         return {}
+
+
+def _sha256_payload(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _build_wu_source_url(
+    *,
+    icao: str,
+    cc: str,
+    unit_code: str,
+    start_date: date,
+    end_date: date,
+) -> str:
+    url = WU_ICAO_HISTORY_URL.format(icao=icao, cc=cc)
+    return (
+        f"{url}?units={unit_code}"
+        f"&startDate={start_date:%Y%m%d}"
+        f"&endDate={end_date:%Y%m%d}"
+    )
+
+
+def _build_wu_daily_provenance(
+    *,
+    icao: str,
+    cc: str,
+    unit: str,
+    unit_code: str,
+    start_date: date,
+    end_date: date,
+    target_date: date,
+    payload_hash: str,
+    source_url: str,
+) -> dict[str, object]:
+    return {
+        "source": "wu_icao_history",
+        "station_id": icao,
+        "country_code": cc,
+        "unit": unit,
+        "unit_code": unit_code,
+        "payload_hash": payload_hash,
+        "payload_scope": "chunk",
+        "source_url": source_url,
+        "api_key_redacted": True,
+        "parser_version": WU_DAILY_PARSER_VERSION,
+        "request_start_date": start_date.isoformat(),
+        "request_end_date": end_date.isoformat(),
+        "target_date": target_date.isoformat(),
+    }
 
 
 def _date_chunks(start_date: date, end_date: date, chunk_days: int) -> list[tuple[date, date]]:
@@ -413,7 +487,7 @@ def backfill_city(
                 err_count += 1
                 current += timedelta(days=1)
                 continue
-            high, low = pair
+            high, low, provenance = pair
 
             # Settlement derivation moved to K4 rebuild_settlements.py (Revision 3 plan)
 
@@ -537,7 +611,7 @@ def backfill_city(
                 data_source_version="wu_icao_v1_2026",
                 authority="VERIFIED",
                 validation_pass=True,
-                provenance_metadata={},
+                provenance_metadata=provenance,
             )
             atom_high = ObservationAtom(
                 value_type="high",

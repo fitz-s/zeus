@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -62,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 HKO_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
 HKO_STATION = "HKO"  # HKO Headquarters — the canonical settlement station
+HKO_DAILY_PARSER_VERSION = "hko_daily_backfill_v2"
 SLEEP_BETWEEN_REQUESTS = 0.5
 FETCH_RETRY_COUNT = 2
 FETCH_RETRY_BACKOFF_SEC = 3.0
@@ -146,11 +148,12 @@ def _fetch_hko_month(
     year: int,
     month: int,
     data_type: str,
-) -> dict[tuple[int, int, int], tuple[float, str]]:
+) -> dict[tuple[int, int, int], tuple[float, str, dict[str, str]]]:
     """Fetch one month of HKO climate data for the specified dataType.
 
-    Returns dict keyed by (year, month, day) → (value_celsius, completeness_flag).
-    completeness_flag is one of "C" (complete), "#" (incomplete), "***" (unavailable).
+    Returns dict keyed by (year, month, day) →
+    (value_celsius, completeness_flag, payload_identity). completeness_flag is
+    one of "C" (complete), "#" (incomplete), "***" (unavailable).
     """
     params = {
         "dataType": data_type,
@@ -162,10 +165,16 @@ def _fetch_hko_month(
     }
     resp = httpx.get(HKO_API_URL, params=params, timeout=30.0)
     resp.raise_for_status()
+    payload_identity = _build_hko_payload_identity(
+        year=year,
+        month=month,
+        data_type=data_type,
+        payload_hash=_sha256_payload(resp.content),
+    )
     data = resp.json()
 
     rows = data.get("data", [])
-    out: dict[tuple[int, int, int], tuple[float, str]] = {}
+    out: dict[tuple[int, int, int], tuple[float, str, dict[str, str]]] = {}
     for row in rows:
         if len(row) < 5:
             logger.warning("Unexpected HKO row shape for %s %d/%d: %r",
@@ -179,9 +188,9 @@ def _fetch_hko_month(
             completeness = str(row[4])
             if completeness == "C":
                 value = float(val_str)
-                out[(y, m, d)] = (value, completeness)
+                out[(y, m, d)] = (value, completeness, payload_identity)
             else:
-                out[(y, m, d)] = (float("nan"), completeness)
+                out[(y, m, d)] = (float("nan"), completeness, payload_identity)
         except (ValueError, TypeError) as e:
             logger.warning(
                 "Parse failed HKO %s %d/%d row %r: %s",
@@ -195,7 +204,7 @@ def _fetch_hko_month_with_retry(
     year: int,
     month: int,
     data_type: str,
-) -> tuple[dict[tuple[int, int, int], tuple[float, str]], str | None]:
+) -> tuple[dict[tuple[int, int, int], tuple[float, str, dict[str, str]]], str | None]:
     """Fetch with retry on transient HTTP errors."""
     for attempt in range(FETCH_RETRY_COUNT + 1):
         try:
@@ -213,6 +222,67 @@ def _fetch_hko_month_with_retry(
         except Exception as e:
             return {}, f"unexpected error: {type(e).__name__}: {e}"
     return {}, "exhausted retries"
+
+
+def _sha256_payload(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _build_hko_source_url(*, year: int, month: int, data_type: str) -> str:
+    return (
+        f"{HKO_API_URL}?dataType={data_type}"
+        f"&year={year}&month={month:02d}"
+        f"&rformat=json&lang=en&station={HKO_STATION}"
+    )
+
+
+def _build_hko_payload_identity(
+    *,
+    year: int,
+    month: int,
+    data_type: str,
+    payload_hash: str,
+) -> dict[str, str]:
+    return {
+        "data_type": data_type,
+        "payload_hash": payload_hash,
+        "source_url": _build_hko_source_url(
+            year=year,
+            month=month,
+            data_type=data_type,
+        ),
+    }
+
+
+def _build_hko_daily_provenance(
+    *,
+    target_date: date,
+    high_identity: dict[str, str],
+    low_identity: dict[str, str],
+) -> dict[str, object]:
+    high_hash = high_identity["payload_hash"]
+    low_hash = low_identity["payload_hash"]
+    combined_hash = _sha256_payload(f"{high_hash}\n{low_hash}".encode("utf-8"))
+    return {
+        "source": "hko_daily_api",
+        "station": HKO_STATION,
+        "station_id": HKO_STATION,
+        "dataType": ["CLMMAXT", "CLMMINT"],
+        "payload_hash": combined_hash,
+        "component_payload_hashes": {
+            "CLMMAXT": high_hash,
+            "CLMMINT": low_hash,
+        },
+        "source_url": (
+            f"{high_identity['source_url']} | {low_identity['source_url']}"
+        ),
+        "component_source_urls": {
+            "CLMMAXT": high_identity["source_url"],
+            "CLMMINT": low_identity["source_url"],
+        },
+        "parser_version": HKO_DAILY_PARSER_VERSION,
+        "target_date": target_date.isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +361,8 @@ def run_backfill(
         month_inserted = 0
         month_guard_rej = 0
         for ymd in sorted(common_days):
-            high_val, high_flag = max_map[ymd]
-            low_val, low_flag = min_map[ymd]
+            high_val, high_flag, high_identity = max_map[ymd]
+            low_val, low_flag, low_identity = min_map[ymd]
 
             if high_flag != "C" or low_flag != "C":
                 # HKO marked day as incomplete or unavailable — skip.
@@ -403,7 +473,11 @@ def run_backfill(
                 data_source_version="hko_opendata_v1_2026",
                 authority="VERIFIED",
                 validation_pass=True,
-                provenance_metadata={"station": HKO_STATION, "dataType": ["CLMMAXT", "CLMMINT"]},
+                provenance_metadata=_build_hko_daily_provenance(
+                    target_date=target_d,
+                    high_identity=high_identity,
+                    low_identity=low_identity,
+                ),
             )
             atom_high = ObservationAtom(
                 value_type="high",

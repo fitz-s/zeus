@@ -514,7 +514,7 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: false
-  current_role: active or closed packet directories; route through current_state for the current active packet, currently P0 4.2.C market-events preflight implementation
+  current_role: active or closed packet directories; route through current_state for the current active packet or latest closeout evidence
   canonical_replaced_by: []
   next_action: archive_after_closeout
   lifecycle_state: transitional

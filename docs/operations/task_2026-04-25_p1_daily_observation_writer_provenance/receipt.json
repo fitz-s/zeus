@@ -1,0 +1,103 @@
+{
+  "task": "P1 daily observation writer provenance identity",
+  "packet": "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+  "route_source": "manual_packet",
+  "route_evidence": [
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/test_topology.yaml",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "architecture/script_manifest.yaml",
+    "architecture/topology.yaml",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md"
+  ],
+  "allowed_files": [
+    "architecture/test_topology.yaml",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "scripts/backfill_wu_daily_all.py",
+    "scripts/backfill_hko_daily.py",
+    "tests/test_k2_live_ingestion_relationships.py",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
+  ],
+  "forbidden_files": [
+    "state/**",
+    ".omx/**",
+    ".code-review-graph/graph.db",
+    "production DBs",
+    "generated runtime JSON",
+    "src/state/** schema/view changes",
+    "src/engine/**",
+    "src/execution/**",
+    "P2 upsert/revision work",
+    "P3 safe-view migration",
+    "P4 data population",
+    "row-level quarantine or production DB mutation"
+  ],
+  "status": "closed",
+  "changed_files": [
+    "architecture/test_topology.yaml",
+    "architecture/topology.yaml",
+    "architecture/docs_registry.yaml",
+    "scripts/backfill_wu_daily_all.py",
+    "scripts/backfill_hko_daily.py",
+    "tests/test_k2_live_ingestion_relationships.py",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
+    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
+  ],
+  "implementation_semantics": [
+    "WU daily backfill provenance records payload_hash, redacted source_url, parser_version, source, station_id, country_code, unit/unit_code, request date range, and target_date",
+    "HKO daily backfill provenance records combined payload_hash, component high/low payload hashes and URLs, parser_version, source, station/station_id, dataType set, and target_date",
+    "Relationship tests execute WU/HKO backfill writer loops against SQLite and assert persisted provenance_metadata JSON",
+    "tests/test_k2_live_ingestion_relationships.py carries lifecycle metadata and is registered in architecture/test_topology.yaml::test_trust_policy.trusted_tests"
+  ],
+  "tests_evidence": [
+    "python3 scripts/topology_doctor.py --task-boot-profiles --json",
+    "python3 scripts/topology_doctor.py --fatal-misreads --json",
+    "python3 scripts/topology_doctor.py --tests --json",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
+    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
+    "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <packet files> --json",
+    ".venv/bin/python -m py_compile scripts/backfill_wu_daily_all.py scripts/backfill_hko_daily.py tests/test_k2_live_ingestion_relationships.py",
+    ".venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -k \"provenance_identity\" -q (4 passed)",
+    ".venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -q (38 passed)",
+    ".venv/bin/python -m pytest tests/test_backfill_scripts_match_live_config.py -q (8 passed)",
+    "git diff --check"
+  ],
+  "verification": [
+    "See tests_evidence"
+  ],
+  "critic": {
+    "first_review": "ITERATE: add test-trust metadata and writer-seam SQLite persistence tests",
+    "fix_status": "implemented",
+    "second_review": "PASS"
+  },
+  "known_gaps": [
+    "Existing WU empty-provenance observations remain fail-closed but are not mutated in this packet.",
+    "Topology navigation fell back to generic/advisory for this narrow script/test scope; direct blockers were absent."
+  ]
+}
