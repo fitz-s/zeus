@@ -59,6 +59,16 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--navigation", action="store_true", help="Run default navigation health and task digest")
     parser.add_argument("--strict-health", action="store_true", help="Make --navigation fail on any repo-health error")
+    parser.add_argument(
+        "--issues-scope",
+        choices=["task", "all"],
+        default="task",
+        help=(
+            "Pretty-print scope for --navigation issues. 'task' (default) shows only "
+            "direct_blockers + admission; cross-task repo-health drift is summarized as a count. "
+            "'all' shows every issue (legacy behavior). JSON payload is unaffected."
+        ),
+    )
     parser.add_argument("--planning-lock", action="store_true", help="Check whether changed files require planning evidence")
     parser.add_argument(
         "--changed-files",
@@ -263,18 +273,36 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         else:
             print(f"navigation ok: {payload['ok']}")
             print(f"profile: {payload['digest']['profile']}")
-            if payload.get("direct_blockers"):
+            issues_scope = getattr(args, "issues_scope", "task")
+            direct_blockers = payload.get("direct_blockers") or []
+            repo_health_warnings = payload.get("repo_health_warnings") or []
+            if direct_blockers:
                 print("direct_blockers:")
-                for issue in payload["direct_blockers"]:
+                for issue in direct_blockers:
                     print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-            if payload.get("repo_health_warnings"):
-                print("repo_health_warnings:")
-                for issue in payload["repo_health_warnings"]:
-                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-            elif not payload.get("direct_blockers") and payload["issues"]:
-                print("issues:")
-                for issue in payload["issues"]:
-                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            if issues_scope == "all":
+                if repo_health_warnings:
+                    print("repo_health_warnings:")
+                    for issue in repo_health_warnings:
+                        print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+                elif not direct_blockers and payload["issues"]:
+                    print("issues:")
+                    for issue in payload["issues"]:
+                        print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
+            else:
+                # task scope: collapse repo-health drift into a single advisory count line
+                if repo_health_warnings:
+                    by_severity: dict[str, int] = {}
+                    for issue in repo_health_warnings:
+                        sev = issue.get("severity", "unknown")
+                        by_severity[sev] = by_severity.get(sev, 0) + 1
+                    severity_summary = ", ".join(
+                        f"{count} {sev}" for sev, count in sorted(by_severity.items())
+                    )
+                    print(
+                        f"repo_health_warnings: {len(repo_health_warnings)} "
+                        f"({severity_summary}) [unrelated to this task; rerun with --issues-scope all to inspect]"
+                    )
             print("excluded_lanes:")
             for lane, reason in payload["excluded_lanes"].items():
                 print(f"- {lane}: {reason}")
