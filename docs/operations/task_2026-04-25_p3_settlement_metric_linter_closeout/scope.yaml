@@ -1,0 +1,32 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-25_p3_settlement_metric_linter_closeout
+status: in_progress
+branch: midstream_remediation
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+in_scope:
+- docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/**
+- scripts/semantic_linter.py
+- tests/test_semantic_linter.py
+- docs/operations/AGENTS.md
+- docs/operations/current_state.md
+- docs/AGENTS.md
+- docs/README.md
+- architecture/docs_registry.yaml
+- architecture/test_topology.yaml
+- scripts/backfill_ens.py
+- scripts/bridge_oracle_to_calibration.py
+- scripts/investigate_ecmwf_bias.py
+- architecture/topology.yaml
+- scripts/backfill_observations_from_settlements.py
+allow_companions:
+- architecture/script_manifest.yaml
+- architecture/test_topology.yaml
+- architecture/docs_registry.yaml
+- architecture/source_rationale.yaml
+- AGENTS.md
+- README.md
+- docs/operations/current_state.md
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*

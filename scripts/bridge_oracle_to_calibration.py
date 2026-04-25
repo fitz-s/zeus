@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Bridge oracle shadow snapshots into the reviewed oracle error-rate config artifact.
+# Reuse: Review source snapshots and high-track settlement filtering before applying output.
 """Bridge oracle shadow snapshots to calibration data.
 
 Compares oracle-time WU/HKO snapshots (captured by
@@ -51,6 +54,7 @@ def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
                settlement_source_type, unit
         FROM settlements
         WHERE authority = 'VERIFIED'
+          AND temperature_metric = 'high'
     """).fetchall()
     result = {}
     for r in rows:

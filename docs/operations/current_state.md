@@ -5,15 +5,15 @@ Role: single live control pointer for the repo.
 ## Active program
 
 - Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P2 backfill completeness guardrails active**
+- Mainline task: **Post-audit remediation mainline — P3 settlement metric-read enforcement active**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
-- Closeout evidence packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
+- Active execution packet: `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
+- Prior P2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
 - Prior P1 closeout evidence packet: `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`
 - Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
 - Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json`
+- Receipt-bound source: `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -47,15 +47,25 @@ Role: single live control pointer for the repo.
   origin before the packet-specific commit command could create a separate
   Lore commit. Phase-entry reassessment selected a narrow P2 4.4.B-lite
   script-guardrail slice for backfill completeness manifests and fail
-  thresholds. This active packet does not authorize production DB mutation,
-  row-level quarantine, schema/view changes, 4.4.A upsert/revision redesign,
-  P3 replay/live consumer rewiring, or P4 data population.
+  thresholds; that packet closed at `0a4bae3`, with packet-runtime naming
+  follow-up `cfd92f9` and runtime snapshot evidence `c023c9c` also pushed.
+  Phase-entry reassessment found P3 4.5.A's named consumer joins already carry
+  explicit `temperature_metric` predicates, but the H3 semantic-linter
+  enforcement boundary still exempts scripts broadly enough for script reads of
+  `settlements` without metric predicates to pass. The active packet is now a
+  narrow P3 4.5.A closeout slice: refresh stale routing docs, tighten the
+  settlement metric-read linter boundary, and fix only remaining consumer
+  script reads exposed by that boundary. This active packet does not authorize
+  production DB mutation, row-level quarantine, schema/view changes, P2
+  upsert/revision redesign, P3 4.5.B/4.5.C safe-view rewiring, or P4 data
+  population.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
-- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md`
-- `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json`
+- `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
+- `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/work_log.md`
+- `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/scope.yaml`
+- `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/receipt.json`
 
 ## Freeze point
 
@@ -68,12 +78,14 @@ Role: single live control pointer for the repo.
   `8e94f4a`, and 4.2.C implementation closed at `1411017`. The P1.5/P1.5a packet
   `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
   remains a historical topology anchor only; it is not the active slice.
-  WU/HKO daily observation writer provenance identity and obs_v2 provenance
-  identity are closed. The active implementation scope is now P2 4.4.B-lite
-  script-level completeness guardrails only. This pointer does not authorize production DB mutation,
-  `settlements_v2` population, market-identity backfill, live executor DB
-  authority, legacy-settlement promotion, broad P1 source-role/view work, P2
-  upsert/revision work, P3 safe-view migration, or P4 data population.
+  WU/HKO daily observation writer provenance identity, obs_v2 provenance
+  identity, and P2 4.4.B-lite backfill completeness guardrails are closed. The
+  active implementation scope is now P3 4.5.A settlement metric-read
+  enforcement closeout only. This pointer does not authorize production DB
+  mutation, `settlements_v2` population, market-identity backfill, live executor
+  DB authority, legacy-settlement promotion, broad P1 source-role/view work, P2
+  upsert/revision work, P3 4.5.B/4.5.C safe-view rewiring, or P4 data
+  population.
 
 ## Current fact companions
 
@@ -88,13 +100,14 @@ Role: single live control pointer for the repo.
 
 ## Parallel infrastructure packet
 
-- Branch: `p2-packet-runtime` (worktree-isolated; not on `midstream_remediation`)
+- Branch: `p2-packet-runtime` (landed into `midstream_remediation`)
 - Scope: Packet Runtime (`zpkt`) — `scripts/zpkt.py`, `scripts/_zpkt_scope.py`,
   `.zeus-githooks/pre-commit`, `architecture/scope_schema.json`, soft-warn
   pre-commit hook, `tooling_runtime` test category, and
   `docs/operations/packet_scope_protocol.md`.
-- Status: Implementation complete; awaiting `zpkt close` landing entry, fast-forward
-  to mainline, and follow-up bypass telemetry review.
+- Status: Landed; packet runtime is available for scope tracking and closeout
+  receipts. Follow-up bypass telemetry review remains future tooling/process
+  work, not a blocker for the active P3 slice.
 - Authority footprint: Tooling/process only; does not touch pricing, settlement,
   observation, calibration, or DB authority. Mainline P1/P2/P3 sequencing is
   unaffected.
@@ -102,7 +115,7 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Implement and verify the active P2 4.4.B-lite backfill completeness
-  guardrail packet.
+- Commit and push the verified active P3 4.5.A settlement metric-read linter
+  closeout packet, then reassess the next mainline slice.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->

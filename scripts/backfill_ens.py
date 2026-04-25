@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Backfill legacy high-track ENS p_raw snapshots for recent verified settlements.
+# Reuse: Run only under packet approval; H3 requires high-track settlement reads.
 """ENS P_raw backfill for historical settlements within 93-day API window.
 
 Open-Meteo past_days max = 93. No historical ensemble endpoint.
@@ -42,8 +45,11 @@ def get_settlements_in_window(conn, days_back: int = 93) -> list[dict]:
         SELECT DISTINCT s.city, s.target_date, s.winning_bin
         FROM settlements s
         LEFT JOIN ensemble_snapshots e
-            ON s.city = e.city AND s.target_date = e.target_date
+            ON s.city = e.city
+           AND s.target_date = e.target_date
+           AND COALESCE(e.temperature_metric, 'high') = 'high'
         WHERE s.target_date >= ?
+          AND s.temperature_metric = 'high'
           AND e.snapshot_id IS NULL
         ORDER BY s.target_date DESC
     """, (cutoff,)).fetchall()

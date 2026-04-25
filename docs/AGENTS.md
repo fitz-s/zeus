@@ -46,7 +46,8 @@ body or bundle.
 | `operations/task_2026-04-25_p0_market_events_preflight/` | Closed POST_AUDIT 4.2.C implementation packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` | Closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet; route through `operations/current_state.md` |
 | `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` | Closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` | Active POST_AUDIT 4.4.B-lite backfill completeness guardrail packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` | Closed POST_AUDIT 4.4.B-lite backfill completeness guardrail packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` | Active POST_AUDIT 4.5.A settlement metric-read linter closeout packet; route through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |

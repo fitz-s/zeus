@@ -25,7 +25,7 @@ test_trust_policy:
     audit_required: "No lifecycle header or missing required dates"
   enforcement: "topology_doctor test_trust check + digest gate output"
 
-  # Machine-readable registry: 36 tests with valid lifecycle headers.
+  # Machine-readable registry: 56 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
@@ -64,6 +64,7 @@ test_trust_policy:
     tests/test_platt.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-21"}
     tests/test_digest_admission_policy.py: {created: "2026-04-25", last_used: "2026-04-25"}

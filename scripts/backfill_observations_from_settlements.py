@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-11; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Backfill legacy high-track daily observations from verified settlement evidence.
+# Reuse: Repair/ETL writer; run dry-run first and keep settlement reads high-track pinned.
 """Backfill daily observations from authoritative settlement rows.
 
 Use when the settlement source's temperature is itself the settlement truth.
@@ -33,6 +36,7 @@ def backfill_observations_from_settlements(*, dry_run: bool = False, limit: int 
         SELECT s.city, s.target_date, s.settlement_value, s.settlement_source
         FROM settlements s
         WHERE s.settlement_value IS NOT NULL
+          AND s.temperature_metric = 'high'
           AND NOT EXISTS (
               SELECT 1
               FROM observations o

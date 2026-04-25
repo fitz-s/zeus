@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Purpose: Diagnostic report for ECMWF bias behavior against high-track settlement evidence.
+# Reuse: Diagnostic only; do not treat output as training authority.
 """ECMWF warm bias investigation.
 
 Questions:
@@ -86,8 +89,12 @@ def investigate():
         SELECT s.city, s.target_date, s.winning_bin, s.settlement_value,
                e.members_json, e.p_raw_json, e.spread
         FROM settlements s
-        INNER JOIN ensemble_snapshots e ON s.city = e.city AND s.target_date = e.target_date
+        INNER JOIN ensemble_snapshots e
+            ON s.city = e.city
+           AND s.target_date = e.target_date
+           AND COALESCE(e.temperature_metric, 'high') = 'high'
         WHERE e.members_json IS NOT NULL AND s.winning_bin IS NOT NULL
+          AND s.temperature_metric = 'high'
         LIMIT 20
     """).fetchall()
 
