@@ -308,11 +308,18 @@ def get_command(conn: sqlite3.Connection, command_id: str) -> Optional[dict]:
 
 
 def find_unresolved_commands(conn: sqlite3.Connection) -> Iterable[dict]:
-    """Yield commands in {SUBMITTING, UNKNOWN, REVIEW_REQUIRED}."""
+    """Yield commands in IN_FLIGHT_STATES.
+
+    Filter set must remain in lockstep with command_bus.IN_FLIGHT_STATES
+    (asserted by tests/test_command_bus_types.py
+    test_inflight_states_match_repo_unresolved_filter). Post-reviewer
+    MEDIUM-2 (2026-04-26): CANCEL_PENDING added so a process restart
+    between CANCEL_REQUESTED and CANCEL_ACKED gets reconciled.
+    """
     with _row_factory_as(conn, sqlite3.Row):
         rows = conn.execute(
             "SELECT * FROM venue_commands "
-            "WHERE state IN ('SUBMITTING', 'UNKNOWN', 'REVIEW_REQUIRED')"
+            "WHERE state IN ('SUBMITTING', 'UNKNOWN', 'REVIEW_REQUIRED', 'CANCEL_PENDING')"
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
 

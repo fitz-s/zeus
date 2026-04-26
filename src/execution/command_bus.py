@@ -24,9 +24,21 @@ Grammar guarantees (INV-29):
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional
+
+
+__all__ = [
+    "CommandState",
+    "CommandEventType",
+    "IntentKind",
+    "IdempotencyKey",
+    "VenueCommand",
+    "IN_FLIGHT_STATES",
+    "TERMINAL_STATES",
+]
 
 
 class CommandState(str, Enum):
@@ -74,10 +86,14 @@ class IntentKind(str, Enum):
 
 # Recovery loop categories. Used by P1.S4 command_recovery to decide what to
 # scan. Sourced from the same definitions to avoid drift.
+# CANCEL_PENDING included per code-reviewer MEDIUM-2 (2026-04-26): a process
+# restart between CANCEL_REQUESTED and CANCEL_ACKED leaves a row whose final
+# venue state may differ from local intent; recovery must reconcile.
 IN_FLIGHT_STATES: frozenset[CommandState] = frozenset({
     CommandState.SUBMITTING,
     CommandState.UNKNOWN,
     CommandState.REVIEW_REQUIRED,
+    CommandState.CANCEL_PENDING,
 })
 
 # A command in any of these states will not move via fill/ack events; only
@@ -127,8 +143,16 @@ class IdempotencyKey:
             order economics)
           - intent_kind: enum value string
 
-        Joined with NUL separators (\\x00) — guarantees no field-boundary
-        ambiguity even if a value contains '|' or other ASCII separators.
+        Fields joined with NUL (\\x00) separators. decision_id and token_id
+        MUST NOT contain NUL bytes themselves — rejected at the boundary so
+        the canonicalization is unambiguous (post-reviewer-HIGH 2026-04-26:
+        without this rejection, ("\\x00", "\\x00x") and ("\\x00\\x00", "x")
+        canonicalize identically and produce key collisions). Realistic Zeus
+        IDs are UUID-like and contain no NULs, so this rejection is free.
+
+        price/size must be finite (NaN/Inf rejected). sha256[:32] = 128 bits;
+        birthday-collision probability ~10^14 vs 2^128 for ~10^7 commands —
+        decisively safe within scope.
         """
         if not isinstance(intent_kind, IntentKind):
             raise TypeError(
@@ -136,6 +160,14 @@ class IdempotencyKey:
             )
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+        if "\x00" in decision_id:
+            raise ValueError("decision_id must not contain NUL bytes (\\x00)")
+        if "\x00" in token_id:
+            raise ValueError("token_id must not contain NUL bytes (\\x00)")
+        if not math.isfinite(float(price)):
+            raise ValueError(f"price must be finite, got {price!r}")
+        if not math.isfinite(float(size)):
+            raise ValueError(f"size must be finite, got {size!r}")
         canonical = "\x00".join([
             decision_id,
             token_id,
@@ -191,3 +223,46 @@ class VenueCommand:
             raise TypeError(
                 f"VenueCommand.idempotency_key must be IdempotencyKey, got {type(self.idempotency_key).__name__}"
             )
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "VenueCommand":
+        """Project a venue_commands row dict into a typed VenueCommand.
+
+        Used by P1.S3 executor (after insert_command/append_event), P1.S4
+        recovery loop (scanning find_unresolved_commands), and P1.S5
+        idempotency lookups. Centralizing the dict→typed coercion here
+        prevents IntentKind(row["..."]) boilerplate from spreading.
+
+        Re-raises with the offending column name on enum mismatch so a corrupt
+        row fails diagnosably rather than via a generic enum ValueError.
+        """
+        try:
+            intent_kind_val = IntentKind(row["intent_kind"])
+        except ValueError as exc:
+            raise ValueError(
+                f"venue_commands.intent_kind={row.get('intent_kind')!r} is not a valid IntentKind"
+            ) from exc
+        try:
+            state_val = CommandState(row["state"])
+        except ValueError as exc:
+            raise ValueError(
+                f"venue_commands.state={row.get('state')!r} is not a valid CommandState"
+            ) from exc
+        return cls(
+            command_id=row["command_id"],
+            position_id=row["position_id"],
+            decision_id=row["decision_id"],
+            idempotency_key=IdempotencyKey(value=row["idempotency_key"]),
+            intent_kind=intent_kind_val,
+            market_id=row["market_id"],
+            token_id=row["token_id"],
+            side=row["side"],
+            size=float(row["size"]),
+            price=float(row["price"]),
+            state=state_val,
+            venue_order_id=row.get("venue_order_id") or "",
+            last_event_id=row.get("last_event_id") or "",
+            created_at=row.get("created_at") or "",
+            updated_at=row.get("updated_at") or "",
+            review_required_reason=row.get("review_required_reason"),
+        )

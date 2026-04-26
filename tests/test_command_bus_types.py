@@ -275,3 +275,171 @@ class TestRepoTypeAlignment:
             assert f"'{s.value}'" in repo_src, (
                 f"IN_FLIGHT_STATES {s.value} missing from repo's unresolved filter — drift"
             )
+
+
+# ---------------------------------------------------------------------------
+# Post-reviewer HIGH: NUL-byte rejection in canonical inputs
+# Closes the IdempotencyKey collision contract overclaim.
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotencyKeyNulByteRejection:
+    def test_decision_id_with_nul_rejected(self):
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        with pytest.raises(ValueError, match="decision_id.*NUL"):
+            IdempotencyKey.from_inputs(
+                decision_id="dec\x00bad", token_id="tok-1", side="BUY",
+                price=0.5, size=10.0, intent_kind=IntentKind.ENTRY,
+            )
+
+    def test_token_id_with_nul_rejected(self):
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        with pytest.raises(ValueError, match="token_id.*NUL"):
+            IdempotencyKey.from_inputs(
+                decision_id="dec-1", token_id="tok\x00bad", side="BUY",
+                price=0.5, size=10.0, intent_kind=IntentKind.ENTRY,
+            )
+
+    def test_known_collision_pair_now_rejected(self):
+        """Code-reviewer's reproduced collision case: ("\\x00", "\\x00x")
+        and ("\\x00\\x00", "x") canonicalized identically pre-fix. Both must
+        now raise — neither tuple makes it past the boundary check.
+        """
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        kw = dict(side="BUY", price=0.5, size=10.0, intent_kind=IntentKind.ENTRY)
+        with pytest.raises(ValueError, match="NUL"):
+            IdempotencyKey.from_inputs(decision_id="\x00", token_id="\x00x", **kw)
+        with pytest.raises(ValueError, match="NUL"):
+            IdempotencyKey.from_inputs(decision_id="\x00\x00", token_id="x", **kw)
+
+    def test_nan_price_rejected(self):
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        with pytest.raises(ValueError, match="price must be finite"):
+            IdempotencyKey.from_inputs(
+                decision_id="dec-1", token_id="tok-1", side="BUY",
+                price=float("nan"), size=10.0, intent_kind=IntentKind.ENTRY,
+            )
+
+    def test_inf_size_rejected(self):
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        with pytest.raises(ValueError, match="size must be finite"):
+            IdempotencyKey.from_inputs(
+                decision_id="dec-1", token_id="tok-1", side="BUY",
+                price=0.5, size=float("inf"), intent_kind=IntentKind.ENTRY,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Post-reviewer MEDIUM: VenueCommand.from_row factory
+# ---------------------------------------------------------------------------
+
+
+class TestVenueCommandFromRow:
+    def test_round_trip_through_in_memory_db(self):
+        """Insert a command via repo, read row back, project to VenueCommand.
+        Lossy projection would surface here — every field must round-trip.
+        """
+        import sqlite3
+        from src.execution.command_bus import (
+            CommandState, IdempotencyKey, IntentKind, VenueCommand,
+        )
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import get_command, insert_command
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+
+        idem = IdempotencyKey.from_inputs(
+            decision_id="dec-fr", token_id="tok-fr", side="BUY",
+            price=0.55, size=20.0, intent_kind=IntentKind.ENTRY,
+        )
+        insert_command(
+            conn,
+            command_id="cmd-fr",
+            position_id="pos-fr",
+            decision_id="dec-fr",
+            idempotency_key=idem.value,
+            intent_kind="ENTRY",
+            market_id="m-fr",
+            token_id="tok-fr",
+            side="BUY",
+            size=20.0,
+            price=0.55,
+            created_at="2026-04-26T00:00:00Z",
+        )
+
+        row = get_command(conn, "cmd-fr")
+        assert row is not None
+        cmd = VenueCommand.from_row(row)
+        assert cmd.command_id == "cmd-fr"
+        assert cmd.intent_kind is IntentKind.ENTRY
+        assert cmd.state is CommandState.INTENT_CREATED
+        assert cmd.idempotency_key.value == idem.value
+        assert cmd.size == 20.0
+        assert cmd.price == 0.55
+        assert cmd.side == "BUY"
+
+    def test_from_row_diagnostic_error_for_bad_state(self):
+        from src.execution.command_bus import VenueCommand
+        bad = {
+            "command_id": "x", "position_id": "x", "decision_id": "x",
+            "idempotency_key": "0" * 32, "intent_kind": "ENTRY",
+            "market_id": "m", "token_id": "t", "side": "BUY",
+            "size": 1.0, "price": 0.5, "state": "BANANA",
+        }
+        with pytest.raises(ValueError, match="venue_commands.state.*BANANA.*CommandState"):
+            VenueCommand.from_row(bad)
+
+    def test_from_row_diagnostic_error_for_bad_intent_kind(self):
+        from src.execution.command_bus import VenueCommand
+        bad = {
+            "command_id": "x", "position_id": "x", "decision_id": "x",
+            "idempotency_key": "0" * 32, "intent_kind": "GIBBERISH",
+            "market_id": "m", "token_id": "t", "side": "BUY",
+            "size": 1.0, "price": 0.5, "state": "INTENT_CREATED",
+        }
+        with pytest.raises(ValueError, match="venue_commands.intent_kind.*GIBBERISH.*IntentKind"):
+            VenueCommand.from_row(bad)
+
+
+# ---------------------------------------------------------------------------
+# Post-reviewer MEDIUM-2: CANCEL_PENDING in IN_FLIGHT_STATES
+# ---------------------------------------------------------------------------
+
+
+class TestCancelPendingInRecoveryFilter:
+    def test_cancel_pending_is_in_flight(self):
+        from src.execution.command_bus import CommandState, IN_FLIGHT_STATES
+        assert CommandState.CANCEL_PENDING in IN_FLIGHT_STATES
+
+    def test_cancel_pending_command_returned_by_find_unresolved(self):
+        """End-to-end: insert command, advance to CANCEL_PENDING, verify
+        repo's find_unresolved_commands returns it."""
+        import sqlite3
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import (
+            append_event, find_unresolved_commands, insert_command,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+
+        insert_command(
+            conn, command_id="cmd-cp", position_id="pos", decision_id="dec",
+            idempotency_key="k" * 32, intent_kind="ENTRY",
+            market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
+            created_at="2026-04-26T00:00:00Z",
+        )
+        # INTENT_CREATED → SUBMITTING → CANCEL_PENDING via valid grammar path
+        append_event(conn, command_id="cmd-cp", event_type="SUBMIT_REQUESTED",
+                     occurred_at="2026-04-26T00:00:01Z")
+        append_event(conn, command_id="cmd-cp", event_type="CANCEL_REQUESTED",
+                     occurred_at="2026-04-26T00:00:02Z")
+
+        unresolved = list(find_unresolved_commands(conn))
+        ids = {c["command_id"] for c in unresolved}
+        assert "cmd-cp" in ids, (
+            "CANCEL_PENDING command must surface in find_unresolved_commands per MEDIUM-2"
+        )
