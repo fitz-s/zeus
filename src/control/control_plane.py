@@ -171,15 +171,34 @@ def get_edge_threshold_multiplier() -> float:
 
 
 def strategy_gates() -> dict[str, GateDecision]:
+    """Return the current strategy_gates table from _control_state.
+
+    BLOCKER #2 fix (2026-04-26, con-nyx review): accepts both dict shape
+    (current production — emitted by db.py::query_control_override_state
+    post-fix and by control_plane._apply_command set_strategy_gate handler)
+    AND legacy bare-bool shape (defense-in-depth for any cache-state path
+    that bypasses the BLOCKER #2 fix). The bool branch synthesizes an
+    UNSPECIFIED GateDecision so callers (is_strategy_enabled, status_summary)
+    don't crash on residual legacy state. Path 1 + Path 2 together cover
+    bool/dict mismatch from both ends.
+    """
     raw = _control_state.get("strategy_gates", {})
     result = {}
     for k, v in raw.items():
         if isinstance(v, dict):
             result[k] = GateDecision.from_dict(v)
+        elif isinstance(v, bool):
+            result[k] = GateDecision(
+                enabled=v,
+                reason_code=ReasonCode.UNSPECIFIED,
+                reason_snapshot={},
+                gated_at="",
+                gated_by="legacy_bool_cache",
+            )
         else:
             raise ValueError(
-                f"Legacy bool strategy gate found for {k!r}. "
-                "Must be migrated to a structured GateDecision dict."
+                f"Strategy gate for {k!r} has unsupported type {type(v).__name__}: {v!r}. "
+                "Expected dict (GateDecision shape) or bool (legacy)."
             )
     return result
 

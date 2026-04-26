@@ -62,3 +62,28 @@ Antibody count: 8 → 11. All green. Regression panel delta still 0.
 Receipt amended with C3 (operator-visible-breaking-change framing now walks the actual runtime sequence) + 3 followup entries (MAJOR #2/#3/#4) in `receipt.followups_owed`.
 
 MINORs #1-#3 accepted as-is (Iterable[str] OK; mode-aware coupling acceptable; SystemExit not masked).
+
+### Step 6 (post-review #2): con-nyx BLOCKER #2 fix — bool/dict shape mismatch
+
+con-nyx re-review of `26729fd` surfaced NEW BLOCKER #2: pre-existing K1 migration debt where `src/state/db.py::query_control_override_state` returned `dict[str, bool]` but `src/control/control_plane.py::strategy_gates()` expected `dict[str, dict]` and raised ValueError on bool. G6's boot guard moved this latent debt onto the critical path of EVERY live launch where operator had ever issued `set_strategy_gate`.
+
+CONDITION C2 was also re-opened: my synthetic `_populate_strategy_gates` fixture used `{"enabled": ..., "reason": ..., "set_at": ...}` shape — production never produces this. Tests passed but did not verify production hydration.
+
+Applied combined fix paths 1+2 (defense-in-depth):
+- **Path 1 (writer-side)**: `query_control_override_state` now emits GateDecision-shaped dicts per row (synthesizes `reason_code='operator_override'`, `gated_at=row['issued_at']`, `gated_by=row['issued_by']`). Primary fix.
+- **Path 2 (reader-side)**: `strategy_gates()` now accepts both dict (post-fix production) AND legacy bare-bool, synthesizing UNSPECIFIED GateDecision for the bool case. Defense-in-depth + closes pre-existing `test_backward_compat_bool_gate` red as a bonus.
+
+CONDITION C2 redo:
+- Updated `_populate_strategy_gates` fixture to mirror EXACT post-refresh shape (full GateDecision dict including reason_code, reason_snapshot, gated_at, gated_by).
+- Added 2 real-DB round-trip tests (#12 + #13):
+  - `test_boot_helper_round_trips_real_db_gate`: real sqlite + init_schema + upsert_control_override + refresh_control_state, only get_world_connection monkeypatched. Asserts `isinstance(gate, dict)` post-fix — would fire on bool regression.
+  - `test_boot_helper_round_trip_refuses_when_db_gate_missing`: empty-DB control, confirms fail-closed when no operator action.
+
+Empirical re-verification: ran the operator-remediation scenario directly in worktree (temp DB, upsert all 3 non-safe to disabled, refresh, helper). Result: SUCCESS — strategy_gates correctly hydrated as dicts; no ValueError; daemon would launch.
+
+Test count: 11 → 13. Regression panel still 5 pre-existing fails, delta=0.
+
+Receipt amended:
+- BLOCKER_1_resolved.verification_AMENDED_post_blocker2: corrected the inaccurate "verified production path" claim from previous round.
+- NEW BLOCKER_2_resolved section.
+- commits array completed (added 1c822ff close + 26729fd fix-1; this commit will be added too).

@@ -22,17 +22,37 @@
       "sha": "211d0ec",
       "stage": "GREEN",
       "summary": "Slice G6 GREEN — wire LIVE_SAFE_STRATEGIES into live boot"
+    },
+    {
+      "sha": "1c822ff",
+      "stage": "close",
+      "summary": "Slice G6 close — register test, write receipt, log close"
+    },
+    {
+      "sha": "26729fd",
+      "stage": "post-review-fix-1",
+      "summary": "G6 BLOCKER #1 fix: hydrate control state before live boot guard (con-nyx review #1)"
     }
   ],
+  "blocker_2_fix_commit_pending": "follows this receipt amendment",
   "antibody_test": "tests/test_live_safe_strategies.py",
-  "antibody_test_count": 11,
-  "antibody_test_pass_rate": "11/11",
+  "antibody_test_count": 13,
+  "antibody_test_pass_rate": "13/13",
   "post_review_amendments": {
     "trigger": "con-nyx adversarial review 2026-04-26 — 1 BLOCKER + 4 MAJOR + 3 MINOR",
     "BLOCKER_1_resolved": {
       "finding": "Boot guard at src/main.py:491-492 read pre-hydration _control_state (empty dict at module load); is_strategy_enabled() default-True semantic meant SystemExit fired unconditionally even when operator had set gates via control_plane set_strategy_gate.",
       "fix_path": "Path 1 (recommended) — extract _assert_live_safe_strategies_or_exit() helper that calls refresh_control_state() before composing the enabled set. Reorder boot to invoke the guard AFTER init_schema(conn) + conn.close(), so the control_overrides table exists when refresh reads from it.",
-      "verification": "Empirical: tests/test_live_safe_strategies.py::test_boot_helper_refuses_when_unsafe_strategy_enabled (hydrated + center_buy enabled → SystemExit fires) + test_boot_helper_silent_when_only_safe_strategy_enabled (hydrated + only opening_inertia → silent) + test_boot_helper_with_cold_cache_refuses_via_default_true_semantic (cold-cache contract pin). Reproduced con-nyx's empirical scenario directly via Python in worktree post-fix; cold-cache still refuses (now intentionally, per docs)."
+      "verification_AMENDED_post_blocker2": "Cold-cache scenario verified via tests/test_live_safe_strategies.py::test_boot_helper_with_cold_cache_refuses_via_default_true_semantic. Initial verification of operator-remediation round-trip was INACCURATE — used synthetic _populate_strategy_gates fixture that bypassed query_control_override_state and therefore did not exercise the bool/dict shape mismatch. CONDITION C2 redo via test_boot_helper_round_trips_real_db_gate (real sqlite + real init_schema + real upsert_control_override + real refresh_control_state, only get_world_connection monkeypatched) now exercises the full production path."
+    },
+    "BLOCKER_2_resolved": {
+      "trigger": "con-nyx re-review of 26729fd surfaced the bool/dict mismatch — pre-existing K1 migration debt that G6's boot guard moved onto the critical path.",
+      "finding": "src/state/db.py::query_control_override_state returned strategy_gates as dict[str, bool], but src/control/control_plane.py::strategy_gates() expected dict[str, dict] and raised ValueError on bare bool. Operator who followed the FATAL message's instruction (set_strategy_gate to disable non-safe strategies + restart) crashed with uncaught ValueError on next launch.",
+      "fix_paths_combined": [
+        "Path 1 (writer-side, primary): query_control_override_state at src/state/db.py:3896 now emits GateDecision-shaped dict per row instead of bare bool. Synthesizes reason_code='operator_override', reason_snapshot={}, gated_at=row['issued_at'], gated_by=row['issued_by'].",
+        "Path 2 (reader-side, defense-in-depth): strategy_gates() at src/control/control_plane.py:173 now accepts both dict (current production) AND legacy bare-bool, synthesizing UNSPECIFIED GateDecision for the bool case. Closes pre-existing test_backward_compat_bool_gate red as a bonus."
+      ],
+      "verification": "Empirical: ran the post-fix scenario directly in worktree — temp DB + upsert_control_override(value='true') for all 3 non-safe + refresh + helper. Result: SUCCESS, no ValueError; strategy_gates correctly hydrated as dicts with enabled=False per gate. Test test_boot_helper_round_trips_real_db_gate explicitly asserts isinstance(gate_value, dict) so a future regression to bool would fire here."
     },
     "MAJOR_1_resolved": {
       "finding": "Test #8 was a string-grep, not an integration test. Allowed BLOCKER #1 to slip past.",
