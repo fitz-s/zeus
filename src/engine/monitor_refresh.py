@@ -27,6 +27,7 @@ from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
+from src.state.chain_reconciliation import resolve_position_metric
 from src.state.portfolio import Position
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.types import Bin
@@ -135,9 +136,17 @@ def _refresh_ens_member_counting(
     # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
     # its own Platt model (pre-P9C this was metric-blind and LOW silently
     # received HIGH calibration — critical blocker for LOW deployment).
+    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical
+    # resolver. Pre-fix, `getattr(position, "temperature_metric", "high")`
+    # silently substituted HIGH for any position with missing metric,
+    # directly undermining the L3 Phase 9C metric-aware gate at the entry
+    # seam (a LOW position with no attribute received HIGH calibration
+    # silently). Post-fix, the resolver still defaults to HIGH for
+    # backward compat, but emits a DEBUG log identifying the position so
+    # operators can audit silent-HIGH events.
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=getattr(position, "temperature_metric", "high"),
+        temperature_metric=resolve_position_metric(position)[0],
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -294,8 +303,9 @@ def _refresh_day0_observation(
 
     # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
     # so Day0Signal receives the typed object, not a bare str.
+    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical resolver.
     temperature_metric = MetricIdentity.from_raw(
-        getattr(position, "temperature_metric", "high")
+        resolve_position_metric(position)[0]
     )
 
     extrema, hours_remaining = remaining_member_extrema_for_day0(
@@ -329,9 +339,11 @@ def _refresh_day0_observation(
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
     # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
+    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical resolver
+    # for operator-visible silent-HIGH audit trail.
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=getattr(position, "temperature_metric", "high"),
+        temperature_metric=resolve_position_metric(position)[0],
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
