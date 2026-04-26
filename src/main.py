@@ -476,6 +476,21 @@ def main():
             f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not valid. "
             "Must be exactly 'live'."
         )
+
+    # G6 antibody (2026-04-26): refuse boot if any non-allowlisted strategy is
+    # currently enabled. KNOWN_STRATEGIES is the engine's universe of buildable
+    # strategies (4); LIVE_SAFE_STRATEGIES is the operator-approved subset for
+    # live execution (1: opening_inertia). is_strategy_enabled() returns True
+    # by default, so non-safe strategies must be explicitly disabled via
+    # control_plane set_strategy_gate before launch.
+    from src.control.control_plane import (
+        assert_live_safe_strategies_under_live_mode,
+        is_strategy_enabled,
+    )
+    from src.engine.cycle_runner import KNOWN_STRATEGIES
+    enabled_strategies = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
+    assert_live_safe_strategies_under_live_mode(enabled_strategies)
+
     mode = get_mode()
     once = "--once" in sys.argv
     logging.basicConfig(
