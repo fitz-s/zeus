@@ -51,6 +51,18 @@ from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
+@pytest.fixture(autouse=True)
+def _default_posture_normal_for_runtime_guards(monkeypatch):
+    """INV-26 / O2-c isolation: tests in this file pre-date the runtime
+    posture gate and assume new entries reach discovery. Default posture to
+    NORMAL so the legacy fixtures keep exercising the gates they were
+    written for. Tests that explicitly verify posture must override.
+    """
+    import src.runtime.posture as _posture_module
+    _posture_module._clear_cache()
+    monkeypatch.setattr(_posture_module, "read_runtime_posture", lambda: "NORMAL")
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,

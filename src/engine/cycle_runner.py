@@ -346,29 +346,27 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
         summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
-    # INV-26 / O2-c posture gate: consult committed runtime_posture.yaml BEFORE
-    # the risk-level gate. Non-NORMAL posture blocks new entries. Monitor, exit,
-    # and reconciliation paths continue regardless of posture.
-    # Wrapped in try/except so a posture read failure does NOT crash the cycle —
-    # fail-closed means posture.read_runtime_posture() already returns
-    # NO_NEW_ENTRIES on error, but an unexpected exception here falls through
-    # to the risk gate (which also fails closed for non-GREEN).
-    _posture_blocked_reason: str | None = None
+    # INV-26 / O2-c posture gate: consult committed runtime_posture.yaml.
+    # Posture is recorded in `summary["posture"]` for operator visibility on
+    # every cycle. It also blocks new entries when non-NORMAL — but only as
+    # the FALLBACK reason when no more-specific gate fires. Specific gates
+    # (chain_sync, quarantine, force_exit, risk_level, bankroll, exposure,
+    # entries_paused) take precedence so operators see actionable detail
+    # rather than the outermost branch posture. Monitor, exit, and
+    # reconciliation paths continue regardless of posture.
+    _current_posture: str = "NO_NEW_ENTRIES"
     try:
         from src.runtime.posture import read_runtime_posture
         _current_posture = read_runtime_posture()
-        if _current_posture != "NORMAL":
-            _posture_blocked_reason = f"posture={_current_posture}"
     except Exception as _posture_exc:
         logger.error(
             "runtime_posture read raised unexpectedly: %s; treating as NO_NEW_ENTRIES",
             _posture_exc,
         )
-        _posture_blocked_reason = "posture=NO_NEW_ENTRIES"
+        _current_posture = "NO_NEW_ENTRIES"
+    summary["posture"] = _current_posture
 
-    if _posture_blocked_reason is not None:
-        entries_blocked_reason = _posture_blocked_reason
-    elif not chain_ready:
+    if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
         entries_blocked_reason = "portfolio_quarantined"
@@ -395,6 +393,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entries_paused = is_entries_paused()
     if entries_paused and entries_blocked_reason is None:
         entries_blocked_reason = "entries_paused"
+    # INV-26 final fallback: posture forbids new entries when no more-specific
+    # gate fires. Recorded last so all actionable reasons take precedence;
+    # posture surfaces only when it is the *sole* block.
+    if entries_blocked_reason is None and _current_posture != "NORMAL":
+        entries_blocked_reason = f"posture={_current_posture}"
     if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
