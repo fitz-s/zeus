@@ -247,9 +247,22 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
     limit_price = base_price
 
     if best_bid is not None and best_bid < base_price:
-        slippage = current_price - best_bid
-        if current_price > 0 and slippage / current_price <= 0.03:
-            limit_price = best_bid
+        # Slice P3.3b (PR #19 phase 4 closeout, 2026-04-26): typed
+        # anticipated-slippage at the price-planning seam. Pre-fix used
+        # raw `slippage = current_price - best_bid` + raw `slippage /
+        # current_price <= 0.03` arithmetic — both unit-ambiguous and
+        # invisible to the type system. Now wraps in SlippageBps which
+        # enforces non-negative magnitude + direction semantics. The
+        # `.fraction` accessor (200 bps == 0.02 fraction) makes the
+        # 3% threshold compare cleanly against a typed value.
+        if current_price > 0:
+            slip_bps = abs(current_price - best_bid) / current_price * 10_000.0
+            slippage = SlippageBps(
+                value_bps=slip_bps,
+                direction="adverse",  # buy crossing to lower bid pays adverse
+            )
+            if slippage.fraction <= 0.03:
+                limit_price = best_bid
 
     # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
     # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`
