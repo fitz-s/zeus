@@ -16,8 +16,19 @@
   ],
   "green_commit_pending": "follows this receipt",
   "antibody_test": "tests/test_obs_v2_physical_bounds.py",
-  "antibody_test_count": 10,
-  "antibody_test_pass_rate": "10/10",
+  "antibody_test_count": 12,
+  "antibody_test_pass_rate": "12/12",
+  "post_review_amendments_2026_04_26": {
+    "trigger": "con-nyx APPROVE_WITH_CONDITIONS — 1 MAJOR (3 legacy violators) + 3 NICE-TO-HAVE",
+    "C1_legacy_violators_acknowledgment": {
+      "operator_visible_breaking_change_addendum": "Forward writes blocked. THREE existing rows in obs_v2 currently violate the new bounds: (1) Lagos 2025-11-25 wu_icao_history running_max/min=89.0°C VERIFIED, (2) Warsaw 2024-12-16 wu_icao_history running_max=88.0°C VERIFIED — THIS IS THE workbook N1.8 row, (3) Houston 2024-05-17 wu_icao_history running_max=160.0°F VERIFIED. All carry authority='VERIFIED' (Fitz Constraint #4 violation: VERIFIED label, broken provenance). Cross-checked: ZERO contamination of settlements OR forecast_skill (verified via JOIN scan against state/zeus-world.db 2026-04-26). Live downstream is clean; remediation planned via B4-legacy-quarantine followup. The 3 rows remain in obs_v2 with VERIFIED label until quarantine UPDATE runs."
+    },
+    "C2_followups_added_below": ["B4-legacy-quarantine", "B4-schema-writer-drift-test (LANDED inline)", "B4-schema-raw-bypass-test (LANDED inline)"],
+    "NICE_TO_HAVE_inline_resolved": {
+      "drift_catcher_test": "test_schema_check_matches_writer_constants — pins schema CHECK BETWEEN literal vs writer _PHYSICAL_TEMP_BOUNDS_C/F constants. Catches missed-edit drift via substring check.",
+      "raw_bypass_schema_check_test": "test_schema_check_rejects_raw_bypass_on_new_db — exercises sqlite3.IntegrityError on raw INSERT bypass with 88°C, confirming schema CHECK is functional second-line defense."
+    }
+  },
   "regression_panel": {
     "scope": [
       "tests/test_obs_v2_writer.py",
@@ -60,7 +71,21 @@
       "id": "B4-source-binding",
       "summary": "Per-city source-binding test (the OTHER half of workbook B4): verify each settlement row's settlement_source matches the (city, target_date) → source mapping in docs/operations/current_source_validity.md.",
       "estimated_hours": 1.5,
-      "gating": "current_source_validity.md format must stabilize first (currently a prose surface; would need a structured section to parse)"
+      "gating": "current_source_validity.md format must stabilize first (currently a prose surface; would need a structured section to parse). Per con-nyx ask #6 verdict: option (c) — extract to architecture/city_truth_contract.yaml — is preferred design."
+    },
+    {
+      "id": "B4-legacy-quarantine",
+      "summary": "Retroactive cleanup: UPDATE the 3 known violators (Lagos 2025-11-25, Warsaw 2024-12-16, Houston 2024-05-17) to authority='QUARANTINED' with provenance_json reason='B4_physical_bounds_post_hoc'. Folds in audit script extension (con-nyx NICE-TO-HAVE #3 — extend scripts/audit_observation_instants_v2.py with physical-bounds clause).",
+      "estimated_hours": 1,
+      "gating": "Operator approval for production DB UPDATE — matches packet_scope_protocol soft-warn pattern; record in dedicated child slice with explicit scope.yaml + receipt.json.",
+      "trigger": "con-nyx B4 review MAJOR — 3 existing rows surface but slice doesn't quarantine them (forward-protection only)."
+    },
+    {
+      "id": "B4-strategy-identity-canonical",
+      "summary": "Per con-nyx pattern feedback #7: when more physical bounds appear (wind speed, pressure, humidity), extract _PHYSICAL_TEMP_BOUNDS_* into a shared src/contracts/physical_bounds.py module. Schema generator can string-format from the typed constants. K<<N cleanup.",
+      "estimated_hours": 2,
+      "gating": "Triggers on second bound family appearance — premature today.",
+      "trigger": "con-nyx B4 review pattern feedback #7."
     }
   ],
   "lore_extracted": false,

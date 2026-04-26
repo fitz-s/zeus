@@ -34,3 +34,23 @@ Authority basis: `plan.md`, `scope.yaml`.
 
 ### con-nyx pattern lesson #1 applied
 Test #8 (`test_insert_rows_integration_path_rejects_out_of_bounds`) exercises the production path end-to-end (build row → call insert_rows on :memory: DB) rather than just literal-arg unit testing. Explicitly addresses the lesson from G6 review.
+
+### Step 4 (post-review): con-nyx APPROVE_WITH_CONDITIONS amendments
+
+con-nyx audited live `state/zeus-world.db` (1,813,662 obs_v2 rows) and surfaced 3 existing legacy violators that the slice's forward-protection would now reject:
+- Lagos 2025-11-25 wu_icao_history running_max=89.0°C VERIFIED
+- Warsaw 2024-12-16 wu_icao_history running_max=88.0°C VERIFIED ← THE workbook N1.8 row
+- Houston 2024-05-17 wu_icao_history running_max=160.0°F VERIFIED
+
+Critical reassurance: cross-check JOIN against settlements + forecast_skill = ZERO contamination. Live downstream is clean. So the finding is MAJOR (not BLOCKER) — write-time gate is sufficient, but the legacy rows should be quarantined to discharge Fitz Constraint #4 (VERIFIED label, broken provenance).
+
+Amendments (single commit pending):
+- C1: receipt addendum naming the 3 violators + zero-contamination confirmation. Operator-visible-breaking-change framing now honest.
+- C2: 3 new followups in receipt.followups_owed:
+  - B4-legacy-quarantine (~1h, includes con-nyx NICE-TO-HAVE #3 audit script extension)
+  - B4-strategy-identity-canonical (~2h, deferred until second bound family appears)
+  - existing B4-source-binding kept; ask #6 answer (option c — extract to architecture/city_truth_contract.yaml) recorded
+- NICE-TO-HAVE #1 LANDED INLINE: test_schema_check_matches_writer_constants (~10 lines). Drift catcher between writer constants and schema CHECK literal.
+- NICE-TO-HAVE #2 LANDED INLINE: test_schema_check_rejects_raw_bypass_on_new_db (~30 lines). Pins schema CHECK as second-line defense via raw INSERT bypass.
+
+Test count: 10 → 12. All green. Regression delta still 0.

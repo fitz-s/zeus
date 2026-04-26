@@ -231,3 +231,76 @@ def test_insert_rows_integration_path_accepts_in_bounds():
         "SELECT COUNT(*) FROM observation_instants_v2"
     ).fetchone()[0]
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Drift catchers (11-12) — con-nyx B4 NICE-TO-HAVE #1 + #2
+# ---------------------------------------------------------------------------
+
+
+def test_schema_check_matches_writer_constants():
+    """Schema CHECK literals must agree with writer _PHYSICAL_TEMP_BOUNDS_*.
+
+    Cheap drift catcher: a future bound change has to touch both the writer
+    constants AND the schema CHECK clause. Without this test, a writer-side
+    bump (-90 → -100) silently leaves the schema at -90 and breaks parity.
+    Catches missed-edit drift via simple substring check.
+    """
+    from src.data.observation_instants_v2_writer import (
+        _PHYSICAL_TEMP_BOUNDS_C,
+        _PHYSICAL_TEMP_BOUNDS_F,
+    )
+
+    schema_path = PROJECT_ROOT / "src" / "state" / "schema" / "v2_schema.py"
+    schema_src = schema_path.read_text(encoding="utf-8")
+
+    c_lo, c_hi = _PHYSICAL_TEMP_BOUNDS_C
+    f_lo, f_hi = _PHYSICAL_TEMP_BOUNDS_F
+
+    # Bounds are integer-valued in the schema literal (BETWEEN -90 AND 60).
+    # Writer constants are float (-90.0); ensure schema string contains the
+    # integer form by stripping trailing .0 — fires on drift in either direction.
+    assert f"BETWEEN {int(c_lo)} AND {int(c_hi)}" in schema_src, (
+        f"Celsius bounds drift between writer ({c_lo}, {c_hi}) and "
+        f"v2_schema.py CHECK clause. Update both together."
+    )
+    assert f"BETWEEN {int(f_lo)} AND {int(f_hi)}" in schema_src, (
+        f"Fahrenheit bounds drift between writer ({f_lo}, {f_hi}) and "
+        f"v2_schema.py CHECK clause."
+    )
+
+
+def test_schema_check_rejects_raw_bypass_on_new_db():
+    """Schema CHECK is the second-line defense if a future writer issues raw INSERT.
+
+    Constructor validation (_validate) is the first line; the schema CHECK
+    catches anything that bypasses the dataclass entirely (e.g., migration
+    scripts, ad-hoc psql sessions, future writers built on raw cursor calls).
+    Pinning so a future schema refactor that drops the CHECK clause fires here.
+
+    Empirical: ran this raw-INSERT bypass against a fresh schema 2026-04-26 and
+    confirmed sqlite3 raises IntegrityError naming the CHECK constraint.
+    """
+    conn = sqlite3.connect(":memory:")
+    apply_v2_schema(conn)
+
+    # Use raw INSERT with all required NOT NULL columns satisfied except the
+    # one that violates: temp_current=88.0 with temp_unit='C'.
+    with pytest.raises(sqlite3.IntegrityError, match=r"(?i)CHECK"):
+        conn.execute(
+            """
+            INSERT INTO observation_instants_v2 (
+                city, target_date, source, timezone_name, local_timestamp,
+                utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
+                imported_at, authority, data_version, provenance_json,
+                temp_current
+            ) VALUES (
+                'Warsaw', '2025-07-01', 'wu_icao_history', 'Europe/Warsaw',
+                '2025-07-01T12:00:00+02:00', '2025-07-01T10:00:00+00:00',
+                120, 'utc_hour_aligned', 'C',
+                '2026-04-26T00:00:00+00:00', 'VERIFIED', 'v1.wu-native.pilot',
+                '{"tier":"WU_ICAO"}',
+                88.0
+            )
+            """
+        )
