@@ -28,6 +28,13 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
    Rationale: °F and °C cities have different settlement semantics (2°F range vs 1°C point bins). Hardcoded unit assumptions silently produce wrong probabilities for the wrong city set.  
    Enforcement: semgrep + test (NC-08)
 
+6. **FM-NC-16** — `place_limit_order(...)` calls outside the gateway boundary
+   Rationale: live order submission must flow through the executor seam so V2
+   endpoint preflight (INV-25) and durable command persistence (planned P1)
+   land together. Direct SDK calls bypass both gates.
+   Allowed callers: `src/execution/executor.py` (gateway), `src/data/polymarket_client.py` (SDK wrapper), `scripts/live_smoke_test.py` (operator path that calls v2_preflight() itself).
+   Enforcement: semgrep `zeus-place-limit-order-gateway-only` + test `tests/test_p0_hardening.py::test_place_limit_order_gateway_only` (NC-16)
+
 ## Strict patterns (always enforced)
 
 1. **FM-07** — raw `phase` / `state` string assignment outside lifecycle fold/manager/projection  

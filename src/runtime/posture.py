@@ -13,8 +13,11 @@ Design decisions (from decisions.md §O2-c):
   Falls back to `default_posture` if branch is not listed.
 - Fail-closed: any read error, YAML parse error, or missing file returns
   NO_NEW_ENTRIES (never NORMAL).
-- Module-level cache: posture is read once per process to avoid subprocess
-  overhead per cycle. Tests must call _clear_cache() between assertions.
+- Module-level cache: posture is read at most once per 60 seconds, with
+  invalidation on yaml mtime change or branch change so long-running
+  daemons (zeus monitor, riskguard) pick up operator YAML commits and
+  branch checkouts without restart. Tests must call _clear_cache()
+  between assertions.
 """
 
 from __future__ import annotations

@@ -180,7 +180,7 @@ invariants:
     statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
     why: A degraded loader signals that DB authority was unreachable or the projection is non-canonical. Stamping that export as VERIFIED tells operator surfaces and downstream consumers that authority survived loss, which is false. Authority labels must reflect actual provenance, not load-success.
     enforced_by:
-      negative_constraints: [NC-16]
+      negative_constraints: [NC-17]
       tests:
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_truth_authority_map_does_not_collapse_degraded_to_verified
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_save_portfolio_degraded_does_not_export_verified
@@ -190,6 +190,7 @@ invariants:
     why: Allowing arbitrary callers to invoke place_limit_order bypasses the gateway boundary, creating multiple uncontrolled order-placement paths. The gateway (executor.py) is the single enforcement point for pre-flight checks, idempotency keys, and rejection-reason surfacing.
     enforced_by:
       negative_constraints: [NC-16]
+      semgrep_rule_ids: [zeus-place-limit-order-gateway-only]
       tests:
         - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
   - id: INV-25

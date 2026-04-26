@@ -60,11 +60,36 @@ def test_inv23_degraded_export_law_registered():
 
 
 def test_inv24_gateway_only_law_registered():
-    """INV-24 must be registered with non-empty enforced_by."""
+    """INV-24 must be registered with non-empty enforced_by AND cite the semgrep rule."""
     manifest = _load_yaml("architecture/invariants.yaml")
     by_id = {item["id"]: item for item in manifest["invariants"]}
     assert "INV-24" in by_id, "INV-24 (place_limit_order gateway-only) missing from invariants.yaml"
-    assert by_id["INV-24"].get("enforced_by"), "INV-24 must declare enforced_by"
+    enforced = by_id["INV-24"].get("enforced_by") or {}
+    assert enforced, "INV-24 must declare enforced_by"
+    assert "zeus-place-limit-order-gateway-only" in (enforced.get("semgrep_rule_ids") or []), (
+        "INV-24 must cite the zeus-place-limit-order-gateway-only semgrep rule"
+    )
+
+
+def test_nc16_semgrep_rule_present():
+    """NC-16 must cite the zeus-place-limit-order-gateway-only semgrep rule
+    AND that rule must exist in architecture/ast_rules/semgrep_zeus.yml.
+    """
+    nc = _load_yaml("architecture/negative_constraints.yaml")
+    nc16 = next(item for item in nc["constraints"] if item["id"] == "NC-16")
+    semgrep_ids = (nc16.get("enforced_by") or {}).get("semgrep_rule_ids") or []
+    assert "zeus-place-limit-order-gateway-only" in semgrep_ids, (
+        "NC-16 must cite zeus-place-limit-order-gateway-only as enforcing rule"
+    )
+    rule_text = (ROOT / "architecture/ast_rules/semgrep_zeus.yml").read_text()
+    assert "zeus-place-limit-order-gateway-only" in rule_text, (
+        "Semgrep rule zeus-place-limit-order-gateway-only must be defined in semgrep_zeus.yml"
+    )
+    # Rule must include scripts/ in paths.include (otherwise BLOCKER #2 returns)
+    # by being silently un-enforced for operator paths.
+    assert "scripts/**/*.py" in rule_text, (
+        "Semgrep rule must scope scripts/ for K2 enforcement to cover live_smoke_test path"
+    )
 
 
 def test_inv25_v2_preflight_law_registered():
@@ -225,11 +250,7 @@ def _ast_calls_place_limit_order(source_text: str) -> bool:
     This is more precise than substring search: it detects only actual
     call expressions, not docstring mentions, comments, or string literals.
     """
-    try:
-        tree = ast.parse(source_text)
-    except SyntaxError:
-        # Unparseable files are treated conservatively as containing a call.
-        return True
+    tree = ast.parse(source_text)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -251,6 +272,7 @@ def test_place_limit_order_gateway_only():
     """
     search_roots = [ROOT / "src", ROOT / "scripts"]
     violations = []
+    parse_failures = []
     for search_root in search_roots:
         if not search_root.exists():
             continue
@@ -259,9 +281,16 @@ def test_place_limit_order_gateway_only():
             if rel in _PLACE_LIMIT_ORDER_ALLOWED_FILES:
                 continue
             text = py_file.read_text(encoding="utf-8")
-            if _ast_calls_place_limit_order(text):
-                violations.append(rel)
+            try:
+                if _ast_calls_place_limit_order(text):
+                    violations.append(rel)
+            except SyntaxError as exc:
+                parse_failures.append(f"{rel}:{exc.lineno}: {exc.msg}")
 
+    assert not parse_failures, (
+        "NC-16 / INV-24 guard could not parse one or more files (fix the syntax error before re-running): "
+        + "; ".join(parse_failures)
+    )
     assert not violations, (
         f"NC-16 / INV-24 violation: place_limit_order call found outside the gateway boundary "
         f"in {violations}. Only {sorted(_PLACE_LIMIT_ORDER_ALLOWED_FILES)} are approved."

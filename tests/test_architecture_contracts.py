@@ -98,6 +98,7 @@ def test_semgrep_rules_cover_core_forbidden_moves():
         "zeus-no-direct-close-from-engine",
         "zeus-no-memory-only-control-state",
         "zeus-no-strategy-default-fallback",
+        "zeus-place-limit-order-gateway-only",
     ):
         assert rule_id in text
 

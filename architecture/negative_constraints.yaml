@@ -99,9 +99,11 @@ constraints:
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
   - id: NC-16
-    statement: No direct place_limit_order call outside the gateway boundary (currently src/execution/executor.py and the SDK wrapper src/data/polymarket_client.py).
+    statement: No direct place_limit_order call outside the gateway boundary (allowed callers — src/execution/executor.py as the executor seam, src/data/polymarket_client.py as the SDK wrapper, scripts/live_smoke_test.py as the operator-only path that calls v2_preflight() itself).
     invariants: [INV-24]
     enforced_by:
+      semgrep_rule_ids:
+        - zeus-place-limit-order-gateway-only
       tests:
         - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
   - id: NC-17
