@@ -98,8 +98,61 @@ def test_semgrep_rules_cover_core_forbidden_moves():
         "zeus-no-direct-close-from-engine",
         "zeus-no-memory-only-control-state",
         "zeus-no-strategy-default-fallback",
+        "zeus-place-limit-order-gateway-only",
+        "zeus-no-direct-venue-command-update",
     ):
         assert rule_id in text
+
+
+def test_init_schema_creates_venue_command_tables():
+    """P1.S1 (INV-28): init_schema() must create both venue_commands and
+    venue_command_events tables with the required columns and indexes."""
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+
+    # venue_commands table and columns
+    vc_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+    }
+    required_vc_cols = {
+        "command_id", "position_id", "decision_id", "idempotency_key",
+        "intent_kind", "market_id", "token_id", "side", "size", "price",
+        "venue_order_id", "state", "last_event_id", "created_at", "updated_at",
+        "review_required_reason",
+    }
+    missing_vc = required_vc_cols - vc_cols
+    assert not missing_vc, f"venue_commands missing columns: {missing_vc}"
+
+    # venue_command_events table and columns
+    vce_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(venue_command_events)").fetchall()
+    }
+    required_vce_cols = {
+        "event_id", "command_id", "sequence_no", "event_type",
+        "occurred_at", "payload_json", "state_after",
+    }
+    missing_vce = required_vce_cols - vce_cols
+    assert not missing_vce, f"venue_command_events missing columns: {missing_vce}"
+
+    # Key indexes exist
+    indexes = {
+        row[1]
+        for row in conn.execute(
+            "SELECT * FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert "idx_venue_commands_position" in indexes
+    assert "idx_venue_commands_state" in indexes
+    assert "idx_venue_commands_decision" in indexes
+    assert "idx_venue_command_events_command" in indexes
+    assert "idx_venue_command_events_type" in indexes
+
+    conn.close()
 
 
 def _canonical_event() -> dict:
@@ -3577,6 +3630,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         shares=20.0,
         order_id="ord-1",
         timeout_seconds=None,
+        command_state="ACKED",  # P1.S5 INV-32: required for materialize_position gate
     )
 
     portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)

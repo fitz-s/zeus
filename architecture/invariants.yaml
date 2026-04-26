@@ -175,3 +175,146 @@ invariants:
       semgrep_rule_ids: [zeus-no-fdr-family-key-drift]
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+  - id: INV-23
+    zones: [K2_runtime]
+    statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
+    why: A degraded loader signals that DB authority was unreachable or the projection is non-canonical. Stamping that export as VERIFIED tells operator surfaces and downstream consumers that authority survived loss, which is false. Authority labels must reflect actual provenance, not load-success.
+    enforced_by:
+      negative_constraints: [NC-17]
+      tests:
+        - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_truth_authority_map_does_not_collapse_degraded_to_verified
+        - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_save_portfolio_degraded_does_not_export_verified
+  - id: INV-24
+    zones: [K2_runtime]
+    statement: place_limit_order is gateway-only; non-gateway call sites are forbidden.
+    why: Allowing arbitrary callers to invoke place_limit_order bypasses the gateway boundary, creating multiple uncontrolled order-placement paths. The gateway (executor.py) is the single enforcement point for pre-flight checks, idempotency keys, and rejection-reason surfacing.
+    enforced_by:
+      negative_constraints: [NC-16]
+      semgrep_rule_ids: [zeus-place-limit-order-gateway-only]
+      tests:
+        - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
+  - id: INV-25
+    zones: [K2_runtime]
+    statement: When V2 endpoint preflight fails, no live place_limit_order call may be issued for that cycle.
+    why: A failed V2 preflight indicates the CLOB endpoint is unreachable or non-responsive. Proceeding with order placement against an unverified endpoint risks silent API errors, duplicate order submission, or orders against a stale/wrong endpoint.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_blocks_placement
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_success_does_not_block
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_fails_when_sdk_lacks_get_ok
+  - id: INV-26
+    zones: [K2_runtime]
+    statement: runtime_posture is read-only at runtime; the entry-decision path must consult it; non-NORMAL posture blocks new entry irrespective of risk_level.
+    why: runtime_posture is a committed YAML law document (O2-c). Allowing runtime mutation or ignoring it in the entry path recreates the second-authority-plane problem. The posture gate is additive with risk_level — both must pass for entry to proceed.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::TestR3RuntimePostureBlocksEntry::test_cycle_runner_posture_gate_blocks_with_reason
+        - tests/test_p0_hardening.py::test_runtime_posture_yaml_present
+  - id: INV-29
+    zones: [K2_runtime]
+    statement: VenueCommand and IdempotencyKey are frozen dataclasses; CommandState,
+      CommandEventType, and IntentKind are closed string enums; their string values
+      must match the venue_commands schema state column and venue_command_events
+      event_type column without drift.
+    why: A drifting type surface breaks the command journal's grammar guarantees.
+      Frozen types at the kernel boundary let all callers (executor, repo, recovery,
+      reconciliation) trust the same definitions. Catching drift at test time
+      prevents the kind of silent translation loss flagged in Fitz Constraint #2.
+    enforced_by:
+      tests:
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_is_frozen
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_state_must_be_enum
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_intent_kind_must_be_enum
+        - tests/test_command_bus_types.py::TestIdempotencyKeyDeterministic::test_same_inputs_produce_same_key
+        - tests/test_command_bus_types.py::TestIdempotencyKeyDeterministic::test_key_stable_across_separate_processes
+        - tests/test_command_bus_types.py::TestEnumsAreClosed::test_command_state_grammar_is_closed
+        - tests/test_command_bus_types.py::TestEnumsAreClosed::test_command_event_type_grammar_is_closed
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_state_keys_are_valid_command_states
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_event_keys_are_valid_command_events
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_inflight_states_match_repo_unresolved_filter
+  - id: INV-27
+    zones: [K2_runtime]
+    statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
+    why: Without explicit operator visibility into execution-truth gaps, positions in unsafe states (quarantined without command authority, pending without order_id) silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Surfacing must not block entries (operator decision 2026-04-26) so entry-decision logic remains driven by risk_level / posture / quarantine, not by surface-warning side effects.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
+  - id: INV-28
+    zones: [K0_frozen_kernel, K2_runtime]
+    statement: Every venue order side effect (place_limit_order / cancel) must be
+      preceded by a persisted venue_commands row + venue_command_events SUBMIT_REQUESTED
+      event written through src/state/venue_command_repo.py.
+    why: Without pre-side-effect persistence, a daemon crash between SDK submit
+      and ack write produces an orphan order at the venue. The command journal is
+      the only mechanism that survives the crash and lets the next cycle reconcile.
+    enforced_by:
+      schema:
+        - src/state/db.py::init_schema (venue_commands, venue_command_events tables)
+      tests:
+        - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_both_rows_inserted
+        - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_rollback_on_mid_transaction_failure
+        - tests/test_venue_command_repo.py::TestAppendEventStateTransitionIsGrammarChecked::test_illegal_transition_raises_value_error
+        - tests/test_venue_command_repo.py::TestIdempotencyKeyUniquenessEnforced::test_duplicate_key_raises_integrity_error
+  - id: INV-30
+    zones: [K2_runtime]
+    statement: client.place_limit_order MUST be preceded by a venue_commands row
+      persisted with state=SUBMITTING within the SAME process invocation. Crash
+      between submit and ack must leave the row in SUBMITTING state for recovery.
+      The venue_commands journal lives in the trades DB (zeus_trades.db); cross-DB
+      atomicity with positions in zeus.db is not guaranteed; P1.S4 recovery must
+      reconcile across both databases.
+    why: Pre-side-effect persistence is the only mechanism that survives a daemon
+      crash between submit and ack. Without it, an orphan order at the venue has
+      no local record to reconcile against.
+    enforced_by:
+      tests:
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_persist_precedes_submit
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_idempotency_key_collision_raises_before_submit
+        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_persist_precedes_submit
+        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_returns_existing_state_acked
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_filled_state_returns_pending
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_rejected_state_returns_rejected
+        - tests/test_executor_command_split.py::test_synthetic_decision_id_emits_warning
+        - tests/test_executor_db_target.py::TestExecutorDbTarget::test_live_order_writes_command_to_trades_db
+        - tests/test_executor_db_target.py::TestExecutorDbTarget::test_exit_order_writes_command_to_trades_db
+  - id: INV-31
+    zones: [K2_runtime]
+    statement: Cycle start must scan venue_commands for unresolved states (SUBMITTING,
+      UNKNOWN, REVIEW_REQUIRED, CANCEL_PENDING) and apply reconciliation events
+      based on venue truth. Cross-DB note per INV-30 — venue_commands lives in
+      zeus_trades.db; reconciliation does not block the cycle on errors.
+    why: Without active reconciliation, UNKNOWN/SUBMITTING rows accumulate
+      indefinitely. Recovery is the only path that turns runtime crash debris
+      into a clean operator surface. P2/K4 will extend with chain-truth integration
+      for FILL_CONFIRMED.
+    enforced_by:
+      tests:
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_submitting_with_venue_order_resolves_to_acked
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_submitting_without_order_id_resolves_to_expired
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_unknown_with_venue_order_resolves_to_acked
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_unknown_without_venue_order_resolves_to_review_required
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_cancel_pending_with_missing_order_resolves_to_cancelled
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_review_required_is_skipped
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_venue_lookup_exception_leaves_state
+        - tests/test_command_recovery.py::TestRecoveryCycleIntegration::test_cycle_runner_calls_recovery
+  - id: INV-32
+    zones: [K2_runtime]
+    statement: Position authority (materialize_position) advances ONLY after the
+      venue command has reached state ACKED, PARTIAL, or FILLED. Commands in
+      SUBMITTING / UNKNOWN / REVIEW_REQUIRED do not yield position rows; recovery
+      resolves them out-of-band.
+    why: >
+      Pre-P1, materialize_position fired on result.status == pending regardless
+      of command state. That races the command journal: a position appeared as
+      active while the venue might never have received the order. Tying
+      materialization to durable ack closes that window.
+    enforced_by:
+      tests:
+        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_submitting_command
+        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_unknown_command
+        - tests/test_discovery_idempotency.py::test_materialize_runs_for_acked_command

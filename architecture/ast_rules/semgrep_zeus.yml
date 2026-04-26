@@ -152,3 +152,60 @@ rules:
       exclude:
         - tests/**/*.py
     pattern: make_family_id(..., strategy_key="", ...)
+
+  # P0 hardening 2026-04-26 (INV-24, NC-16): place_limit_order is the
+  # SDK seam to Polymarket CLOB; new entries must flow through the executor
+  # gateway so V2 preflight (INV-25) and the durable command boundary land
+  # together. Allowed callers: src/execution/executor.py (seam),
+  # src/data/polymarket_client.py (definition), and the operator-only
+  # scripts/live_smoke_test.py which calls v2_preflight() itself.
+  - id: zeus-place-limit-order-gateway-only
+    message: "place_limit_order is gateway-only. Call execute_intent / _live_order, not the SDK directly."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+        - scripts/**/*.py
+      exclude:
+        - src/execution/executor.py
+        - src/data/polymarket_client.py
+        - scripts/live_smoke_test.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: $CLIENT.place_limit_order(...)
+      - pattern: place_limit_order(...)
+
+  # P1.S1 (NC-18): venue_command_events is append-only outside the repo.
+  # Mutating a recorded event creates a "fact rewrite" path that is invisible
+  # to forensic recovery — append a new event instead.
+  # Post-critic MEDIUM-2 (2026-04-26): scope expanded to also cover
+  # venue_commands UPDATE/DELETE, matching the parallel test surface and
+  # closing the asymmetry between belt and suspenders.
+  - id: zeus-no-direct-venue-command-update
+    message: "venue_commands / venue_command_events are append-only outside the repo; record new events via venue_command_repo, do not UPDATE/DELETE either table."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - src/state/venue_command_repo.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: |
+          $CONN.execute("UPDATE venue_command_events ...")
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_command_events ...")
+      - pattern: |
+          $CONN.execute("UPDATE venue_command_events ...", ...)
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_command_events ...", ...)
+      - pattern: |
+          $CONN.execute("UPDATE venue_commands ...")
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_commands ...")
+      - pattern: |
+          $CONN.execute("UPDATE venue_commands ...", ...)
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_commands ...", ...)

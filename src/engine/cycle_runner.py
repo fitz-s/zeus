@@ -106,6 +106,51 @@ def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
     return risk_level == RiskLevel.GREEN
 
 
+# P0.3 (INV-27): observability-only surfacing of positions in execution-unsafe
+# states. Operator decision 2026-04-26: surface warnings, do NOT block entries.
+# K4 (P1+) will replace these heuristics with command-truth integration.
+_PENDING_STATE_PREFIX = "pending_"
+_QUARANTINED_STATE_VALUES = frozenset({"quarantined", "quarantine_expired"})
+
+
+def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
+    """Scan portfolio for positions in execution-unsafe states.
+
+    Returns a list of warning dicts. Each warning carries enough identity
+    (trade_id, state) for an operator to investigate; we do not block entries.
+
+    Detection rules (P0 conservative — pre-K4):
+    - Position in any quarantined state with empty `order_id`
+      → "quarantine_without_order_authority"
+    - Position in any pending_* state with empty `order_id`
+      → "pending_state_missing_order_id"
+
+    Once K4 lands a durable command journal, these heuristics are replaced
+    with command-truth lookup (UNKNOWN command authority for that position).
+    """
+    warnings: list[dict] = []
+    for pos in portfolio.positions:
+        raw_state = getattr(pos, "state", "") or ""
+        state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
+        order_id = str(getattr(pos, "order_id", "") or "").strip()
+        trade_id = getattr(pos, "trade_id", "") or ""
+        if state_val in _QUARANTINED_STATE_VALUES and not order_id:
+            warnings.append({
+                "type": "quarantine_without_order_authority",
+                "trade_id": trade_id,
+                "state": state_val,
+                "reason": "Position is quarantined without order_id; no venue command authority to verify state.",
+            })
+        elif state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
+            warnings.append({
+                "type": "pending_state_missing_order_id",
+                "trade_id": trade_id,
+                "state": state_val,
+                "reason": "Position in pending state without order_id; execution truth is unknown.",
+            })
+    return warnings
+
+
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
     if mode == DiscoveryMode.DAY0_CAPTURE:
         return "settlement_capture"
@@ -287,6 +332,16 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     if stale_cancelled:
         summary["stale_orders_cancelled"] = stale_cancelled
 
+    # INV-31: command-recovery loop. Reconciles unresolved venue_commands
+    # against venue state. Errors don't fail the cycle.
+    try:
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        rec_summary = reconcile_unresolved_commands()
+        summary["command_recovery"] = rec_summary
+    except Exception as exc:
+        logger.error("command_recovery raised; continuing cycle: %s", exc)
+        summary["command_recovery"] = {"error": str(exc)}
+
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 
@@ -321,6 +376,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
 
+    # INV-27 / P0.3: surface execution-truth warnings for operator visibility.
+    # Observability-only — never blocks entries (per operator decision 2026-04-26).
+    # K4 (P1+) will replace this heuristic scan with command-journal truth.
+    _exec_truth_warnings = _collect_execution_truth_warnings(portfolio)
+    if _exec_truth_warnings:
+        summary["execution_truth_warnings"] = _exec_truth_warnings
+
     entries_blocked_reason = None
     has_quarantine = any(
         pos.chain_state in {"quarantined", "quarantine_expired"}
@@ -353,6 +415,26 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
         summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
+    # INV-26 / O2-c posture gate: consult committed runtime_posture.yaml.
+    # Posture is recorded in `summary["posture"]` for operator visibility on
+    # every cycle. It also blocks new entries when non-NORMAL — but only as
+    # the FALLBACK reason when no more-specific gate fires. Specific gates
+    # (chain_sync, quarantine, force_exit, risk_level, bankroll, exposure,
+    # entries_paused) take precedence so operators see actionable detail
+    # rather than the outermost branch posture. Monitor, exit, and
+    # reconciliation paths continue regardless of posture.
+    _current_posture: str = "NO_NEW_ENTRIES"
+    try:
+        from src.runtime.posture import read_runtime_posture
+        _current_posture = read_runtime_posture()
+    except Exception as _posture_exc:
+        logger.error(
+            "runtime_posture read raised unexpectedly: %s; treating as NO_NEW_ENTRIES",
+            _posture_exc,
+        )
+        _current_posture = "NO_NEW_ENTRIES"
+    summary["posture"] = _current_posture
+
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
@@ -380,6 +462,11 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entries_paused = is_entries_paused()
     if entries_paused and entries_blocked_reason is None:
         entries_blocked_reason = "entries_paused"
+    # INV-26 final fallback: posture forbids new entries when no more-specific
+    # gate fires. Recorded last so all actionable reasons take precedence;
+    # posture surfaces only when it is the *sole* block.
+    if entries_blocked_reason is None and _current_posture != "NORMAL":
+        entries_blocked_reason = f"posture={_current_posture}"
     if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())

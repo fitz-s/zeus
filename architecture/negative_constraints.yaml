@@ -98,3 +98,40 @@ constraints:
         - zeus-no-fdr-family-key-drift
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+  - id: NC-16
+    statement: No direct place_limit_order call outside the gateway boundary (allowed callers — src/execution/executor.py as the executor seam, src/data/polymarket_client.py as the SDK wrapper, scripts/live_smoke_test.py as the operator-only path that calls v2_preflight() itself).
+    invariants: [INV-24]
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-place-limit-order-gateway-only
+      tests:
+        - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
+  - id: NC-17
+    statement: ExecutionIntent must not carry decorative capability labels (slice_policy, reprice_policy, liquidity_guard, or any future label) without an enforcing executor branch that exhibits real capability behavior. Logging-only branches do not count.
+    invariants: [INV-23]
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_execution_intent_has_no_decorative_fields
+        - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_executor_does_not_branch_on_decorative_labels
+  - id: NC-18
+    statement: No direct UPDATE or DELETE on venue_commands / venue_command_events outside
+      src/state/venue_command_repo.py. Both tables are append-only via the repo seam;
+      mutations are recorded as new events, not edits to existing rows.
+    invariants: [INV-28]
+    enforced_by:
+      semgrep_rule_ids:
+        - zeus-no-direct-venue-command-update
+      tests:
+        - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo
+        - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_catches_known_evasion_shapes
+        - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_does_not_false_positive_on_benign_strings
+  - id: NC-19
+    statement: Discovery phase must not call client.place_limit_order (or its
+      indirect equivalents via execute_intent) without first checking
+      find_command_by_idempotency_key for an existing row, AND it must not
+      materialize a position from a SUBMITTING / UNKNOWN command state.
+    invariants: [INV-32]
+    enforced_by:
+      tests:
+        - tests/test_discovery_idempotency.py::test_idempotency_key_skips_duplicate_submit
+        - tests/test_discovery_idempotency.py::test_retry_after_unknown_does_not_double_place

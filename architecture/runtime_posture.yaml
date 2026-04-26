@@ -1,0 +1,34 @@
+# Created: 2026-04-26
+# Last reused/audited: 2026-04-26
+# Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/decisions.md §O2-c
+#
+# Runtime posture YAML — read-only at runtime (INV-26).
+#
+# Design (O2-c): This file is the ONLY authority for branch posture. There is no
+# runtime override path. To change posture, commit a PR against this file.
+# Audit trail is git log. The entry-decision path in cycle_runner.py reads this
+# file via src/runtime/posture.py before any entry is allowed.
+#
+# Grammar:
+#   NORMAL          — all entry gates apply normally; new entries allowed if other gates pass.
+#   NO_NEW_ENTRIES  — posture gate blocks new entries; monitor/exit/reconciliation continue.
+#   EXIT_ONLY       — only exit orders may be placed; no new entries.
+#   MONITOR_ONLY    — monitoring only; no entry or exit orders.
+#
+# Fail-closed: a missing file, parse error, or unknown branch falls back to
+# default_posture. A default_posture outside the grammar raises ValueError.
+
+schema_version: 1
+default_posture: NO_NEW_ENTRIES
+
+branches:
+  main: NO_NEW_ENTRIES
+  midstream_remediation: NO_NEW_ENTRIES
+  claude/pr18-execution-state-truth-fix-plan-2026-04-26: NO_NEW_ENTRIES
+  data-improve: NO_NEW_ENTRIES
+
+posture_grammar:
+  - NORMAL
+  - NO_NEW_ENTRIES
+  - EXIT_ONLY
+  - MONITOR_ONLY
