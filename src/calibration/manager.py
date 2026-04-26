@@ -170,6 +170,18 @@ def get_calibrator(
         # Legacy fallback only for HIGH — LOW has never existed in legacy
         bk = bucket_key(cluster, season)
         model_data = load_platt_model(conn, bk)
+        # Slice P3.4 (PR #19 phase 3, 2026-04-26): operator-visible WARNING
+        # when v2 misses and legacy fills. Pre-fix the fallback executed
+        # silently — operators monitoring calibration health had no signal
+        # that v2 coverage was incomplete for this (cluster, season). Surface
+        # the event so ops can drive v2-coverage backfill priority.
+        if model_data is not None:
+            logger.warning(
+                "v2_to_legacy_fallback: cluster=%s season=%s metric=high "
+                "primary v2 missed; serving legacy platt_models. Operator "
+                "review v2 coverage gap.",
+                cluster, season,
+            )
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(
@@ -230,6 +242,16 @@ def get_calibrator(
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
             model_data = load_platt_model(conn, bk_fb)
+            # Slice P3.4 (PR #19 phase 3, 2026-04-26): twin-site WARNING
+            # for season-only fallback path.
+            if model_data is not None:
+                logger.warning(
+                    "v2_to_legacy_fallback: cluster=%s (season-fallback) "
+                    "season=%s metric=high primary v2 missed; serving legacy "
+                    "platt_models from fallback cluster. Operator review "
+                    "v2 coverage gap.",
+                    fallback_cluster, season,
+                )
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":
                 logger.warning(
