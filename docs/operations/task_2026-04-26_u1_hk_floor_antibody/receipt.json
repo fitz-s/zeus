@@ -1,7 +1,26 @@
 {
   "schema_version": 1,
   "packet": "task_2026-04-26_u1_hk_floor_antibody",
-  "status": "closed",
+  "status": "closed_approved_by_critic",
+  "critic_approval_2026_04_26": {
+    "verdict": "APPROVE",
+    "verifier": "con-nyx@zeus-live-readiness-debate",
+    "category_immunity_score": 0.90,
+    "category_immunity_rank": "highest of the live-readiness packet — narrow scope, precise pins, exemplary discipline",
+    "verification_method": "empirical re-audit of both absorption halves + per-test review",
+    "amendments_applied_inline": {
+      "U1_NICE_TO_HAVE_1_fixture_cleanup": "_hk_city() and _wu_celsius_city() helpers now return cities_by_name['Hong Kong'] and cities_by_name['Taipei'] instead of synthetic City instantiation. Tracks production config drift automatically. Fixed real divergence (production HK has wu_station=None; synthetic was '' — both worked but schema-divergent).",
+      "U1_NICE_TO_HAVE_2_alias_edge_cases": "test_oracle_truncate_semantically_equivalent_to_floor sample array extended from 8 to 16 cases: canonical positive (6) + negative/near-zero (5) + Vostok extreme + precision boundaries (1e-10, 1e15) + non-finite (NaN, +inf). Added explicit NaN-propagation assertion via np.isnan masking — alias contract holds even for values that assert_settlement_value rejects upstream."
+    },
+    "operator_visible_recommendation": {
+      "from_critic_ask_3_response": "Recommend including HK in G7's INITIAL LIVE_SAFE_CITIES set, NOT deferring to a wave-2 expansion. Reasoning: workbook intent 'until both ship' = eligible after both ship; both shipped; alternative ('US-only initial set') would require another packet just to add HK, contradicting the audit chain.",
+      "operator_decision_required": true,
+      "tracked_in": "G7-LIVE_SAFE_CITIES (Wave 2) plan + this slice's followups_owed"
+    },
+    "pattern_lesson_elevation": {
+      "lesson_14_grep_gate_before_scoping": "L20 grep-gate before scoping multi-deliverable workbook entries elevated to critic standing-order per con-nyx Ask #5. U1 slice is the canonical example — workbook said triple-deliverable, audit found double-absorption, slice scope reduced to antibody-only without losing safety. Saves tail-end scope creep when half the work is already done."
+    }
+  },
   "branch": "claude/live-readiness-completion-2026-04-26",
   "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
   "parent_packet": "task_2026-04-26_live_readiness_completion",
@@ -25,7 +44,7 @@
   },
   "antibody_test": "tests/test_hk_settlement_floor_rounding.py",
   "antibody_test_count": 7,
-  "antibody_test_pass_rate": "7/7",
+  "antibody_test_pass_rate": "7/7 (post-amendment: 16-sample alias contract + explicit NaN-propagation assertion)",
   "regression_panel": {
     "scope": [
       "tests/test_architecture_contracts.py",
