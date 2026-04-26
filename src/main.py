@@ -468,6 +468,35 @@ def _startup_data_health_check(conn):
         logger.debug("Startup health check failed: %s", e)
 
 
+def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
+    """G6 boot guard: refuse live launch when a non-allowlisted strategy is enabled.
+
+    Composes the production-path enabled set:
+      enabled = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
+    where ``is_strategy_enabled`` reads ``_control_state["strategy_gates"]`` —
+    which is empty until ``refresh_control_state()`` hydrates it from the
+    ``control_overrides`` table. Without that hydration, every strategy looks
+    enabled (default-True) and the guard would refuse every launch regardless
+    of operator configuration. So the helper hydrates first by default.
+
+    ``refresh_state=False`` is reserved for tests that supply pre-populated
+    state via monkeypatch; production callers should always leave the default.
+
+    On success: returns silently. On refusal: SystemExit with FATAL message
+    naming offending strategies (matches src/main.py:472-477 pattern).
+    """
+    from src.control.control_plane import (
+        assert_live_safe_strategies_under_live_mode,
+        is_strategy_enabled,
+        refresh_control_state,
+    )
+    from src.engine.cycle_runner import KNOWN_STRATEGIES
+    if refresh_state:
+        refresh_control_state()
+    enabled_strategies = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
+    assert_live_safe_strategies_under_live_mode(enabled_strategies)
+
+
 def main():
     if "ZEUS_MODE" not in os.environ:
         sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=live")
@@ -476,20 +505,6 @@ def main():
             f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not valid. "
             "Must be exactly 'live'."
         )
-
-    # G6 antibody (2026-04-26): refuse boot if any non-allowlisted strategy is
-    # currently enabled. KNOWN_STRATEGIES is the engine's universe of buildable
-    # strategies (4); LIVE_SAFE_STRATEGIES is the operator-approved subset for
-    # live execution (1: opening_inertia). is_strategy_enabled() returns True
-    # by default, so non-safe strategies must be explicitly disabled via
-    # control_plane set_strategy_gate before launch.
-    from src.control.control_plane import (
-        assert_live_safe_strategies_under_live_mode,
-        is_strategy_enabled,
-    )
-    from src.engine.cycle_runner import KNOWN_STRATEGIES
-    enabled_strategies = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
-    assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
     mode = get_mode()
     once = "--once" in sys.argv
@@ -519,6 +534,16 @@ def main():
     _startup_data_health_check(conn)
 
     conn.close()
+
+    # G6 antibody (2026-04-26, fixed 2026-04-26 per con-nyx CONDITION C1):
+    # Refuse boot if any non-allowlisted strategy is enabled. Must run AFTER
+    # init_schema (so control_overrides table exists) and BEFORE wallet check
+    # (no point spending HTTP if guard refuses). The helper hydrates
+    # _control_state from durable storage before composing the enabled set —
+    # without hydration, every strategy reads as enabled (default-True) and
+    # operator-set gates from prior `set_strategy_gate` invocations are not
+    # visible. See _assert_live_safe_strategies_or_exit() docstring above.
+    _assert_live_safe_strategies_or_exit()
 
     # P7: Fail-closed wallet gate u2014 must run before first cycle.
     _startup_wallet_check()

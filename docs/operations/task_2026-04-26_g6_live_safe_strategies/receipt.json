@@ -25,8 +25,39 @@
     }
   ],
   "antibody_test": "tests/test_live_safe_strategies.py",
-  "antibody_test_count": 8,
-  "antibody_test_pass_rate": "8/8",
+  "antibody_test_count": 11,
+  "antibody_test_pass_rate": "11/11",
+  "post_review_amendments": {
+    "trigger": "con-nyx adversarial review 2026-04-26 — 1 BLOCKER + 4 MAJOR + 3 MINOR",
+    "BLOCKER_1_resolved": {
+      "finding": "Boot guard at src/main.py:491-492 read pre-hydration _control_state (empty dict at module load); is_strategy_enabled() default-True semantic meant SystemExit fired unconditionally even when operator had set gates via control_plane set_strategy_gate.",
+      "fix_path": "Path 1 (recommended) — extract _assert_live_safe_strategies_or_exit() helper that calls refresh_control_state() before composing the enabled set. Reorder boot to invoke the guard AFTER init_schema(conn) + conn.close(), so the control_overrides table exists when refresh reads from it.",
+      "verification": "Empirical: tests/test_live_safe_strategies.py::test_boot_helper_refuses_when_unsafe_strategy_enabled (hydrated + center_buy enabled → SystemExit fires) + test_boot_helper_silent_when_only_safe_strategy_enabled (hydrated + only opening_inertia → silent) + test_boot_helper_with_cold_cache_refuses_via_default_true_semantic (cold-cache contract pin). Reproduced con-nyx's empirical scenario directly via Python in worktree post-fix; cold-cache still refuses (now intentionally, per docs)."
+    },
+    "MAJOR_1_resolved": {
+      "finding": "Test #8 was a string-grep, not an integration test. Allowed BLOCKER #1 to slip past.",
+      "fix": "Added 3 boot-integration tests (#9-11) that exercise the production composition path with monkeypatched _control_state. Cold-cache scenario explicitly pinned."
+    },
+    "MAJOR_2_followup": "KNOWN_STRATEGIES drift surface count is 3 (cycle_runner.py / strategy_tracker.py / portfolio.py literals). Test #3 covers only cycle_runner. Followup: canonicalize to src/types/strategy_identity.py (Fitz K<<N pattern, mirror metric_identity.py). Captured in followups_owed.",
+    "MAJOR_3_followup": "scripts/live_smoke_test.py is a ZEUS_MODE=live boot-bypass channel (calls PolymarketClient directly, never invokes main()). Currently low-risk (only $0.01 BUY+CANCEL on TEST_TOKEN_ID) but inheritable via copy-paste. Followup: document the carve-out in operator runbook OR add LIVE_SAFE_STRATEGIES_ASSERTED() shim required by all live-mode scripts.",
+    "MAJOR_4_partial_addressed": "Receipt amended below to articulate actual operator-visible behavior post-fix (DB read + gate composition + guard, in that order). DB-fault-path hardening (refresh_control_state's query_error branch leaving strategy_gates={}) deferred to followup."
+  },
+  "operator_visible_breaking_change_AMENDED_C3": {
+    "applies_when": "ZEUS_MODE=live AND any of {settlement_capture, shoulder_sell, center_buy} is enabled (default state on a fresh DB with no control_overrides rows)",
+    "actual_runtime_sequence": [
+      "1. ZEUS_MODE=live validation passes (existing).",
+      "2. mode/log/proxy_health/capital setup (existing).",
+      "3. get_world_connection() + init_schema(conn) (existing — required to ensure control_overrides table exists).",
+      "4. trade_conn init_schema (existing).",
+      "5. _startup_data_health_check(conn) (existing).",
+      "6. conn.close() (existing).",
+      "7. NEW: _assert_live_safe_strategies_or_exit() — internally calls refresh_control_state() which opens its own connection, reads control_overrides, populates _control_state['strategy_gates']; then composes enabled set from KNOWN_STRATEGIES ∩ is_strategy_enabled(); then delegates to assert_live_safe_strategies_under_live_mode.",
+      "8. _startup_wallet_check (existing).",
+      "9. scheduler.start (existing)."
+    ],
+    "remediation": "Operator must explicitly disable each non-allowlisted strategy via control_plane set_strategy_gate. The disable command writes to control_overrides; the next boot's refresh_control_state() reads it; the guard then sees opening_inertia as the only enabled strategy and passes silently.",
+    "AMENDED_FROM_PRE_REVIEW": "Pre-review framing said 'Daemon refuses to launch with FATAL exit message naming offending strategies'. Post-review correction: this is now true. Pre-fix, the daemon refused REGARDLESS of operator action because the gate state was never hydrated before the guard ran (con-nyx BLOCKER #1)."
+  },
   "regression_panel": {
     "scope": [
       "tests/test_architecture_contracts.py",
@@ -65,6 +96,24 @@
       "summary": "LIVE_SAFE_CITIES typed frozenset + executor.py pre-CLOB assertion (same pattern as G6)",
       "wave": "Wave 2",
       "gating": "Wait for zeus-pr18-fix-plan-20260426 to merge (executor.py overlap)"
+    },
+    {
+      "id": "G6-MAJOR-2-followup",
+      "summary": "Canonicalize KNOWN_STRATEGIES to src/types/strategy_identity.py (Fitz K<<N pattern; mirror metric_identity.py). Replace 3 drift surfaces (cycle_runner.py / strategy_tracker.py / portfolio.py) with single import.",
+      "estimated_hours": 2,
+      "trigger": "con-nyx review MAJOR #2"
+    },
+    {
+      "id": "G6-MAJOR-3-followup",
+      "summary": "scripts/live_smoke_test.py is a ZEUS_MODE=live boot-bypass channel (calls PolymarketClient directly). Either (a) add LIVE_SAFE_STRATEGIES_ASSERTED() shim required by all live-mode scripts + counter-test, or (b) document the carve-out in operator runbook.",
+      "estimated_hours": 0.5,
+      "trigger": "con-nyx review MAJOR #3"
+    },
+    {
+      "id": "G6-MAJOR-4-followup",
+      "summary": "refresh_control_state's query_error branch (control_plane.py:225-228) leaves strategy_gates={}, which after the BLOCKER #1 fix means a transient DB hiccup at boot still produces refusal. Either populate gates from a prior-persisted view in the error path, or document fail-closed-on-DB-fault as intentional.",
+      "estimated_hours": 2,
+      "trigger": "con-nyx review MAJOR #4"
     }
   ],
   "lore_extracted": false,

@@ -169,3 +169,129 @@ def test_main_boot_wiring_imports_assert_helper():
         "src/main.py boot wiring should reference is_strategy_enabled (to compose "
         "the enabled set) or LIVE_SAFE_STRATEGIES directly. Neither found."
     )
+
+
+# ---------------------------------------------------------------------------
+# Boot-integration tests (8-10): exercise the cold-cache vs hydrated-cache
+# distinction via _assert_live_safe_strategies_or_exit() helper. These tests
+# fix the gap that allowed BLOCKER #1 (con-nyx review 2026-04-26): atom-shape
+# tests + literal-arg helper tests + string-grep tests do NOT prove that the
+# production composition path (KNOWN_STRATEGIES ∩ is_strategy_enabled, with
+# is_strategy_enabled reading hydrated _control_state) actually works.
+# ---------------------------------------------------------------------------
+
+
+def _populate_strategy_gates(_control_state: dict, gates: dict[str, bool]) -> None:
+    """Test helper: install strategy_gates into the control_plane module cache.
+
+    Mirrors the post-refresh shape: _control_state["strategy_gates"] is a
+    dict[str, dict] where each value is a GateDecision-shaped dict with at
+    minimum a `enabled: bool` key.
+    """
+    _control_state["strategy_gates"] = {
+        name: {"enabled": enabled, "reason": "test_setup", "set_at": "2026-04-26T00:00:00Z"}
+        for name, enabled in gates.items()
+    }
+
+
+def test_boot_helper_refuses_when_unsafe_strategy_enabled(monkeypatch):
+    """Production composition path: hydrated state with center_buy enabled → SystemExit.
+
+    Replaces the missing relationship test that masked BLOCKER #1.
+    Sets up _control_state via the same shape refresh_control_state() would
+    populate, then invokes the boot guard with refresh_state=False (we already
+    populated it ourselves to avoid touching a real DB).
+    """
+    import src.control.control_plane as cp
+    import src.main as main_mod
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+
+    # Snapshot + restore _control_state to avoid leaking into other tests.
+    original_state = dict(cp._control_state)
+    monkeypatch.setattr(cp, "_control_state", {})
+
+    # Production scenario: opening_inertia enabled (safe), center_buy also
+    # enabled (NOT safe). Operator forgot to disable center_buy.
+    _populate_strategy_gates(
+        cp._control_state,
+        {
+            "opening_inertia": True,
+            "center_buy": True,
+            "shoulder_sell": False,
+            "settlement_capture": False,
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
+
+    msg = str(exc_info.value)
+    assert "FATAL" in msg, f"Expected FATAL marker: {msg!r}"
+    assert "center_buy" in msg, f"Expected center_buy in offenders: {msg!r}"
+
+    # Restore (defensive — monkeypatch.setattr handles this, but explicit on dict).
+    cp._control_state.clear()
+    cp._control_state.update(original_state)
+
+
+def test_boot_helper_silent_when_only_safe_strategy_enabled(monkeypatch):
+    """Production composition path: hydrated state with only opening_inertia enabled → silent.
+
+    The post-fix happy path. Operator explicitly disabled center_buy /
+    shoulder_sell / settlement_capture; only opening_inertia is enabled.
+    """
+    import src.control.control_plane as cp
+    import src.main as main_mod
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    original_state = dict(cp._control_state)
+    monkeypatch.setattr(cp, "_control_state", {})
+
+    _populate_strategy_gates(
+        cp._control_state,
+        {
+            "opening_inertia": True,
+            "center_buy": False,
+            "shoulder_sell": False,
+            "settlement_capture": False,
+        },
+    )
+
+    # Must NOT raise.
+    main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
+
+    cp._control_state.clear()
+    cp._control_state.update(original_state)
+
+
+def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypatch):
+    """The pre-fix BLOCKER scenario, now PINNED as expected behavior under refresh_state=False.
+
+    Cold cache (empty _control_state) + is_strategy_enabled returns True for
+    all KNOWN_STRATEGIES → guard refuses. This documents the contract
+    operators MUST satisfy: hydration before guard. The production main()
+    path always passes refresh_state=True (the default), which calls
+    refresh_control_state() first; this test pins what happens if a future
+    caller forgets to hydrate.
+    """
+    import src.control.control_plane as cp
+    import src.main as main_mod
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    original_state = dict(cp._control_state)
+    monkeypatch.setattr(cp, "_control_state", {})  # empty: cold cache
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
+
+    msg = str(exc_info.value)
+    # All 3 non-safe strategies should be named (default-True semantic on empty cache).
+    for offender in ("center_buy", "shoulder_sell", "settlement_capture"):
+        assert offender in msg, (
+            f"Cold-cache scenario must surface ALL non-safe strategies. "
+            f"Missing {offender!r} in: {msg!r}"
+        )
+
+    cp._control_state.clear()
+    cp._control_state.update(original_state)
