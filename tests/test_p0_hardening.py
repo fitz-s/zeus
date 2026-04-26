@@ -308,6 +308,17 @@ class TestR2V2PreflightBlocksPlacement:
     ever reaching place_limit_order. INV-25.
     """
 
+    @pytest.fixture
+    def _mem_conn(self):
+        """In-memory DB with schema for P1.S3 persist phase."""
+        import sqlite3 as _sqlite3
+        from src.state.db import init_schema
+        c = _sqlite3.connect(":memory:")
+        c.row_factory = _sqlite3.Row
+        init_schema(c)
+        yield c
+        c.close()
+
     def _make_intent(self):
         """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
         from src.contracts.execution_intent import ExecutionIntent
@@ -326,13 +337,16 @@ class TestR2V2PreflightBlocksPlacement:
             decision_edge=0.05,
         )
 
-    def test_v2_preflight_blocks_placement(self):
+    def test_v2_preflight_blocks_placement(self, _mem_conn):
         """Mocked v2_preflight raises V2PreflightError; _live_order returns rejected
         without calling place_limit_order.
 
         Note: PolymarketClient is imported inside _live_order via a local import,
         so we patch src.data.polymarket_client.PolymarketClient (the class at its
         definition site) to intercept the local import at call time.
+
+        P1.S3: _live_order now requires a conn for the persist phase; an in-memory
+        DB with schema is supplied via the _mem_conn fixture.
         """
         from src.data.polymarket_client import V2PreflightError
         from src.execution.executor import _live_order
@@ -348,6 +362,7 @@ class TestR2V2PreflightBlocksPlacement:
                 trade_id="test-trade-001",
                 intent=intent,
                 shares=18.19,
+                conn=_mem_conn,
             )
 
         assert result.status == "rejected", (
@@ -360,12 +375,15 @@ class TestR2V2PreflightBlocksPlacement:
         # Confirm place_limit_order was never reached
         mock_instance.place_limit_order.assert_not_called()
 
-    def test_v2_preflight_success_does_not_block(self):
+    def test_v2_preflight_success_does_not_block(self, _mem_conn):
         """When v2_preflight succeeds (no-op), placement proceeds to place_limit_order.
 
         The mock SDK client exposes get_ok (positive case) so the fail-closed
         hasattr check passes. We assert v2_preflight was called before
         place_limit_order by verifying both call counts in sequence.
+
+        P1.S3: _live_order now requires a conn for the persist phase; an in-memory
+        DB with schema is supplied via the _mem_conn fixture.
         """
         from src.execution.executor import _live_order
 
@@ -388,6 +406,7 @@ class TestR2V2PreflightBlocksPlacement:
                 trade_id="test-trade-002",
                 intent=intent,
                 shares=18.19,
+                conn=_mem_conn,
             )
 
         # v2_preflight must have been called (INV-25 gate active)

@@ -258,3 +258,18 @@ invariants:
         - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_rollback_on_mid_transaction_failure
         - tests/test_venue_command_repo.py::TestAppendEventStateTransitionIsGrammarChecked::test_illegal_transition_raises_value_error
         - tests/test_venue_command_repo.py::TestIdempotencyKeyUniquenessEnforced::test_duplicate_key_raises_integrity_error
+  - id: INV-30
+    zones: [K2_runtime]
+    statement: client.place_limit_order MUST be preceded by a venue_commands row
+      persisted with state=SUBMITTING within the SAME process invocation. Crash
+      between submit and ack must leave the row in SUBMITTING state for recovery.
+    why: Pre-side-effect persistence is the only mechanism that survives a daemon
+      crash between submit and ack. Without it, an orphan order at the venue has
+      no local record to reconcile against.
+    enforced_by:
+      tests:
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_persist_precedes_submit
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_idempotency_key_collision_raises_before_submit
+        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_persist_precedes_submit
+        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_unknown_writes_event_with_state_unknown
