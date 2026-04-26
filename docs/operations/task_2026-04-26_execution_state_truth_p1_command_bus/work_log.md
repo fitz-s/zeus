@@ -445,6 +445,76 @@ pytest tests/test_executor_command_split.py tests/test_command_recovery.py \
 - `tests/test_architecture_contracts.py` u2014 `command_state="ACKED"` stub fix
 - `tests/test_runtime_guards.py` u2014 `command_state="ACKED"` stub fix
 
-### Commit
+### Commits
 
-Pending u2014 see P1 closeout section.
+- `30c63b8` — Land P1.S5: discovery integration + idempotency lookup — INV-32 / NC-19
+- `7211f5b` — Record P1.S5 closeout — P1 packet complete
+
+---
+
+## 2026-04-26 — P1.S4 critic-followup: status-aware recovery (commit `973d23c`)
+
+Closes the parallel code-reviewer findings on commit `828319d` (P1.S4 recovery loop):
+
+- **HIGH-1 (symmetric grammar fix)**: `SUBMITTING + venue returns None`
+  emitted illegal `EXPIRED` event. Symmetric to the no-venue_order_id branch
+  that already routed to `REVIEW_REQUIRED`; fix mirrors that path. Row no
+  longer gets stuck looping in `summary["errors"]`.
+- **HIGH-2 (status-aware recovery)**: `SUBMITTING + venue_resp` unconditionally
+  emitted `SUBMIT_ACKED` even when `status="REJECTED"`. Now branches:
+  - `REJECTED` → `SUBMIT_REJECTED`
+  - `CANCELLED/CANCELED/EXPIRED` → `REVIEW_REQUIRED` (terminal-no-fill)
+  - `LIVE/MATCHED/active/...` → `SUBMIT_ACKED` (status captured in payload)
+  Same logic mirrored for `UNKNOWN` state.
+- `_TRANSITIONS` unchanged — recovery only uses existing legal grammar paths.
+- INV-31 unchanged.
+
+Verified: `tests/test_command_recovery.py` 11/11 pass.
+
+---
+
+## 2026-04-26 — P1 PACKET COMPLETE
+
+All five slices shipped + critic/reviewer-follow-up close:
+
+| Slice | Commits | INV/NC |
+|-------|---------|--------|
+| P1.S1 schema + repo | `0a7845f` `7ebed4e` `6112d74` `904a989` | INV-28 + NC-18 |
+| P1.S2 typed surface | `447ed3c` `7d48eb5` `1453eaf` | INV-29 |
+| P1.S3 executor split | `4fcb2db` `f0783f8` `f7fc9be` `b5fffb6` | INV-30 |
+| P1.S4 recovery loop | `828319d` `6f567ae` `973d23c` | INV-31 |
+| P1.S5 discovery + idempotency | `30c63b8` `7211f5b` | INV-32 + NC-19 |
+
+### Final test counts
+
+```
+pytest tests/test_command_bus_types.py tests/test_venue_command_repo.py \
+       tests/test_executor_command_split.py tests/test_command_recovery.py \
+       tests/test_discovery_idempotency.py tests/test_p0_hardening.py
+  → 153 passed, 1 skipped, 1 xpassed
+```
+
+P0 + P1 invariants summary:
+
+- Manifest invariants added: INV-23, INV-24, INV-25, INV-26, INV-27 (P0) +
+  INV-28, INV-29, INV-30, INV-31, INV-32 (P1).
+- Negative constraints added: NC-16, NC-17 (P0) + NC-18, NC-19 (P1).
+- New runtime modules: `src/runtime/posture.py`, `src/state/venue_command_repo.py`,
+  `src/execution/command_bus.py`, `src/execution/command_recovery.py`.
+
+### What lands in P2 (deferred)
+
+- **K4** chain × command UNKNOWN composition + remove fabricated
+  `unknown_entered_at` + RED → durable cancel/derisk/exit command emission.
+- **Cross-DB threading**: `cycle_runtime.execute_discovery_phase` should pass
+  `trade_conn` and `clob` into `reconcile_unresolved_commands(...)` and
+  `execute_intent(..., conn=trade_conn)` to avoid the dual-connection cost.
+- **SDK 404 detection**: replace text-heuristic in `client.get_order` with
+  typed exception path (per P1.S4 critic MAJOR-1 noted; not blocking P1).
+- **Response normalization**: add `orderId` (camelCase) to `get_order` fallback
+  chain (per P1.S4 reviewer MINOR-1).
+
+### Operator gates
+
+- Push to origin: pending operator decision.
+- Promote `current_state.md` to point at this packet: operator-only.
