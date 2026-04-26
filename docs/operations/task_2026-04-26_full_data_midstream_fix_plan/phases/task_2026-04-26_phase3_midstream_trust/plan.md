@@ -289,4 +289,35 @@ Memory citations applied:
 - `feedback_critic_reproduces_regression_baseline.md` — reviewers must independently re-run.
 - `feedback_no_git_add_all_with_cotenant.md` — phase 3 commits stage only files this packet owns.
 
+---
+
+## 11. Post-review addendum (2026-04-26 — after critic + code-reviewer phase 3 pass)
+
+Two parallel review agents completed phase 3 review. Findings drove 4 fix commits (`595ff0f` … `3ca0a97` … `b1cc241` ... wait, the right sequence is `b1cc241` → `8a2d2c1` → `ac5ae8d` → `ab0f0b3` → `3ca0a97` → P3-fix4). Summary:
+
+### Reviewer findings addressed
+
+- **Critic M1 + code-reviewer M3** (BLOCKER consensus — typed boundary illusory): `from __future__ import annotations` + TYPE_CHECKING forward-ref made `max_slippage: SlippageBps` a runtime no-op. Two pre-existing test fixtures still constructed `max_slippage=0.02` raw and passed silently. **Fix `b1cc241` (P3-fix1)**: `__post_init__` runtime isinstance check on `ExecutionIntent.max_slippage`; updated 2 stale fixtures to use SlippageBps; antibody tests pin TypeError on raw float / None / int / str / dict.
+- **P2-fix3 latent bug surfaced**: hoisting the new `__post_init__` regression revealed `_normalize_temperature_metric` was imported inside `if market_candidate_ctor is None:` block at cycle_runtime.py:937, leaving the name undefined on the external-deps path. **Fix `8a2d2c1` (P3-fix1b)**: hoist the import out of the conditional.
+- **Test fixture market dict missing temperature_metric**: P2-fix3's fail-loud normalizer surfaced one test (test_strategy_gate_blocks_trade_execution) whose market mock omitted the field. **Fix `ac5ae8d` (P3-fix1c)**: add `"temperature_metric": "high"` to the mock market dict.
+- **Critic Minor #1 + code-reviewer MAJOR-1** (WARNING noise risk): if v2 coverage sparse, P3.4 alert fires every cycle for every uncovered bucket → operator demotes to DEBUG and loses signal. **Fix `ab0f0b3` (P3-fix2)**: per-(path, cluster, season, metric) seen-set dedup; first occurrence per process emits WARNING, subsequent suppress. Also unifies primary + season-pool message format with stable `v2_to_legacy_fallback path=...` prefix (critic NIT).
+- **Critic Major #2** (P3.2 staleness audit gap + critic NIT entry_ci_width docstring): **Fix `3ca0a97` (P3-fix3)**: DEBUG log at fallback site identifies trade_id + entry_ci_width. Annotated `Position.entry_ci_width` field as ENTRY-TIME SNAPSHOT in src/state/portfolio.py:237.
+- **Code-reviewer M2** (test fragility): re-labeled 2 source-inspection tests in test_monitor_refresh_ci_fallback.py as "[TEXT-PINNING ANTIBODY — fragile to legitimate refactors]" (`3ca0a97`).
+- **Code-reviewer NIT-1** (in-function import): **Fix (this commit, P3-fix4)**: hoist `from src.contracts.slippage_bps import SlippageBps` to executor.py module top.
+- **Code-reviewer Minor 1** (plan citation drift): commit msg said L172/L232; actual L172/L244. Acknowledged in this addendum; the manager.py refactor in P3-fix2 made line numbers irrelevant by extracting the helper.
+
+### Reviewer findings explicitly NOT addressed (with rationale)
+
+- **Critic "P3.3 RealizedFill threading promised but not delivered"**: P3.3 commit message mentioned RealizedFill at fill receipt but the diff only delivers the constant typing. The threading at executor.py:242 fill-receipt is a separate boundary (raw `slippage = current_price - best_bid` arithmetic) that requires a deeper refactor. **Acknowledgement**: phase 3 narrowed P3.3 to constant-typing only; RealizedFill threading at receipt is a follow-on slice (call it P3.3b) that needs its own audit + plan because the fill-receipt code paths are scattered across CLOB response handlers.
+- **Code-reviewer Minor 4** (SlippageBps EVENT vs BUDGET semantic mismatch): SlippageBps was designed as an event type but used here as a budget. The `direction="adverse"` semantic is a stretch for a one-sided budget. **Acknowledgement**: documented in plan §9 Q1; introducing a separate `SlippageBudgetBps` type is a follow-on packet — out of phase 3 scope.
+- **Code-reviewer Minor 2** (test doesn't exercise season-fallback path): the new `test_repeated_fallback_for_same_bucket_logs_only_once` in P3-fix2 partially addresses this by exercising repeated calls, but doesn't drive the season-pool fallback specifically. **Acknowledgement**: combined with the existing `test_v2_miss_with_legacy_hit_logs_fallback_warning` (which exercises the primary path), coverage is adequate; season-pool path is structurally identical in dedup behavior.
+- **Code-reviewer M2 alternative** (rewrite tests to drive refresh_position): deferred — would require building shared monitor-cycle test fixtures (heavy infra). The text-pinning antibodies remain valid regression guards.
+- **Critic open-question** (Position-level audit of in-flight bootstrap_ctx coverage; v2-coverage measurement before P3.4 deploys): operator-driven measurement work — out of code scope.
+- **Critic + Code-reviewer cross-cutting**: pre-existing test failures in `tests/test_riskguard.py` (TestStrategyPolicyResolver — 17 tests) and `tests/test_pre_live_integration.py::test_full_monitoring_pipeline` reproduce on a stash-revert baseline of phase 3 commits — out of phase 3 scope.
+
+### Final phase 3 regression posture
+
+- **84 antibody tests** across the full PR #19 fix-plan packet pass cleanly (15 phase-3 + 4 phase-3 fix tests + 65 phase-1+phase-2 tests; some test files grow as fixes added cases).
+- Phase 3 + 4 fix commits net regression delta against pre-phase-3 baseline (5f6e502): ZERO new failures attributable. The pre-existing widespread riskguard test rot (17 failures in TestStrategyPolicyResolver) and the test_full_monitoring_pipeline stale-fixture failure pre-date all phase 3 work and reproduce on origin/main with the appropriate file cherry-picks.
+
 End of phase 3 plan.

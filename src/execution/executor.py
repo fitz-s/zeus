@@ -19,6 +19,7 @@ from typing import Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
+from src.contracts.slippage_bps import SlippageBps
 from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
@@ -120,12 +121,13 @@ def create_execution_intent(
         raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
     timeout = MODE_TIMEOUTS[mode]
     
-    # Slice P3.3 (PR #19 phase 3, 2026-04-26): typed slippage budget.
-    # 0.02 fraction = 200 bps (2% adverse-direction limit). Wrapping in
-    # SlippageBps makes the units explicit at construction; pre-fix the
-    # raw 0.02 was unit-ambiguous and the type system couldn't catch a
-    # caller that meant 0.02 bps (200x tighter) instead of 0.02 fraction.
-    from src.contracts.slippage_bps import SlippageBps
+    # Slice P3.3 + P3-fix4 (post-review code-reviewer NIT-1): typed
+    # slippage budget. 0.02 fraction = 200 bps (2% adverse-direction
+    # limit). Wrapping in SlippageBps makes the units explicit at
+    # construction; pre-fix the raw 0.02 was unit-ambiguous and the
+    # type system couldn't catch a caller that meant 0.02 bps (200x
+    # tighter) instead of 0.02 fraction. Import hoisted to module top
+    # per PEP 8.
     return ExecutionIntent(
         direction=Direction(edge.direction),
         target_size_usd=size_usd,
