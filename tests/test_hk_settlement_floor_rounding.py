@@ -45,44 +45,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import City
+from src.config import City, cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 
 
 def _hk_city() -> City:
-    """Hong Kong configuration: HKO source, °C unit, no WU station.
+    """Hong Kong from production cities_by_name (con-nyx U1 NICE-TO-HAVE-1).
 
-    Mirrors `config/cities.json` Hong Kong entry. wu_station="" because
-    City dataclass requires str; HK has no WU station.
+    Per con-nyx review: prefer real production city object over synthetic
+    instantiation so the test tracks live config drift automatically.
+    Empirical: production HK has wu_station=None (not ""); synthetic was
+    technically passing but diverged from production schema.
     """
-    return City(
-        name="Hong Kong",
-        lat=22.303611,
-        lon=114.171944,
-        timezone="Asia/Hong_Kong",
-        settlement_unit="C",
-        cluster="Hong Kong",
-        wu_station="",
-        settlement_source_type="hko",
-    )
+    return cities_by_name["Hong Kong"]
 
 
 def _wu_celsius_city() -> City:
-    """Control: a non-HK °C city that uses WU + wmo_half_up.
+    """Control: non-HK °C city (Taipei) from production cities_by_name.
 
-    Taipei is a real Zeus °C city configured via wu_icao path.
-    Used in test 6 to confirm HK exception is HK-only, not all-°C.
+    Taipei is the only Zeus °C city configured via wu_icao path. Per
+    con-nyx U1 NICE-TO-HAVE-1: use production city object so a future
+    config change (e.g., Taipei migrated to cwa_station) surfaces here.
     """
-    return City(
-        name="Taipei",
-        lat=25.0696,
-        lon=121.5520,
-        timezone="Asia/Taipei",
-        settlement_unit="C",
-        cluster="Taipei",
-        wu_station="RCSS",
-        settlement_source_type="wu_icao",
-    )
+    return cities_by_name["Taipei"]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +188,14 @@ def test_oracle_truncate_semantically_equivalent_to_floor():
     The alias contract: oracle_truncate is a NAMED floor with HKO/UMA
     justification. A future split where oracle_truncate diverges from floor
     (e.g., adds an offset, switches dispatch) would fire here.
+
+    Sample set extended per con-nyx U1 NICE-TO-HAVE-2:
+    - Canonical positive cases (27.8, 28.7, 24.5, 19.4, 15.0, 99.999)
+    - Negative + near-zero (-3.2, -0.5, -0.1, 0.5, 0.0)
+    - Vostok extreme (-89.9)
+    - Precision boundaries (1e-10 underflow, 1e15 overflow)
+    - Non-finite (NaN, +inf) — alias contract MUST hold even though
+      assert_settlement_value rejects these upstream
     """
     floor_sem = SettlementSemantics(
         resolution_source="test_floor",
@@ -218,10 +211,30 @@ def test_oracle_truncate_semantically_equivalent_to_floor():
         rounding_rule="oracle_truncate",
         finalization_time="12:00:00Z",
     )
-    samples = np.array([27.8, 28.7, 24.5, 19.4, 15.0, -3.2, 0.0, 99.999])
+    samples = np.array([
+        # Canonical positive
+        27.8, 28.7, 24.5, 19.4, 15.0, 99.999,
+        # Negative + near-zero (numpy floor toward -inf)
+        -3.2, -0.5, -0.1, 0.5, 0.0,
+        # Vostok extreme
+        -89.9,
+        # Precision boundaries
+        1e-10, 1e15,
+        # Non-finite — alias contract MUST hold even though
+        # assert_settlement_value rejects these upstream
+        float("nan"), float("inf"),
+    ])
     floor_out = floor_sem.round_values(samples)
     oracle_out = oracle_sem.round_values(samples)
+    # equal_nan=True so NaN-propagation parity is asserted (NaN != NaN
+    # under default equality, but they must agree as alias output).
     np.testing.assert_array_equal(
         floor_out, oracle_out,
-        err_msg="oracle_truncate diverged from floor — alias contract broken."
+        err_msg="oracle_truncate diverged from floor — alias contract broken.",
+        strict=False,  # types may differ slightly; values must match
     )
+    # Explicit NaN-propagation assertion (assert_array_equal w/o equal_nan
+    # is strict in newer numpy; pin the semantic here).
+    nan_idx = np.isnan(samples)
+    assert np.all(np.isnan(floor_out[nan_idx])), "floor lost NaN propagation"
+    assert np.all(np.isnan(oracle_out[nan_idx])), "oracle_truncate lost NaN propagation"
