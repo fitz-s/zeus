@@ -6,8 +6,8 @@ Role: single live control pointer for the repo.
 
 - Branch: `midstream_remediation`
 - Mainline task: **Post-audit remediation mainline — P4 read-only readiness checker closed; P4 mutation blocked**
-- Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
-- Active execution packet: none frozen; next packet pending phase-entry
+- Active package source: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/project_brief.md`
+- Active execution packet: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/implementation_plan.md` (planning package only; first coding packet is P0 hardening)
 - Closeout evidence packet: `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
 - Prior post-P3/P4 preflight closeout evidence packet: `docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
 - Prior P3 B-lite closeout evidence packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
@@ -93,10 +93,12 @@ Role: single live control pointer for the repo.
 
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/project_brief.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/implementation_plan.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/task_packet.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/verification_plan.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/work_log.md`
+- Prior closeout remains available at `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
 
 ## Freeze point
 
@@ -149,8 +151,8 @@ Role: single live control pointer for the repo.
 
 ## Next action
 
-- Use the closed P4 readiness checker output to freeze the next narrow packet.
-  Do not start P4 mutation until the relevant operator/source/data evidence
-  appears and semantic boot/topology gates are rerun.
+- Use `docs/operations/task_2026-04-19_execution_state_truth_upgrade/implementation_plan.md` to freeze the next narrow implementation packet: P0 hardening only.
+  Do not start P1/P2 schema or lifecycle work until P0 closes and topology/planning-lock gates are rerun.
+  Do not start P4 data mutation until the relevant operator/source/data evidence appears and semantic boot/topology gates are rerun.
 - Preserve unrelated dirty work and concurrent in-flight edits.
 - 2026-04-25 packet `task_2026-04-25_p2_packet_runtime` landed (head 7bf8da2). <!-- zpkt landed: task_2026-04-25_p2_packet_runtime -->

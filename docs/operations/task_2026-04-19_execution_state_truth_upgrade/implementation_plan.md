@@ -1,448 +1,262 @@
 # Implementation Plan — Execution-State Truth Upgrade
 
-## 1. Phase order
+## 1. Mainline sequence
 
-- **P0:** immediate hardening / no-new-entry gates / degraded authority fix / V2 preflight / stale authority cleanup
-- **P1:** `venue_commands` + `venue_command_events` + submit-before-side-effect + crash recovery
-- **P2:** `UNKNOWN` integration with reconciliation + `RED` authoritative de-risk
-- **P3:** market eligibility / settlement containment / persistent alpha budget
+Unrestricted live entry is blocked until P0, P1, and P2 are implemented and verified.
 
-Unrestricted live entry is blocked until P0, P1, and P2 are complete and verified.
+1. **P0 — Immediate hardening**: stop unsafe confidence and unsafe new risk now.
+2. **P1 — Durable command truth**: add pre-side-effect `venue_commands` and append-first `venue_command_events`.
+3. **P2 — Semantic closure**: make unresolved command truth first-class and make RED command-authoritative.
+4. **P3 — Outer containment**: add market eligibility/settlement containment and persistent alpha spending.
 
-## 2. Global rules for every phase
+## 2. Global invariants for every phase
 
-All phases must preserve the following:
-
-- DB / event truth outranks JSON/status projections
-- JSON/status projections are never canonical truth
-- no venue order side effect without persisted `VenueCommand`
-- no authoritative position state change from order submission without `venue_command_event`
-- degraded export never labeled `VERIFIED`
-- `UNKNOWN` / `REVIEW_REQUIRED` block new entries
-- `RED` produces cancel/de-risk/exit commands
-- `positions.json` is projection only
-- direct `place_limit_order` outside gateway blocked by AST/CI guard
-- V2 preflight failure blocks live order placement
-- unrelated dirty work is preserved; no reset/checkout/revert
+- DB/event truth outranks JSON/status projections.
+- JSON/status files are projections only.
+- No venue order side effect may occur without a persisted command record.
+- No position authority may advance from order submission without a command event.
+- Degraded projections must never export as `VERIFIED`.
+- `UNKNOWN` / `REVIEW_REQUIRED` blocks new entries.
+- `RED` must create cancel/de-risk/exit work, not only stop entries.
+- Direct live placement outside the gateway/command boundary is forbidden.
+- V2 preflight failure blocks live placement.
+- Rollback is behavioral (`NO_NEW_ENTRIES`, `EXIT_ONLY`, recovery-only), not destructive.
 
 ## 3. P0 — Immediate hardening
 
 ### Objective
 
-Stop authority inflation and unsafe new-risk creation immediately, without waiting for the full schema re-architecture.
+Remove known false confidence and block unsafe new entries without waiting for the schema refactor.
 
-### Touched files
+### In scope
 
-Minimum expected scope:
+1. Fix `_TRUTH_AUTHORITY_MAP["degraded"]` so degraded projection cannot be `VERIFIED`.
+2. Ensure degraded loader state blocks new entries while monitor/exit/reconciliation continue.
+3. Add an explicit entry gate for known unresolved execution-truth conditions available before P1, including quarantine without order authority, missing order id on pending live state, and future command-unknown hook points.
+4. Add CLOB V2 preflight gate in the live order path.
+5. Add static guard that only the approved gateway/command boundary may call `place_limit_order`.
+6. Update/demote stale tests and comments that still claim commit-then-export or FDR split are missing.
+7. Mark branch posture as `NO_NEW_ENTRIES` until P0 closes.
+
+### Likely touched surfaces
 
 - `src/state/portfolio.py`
 - `src/engine/cycle_runner.py`
+- `src/execution/executor.py`
 - `src/data/polymarket_client.py`
+- `src/riskguard/riskguard.py` comments if stale authority text remains
 - `architecture/invariants.yaml`
 - `architecture/negative_constraints.yaml`
-- `architecture/ast_rules/forbidden_patterns.md` and/or the active Semgrep rule registry
-- CI/workflow surface that enforces AST/CI rules
-- stale authority-facing tests:
-  - `tests/test_dt1_commit_ordering.py`
-  - `tests/test_fdr_family_scope.py`
-- new P0 tests:
-  - `tests/test_degraded_export_never_verified.py`
-  - `tests/test_v2_preflight_blocks_live_placement.py`
-  - `tests/test_unknown_or_review_required_blocks_new_entries.py`
-  - `tests/test_no_direct_place_limit_order_outside_gateway.py`
+- AST/static-rule surface used by current CI/topology checks
+- targeted tests under `tests/`
 
-Authority-facing stale comments likely touched in:
-- `src/riskguard/riskguard.py`
-- `src/state/portfolio.py`
+### Acceptance tests / proofs
 
-### Authority boundary
+- degraded export never says `VERIFIED`
+- degraded loader keeps monitor/exit/reconciliation alive and blocks entries
+- V2 preflight failure prevents placement
+- non-gateway direct `place_limit_order` calls fail static guard
+- stale tests no longer encode false present-tense claims
 
-P0 does not yet create the new command journal. It hardens the current boundary by refusing unsafe authority claims and blocking unsafe entry.
+### Stop conditions
 
-### Invariants
+- Stop if P0 needs a new DB schema.
+- Stop if implementation requires choosing final command-event grammar.
+- Stop if V2 compatibility cannot be proven from approved package/version evidence.
 
-P0 must lock the following behavior immediately:
+### Rollback
 
-- degraded export is never `VERIFIED`
-- live placement requires V2 preflight success
-- explicit unresolved execution-truth conditions block new entry
-- stale authority artifacts may not contradict current runtime truth
-- non-gateway order placement is CI/AST forbidden
-
-### Tests to add/update
-
-Add/update at least:
-
-- update stale assertions in `tests/test_dt1_commit_ordering.py`
-- update stale assertions in `tests/test_fdr_family_scope.py`
-- `tests/test_degraded_export_never_verified.py`
-- `tests/test_v2_preflight_blocks_live_placement.py`
-- `tests/test_unknown_or_review_required_blocks_new_entries.py`
-- `tests/test_no_direct_place_limit_order_outside_gateway.py`
-
-### Verification commands
-
-```bash
-python scripts/topology_doctor.py --planning-lock --changed-files src/state/portfolio.py src/engine/cycle_runner.py src/data/polymarket_client.py architecture/invariants.yaml architecture/negative_constraints.yaml tests/test_dt1_commit_ordering.py tests/test_fdr_family_scope.py --plan-evidence docs/operations/task_2026-04-19_execution_state_truth_upgrade/project_brief.md
-pytest -q tests/test_dt1_commit_ordering.py tests/test_fdr_family_scope.py tests/test_degraded_export_never_verified.py tests/test_v2_preflight_blocks_live_placement.py tests/test_unknown_or_review_required_blocks_new_entries.py tests/test_no_direct_place_limit_order_outside_gateway.py
-python scripts/topology_doctor.py --tests --json
-python scripts/check_kernel_manifests.py
-```
-
-### Rollback path
-
-Rollback is behavioral, not destructive:
-
-- keep `NO_NEW_ENTRIES`
-- keep monitor / exit / reconciliation available
-- do not remove stale-test cleanup or reintroduce false verified labeling
-- if V2 preflight implementation is broken, fail closed on live placement rather than bypass it
-
-Do **not** drop unrelated work or use destructive git cleanup.
-
-### Blast radius
-
-Low to medium:
-
-- operator-facing truth labels
-- live placement gating
-- stale test/doc authority surfaces
-- CI/AST enforcement
-
-### Hard gates
-
-P0 is not complete until all of the following are true:
-
-- degraded truth never exports `VERIFIED`
-- V2 preflight failure blocks placement
-- direct non-gateway order placement is AST/CI guarded
-- stale authority-facing tests no longer assert false current behavior
-- runtime posture remains `NO_NEW_ENTRIES`
-
-### What not to do in P0
-
-- do not add the `venue_commands` schema yet
-- do not refactor the full execution path yet
-- do not redesign Kelly / evaluator / market selection in this phase
-- do not perform broad stale cleanup beyond authority-misleading artifacts
-- do not re-enable live entry
+Keep entries paused. If a P0 gate is too strict, degrade to `MONITOR_ONLY` / `EXIT_ONLY` rather than bypassing degraded/V2/unknown guards.
 
 ## 4. P1 — Durable command truth
 
 ### Objective
 
-Introduce the missing durable execution truth layer so live side effects can be recovered deterministically.
+Close the orphan-order window by making command intent durable before any network side effect.
 
-### Touched files
+### In scope
 
-New files:
+1. Add `src/execution/command_bus.py` with typed `VenueCommand` and command-state definitions.
+2. Add `src/state/venue_command_repo.py` as the only DB API for command rows/events.
+3. Add `venue_commands` and `venue_command_events` schema/API in `src/state/db.py` or the approved migration layer.
+4. Split executor into request building and command submission:
+   - build command/request without side effect
+   - persist command
+   - submit through gateway
+   - append command event
+5. Change `cycle_runtime.execute_discovery_phase()` to create/persist command before submit and materialize position only from durable command-event outcome.
+6. Add `src/execution/command_recovery.py` to scan unresolved commands at startup/cycle boundary.
+7. Add idempotency/replay key contract.
+8. Add query/report surfaces for unresolved command counts.
 
-- `src/execution/command_bus.py`
-- `src/execution/command_recovery.py`
-- `src/state/authority_state.py`
-- `src/state/venue_command_repo.py`
-- migration file, e.g. `migrations/2026_04_19_execution_command_journal.sql`
+### Likely touched surfaces
 
-Modified files:
+- New: `src/execution/command_bus.py`
+- New: `src/execution/command_recovery.py`
+- New: `src/state/venue_command_repo.py`
+- Possibly new: `src/state/authority_state.py`
+- Modified: `src/state/db.py`
+- Modified: `src/engine/cycle_runtime.py`
+- Modified: `src/execution/executor.py`
+- Modified: `src/data/polymarket_client.py`
+- Modified: tests and architecture manifests
 
-- `src/state/db.py`
-- `src/engine/cycle_runtime.py`
-- `src/execution/executor.py`
-- `src/data/polymarket_client.py`
-- `architecture/invariants.yaml`
-- `architecture/negative_constraints.yaml`
-- AST/CI rule surface
-- new P1 tests:
-  - `tests/test_command_persisted_before_submit.py`
-  - `tests/test_crash_after_submit_before_ack_write_replays_to_unknown.py`
-  - `tests/test_command_events_required_for_position_authority.py`
-  - `tests/test_no_direct_place_limit_order_outside_gateway.py`
+### Command states
 
-### Authority boundary
+Minimum state grammar:
 
-P1 creates the new boundary:
+- `INTENT_CREATED`
+- `SUBMITTING`
+- `ACKED`
+- `UNKNOWN`
+- `PARTIAL`
+- `FILLED`
+- `CANCEL_PENDING`
+- `CANCELLED`
+- `EXPIRED`
+- `REJECTED`
+- `REVIEW_REQUIRED`
 
-`decision -> VenueCommand persisted -> submit through gateway -> venue_command_event -> position authority`
+### Minimum command events
 
-Local control flow and convenience reports are no longer allowed to stand in for execution truth.
+- `SUBMIT_REQUESTED`
+- `SUBMIT_ACKED`
+- `SUBMIT_UNKNOWN`
+- `SUBMIT_REJECTED`
+- `PARTIAL_FILL_OBSERVED`
+- `FILL_CONFIRMED`
+- `CANCEL_REQUESTED`
+- `CANCEL_ACKED`
+- `EXPIRED`
+- `REVIEW_REQUIRED`
 
-### Invariants
+### Acceptance tests / proofs
 
-P1 must implement and prove:
+- command row is persisted before submit spy sees any side effect
+- crash after submit before ack write recovers to `UNKNOWN` or resolved command state
+- attempted submit alone does not create authoritative position state
+- unresolved command survives restart
+- gateway-only static guard remains enforced
 
-- no venue side effect without persisted `VenueCommand`
-- no position-authority change from submit without `venue_command_event`
-- idempotent replay key survives restart
-- gateway is the only live placement surface
-- unresolved command state is durable across restart
+### Stop conditions
 
-### Tests to add/update
+- Stop if schema ownership is unresolved.
+- Stop if command-event grammar cannot be frozen.
+- Stop if idempotency key cannot be stable across restart.
+- Stop if old execution report or trade decision tables are being overloaded as command authority.
 
-Add at minimum:
+### Rollback
 
-- `tests/test_command_persisted_before_submit.py`
-- `tests/test_crash_after_submit_before_ack_write_replays_to_unknown.py`
-- `tests/test_command_events_required_for_position_authority.py`
-- `tests/test_no_direct_place_limit_order_outside_gateway.py`
-- integration coverage for new DB tables and repo API
-
-### Verification commands
-
-```bash
-python scripts/topology_doctor.py --planning-lock --changed-files src/execution/command_bus.py src/execution/command_recovery.py src/state/authority_state.py src/state/venue_command_repo.py src/state/db.py src/engine/cycle_runtime.py src/execution/executor.py src/data/polymarket_client.py migrations/2026_04_19_execution_command_journal.sql --plan-evidence docs/operations/task_2026-04-19_execution_state_truth_upgrade/architecture_note.md
-pytest -q tests/test_command_persisted_before_submit.py tests/test_crash_after_submit_before_ack_write_replays_to_unknown.py tests/test_command_events_required_for_position_authority.py tests/test_no_direct_place_limit_order_outside_gateway.py
-python scripts/check_kernel_manifests.py
-python scripts/topology_doctor.py --tests --json
-```
-
-### Rollback path
-
-Do not roll back by deleting schema. Roll back by narrowing behavior:
-
-- keep schema in place
-- switch runtime to `EXIT_ONLY` / recovery-only mode
-- disable new entry submission through control-plane gate
-- leave recovery tooling active
-- preserve accumulated command journal for forensic recovery
-
-### Blast radius
-
-High:
-
-- DB schema
-- execution path
-- restart behavior
-- live order placement
-- reconciliation inputs
-- CI/AST enforcement
-
-### Hard gates
-
-P1 is not complete until all of the following are true:
-
-- live placement cannot happen without persisted command
-- crash-after-submit drill produces durable unresolved command
-- non-gateway live placement is blocked
-- command journal and event spine are queryable and replayable
-- rollback posture is documented without dropping schema/data
-
-### What not to do in P1
-
-- do not add complex execution tactics (slicing/repricing/iceberg semantics)
-- do not widen into market eligibility redesign
-- do not solve persistent alpha budget in the same packet
-- do not let telemetry tables masquerade as canonical command truth
+Do not drop command schema. Disable new entry and leave recovery/query surfaces active for forensic reconciliation.
 
 ## 5. P2 — Semantic closure
 
 ### Objective
 
-Make unresolved execution truth and forced de-risk truly authoritative system behavior.
+Make unresolved truth and RED de-risk authoritative behavior across reconciliation, risk, and operator workflow.
 
-### Touched files
+### In scope
 
-Expected scope:
+1. Feed unresolved commands into chain classification/reconciliation.
+2. Treat `UNKNOWN` / `REVIEW_REQUIRED` as first-class execution truth that blocks entries.
+3. Replace empty-chain heuristic folding with command-aware review/unknown outcomes.
+4. Remove or quarantine fabricated time fields such as `unknown_entered_at` from downstream temporal authority.
+5. Change RED from local exit marking to durable cancel/de-risk/exit command emission.
+6. Surface operator backlog: unknown command count, review-required count, pending de-risk count, RED unwind pending count.
+7. Clarify `positions.json` and status outputs as projection-only.
 
+### Likely touched surfaces
+
+- `src/state/chain_state.py`
 - `src/state/chain_reconciliation.py`
-- any chain-state helper surface that owns truth classification
+- `src/state/lifecycle_manager.py` only if enum/state grammar change is approved
 - `src/riskguard/riskguard.py`
+- `src/riskguard/risk_level.py`
 - `src/engine/cycle_runner.py`
+- `src/engine/cycle_runtime.py`
 - `src/execution/exit_lifecycle.py`
-- `src/engine/monitor_refresh.py`
-- `src/state/portfolio.py`
-- `architecture/invariants.yaml`
-- new P2 tests:
-  - `tests/test_unknown_command_blocks_new_entries.py`
-  - `tests/test_empty_chain_with_mixed_freshness_marks_unknown.py`
-  - `tests/test_red_emits_derisk_commands.py`
-  - `tests/test_review_required_stops_new_entries.py`
+- `src/execution/command_bus.py`
+- `src/state/venue_command_repo.py`
+- observability/status surfaces
 
-### Authority boundary
+### Acceptance tests / proofs
 
-P2 makes unresolved command truth part of the canonical runtime control boundary.
+- unknown command blocks new entries
+- empty-chain + mixed freshness + unresolved command does not void or certify flat
+- RED emits durable cancel/de-risk/exit commands
+- operator status exposes review workload and unwind backlog
+- fabricated entry timestamps cannot drive hold-duration or exit-timing authority without explicit quarantine
 
-New rule:
+### Stop conditions
 
-- reconciliation cannot conclude absence/void/full safety without considering unresolved command state
-- `RED` cannot remain a local position annotation; it must emit durable command work
+- Stop if lifecycle enum grammar changes are needed but not planned.
+- Stop if RED command emission requires unsupported venue cancel/exit semantics.
+- Stop if operator workflow cannot represent review-required state.
 
-### Invariants
+### Rollback
 
-P2 must prove:
+Set runtime to `EXIT_ONLY` / recovery-only, keep command journal and review queues visible, and do not auto-clear unknowns.
 
-- `UNKNOWN` and `REVIEW_REQUIRED` are first-class blocking states
-- empty-chain + mixed freshness does not silently void or silently bless positions
-- fabricated execution timestamps are removed, nullable, or typed as unresolved rather than smuggled into normal timestamps
-- `RED` emits durable cancel/de-risk/exit commands
-
-### Tests to add/update
-
-Add at minimum:
-
-- `tests/test_unknown_command_blocks_new_entries.py`
-- `tests/test_empty_chain_with_mixed_freshness_marks_unknown.py`
-- `tests/test_red_emits_derisk_commands.py`
-- `tests/test_review_required_stops_new_entries.py`
-
-### Verification commands
-
-```bash
-python scripts/topology_doctor.py --planning-lock --changed-files src/state/chain_reconciliation.py src/riskguard/riskguard.py src/engine/cycle_runner.py src/execution/exit_lifecycle.py src/engine/monitor_refresh.py src/state/portfolio.py architecture/invariants.yaml --plan-evidence docs/operations/task_2026-04-19_execution_state_truth_upgrade/implementation_plan.md
-pytest -q tests/test_unknown_command_blocks_new_entries.py tests/test_empty_chain_with_mixed_freshness_marks_unknown.py tests/test_red_emits_derisk_commands.py tests/test_review_required_stops_new_entries.py
-python scripts/check_kernel_manifests.py
-```
-
-### Rollback path
-
-If semantic closure causes unstable automation:
-
-- keep new-entry block in place
-- demote automated unwind to operator-reviewed de-risk execution
-- keep unresolved states explicit
-- do not re-collapse unknown truth into normal absence
-
-### Blast radius
-
-Medium to high:
-
-- reconciliation truth
-- operator workflow
-- risk control semantics
-- exit automation
-- incident response
-
-### Hard gates
-
-P2 is not complete until:
-
-- unresolved command truth is visible and blocking
-- mixed-freshness empty-chain cases no longer auto-fold into simple absence
-- `RED` produces durable de-risk work
-- operators can see review-required workload explicitly
-
-### What not to do in P2
-
-- do not use heuristics to hide unresolved truth
-- do not relabel degraded/unknown states as verified for operator convenience
-- do not couple this phase to market eligibility or alpha-budget redesign
-
-## 6. P3 — Market eligibility / settlement containment / persistent alpha budget
+## 6. P3 — Outer containment and decision-law governance
 
 ### Objective
 
-Reduce outer exposure to settlement-boundary risk and repeated-testing pressure once execution truth is durable.
+Reduce settlement/venue and repeated-testing risk after execution truth is stable.
 
-### Touched files
+### In scope
 
-Likely scope:
+1. Add market eligibility policy for settlement boundary ambiguity, station mapping, finalization contract, and depth/liquidity.
+2. Add venue-state stability checks around CLOB V2/cutover generations.
+3. Add persistent alpha-spending ledger or equivalent durable attempt budget across cycles/snapshots.
+4. Add metrics for family/day repeated attempts and budget consumption.
+
+### Likely touched surfaces
 
 - `src/data/market_scanner.py`
+- New `src/market/eligibility.py` or approved package location
+- `config/market_eligibility.yaml` if approved
 - `src/engine/evaluator.py`
 - `src/strategy/selection_family.py`
-- new `src/market/eligibility.py`
-- config surface for eligibility policy
-- DB surface for persistent alpha ledger
-- new P3 tests:
-  - `tests/test_market_eligibility_blocks_boundary_ambiguous_markets.py`
-  - `tests/test_station_mapping_required_for_live_market.py`
-  - `tests/test_persistent_alpha_budget_across_snapshots.py`
+- `src/strategy/market_analysis_family_scan.py`
+- `src/state/db.py`
 
-### Authority boundary
+### Acceptance tests / proofs
 
-P3 may add policy truth, but it may not backdoor execution authority.
+- boundary-ambiguous markets are ineligible
+- station/finalization contract required before live eligibility
+- low-depth or venue-unstable markets are rejected before sizing
+- repeated same-family/day attempts consume durable budget across snapshots
+- alpha budget does not reset simply because the cycle reran
 
-Execution-state truth remains upstream and canonical. Eligibility and alpha budget consume truth; they do not redefine it.
+### Stop conditions
 
-### Invariants
+- Stop if P1/P2 are not closed.
+- Stop if market eligibility needs unverified source-validity facts.
+- Stop if alpha budget design would change strategy identity law without architecture approval.
 
-P3 must enforce:
+### Rollback
 
-- settlement-ambiguous markets are ineligible for live entry
-- station/finalization confidence is explicit
-- repeated testing pressure is accounted for durably across time
-- eligibility does not override unresolved execution truth
+Fallback to hard cooldown / one-attempt-per-family-day and keep stricter market ineligibility; do not loosen entry to compensate.
 
-### Tests to add/update
+## 7. Required monitoring counters
 
-Add at minimum:
+- `unknown_venue_command_count`
+- `review_required_count`
+- `submitting_age_p95`
+- `pending_no_order_id_count`
+- `venue_order_unlinked_count`
+- `degraded_export_count`
+- `loader_degraded_cycles`
+- `red_unwind_pending_count`
+- `v2_preflight_ok`
+- `post_cutover_order_reconcile_gap`
+- `boundary_distance_ticks_exposure`
+- `snapshot_count_per_family_day`
+- `trade_attempts_per_family_day`
+- `alpha_spend_remaining`
 
-- `tests/test_market_eligibility_blocks_boundary_ambiguous_markets.py`
-- `tests/test_station_mapping_required_for_live_market.py`
-- `tests/test_persistent_alpha_budget_across_snapshots.py`
+## 8. First coding packet after this planning package
 
-### Verification commands
+Name: `task_2026-04-26_execution_state_truth_p0_hardening`
 
-```bash
-python scripts/topology_doctor.py --planning-lock --changed-files src/data/market_scanner.py src/engine/evaluator.py src/strategy/selection_family.py src/market/eligibility.py --plan-evidence docs/operations/task_2026-04-19_execution_state_truth_upgrade/prd.md
-pytest -q tests/test_market_eligibility_blocks_boundary_ambiguous_markets.py tests/test_station_mapping_required_for_live_market.py tests/test_persistent_alpha_budget_across_snapshots.py
-python scripts/check_kernel_manifests.py
-```
-
-### Rollback path
-
-- keep core execution truth untouched
-- revert new eligibility policy to stricter static denylist / cooldown if needed
-- keep persistent alpha ledger read-only if budget logic needs correction
-- do not reopen live-entry breadth through silent policy bypass
-
-### Blast radius
-
-Medium:
-
-- candidate selection
-- acceptance rate
-- trade frequency
-- research expectations
-
-### Hard gates
-
-P3 is not complete until:
-
-- settlement boundary ambiguity is explicitly handled
-- station/finalization contract is explicit for live-eligible markets
-- persistent alpha budget survives multi-snapshot replay
-
-### What not to do in P3
-
-- do not reopen the command-truth design
-- do not add complex queue-position simulator work
-- do not widen into unrelated model sophistication work
-- do not make P3 a substitute for incomplete P1/P2 truth work
-
-## 7. Cross-phase hard gates
-
-The following conditions must remain active across phases:
-
-- V2 preflight failure -> no live order placement
-- any unresolved `UNKNOWN` or `REVIEW_REQUIRED` command -> no new entry
-- degraded authority -> no verified export + no new entry
-- `RED` -> cancel/de-risk/exit path required
-- non-gateway `place_limit_order` -> CI/AST fail
-- preserve unrelated dirty work; never recommend reset/checkout/revert
-
-## 8. First recommended implementation packet after planning
-
-### Packet
-
-`P0 hardening — authority label + V2 preflight + stale authority cleanup`
-
-### Why this first
-
-It delivers the fastest real reduction in live risk with the smallest blast radius, while preparing the repo for the bigger P1 schema packet.
-
-### Exact initial deliverables
-
-1. fix degraded truth labeling
-2. add V2 preflight gate
-3. add unresolved/unknown entry block
-4. update stale authority tests/comments
-5. add AST/CI guard for direct live placement outside approved boundary
-6. keep branch in `NO_NEW_ENTRIES`
-
-### Exit criteria for the first packet
-
-- all P0 tests green
-- manifests updated
-- operator truth surface no longer inflates degraded state
-- live placement cannot bypass V2 preflight
-- no destructive git actions used
+Goal: P0 only — fix degraded export labeling, freeze/verify no-new-entry posture, add V2 preflight gate, add direct-placement guard, and clean stale authority artifacts. Do not add command schema in that first packet.
