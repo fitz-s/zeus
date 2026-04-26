@@ -55,12 +55,15 @@ def _make_intent(limit_price: float) -> ExecutionIntent:
     ``src/contracts/execution_intent.py``). The fixture passes an
     explicit value so the field is exercised end-to-end.
     """
+    # P3-fix1 (post-review BLOCKER, 2026-04-26): max_slippage now requires
+    # SlippageBps per ExecutionIntent.__post_init__ runtime guard.
+    from src.contracts.slippage_bps import SlippageBps
     return ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=False,
         market_id="test-market",
         token_id="test-token-12345",

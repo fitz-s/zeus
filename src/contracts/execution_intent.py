@@ -36,3 +36,20 @@ class ExecutionIntent:
     reprice_policy: str = "static"
     liquidity_guard: bool = True
     decision_edge: float = 0.0  # T5.a 2026-04-23: field was read at src/execution/executor.py:136,428 but missing from dataclass, latent TypeError on live entry; paired default maintains backward compatibility.
+
+    def __post_init__(self) -> None:
+        # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
+        # M3, 2026-04-26): runtime isinstance check on max_slippage.
+        # Pre-fix1, the type annotation was a string (forward-ref via
+        # TYPE_CHECKING), so passing a raw float silently stored as float
+        # — the typing seam was illusory. Now the dataclass refuses
+        # construction at runtime; the antibody is universal across
+        # production callers + every test fixture.
+        from src.contracts.slippage_bps import SlippageBps
+        if not isinstance(self.max_slippage, SlippageBps):
+            raise TypeError(
+                f"ExecutionIntent.max_slippage must be SlippageBps, "
+                f"got {type(self.max_slippage).__name__} "
+                f"(value={self.max_slippage!r}). Per P3.3 + P3-fix1, "
+                f"raw floats are no longer accepted at the boundary."
+            )
