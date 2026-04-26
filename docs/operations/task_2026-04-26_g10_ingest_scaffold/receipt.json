@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_g10_ingest_scaffold",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "k_decision": "K3.G10-scaffold",
+  "closed_at_utc": "2026-04-26",
+  "single_commit": true,
+  "antibody_test": "tests/test_ingest_isolation.py",
+  "antibody_test_count": 5,
+  "antibody_test_pass_rate": "5/5",
+  "regression_panel": {
+    "scope": [
+      "tests/test_architecture_contracts.py",
+      "tests/test_live_safety_invariants.py",
+      "tests/test_cross_module_invariants.py",
+      "tests/test_ingest_isolation.py",
+      "tests/test_live_safe_strategies.py",
+      "tests/test_obs_v2_physical_bounds.py",
+      "tests/test_obs_v2_dst_missing_hour_flag.py"
+    ],
+    "baseline_failures": 5,
+    "post_commit_failures": 5,
+    "delta_new_failures": 0
+  },
+  "files_touched": [
+    "scripts/ingest/__init__.py",
+    "scripts/ingest/_shared.py",
+    "scripts/ingest/daily_obs_tick.py",
+    "scripts/ingest/hourly_instants_tick.py",
+    "scripts/ingest/solar_daily_tick.py",
+    "scripts/ingest/forecasts_daily_tick.py",
+    "scripts/ingest/hole_scanner_tick.py",
+    "tests/test_ingest_isolation.py",
+    "architecture/test_topology.yaml",
+    "architecture/script_manifest.yaml"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "isolation_contract_enforcement": {
+    "forbidden_import_prefixes": [
+      "src.engine",
+      "src.execution",
+      "src.strategy",
+      "src.signal",
+      "src.supervisor_api",
+      "src.control",
+      "src.observability",
+      "src.main"
+    ],
+    "enforcement_mechanism": "AST-walk via tests/test_ingest_isolation.py::test_no_forbidden_imports_in_ingest. Regex-first scan would miss `from src.signal.diurnal import x` masquerading as substring; AST is precise.",
+    "current_violators": []
+  },
+  "empirical_smoke_test": {
+    "scope": "Import-only — each tick's main() callable was imported via venv to confirm the dependency chain resolves.",
+    "results": "5/5 ticks importable cleanly.",
+    "did_not_execute": "Ticks were NOT run against production DB — that is an operator-controlled action. The slice ships the lane structure + antibody + import-validity proof, not runtime execution proof."
+  },
+  "departures_from_pattern": {
+    "skipped_red_commit": "RED phase intentionally skipped — this slice is structural decoupling + antibody. A tick with a forbidden import would be a bug, not a meaningful RED. The antibody catches mistakes pre-commit on any future addition.",
+    "did_not_remove_main_py_ticks": "G10-cutover (Wave 2). Cannot remove the bundled tick functions until launchd plists are in place + at least one cycle proves scheduled execution works."
+  },
+  "followups_owed": [
+    {
+      "id": "G10-cutover",
+      "summary": "Remove _k2_*_tick + _ecmwf_open_data_cycle from src/main.py scheduler. Requires operator decision + launchd plists + at least one cycle proof.",
+      "estimated_hours": 1,
+      "wave": "Wave 2",
+      "gating": "Operator decision + launchd plists deployed + cycle proof"
+    },
+    {
+      "id": "G10-source-split",
+      "summary": "Workbook G10 enumeration lists 8 finer-grained ticks (wu_icao_tick, ogimet_tick, openmeteo_hourly_tick, openmeteo_solar_tick, forecasts_tick, ecmwf_open_ens_tick, hko_tick, hole_scan_tick). Requires refactoring src/data/daily_obs_append.daily_tick to accept a source filter.",
+      "estimated_hours": 4,
+      "wave": "Wave 1 followup OR Wave 2",
+      "gating": "Source-filter API design"
+    },
+    {
+      "id": "G10-launchd-plists",
+      "summary": "8 launchd plist files for the ingest tick scripts. Operator deploy concern.",
+      "estimated_hours": 1,
+      "gating": "Operator deploy permission"
+    },
+    {
+      "id": "G10-ecmwf-tick",
+      "summary": "Standalone ECMWF open-data cycle tick (paralleling _ecmwf_open_data_cycle in src/main.py). Separate cadence (cycle-based, not tick-based).",
+      "estimated_hours": 1,
+      "gating": "Operator decision on cadence"
+    }
+  ],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "If a future contract needs to widen FORBIDDEN_IMPORT_PREFIXES (e.g., add src.calibration or remove src.observability), extract the rationale into a lore card. Today's set matches the workbook G10 acceptance verbatim."
+}
