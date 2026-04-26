@@ -29,6 +29,7 @@ R-4 (capability x consumption): ExecutionIntent must not carry decorative
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -205,31 +206,64 @@ class TestR4ExecutionIntentNoDecorativeLabels:
 # The allowed-files frozenset is the explicit boundary. To add a new
 # approved call site, update this set AND the NC-16 / INV-24 manifest
 # entries in the same commit (so law and guard stay in sync).
+#
+# scripts/live_smoke_test.py is an explicit operator-bypass exemption:
+# it is operator-driven (not runtime) and MUST call v2_preflight() itself
+# before place_limit_order. This exemption does NOT relax INV-25 — the
+# smoke test must honor it on its own path.
 _PLACE_LIMIT_ORDER_ALLOWED_FILES = frozenset({
     "src/execution/executor.py",
     "src/data/polymarket_client.py",
+    "scripts/live_smoke_test.py",
 })
 
 
-def test_place_limit_order_gateway_only():
-    """K2 / NC-16 / INV-24: place_limit_order must only appear in gateway-boundary files.
+def _ast_calls_place_limit_order(source_text: str) -> bool:
+    """Return True if source_text contains an AST Call node whose func
+    attribute is an Attribute node with attr == 'place_limit_order'.
 
-    Walks all *.py files under src/, checks for the string 'place_limit_order'.
+    This is more precise than substring search: it detects only actual
+    call expressions, not docstring mentions, comments, or string literals.
+    """
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        # Unparseable files are treated conservatively as containing a call.
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "place_limit_order":
+                return True
+    return False
+
+
+def test_place_limit_order_gateway_only():
+    """K2 / NC-16 / INV-24: place_limit_order calls must only appear in gateway-boundary files.
+
+    Walks all *.py files under src/ AND scripts/, uses AST-based detection
+    (not substring match) to find actual Call nodes with attr='place_limit_order'.
     Files in _PLACE_LIMIT_ORDER_ALLOWED_FILES are the only permitted locations.
     A violation means a caller is bypassing the gateway boundary.
+
+    Note: scripts/live_smoke_test.py is an explicit operator-bypass exemption;
+    it is NOT a runtime call site and must call v2_preflight() itself (INV-25).
     """
-    src_root = ROOT / "src"
+    search_roots = [ROOT / "src", ROOT / "scripts"]
     violations = []
-    for py_file in src_root.rglob("*.py"):
-        rel = py_file.relative_to(ROOT).as_posix()
-        if rel in _PLACE_LIMIT_ORDER_ALLOWED_FILES:
+    for search_root in search_roots:
+        if not search_root.exists():
             continue
-        text = py_file.read_text(encoding="utf-8")
-        if "place_limit_order" in text:
-            violations.append(rel)
+        for py_file in search_root.rglob("*.py"):
+            rel = py_file.relative_to(ROOT).as_posix()
+            if rel in _PLACE_LIMIT_ORDER_ALLOWED_FILES:
+                continue
+            text = py_file.read_text(encoding="utf-8")
+            if _ast_calls_place_limit_order(text):
+                violations.append(rel)
 
     assert not violations, (
-        f"NC-16 / INV-24 violation: 'place_limit_order' found outside the gateway boundary "
+        f"NC-16 / INV-24 violation: place_limit_order call found outside the gateway boundary "
         f"in {violations}. Only {sorted(_PLACE_LIMIT_ORDER_ALLOWED_FILES)} are approved."
     )
 
@@ -298,7 +332,12 @@ class TestR2V2PreflightBlocksPlacement:
         mock_instance.place_limit_order.assert_not_called()
 
     def test_v2_preflight_success_does_not_block(self):
-        """When v2_preflight succeeds (no-op), placement proceeds to place_limit_order."""
+        """When v2_preflight succeeds (no-op), placement proceeds to place_limit_order.
+
+        The mock SDK client exposes get_ok (positive case) so the fail-closed
+        hasattr check passes. We assert v2_preflight was called before
+        place_limit_order by verifying both call counts in sequence.
+        """
         from src.execution.executor import _live_order
 
         intent = self._make_intent()
@@ -306,7 +345,11 @@ class TestR2V2PreflightBlocksPlacement:
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
-            mock_instance.v2_preflight.return_value = None  # success
+            # Inject a mock SDK client that DOES expose get_ok (positive case).
+            mock_clob = MagicMock()
+            mock_clob.get_ok.return_value = None  # get_ok present and succeeds
+            mock_instance._clob_client = mock_clob
+            mock_instance.v2_preflight.return_value = None  # preflight succeeds
             mock_instance.place_limit_order.return_value = {
                 "orderID": "test-order-123",
                 "status": "placed",
@@ -318,8 +361,26 @@ class TestR2V2PreflightBlocksPlacement:
                 shares=18.19,
             )
 
+        # v2_preflight must have been called (INV-25 gate active)
+        mock_instance.v2_preflight.assert_called_once()
         mock_instance.place_limit_order.assert_called_once()
         assert result.status == "pending"
+
+    def test_v2_preflight_fails_when_sdk_lacks_get_ok(self):
+        """Negative case: when SDK lacks get_ok, v2_preflight raises V2PreflightError.
+
+        This verifies the fail-closed fix from MAJOR #2: AttributeError on
+        missing get_ok must NOT be swallowed silently. INV-25.
+        """
+        from src.data.polymarket_client import PolymarketClient, V2PreflightError
+
+        client = PolymarketClient.__new__(PolymarketClient)
+        # Inject a mock CLOB client that does NOT expose get_ok.
+        mock_clob = MagicMock(spec=[])  # empty spec: no attributes
+        client._clob_client = mock_clob
+
+        with pytest.raises(V2PreflightError, match="SDK lacks get_ok"):
+            client.v2_preflight()
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +437,8 @@ class TestR3RuntimePostureBlocksEntry:
         from src.runtime import posture as posture_mod
 
         posture_mod._clear_cache()
-        with patch.object(posture_mod, "_read_posture_uncached", return_value="NORMAL"):
+        # _read_posture_uncached returns (posture, branch, yaml_mtime) tuple
+        with patch.object(posture_mod, "_read_posture_uncached", return_value=("NORMAL", "main", 0.0)):
             result = posture_mod.read_runtime_posture()
         posture_mod._clear_cache()
 

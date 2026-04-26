@@ -97,15 +97,13 @@ class PolymarketClient:
         OrderResult without calling place_limit_order.
         """
         self._ensure_client()
+        if not hasattr(self._clob_client, "get_ok"):
+            raise V2PreflightError(
+                "SDK lacks get_ok preflight method; preflight cannot verify endpoint identity. "
+                "Upgrade py-clob-client to >= 0.34 to satisfy INV-25."
+            )
         try:
-            try:
-                self._clob_client.get_ok()
-            except AttributeError:
-                # SDK version does not expose get_ok; treat as no-op success.
-                # This allows the guard to be forward-compatible: once the SDK
-                # exposes get_ok, the real check runs automatically.
-                logger.debug("v2_preflight: SDK has no get_ok method; skipping reachability check")
-                return
+            self._clob_client.get_ok()
         except Exception as exc:
             raise V2PreflightError(f"V2 endpoint preflight failed: {exc!r}") from exc
 

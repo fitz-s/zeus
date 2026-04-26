@@ -180,9 +180,10 @@ invariants:
     statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
     why: A degraded loader signals that DB authority was unreachable or the projection is non-canonical. Stamping that export as VERIFIED tells operator surfaces and downstream consumers that authority survived loss, which is false. Authority labels must reflect actual provenance, not load-success.
     enforced_by:
-      negative_constraints: [NC-17]
+      negative_constraints: [NC-16]
       tests:
-        - tests/test_p0_hardening.py::test_degraded_export_never_verified
+        - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_truth_authority_map_does_not_collapse_degraded_to_verified
+        - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_save_portfolio_degraded_does_not_export_verified
   - id: INV-24
     zones: [K2_runtime]
     statement: place_limit_order is gateway-only; non-gateway call sites are forbidden.
@@ -197,12 +198,14 @@ invariants:
     why: A failed V2 preflight indicates the CLOB endpoint is unreachable or non-responsive. Proceeding with order placement against an unverified endpoint risks silent API errors, duplicate order submission, or orders against a stale/wrong endpoint.
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::test_v2_preflight_blocks_placement
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_blocks_placement
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_success_does_not_block
+        - tests/test_p0_hardening.py::TestR2V2PreflightBlocksPlacement::test_v2_preflight_fails_when_sdk_lacks_get_ok
   - id: INV-26
     zones: [K2_runtime]
     statement: runtime_posture is read-only at runtime; the entry-decision path must consult it; non-NORMAL posture blocks new entry irrespective of risk_level.
     why: runtime_posture is a committed YAML law document (O2-c). Allowing runtime mutation or ignoring it in the entry path recreates the second-authority-plane problem. The posture gate is additive with risk_level — both must pass for entry to proceed.
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::test_runtime_posture_blocks_new_entry
+        - tests/test_p0_hardening.py::TestR3RuntimePostureBlocksEntry::test_cycle_runner_posture_gate_blocks_with_reason
         - tests/test_p0_hardening.py::test_runtime_posture_yaml_present

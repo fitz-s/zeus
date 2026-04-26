@@ -54,6 +54,13 @@ CANONICAL_STRATEGY_KEYS = {
 
 POSITIONS_PATH = state_path("positions.json")
 
+# Portfolio authority labels are a separate grammar from observation authority.
+# ObservationAtom uses Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
+# (src/types/observation_atom.py). DEGRADED_PROJECTION is a portfolio-only
+# label emitted via annotate_truth_payload in save_portfolio; it MUST NOT
+# flow into ObservationAtom or MarketScanner typed boundaries.
+# Verified isolated: grep confirms no DEGRADED_PROJECTION consumer in
+# src/types/ or src/data/market_scanner.py (2026-04-26 audit).
 _TRUTH_AUTHORITY_MAP: dict[str, str] = {
     "canonical_db": "VERIFIED",
     "degraded": "DEGRADED_PROJECTION",

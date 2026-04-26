@@ -109,4 +109,5 @@ constraints:
     invariants: [INV-23]
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::test_execution_intent_no_decorative_labels
+        - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_execution_intent_has_no_decorative_fields
+        - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_executor_does_not_branch_on_decorative_labels

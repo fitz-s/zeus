@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,14 +32,43 @@ logger = logging.getLogger(__name__)
 # Grammar is frozen at these four values. Any other value in the YAML is corrupt.
 POSTURE_GRAMMAR = frozenset({"NORMAL", "NO_NEW_ENTRIES", "EXIT_ONLY", "MONITOR_ONLY"})
 
-# Module-level cache. None means not yet populated.
-_cached_posture: Optional[str] = None
+# Cache TTL: re-read the YAML at most every 60 seconds so long-running daemons
+# pick up operator commits to architecture/runtime_posture.yaml without restart.
+_CACHE_TTL_SECONDS = 60
+
+# Module-level cache entry: (posture_value, branch_name, yaml_mtime, cached_at_ts)
+# None means not yet populated.
+_cache_entry: Optional[tuple[str, str, float, float]] = None
 
 
 def _clear_cache() -> None:
     """Clear the module-level posture cache. Call in tests between assertions."""
-    global _cached_posture
-    _cached_posture = None
+    global _cache_entry
+    _cache_entry = None
+
+
+def _cache_is_valid(entry: tuple[str, str, float, float]) -> bool:
+    """Return True if the cached entry is still valid.
+
+    Invalidation triggers (any one is sufficient):
+    - cached_at_ts is older than _CACHE_TTL_SECONDS
+    - yaml_mtime differs from the file's current mtime
+    - current branch name differs from the cached branch
+    """
+    posture_val, branch_name, yaml_mtime, cached_at_ts = entry
+    if time.monotonic() - cached_at_ts >= _CACHE_TTL_SECONDS:
+        return False
+    try:
+        repo_root = _find_repo_root()
+        posture_path = repo_root / "architecture" / "runtime_posture.yaml"
+        if posture_path.exists() and posture_path.stat().st_mtime != yaml_mtime:
+            return False
+    except Exception:
+        return False
+    current_branch = _resolve_current_branch()
+    if current_branch != branch_name:
+        return False
+    return True
 
 
 def _find_repo_root() -> Path:
@@ -90,19 +120,27 @@ def read_runtime_posture() -> str:
     Returns one of: NORMAL | NO_NEW_ENTRIES | EXIT_ONLY | MONITOR_ONLY.
     Fail-closed: returns NO_NEW_ENTRIES on any error.
 
-    Result is cached for the process lifetime. Call _clear_cache() in tests.
+    Cache policy (TTL + mtime + branch invalidation):
+    - Re-reads the YAML when cached_at_ts is older than _CACHE_TTL_SECONDS (60s),
+      when the YAML file's mtime changes, or when the git branch changes.
+    - This ensures long-running daemons (zeus monitor, riskguard) pick up
+      operator commits to architecture/runtime_posture.yaml without restart.
+    - Call _clear_cache() in tests between assertions.
     """
-    global _cached_posture
-    if _cached_posture is not None:
-        return _cached_posture
+    global _cache_entry
+    if _cache_entry is not None and _cache_is_valid(_cache_entry):
+        return _cache_entry[0]
 
-    posture = _read_posture_uncached()
-    _cached_posture = posture
+    posture, branch, yaml_mtime = _read_posture_uncached()
+    _cache_entry = (posture, branch, yaml_mtime, time.monotonic())
     return posture
 
 
-def _read_posture_uncached() -> str:
-    """Inner implementation — called once per process."""
+def _read_posture_uncached() -> tuple[str, str, float]:
+    """Inner implementation — returns (posture, branch, yaml_mtime).
+
+    yaml_mtime is 0.0 if the file is absent (fail-closed path).
+    """
     try:
         repo_root = _find_repo_root()
         posture_path = repo_root / "architecture" / "runtime_posture.yaml"
@@ -112,14 +150,17 @@ def _read_posture_uncached() -> str:
                 "failing closed to NO_NEW_ENTRIES (INV-26)",
                 posture_path,
             )
-            return "NO_NEW_ENTRIES"
+            branch = _resolve_current_branch()
+            return "NO_NEW_ENTRIES", branch, 0.0
 
+        yaml_mtime = posture_path.stat().st_mtime
         raw = yaml.safe_load(posture_path.read_text())
         if not isinstance(raw, dict):
             logger.error(
                 "runtime_posture.yaml is not a YAML mapping; failing closed to NO_NEW_ENTRIES"
             )
-            return "NO_NEW_ENTRIES"
+            branch = _resolve_current_branch()
+            return "NO_NEW_ENTRIES", branch, yaml_mtime
 
         grammar = raw.get("posture_grammar")
         if isinstance(grammar, list):
@@ -143,7 +184,7 @@ def _read_posture_uncached() -> str:
             )
 
         logger.debug("Runtime posture: branch=%r posture=%r", branch, posture)
-        return posture
+        return posture, branch, yaml_mtime
 
     except ValueError:
         raise  # caller may propagate ValueError for corrupt grammar
@@ -152,4 +193,5 @@ def _read_posture_uncached() -> str:
             "Failed to read runtime_posture.yaml: %s; failing closed to NO_NEW_ENTRIES",
             exc,
         )
-        return "NO_NEW_ENTRIES"
+        branch = _resolve_current_branch()
+        return "NO_NEW_ENTRIES", branch, 0.0
