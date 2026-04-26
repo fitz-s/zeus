@@ -46,6 +46,46 @@ PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "
 LEARNING_AUTHORITY_REQUIRED = "VERIFIED"
 
 
+def resolve_position_metric(position) -> tuple[str, str, str]:
+    """Peer of resolve_rescue_authority for non-rescue position-metric reads.
+
+    Slice P2-C1 (PR #19 phase 2, 2026-04-26): consolidates the 4 silent-
+    HIGH defaults at lifecycle_events.py:100, monitor_refresh.py:140/298/334
+    into one helper that preserves UNVERIFIED authority tagging.
+
+    Pre-P2-C1, those sites used `getattr(position, "temperature_metric",
+    "high")` which silently substituted HIGH for missing metric WITHOUT
+    informing downstream consumers. monitor_refresh.py:140 was the most
+    severe case — passing the silent HIGH directly into get_calibrator,
+    undermining Phase 9C L3's metric-aware calibrator gate at the entry
+    seam (a LOW position with missing metric received the HIGH Platt
+    model silently).
+
+    Return shape mirrors resolve_rescue_authority exactly so analytics
+    consumers can apply the same authority='VERIFIED' filter pattern.
+    Emits a DEBUG log when the UNVERIFIED default fires so operators can
+    audit which positions are being defaulted.
+
+    Returns:
+        (metric, authority, source)
+        - metric: str — "high" or "low" (always in domain; defaults to "high"
+          for backward compat with legacy positions whose metric was never set).
+        - authority: str — "VERIFIED" iff metric was materialized from a valid
+          (high|low) value; "UNVERIFIED" otherwise.
+        - source: str — provenance string for forensic filtering.
+    """
+    _raw_metric = getattr(position, "temperature_metric", None)
+    if _raw_metric in ("high", "low"):
+        return (_raw_metric, "VERIFIED", "position_materialized")
+    logger.debug(
+        "resolve_position_metric: defaulting to HIGH+UNVERIFIED for "
+        "position trade_id=%s raw_metric=%r",
+        getattr(position, "trade_id", "?"),
+        _raw_metric,
+    )
+    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
+
+
 def resolve_rescue_authority(position) -> tuple[str, str, str]:
     """Resolve (temperature_metric, authority, authority_source) for a
     rescue_events_v2 row from a Position object.
