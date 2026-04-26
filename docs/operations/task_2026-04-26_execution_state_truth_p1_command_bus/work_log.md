@@ -378,3 +378,73 @@ pytest tests/ -q [wide sweep]
 ### Commit
 
 `828319d` u2014 Land P1.S4: command recovery loop u2014 INV-31
+
+---
+
+## 2026-04-26 u2014 P1.S5: Discovery integration + idempotency lookup (P1 FINAL)
+
+### Scope landed
+
+Final P1 slice. Closes four open items: NC-19 pre-submit idempotency gate, INV-32
+materialize_position authority gate, `_orderresult_from_existing()` helper
+(eliminates 4-way drift deferred from P1.S3 critic review), and `command_state`
+field on `OrderResult` propagating durable-ack signal to cycle_runtime.
+
+### Sequence executed
+
+1. Added `command_state: Optional[str] = None` field to `OrderResult` dataclass
+   in `src/execution/executor.py`.
+2. Extracted `_orderresult_from_existing()` helper (single definition, 4 call
+   sites: pre-submit lookup + IntegrityError handler in both `_live_order` and
+   `execute_exit_order`). Eliminates drift that P1.S3 critic flagged as MAJOR.
+3. Added pre-submit idempotency lookup (`find_command_by_idempotency_key` call
+   before INSERT) in both `_live_order` and `execute_exit_order`. IntegrityError
+   handler remains as race-condition safety belt.
+4. Added `command_state="ACKED"` to success result in both `_live_order` and
+   `execute_exit_order`.
+5. Updated `execute_intent()` signature: `conn=None, decision_id=""` kwargs;
+   threads both to `_live_order`.
+6. Updated `cycle_runtime.execute_discovery_phase`: threads
+   `decision_id=str(d.decision_id) if d.decision_id else ""` into
+   `execute_intent` call. Deliberately does NOT pass `conn` (P2 concern: cycle
+   conn targets zeus.db, venue_commands live in zeus_trades.db).
+7. Added INV-32 materialize gate in `execute_discovery_phase`: only calls
+   `materialize_position` when `result.command_state in ("ACKED",
+   "PARTIAL", "FILLED")`. SUBMITTING/UNKNOWN logs WARNING per INV-32 and skips.
+8. Fixed YAML formatting in `architecture/invariants.yaml` INV-32 `why:` block
+   (YAML scalar colon issue; used block scalar `>`).
+9. Added `command_state="ACKED"` to stubs in `test_architecture_contracts.py`
+   and `test_runtime_guards.py` (INV-32 gate requires durable ack for materialize
+   path in existing tests).
+10. Created `tests/test_discovery_idempotency.py` (7 tests, P1.S5 spec).
+11. Added INV-32 to `architecture/invariants.yaml`.
+12. Added NC-19 to `architecture/negative_constraints.yaml`.
+
+### Verification commands
+
+```
+pytest tests/test_discovery_idempotency.py -v
+  -> 6 passed, 1 xpassed (decision_id threading xfail now passes)
+
+pytest tests/test_executor_command_split.py tests/test_command_recovery.py \
+       tests/test_p0_hardening.py tests/test_command_bus_types.py \
+       tests/test_venue_command_repo.py tests/test_architecture_contracts.py \
+       tests/test_runtime_guards.py tests/test_discovery_idempotency.py -q
+  -> 16 failed, 329 passed, 23 skipped, 1 xpassed
+     (baseline: 16 failed, 323 passed, 23 skipped; parity confirmed)
+```
+
+### Touched files
+
+- `src/execution/executor.py` u2014 `command_state` field, `_orderresult_from_existing()`,
+  pre-submit lookup, `conn`/`decision_id` threading
+- `src/engine/cycle_runtime.py` u2014 `decision_id` wiring, INV-32 materialize gate
+- `architecture/invariants.yaml` u2014 INV-32
+- `architecture/negative_constraints.yaml` u2014 NC-19
+- `tests/test_discovery_idempotency.py` u2014 new (7 tests)
+- `tests/test_architecture_contracts.py` u2014 `command_state="ACKED"` stub fix
+- `tests/test_runtime_guards.py` u2014 `command_state="ACKED"` stub fix
+
+### Commit
+
+Pending u2014 see P1 closeout section.
