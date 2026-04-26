@@ -934,10 +934,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     tracker_dirty = False
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
     if market_candidate_ctor is None:
-        from src.engine.evaluator import (
-            MarketCandidate as market_candidate_ctor,
-            _normalize_temperature_metric,
-        )
+        from src.engine.evaluator import MarketCandidate as market_candidate_ctor
+    # Slice P3-fix1b (post-review side-fix, 2026-04-26): _normalize_
+    # temperature_metric must be imported unconditionally — pre-fix
+    # the import sat inside `if market_candidate_ctor is None:` so the
+    # external-deps path (deps.MarketCandidate provided) left
+    # _normalize_temperature_metric undefined when L1133 referenced it,
+    # raising UnboundLocalError that the entry path caught and
+    # auto-paused entries. P2-fix3 latent bug surfaced post-merge.
+    from src.engine.evaluator import _normalize_temperature_metric
 
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
         try:
