@@ -181,12 +181,21 @@ def _refresh_ens_member_counting(
 
     # K1/#68: verify calibration authority before computing alpha.
     # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
+    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): scope to active metric so
+    # cross-metric noise doesn't trigger false-positive stale-probability
+    # warnings. Resolver from P2-C1 already determined position metric
+    # for this monitor cycle (post-P2-C2 routing); reuse it here.
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
+        _gate_metric = "high" if resolve_position_metric(position)[0] == "high" else None
         try:
-            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+            _unverified_pairs = _get_pairs(
+                conn, city.cluster, _cal_season,
+                authority_filter='UNVERIFIED',
+                metric=_gate_metric,
+            )
         except Exception:
             _unverified_pairs = []
         if _unverified_pairs:
@@ -378,12 +387,19 @@ def _refresh_day0_observation(
             pass
 
     # K1/#68: verify calibration authority before computing alpha.
+    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —
+    # scope to active metric for the same false-positive-suppression reason.
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
+        _gate_metric = "high" if resolve_position_metric(position)[0] == "high" else None
         try:
-            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+            _unverified_pairs = _get_pairs(
+                conn, city.cluster, _cal_season,
+                authority_filter='UNVERIFIED',
+                metric=_gate_metric,
+            )
         except Exception:
             _unverified_pairs = []
         if _unverified_pairs:
