@@ -220,3 +220,19 @@ invariants:
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
+  - id: INV-28
+    zones: [K0_frozen_kernel, K2_runtime]
+    statement: Every venue order side effect (place_limit_order / cancel) must be
+      preceded by a persisted venue_commands row + venue_command_events SUBMIT_REQUESTED
+      event written through src/state/venue_command_repo.py.
+    why: Without pre-side-effect persistence, a daemon crash between SDK submit
+      and ack write produces an orphan order at the venue. The command journal is
+      the only mechanism that survives the crash and lets the next cycle reconcile.
+    enforced_by:
+      schema:
+        - src/state/db.py::init_schema (venue_commands, venue_command_events tables)
+      tests:
+        - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_both_rows_inserted
+        - tests/test_venue_command_repo.py::TestInsertCommandAtomicWithIntentCreatedEvent::test_rollback_on_mid_transaction_failure
+        - tests/test_venue_command_repo.py::TestAppendEventStateTransitionIsGrammarChecked::test_illegal_transition_raises_value_error
+        - tests/test_venue_command_repo.py::TestIdempotencyKeyUniquenessEnforced::test_duplicate_key_raises_integrity_error

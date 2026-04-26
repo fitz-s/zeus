@@ -799,6 +799,56 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             details_json TEXT NOT NULL
 );
 
+        -- P1.S1 (INV-28 / D-P1-1-a, D-P1-2-a): durable command journal
+        -- venue_commands is the pre-side-effect persistence layer for every
+        -- place_limit_order / cancel call.  Written via src/state/venue_command_repo.py
+        -- only — no direct SQL outside the repo module.
+        CREATE TABLE IF NOT EXISTS venue_commands (
+            command_id TEXT PRIMARY KEY,
+            -- Identity
+            position_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            intent_kind TEXT NOT NULL,
+            -- Order shape
+            market_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            size REAL NOT NULL,
+            price REAL NOT NULL,
+            -- Venue identity (NULL until first ACK)
+            venue_order_id TEXT,
+            -- Lifecycle
+            state TEXT NOT NULL,
+            last_event_id TEXT,
+            -- Timestamps
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            -- Optional review
+            review_required_reason TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_venue_commands_position ON venue_commands(position_id);
+        CREATE INDEX IF NOT EXISTS idx_venue_commands_state ON venue_commands(state);
+        CREATE INDEX IF NOT EXISTS idx_venue_commands_decision ON venue_commands(decision_id);
+
+        -- P1.S1 (INV-28 / D-P1-3-a): append-only event log for venue_commands.
+        -- Records every state transition.  NC-18 forbids UPDATE/DELETE outside
+        -- src/state/venue_command_repo.py.
+        CREATE TABLE IF NOT EXISTS venue_command_events (
+            event_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT,
+            state_after TEXT NOT NULL,
+            UNIQUE (command_id, sequence_no)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_venue_command_events_command ON venue_command_events(command_id);
+        CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
+
     """)
     
     # Safe Schema evolution for phase 3 attribution

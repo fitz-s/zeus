@@ -35,6 +35,13 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
    Allowed callers: `src/execution/executor.py` (gateway), `src/data/polymarket_client.py` (SDK wrapper), `scripts/live_smoke_test.py` (operator path that calls v2_preflight() itself).
    Enforcement: semgrep `zeus-place-limit-order-gateway-only` + test `tests/test_p0_hardening.py::test_place_limit_order_gateway_only` (NC-16)
 
+7. **FM-NC-18** — direct `UPDATE venue_command_events` or `DELETE FROM venue_command_events` outside `src/state/venue_command_repo.py`
+   Rationale: the event table is the forensic append-only record of every state transition.
+   Mutating a recorded event creates a "fact rewrite" path invisible to forensic recovery;
+   corrections must be expressed as new events, not edits to existing ones.
+   Only `src/state/venue_command_repo.py` may write to `venue_command_events`.
+   Enforcement: semgrep `zeus-no-direct-venue-command-update` + test `tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo` (NC-18)
+
 ## Strict patterns (always enforced)
 
 1. **FM-07** — raw `phase` / `state` string assignment outside lifecycle fold/manager/projection  

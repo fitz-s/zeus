@@ -175,3 +175,26 @@ rules:
     pattern-either:
       - pattern: $CLIENT.place_limit_order(...)
       - pattern: place_limit_order(...)
+
+  # P1.S1 (NC-18): venue_command_events is append-only outside the repo.
+  # Mutating a recorded event creates a "fact rewrite" path that is invisible
+  # to forensic recovery — append a new event instead.
+  - id: zeus-no-direct-venue-command-update
+    message: "venue_command_events is append-only; record new events via venue_command_repo, do not UPDATE/DELETE."
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - src/**/*.py
+      exclude:
+        - src/state/venue_command_repo.py
+        - tests/**/*.py
+    pattern-either:
+      - pattern: |
+          $CONN.execute("UPDATE venue_command_events ...")
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_command_events ...")
+      - pattern: |
+          $CONN.execute("UPDATE venue_command_events ...", ...)
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_command_events ...", ...)
