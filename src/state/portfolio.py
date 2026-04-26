@@ -959,12 +959,12 @@ class DeprecatedStateFileError(RuntimeError):
 # (derived surfaces should not write at all) — if any code path accidentally
 # leaves a settled row in state.positions, the write-side filter strips it;
 # if a stale JSON file lingers on disk, the read-side filter strips it.
-_TERMINAL_POSITION_STATES = frozenset({
-    "settled",
-    "voided",
-    "admin_closed",
-    "quarantined",
-})
+#
+# Slice B1 (PR #19 finding 9, 2026-04-26): canonical set lives in
+# src/state/lifecycle_manager.TERMINAL_STATES, derived from
+# LEGAL_LIFECYCLE_FOLDS. Re-imported here under the local name for zero
+# call-site churn at L1008/L1343.
+from src.state.lifecycle_manager import TERMINAL_STATES as _TERMINAL_POSITION_STATES
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:
