@@ -33,11 +33,31 @@ rejection path bails out before the client is even constructed).
 from __future__ import annotations
 
 import math
+import sqlite3
 
 import pytest
 
 from src.contracts import Direction, ExecutionIntent
 from src.execution.executor import OrderResult, _live_order
+
+
+@pytest.fixture(autouse=True)
+def _inject_mem_conn(monkeypatch):
+    """Inject an in-memory DB into _live_order's get_connection fallback.
+
+    P1.S3: _live_order persists a venue_commands row (INV-30) before
+    submitting. Tests that call _live_order without an explicit conn
+    now hit get_connection() as a fallback. Supply an in-memory DB with
+    schema so unit tests remain self-contained.
+    """
+    from src.state.db import init_schema
+    mem = sqlite3.connect(":memory:")
+    mem.row_factory = sqlite3.Row
+    mem.execute("PRAGMA foreign_keys=ON")
+    init_schema(mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    yield mem
+    mem.close()
 
 
 def _make_intent(limit_price: float) -> ExecutionIntent:
@@ -68,9 +88,6 @@ def _make_intent(limit_price: float) -> ExecutionIntent:
         market_id="test-market",
         token_id="test-token-12345",
         timeout_seconds=3600,
-        slice_policy="single_shot",
-        reprice_policy="static",
-        liquidity_guard=False,
         decision_edge=0.05,
     )
 

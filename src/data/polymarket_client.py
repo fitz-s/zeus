@@ -18,6 +18,15 @@ CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
 
 
+class V2PreflightError(RuntimeError):
+    """Raised when the V2 endpoint preflight check fails (INV-25).
+
+    A V2PreflightError means the CLOB endpoint is unreachable or returned an
+    unexpected response. Callers (executor._live_order) must treat this as a
+    hard rejection — no place_limit_order call may proceed in the same cycle.
+    """
+
+
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 
@@ -71,6 +80,32 @@ class PolymarketClient:
             self._clob_client.create_or_derive_api_creds()
         )
         logger.info("Polymarket CLOB client initialized (live mode)")
+
+    def v2_preflight(self) -> None:
+        """Verify V2 endpoint reachability before any order placement (INV-25).
+
+        Calls self._clob_client.get_ok() — a V2-only SDK health-check method.
+        Any failure (network error, unexpected response, AttributeError if the
+        SDK does not expose get_ok) raises V2PreflightError.
+
+        This is a reachability-only check today. Full V2 endpoint-identity
+        verification (signature challenge, API version header assertion) requires
+        operator-confirmed endpoint signature and is deferred to a follow-up slice
+        per decisions.md §O3-b.
+
+        INV-25: When this method raises, _live_order must return a rejected
+        OrderResult without calling place_limit_order.
+        """
+        self._ensure_client()
+        if not hasattr(self._clob_client, "get_ok"):
+            raise V2PreflightError(
+                "SDK lacks get_ok preflight method; preflight cannot verify endpoint identity. "
+                "Upgrade py-clob-client to >= 0.34 to satisfy INV-25."
+            )
+        try:
+            self._clob_client.get_ok()
+        except Exception as exc:
+            raise V2PreflightError(f"V2 endpoint preflight failed: {exc!r}") from exc
 
     def get_orderbook(self, token_id: str) -> dict:
         """Fetch orderbook for a token. Public endpoint, no auth.
@@ -162,6 +197,50 @@ class PolymarketClient:
 
         logger.info("Order placed: %s %s @ %.3f x %.1f → %s",
                      side, token_id[:12], price, size, result.get("status"))
+        return result
+
+    def get_order(self, order_id: str) -> Optional[dict]:
+        """Fetch a single order by venue order ID. Returns None if not found.
+
+        Wraps SDK's get_order. Normalizes response to at least
+        {"orderID": str, "status": str} so the recovery loop is stable
+        against SDK response shape changes.
+
+        Returns None when the venue returns 404 or similar "not found" signal.
+        Other exceptions (network error, auth failure) propagate — the
+        recovery loop catches and logs them so a single bad lookup does not
+        kill the loop.
+        """
+        self._ensure_client()
+        try:
+            result = self._clob_client.get_order(order_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        except Exception as exc:
+            # Some SDK versions raise a plain exception on 404; treat any
+            # message containing "not found" (case-insensitive) as None.
+            if "not found" in str(exc).lower() or "404" in str(exc):
+                return None
+            raise
+
+        if result is None:
+            return None
+
+        # Normalize to stable shape if SDK returns a non-dict (e.g. a model obj).
+        if not isinstance(result, dict):
+            try:
+                result = dict(result)
+            except (TypeError, ValueError):
+                result = {"orderID": order_id, "status": str(result)}
+
+        # Guarantee the two load-bearing keys downstream code reads.
+        if "orderID" not in result:
+            result.setdefault("orderID", result.get("id") or result.get("order_id") or order_id)
+        if "status" not in result:
+            result.setdefault("status", result.get("state") or result.get("order_status") or "UNKNOWN")
+
         return result
 
     def cancel_order(self, order_id: str) -> Optional[dict]:

@@ -75,7 +75,21 @@ def main():
         }
     step("fetch_orderbook", fetch_book)
 
-    # Step 4: Place minimal order
+    # Step 4a: V2 preflight — INV-25: must verify endpoint identity before any placement.
+    # This is the operator-bypass path; the executor handles this in runtime code.
+    # If preflight fails, abort before attempting to place an order.
+    from src.data.polymarket_client import V2PreflightError
+    try:
+        clob.v2_preflight()
+        results["v2_preflight"] = {"status": "OK", "result": "endpoint reachable"}
+        logger.info("    OK: v2_preflight passed")
+    except V2PreflightError as exc:
+        results["v2_preflight"] = {"status": "FAIL", "error": str(exc), "type": "V2PreflightError"}
+        logger.error("    FAIL: v2_preflight: %s", exc)
+        logger.error("Cannot place order — V2 preflight failed (INV-25). Aborting.")
+        return dump_results()
+
+    # Step 4b: Place minimal order
     order_result = step("place_order", lambda: clob.place_limit_order(
         token_id=TEST_TOKEN_ID,
         price=TEST_PRICE,

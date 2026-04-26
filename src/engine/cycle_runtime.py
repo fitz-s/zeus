@@ -1307,7 +1307,18 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         token_id=d.tokens["token_id"],
                         no_token_id=d.tokens["no_token_id"],
                     )
-                    result = deps.execute_intent(intent, d.edge.vwmp, d.edge.bin.label)
+                    # P1.S5: thread decision_id from d.decision_id so the
+                    # executor can use a stable upstream ID for idempotency.
+                    # We do NOT pass conn from cycle_runtime (P2 concern: the
+                    # cycle conn targets zeus.db, not zeus_trades.db where
+                    # venue_commands live). The executor opens its own
+                    # get_trade_connection_with_world() fallback.
+                    result = deps.execute_intent(
+                        intent,
+                        d.edge.vwmp,
+                        d.edge.bin.label,
+                        decision_id=str(d.decision_id) if d.decision_id else "",
+                    )
                     artifact.add_trade(
                         {
                             "decision_id": d.decision_id,
@@ -1343,7 +1354,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             "agreement": getattr(d, "agreement", ""),
                         }
                     )
-                    if result.status in ("filled", "pending"):
+                    # P1.S5 INV-32: materialize_position advances position
+                    # authority ONLY after the venue command reached a durable
+                    # ack state (ACKED, PARTIAL, FILLED). Commands in
+                    # SUBMITTING / UNKNOWN do not yield position rows;
+                    # the recovery loop resolves them out-of-band.
+                    _cmd_state = result.command_state  # str | None
+                    _cmd_durable = _cmd_state in ("ACKED", "PARTIAL", "FILLED")
+                    _cmd_in_flight = _cmd_state in ("SUBMITTING", "UNKNOWN")
+                    if result.status in ("filled", "pending") and _cmd_durable:
                         pos = materialize_position(
                             candidate,
                             d,
@@ -1387,6 +1406,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             tracker.record_entry(pos)
                             tracker_dirty = True
                             summary["trades"] += 1
+                    elif result.status in ("filled", "pending") and not _cmd_durable:
+                        # INV-32: command in SUBMITTING/UNKNOWN or command_state=None
+                        # (pre-P1.S5 path or executor rejected before persist).
+                        # Do not materialize; recovery loop will resolve.
+                        if _cmd_in_flight:
+                            logger.warning(
+                                "INV-32: skipping materialize_position for trade_id=%s "
+                                "command_state=%s (in-flight; recovery will resolve)",
+                                result.trade_id,
+                                _cmd_state,
+                            )
+                        else:
+                            logger.warning(
+                                "INV-32: skipping materialize_position for trade_id=%s "
+                                "command_state=%s (no durable ack)",
+                                result.trade_id,
+                                _cmd_state,
+                            )
                     else:
                         from src.state.db import log_execution_report
 

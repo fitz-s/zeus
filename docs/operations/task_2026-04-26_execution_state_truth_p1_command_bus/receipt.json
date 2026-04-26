@@ -1,0 +1,44 @@
+{
+  "packet": "task_2026-04-26_execution_state_truth_p1_command_bus",
+  "slice": "P1_packet_complete",
+  "status": "complete_pending_push",
+  "branch": "claude/pr18-execution-state-truth-fix-plan-2026-04-26",
+  "date": "2026-04-26",
+  "p1_complete": true,
+  "slices_landed": ["P1.S1", "P1.S2", "P1.S3", "P1.S4", "P1.S5"],
+  "post_critic_followup_landed": "973d23c (HIGH-1 grammar + HIGH-2 venue status branch)",
+  "all_invariants_added": ["INV-28", "INV-29", "INV-30", "INV-31", "INV-32"],
+  "all_negative_constraints_added": ["NC-18", "NC-19"],
+  "allowed_files": [
+    "src/execution/executor.py",
+    "src/engine/cycle_runtime.py",
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "tests/test_discovery_idempotency.py",
+    "tests/test_architecture_contracts.py",
+    "tests/test_runtime_guards.py",
+    "docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/work_log.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/receipt.json"
+  ],
+  "tests_evidence": {
+    "test_discovery_idempotency": "6 passed, 1 xpassed (NC-19 + INV-32)",
+    "regression_8_file_suite": "16 failed, 329 passed, 23 skipped, 1 xpassed (baseline: 16 failed — parity)",
+    "new_test_ids": [
+      "tests/test_discovery_idempotency.py::TestPreSubmitIdempotencyLookup::test_idempotency_key_skips_duplicate_submit",
+      "tests/test_discovery_idempotency.py::TestPreSubmitIdempotencyLookup::test_retry_after_unknown_does_not_double_place",
+      "tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_submitting_command",
+      "tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_unknown_command",
+      "tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_runs_for_acked_command",
+      "tests/test_discovery_idempotency.py::TestWarningSurfaces::test_synthetic_decision_id_still_uses_warning",
+      "tests/test_discovery_idempotency.py::TestWarningSurfaces::test_decision_id_threaded_from_cycle_runtime"
+    ]
+  },
+  "invariants_added": ["INV-32"],
+  "negative_constraints_added": ["NC-19"],
+  "key_decisions": {
+    "conn_not_passed_from_cycle_runtime": "P2 deferral: cycle conn targets zeus.db; venue_commands in zeus_trades.db; executor uses get_trade_connection_with_world() fallback",
+    "command_state_field": "Optional[str] on OrderResult propagates durable-ack signal without cross-module coupling",
+    "belt_and_suspenders_idempotency": "pre-submit lookup (fast path) + IntegrityError handler (race-condition safety belt)",
+    "orderresult_from_existing_helper": "single definition eliminates 4-way drift (entry/exit x lookup/collision)"
+  }
+}

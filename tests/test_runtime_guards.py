@@ -52,6 +52,18 @@ from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 
 
+@pytest.fixture(autouse=True)
+def _default_posture_normal_for_runtime_guards(monkeypatch):
+    """INV-26 / O2-c isolation: tests in this file pre-date the runtime
+    posture gate and assume new entries reach discovery. Default posture to
+    NORMAL so the legacy fixtures keep exercising the gates they were
+    written for. Tests that explicitly verify posture must override.
+    """
+    import src.runtime.posture as _posture_module
+    _posture_module._clear_cache()
+    monkeypatch.setattr(_posture_module, "read_runtime_posture", lambda: "NORMAL")
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,
@@ -593,7 +605,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision(True), DummyDecision(False)])
     monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: object())
-    monkeypatch.setattr(cycle_runner, "execute_intent", lambda *args, **kwargs: OrderResult(status="filled", trade_id="rt1", order_id="o1", fill_price=0.35, shares=10.0))
+    monkeypatch.setattr(cycle_runner, "execute_intent", lambda *args, **kwargs: OrderResult(status="filled", trade_id="rt1", order_id="o1", fill_price=0.35, shares=10.0, command_state="ACKED"))  # P1.S5 INV-32
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
