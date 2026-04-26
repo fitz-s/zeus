@@ -26,11 +26,16 @@ In scope:
   creation.
 - Keep the PR #17 review-fix code/test changes in the package-local phase
   folder.
+- Stop tracking live runtime projections that already belong to `.gitignore`:
+  `state/daemon-heartbeat.json` and `state/status_summary.json`.
+- Record a process assessment that reduces repeated agent ceremony while
+  preserving the quality gates that found real defects.
 
 Out of scope:
 
 - Archiving old package evidence.
-- Runtime artifact tracking policy.
+- Broader runtime artifact tracking policy beyond the two live projections
+  above.
 - Production DB mutation or P4 population.
 
 ## Verification
@@ -48,3 +53,6 @@ Out of scope:
   `docs/operations/AGENTS.md`, `docs/README.md`,
   `architecture/naming_conventions.yaml`, `architecture/artifact_lifecycle.yaml`,
   `architecture/change_receipt_schema.yaml`, and `scripts/zpkt.py`.
+- `state/daemon-heartbeat.json` and `state/status_summary.json` are no longer
+  tracked by Git; live daemon writes continue to update local files without
+  dirtying source/review packets.
