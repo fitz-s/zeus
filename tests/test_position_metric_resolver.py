@@ -79,6 +79,35 @@ def test_position_missing_attribute_returns_unverified():
     assert source.startswith("position_missing_metric:")
 
 
+def test_none_input_raises_type_error():
+    """Slice P2-fix4 guard: None is a programmer-bug signal, not a legacy
+    quarantine case. Must crash loudly so the audit log doesn't conflate
+    caller bugs with legitimate quarantine defaults."""
+    with pytest.raises(TypeError, match="got None"):
+        resolve_position_metric(None)
+
+
+def test_resolve_rescue_authority_delegates_to_resolve_position_metric():
+    """Slice P2-fix4 DRY collapse: resolve_rescue_authority is now a thin
+    delegate. The two names persist for caller-context documentation
+    (rescue vs non-rescue read sites) but share one implementation.
+
+    Pinning equivalence here ensures a future contributor cannot diverge
+    them silently — divergence breaks both this test and the existing
+    symmetry test test_resolve_position_metric_matches_resolve_rescue_
+    authority_shape."""
+    from src.state.chain_reconciliation import resolve_rescue_authority
+    # Identity check via source — both should call the same code path,
+    # producing identical DEBUG log on default-fire.
+    p = SimpleNamespace(temperature_metric="low", trade_id="t1")
+    assert resolve_rescue_authority(p) == resolve_position_metric(p)
+    p_bad = SimpleNamespace(trade_id="t2")
+    assert resolve_rescue_authority(p_bad) == resolve_position_metric(p_bad)
+    # None guard now applies to rescue site too.
+    with pytest.raises(TypeError, match="got None"):
+        resolve_rescue_authority(None)
+
+
 # -----------------------------------------------------------------------------
 # Operator audit trail: DEBUG log on default-fire
 # -----------------------------------------------------------------------------
