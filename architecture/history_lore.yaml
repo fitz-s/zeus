@@ -2411,7 +2411,7 @@ cards:
       - src/execution/harvester.py
       - src/data/tier_resolver.py
       - state/zeus-world.db (2026-04-24 probe)
-      - docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/
+      - docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/
     failure_mode: >
       A future agent reads harvester._HARVESTER_LIVE_DATA_VERSION['cwa_station']
       = 'cwa_no_collector_v0', tier_resolver.py:72 saying 'no city uses this

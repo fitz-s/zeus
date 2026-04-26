@@ -1,10 +1,10 @@
 {
   "task": "POST_AUDIT_HANDOFF 4.2.B legacy hourly evidence-only view",
-  "packet": "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -34,9 +34,9 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json",
     "architecture/topology.yaml",
     "architecture/docs_registry.yaml",
     "src/state/db.py",
@@ -60,9 +60,9 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md",
-    "docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json",
     "architecture/topology.yaml",
     "architecture/docs_registry.yaml",
     "src/state/db.py",

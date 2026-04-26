@@ -1,10 +1,10 @@
 {
   "task": "P1 daily observation writer provenance identity",
-  "packet": "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -33,9 +33,9 @@
     "docs/README.md",
     "docs/operations/current_state.md",
     "docs/operations/AGENTS.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -63,9 +63,9 @@
     "docs/README.md",
     "docs/operations/current_state.md",
     "docs/operations/AGENTS.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
-    "docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json"
   ],
   "implementation_semantics": [
     "WU daily backfill provenance records payload_hash, redacted source_url, parser_version, source, station_id, country_code, unit/unit_code, request date range, and target_date",
@@ -77,10 +77,10 @@
     "python3 scripts/topology_doctor.py --task-boot-profiles --json",
     "python3 scripts/topology_doctor.py --fatal-misreads --json",
     "python3 scripts/topology_doctor.py --tests --json",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json",
-    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json",
-    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
-    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
+    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <packet files> --json",
     ".venv/bin/python -m py_compile scripts/backfill_wu_daily_all.py scripts/backfill_hko_daily.py tests/test_k2_live_ingestion_relationships.py",
     ".venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -k \"provenance_identity\" -q (4 passed)",

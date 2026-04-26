@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-26; last_reused=2026-04-26
+# Purpose: Provide the packet-runtime CLI for package creation, scope tracking, and closeout bookkeeping.
+# Reuse: Run or update when operations packet structure, scope sidecars, or packet closeout automation changes.
 """``zpkt`` — Zeus Packet Runtime CLI.
 
 A single command surface that collapses five distinct "agent runtime
@@ -9,7 +12,9 @@ burdens" into one tool:
    five minutes to amortise the 1.6 s cold-start.
 #. **Scope tracking** -- ``zpkt start`` creates ``scope.yaml`` and
    ``zpkt scope add`` widens it; the soft-warn pre-commit hook reads
-   the same data. Prose ``plan.md`` stays untouched.
+   the same data. Prose ``plan.md`` stays untouched. For multi-phase
+   work, reuse one top-level package with ``--package`` so phase evidence
+   lands under ``<package>/phases/`` instead of creating sibling packages.
 #. **Manifest sideledger** -- ``zpkt close`` auto-derives entries for
    ``script_manifest.yaml``, ``test_topology.yaml``, ``docs_registry.yaml``
    and ``source_rationale.yaml`` from the new files in the packet,
@@ -18,12 +23,12 @@ burdens" into one tool:
    ``receipt.json``, appends to ``current_state.md``, and closes the
    ``scope.yaml`` status to ``landed``.
 #. **Multi-packet concurrency** -- ``zpkt start`` creates a new git
-   worktree by default so two packets never share a working tree.
+   worktree by default so independent packages never share a working tree.
 
 Subcommand surface
 ~~~~~~~~~~~~~~~~~~
 
-* ``zpkt start <name>``           -- create packet folder + worktree.
+* ``zpkt start <name>``           -- create package or phase folder + worktree.
 * ``zpkt status``                 -- one-call digest replacing 5 doctor commands.
 * ``zpkt scope add <files...>``   -- widen ``in_scope``.
 * ``zpkt scope show``             -- print the active scope.
@@ -154,6 +159,20 @@ def make_packet_name(slug: str, today: str | None = None) -> str:
     return f"task_{today}_{slug}"
 
 
+def normalize_package_name(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    package = raw.strip().strip("/")
+    prefix = f"{PACKET_ROOT}/"
+    if package.startswith(prefix):
+        package = package[len(prefix):]
+    if "/" in package:
+        die("--package must name one top-level docs/operations package folder")
+    if not _PACKET_RE.match(package):
+        die(f"invalid package {raw!r}; expected task_YYYY-MM-DD_slug")
+    return package
+
+
 # ---------------------------------------------------------------------------
 # `start`
 # ---------------------------------------------------------------------------
@@ -163,7 +182,12 @@ def cmd_start(args: argparse.Namespace) -> int:
     root = repo_root()
     slug = slugify(args.name)
     packet = make_packet_name(slug, today=args.date)
-    packet_dir = root / PACKET_ROOT / packet
+    package = normalize_package_name(args.package)
+    packet_path = f"{package}/phases/{packet}" if package else packet
+    package_dir = root / PACKET_ROOT / package if package else None
+    if package_dir is not None and not package_dir.is_dir():
+        die(f"package folder not found: {package_dir}")
+    packet_dir = root / PACKET_ROOT / packet_path
     if packet_dir.exists():
         die(f"packet folder already exists: {packet_dir}")
 
@@ -190,15 +214,17 @@ def cmd_start(args: argparse.Namespace) -> int:
         info(f"worktree created at {worktree_path} on branch {branch}")
 
     target = worktree_path
-    pkt_dir = target / PACKET_ROOT / packet
+    pkt_dir = target / PACKET_ROOT / packet_path
     pkt_dir.mkdir(parents=True, exist_ok=True)
 
     write_packet_skeleton(pkt_dir=pkt_dir, packet=packet, branch=branch, worktree=target)
-    set_active_packet(target, packet)
+    set_active_packet(target, packet_path)
 
     print(json.dumps({
         "ok": True,
         "packet": packet,
+        "packet_path": packet_path,
+        "package": package,
         "branch": branch,
         "worktree": str(target),
         "next_steps": [
@@ -216,14 +242,16 @@ def write_packet_skeleton(*, pkt_dir: Path, packet: str, branch: str, worktree: 
         plan.write_text(_render_plan_template(packet=packet, branch=branch, worktree=worktree), encoding="utf-8")
     scope_path = pkt_dir / "scope.yaml"
     if not scope_path.exists():
+        schema_ref = os.path.relpath(worktree / "architecture" / "scope_schema.json", pkt_dir)
+        packet_scope = pkt_dir.relative_to(worktree).as_posix()
         scope_doc = {
-            "$schema": "../../../architecture/scope_schema.json",
+            "$schema": schema_ref,
             "schema_version": 1,
             "packet": packet,
             "status": "in_progress",
             "branch": branch,
             "worktree": str(worktree),
-            "in_scope": [f"{PACKET_ROOT}/{packet}/**"],
+            "in_scope": [f"{packet_scope}/**"],
             "allow_companions": list(DEFAULT_COMPANIONS),
             "out_of_scope": list(DEFAULT_OUT_OF_SCOPE),
         }
@@ -650,10 +678,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=ZPKT_VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("start", help="create a new packet + worktree")
+    sp = sub.add_parser("start", help="create a new package/phase + worktree")
     sp.add_argument("name", help="short slug or human title (will be slugified)")
     sp.add_argument("--branch", help="branch name (default: derived from slug)")
     sp.add_argument("--date", help="ISO date for packet folder (default: today UTC)")
+    sp.add_argument("--package", help="existing top-level package folder for multi-phase work")
     sp.add_argument("--inplace", action="store_true", help="reuse current worktree (rare)")
     sp.set_defaults(func=cmd_start)
 

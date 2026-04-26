@@ -132,9 +132,9 @@ Planning commit may change:
 - `architecture/docs_registry.yaml`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
 Allowed future implementation files only after this plan is reviewed, pushed,
 post-close reviewed, and a fresh phase-entry is completed:
@@ -157,17 +157,17 @@ P1.5a implementation files:
 - `scripts/topology_doctor_test_checks.py` (topology hygiene companion only)
 - `tests/test_truth_surface_health.py`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
 Optional future closeout bookkeeping:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
 Forbidden files for this planning packet:
 
@@ -262,12 +262,12 @@ until a fresh phase-entry plan is written.
 
 This planning packet must run:
 
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <planning files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json`
-- `python3 scripts/topology_doctor.py --work-record --changed-files <planning files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json`
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <planning files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json`
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <planning files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <planning files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <planning files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <planning files> --json`
-- `python3 -m json.tool docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 - `git diff --check`
 
 Future implementation must run at minimum:

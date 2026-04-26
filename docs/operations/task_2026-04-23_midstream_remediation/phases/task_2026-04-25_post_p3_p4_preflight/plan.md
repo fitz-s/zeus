@@ -77,11 +77,11 @@ human-readable mirror._
 - `sqlite3 state/zeus-world.db "<P4 blocker table-count query>"`
 - `find state raw data -maxdepth 3 <TIGGE/market-rule artifact query>`
 - `python3 scripts/topology_doctor.py --current-state-receipt-bound`
-- `python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md`
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/work_log.md`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 -m json.tool docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json`
+- `python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json`
 - `git diff --check -- <packet files>`
 
 ## Closeout

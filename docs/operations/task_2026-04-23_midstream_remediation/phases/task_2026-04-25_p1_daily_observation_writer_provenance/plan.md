@@ -30,9 +30,9 @@ Control/evidence files:
 - `docs/README.md`
 - `docs/operations/current_state.md`
 - `docs/operations/AGENTS.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json`
 
 ## Acceptance
 
@@ -52,7 +52,7 @@ Control/evidence files:
 - `.venv/bin/python -m py_compile scripts/backfill_wu_daily_all.py scripts/backfill_hko_daily.py tests/test_k2_live_ingestion_relationships.py`
 - `.venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -q`
 - `.venv/bin/python -m pytest tests/test_backfill_scripts_match_live_config.py -q`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json`
-- `python3 scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json`
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json`
 - Critic review before closeout.

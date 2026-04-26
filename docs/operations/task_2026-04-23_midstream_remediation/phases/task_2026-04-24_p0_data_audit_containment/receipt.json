@@ -1,9 +1,9 @@
 {
   "task": "P0 post-audit data containment readiness gates; POST_AUDIT_HANDOFF 4.2.A readiness guard normalization follow-up",
-  "packet": "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -24,9 +24,9 @@
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
     "docs/operations/runtime_artifact_inventory.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -40,9 +40,9 @@
     "tests/test_truth_surface_health.py",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md",
-    "docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json"
   ],
   "tests_evidence": [
     "tests/test_truth_surface_health.py"

@@ -14,9 +14,9 @@ Changed files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
 - `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
 - `src/state/db.py`
@@ -76,9 +76,9 @@ Expected changed files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
 - `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
 - `src/state/db.py`
@@ -194,13 +194,13 @@ Closeout verification after fixes:
   -> 126 passed, 27 skipped.
 - `.venv/bin/python scripts/semantic_linter.py --check src/state/db.py`
   -> passed.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.B files> --plan-evidence docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.B files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.B files> --work-record-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.B files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.B files> --receipt-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.B files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.B files> --json`
   -> `{"ok": true, "issues": []}`.
@@ -212,7 +212,7 @@ Closeout verification after fixes:
   -> `{"ok": true, "issues": []}`.
 - `git diff --check -- <4.2.B files>`
   -> passed.
-- `python3 -m json.tool docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
+- `python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
   -> passed.
 
 Final review:
@@ -230,10 +230,10 @@ Final review:
 - `.venv/bin/python -m pytest -q tests/test_semantic_linter.py -k hourly_observations`
 - `.venv/bin/python -m pytest -q tests/test_truth_surface_health.py`
 - `.venv/bin/python scripts/semantic_linter.py --check src/state/db.py tests/test_architecture_contracts.py`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.B files> --plan-evidence docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md --json`
-- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.B files> --work-record-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md --json`
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.B files> --receipt-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.B files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.B files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.B files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json --json`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.B files> --json`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_architecture_contracts.py tests/test_truth_surface_health.py --json`
 - `git diff --check -- <4.2.B files>`

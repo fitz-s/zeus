@@ -1,11 +1,11 @@
 {
   "task": "P2 4.4.A1 obs_v2 revision history",
-  "packet": "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
-  "scope": "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
+  "scope": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
     "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md"
   ],
   "required_law": [
@@ -48,14 +48,14 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/receipt.json"
   ],
   "forbidden_files": [
     "state/*.db",
@@ -79,7 +79,7 @@
     "commit": "0837afc",
     "branch": "midstream_remediation",
     "pushed": true,
-    "follow_up": "docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md"
+    "follow_up": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/plan.md"
   },
   "changed_files": [
     "architecture/docs_registry.yaml",
@@ -93,17 +93,17 @@
     "src/state/schema/v2_schema.py",
     "tests/test_obs_v2_writer.py",
     "tests/test_backfill_scripts_match_live_config.py",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
-    "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/receipt.json"
   ],
   "tests_evidence": [
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <planned packet files> --plan-evidence docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md -> ok",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <planned packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md -> ok",
     "python3 scripts/topology_doctor.py --task-boot-profiles --json -> ok",
     "python3 scripts/topology_doctor.py --fatal-misreads --json -> ok",
     "python3 scripts/topology_doctor.py --navigation --task \"P2 4.4.A1 obs_v2 hash-checked revision history\" --files <planned packet files> -> scope_expansion_required as expected for multi-zone schema/data/docs packet",
@@ -114,11 +114,11 @@
     "python3 scripts/topology_doctor.py --tests --json -> ok",
     "python3 scripts/topology_doctor.py --scripts --json -> ok",
     "python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_obs_v2_writer.py tests/test_backfill_scripts_match_live_config.py scripts/backfill_obs_v2.py src/data/observation_instants_v2_writer.py -> ok",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md -> ok",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md -> ok",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files> -> ok",
-    "python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json -> ok",
+    "python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/receipt.json -> ok",
     "python3 scripts/topology_doctor.py --current-state-receipt-bound -> ok",
-    "python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md -> ok",
+    "python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/work_log.md -> ok",
     "git diff --check -- <packet files> -> ok",
     "python3 scripts/semantic_linter.py --check <packet python files> -> non-blocking pre-existing false positive on obs_v2 local_hour contract transport; no new raw time-semantics logic introduced"
   ],

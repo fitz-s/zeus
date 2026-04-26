@@ -102,9 +102,9 @@ the current row.
 - `python3 scripts/topology_doctor.py --tests --json`
 - `python3 scripts/topology_doctor.py --scripts --json`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <changed scripts/tests>`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-25_p2_daily_observation_revision_history/receipt.json`
+- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/receipt.json`
 - `git diff --check -- <packet files>`
 
 ## Stop Conditions

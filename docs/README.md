@@ -44,17 +44,7 @@ Historical governance files demoted from authority live under
 - `operations/current_source_validity.md` - current audited source-validity posture
 - `runbooks/live_operation.md` - day-to-day live daemon runbook
 - `operations/known_gaps.md` - active operational gap register
-- `operations/task_2026-04-25_p0_market_events_preflight/` - closed POST_AUDIT 4.2.C implementation packet
-- `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` - closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet
-- `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` - closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet
-- `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` - closed POST_AUDIT 4.4.B-lite backfill completeness guardrail packet
-- `operations/task_2026-04-25_p2_obs_v2_revision_history/` - closed POST_AUDIT 4.4.A1 obs_v2 revision-history packet
-- `operations/task_2026-04-25_p2_daily_observation_revision_history/` - closed POST_AUDIT 4.4.A2 daily observation backfill revision-history packet
-- `operations/task_2026-04-25_post_p3_p4_preflight/` - closed post-P3/P4 preflight evidence packet
-- `operations/task_2026-04-25_p4_readiness_checker/` - closed read-only P4 readiness-checker packet
-- `operations/task_2026-04-25_p3_obs_v2_reader_gate/` - closed POST_AUDIT 4.5.B-lite obs_v2 reader-gate consumer-hardening packet
-- `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` - closed POST_AUDIT 4.5.A settlement metric-read linter closeout packet
-- `operations/task_2026-04-25_p3_usage_path_residual_guards/` - closed P3 residual usage-path guard packet
+- `operations/task_2026-04-23_midstream_remediation/` - midstream remediation package; phase evidence lives under `phases/`
 - `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
 - `../workspace_map.md` - repo visibility and routing guide
 
@@ -70,7 +60,9 @@ task explicitly needs historical evidence, and label archive-derived claims as
 
 - All `.md` files use `lower_snake_case.md`
 - Exceptions: `AGENTS.md`, `README.md`
-- New time-bound packet files use `task_YYYY-MM-DD_name.md` or
+- New independent packages use `task_YYYY-MM-DD_name.md` or
   `task_YYYY-MM-DD_name/`
+- Multi-phase work stays inside one package folder, normally under
+  `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`
 - Avoid generic top-level names such as `plan.md` or `progress.md` outside an
   active task folder

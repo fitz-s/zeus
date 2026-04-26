@@ -13,9 +13,9 @@ Changed files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json`
 - `architecture/docs_registry.yaml`
 - `src/engine/replay.py`
 - `scripts/run_replay.py`
@@ -48,13 +48,13 @@ Verification:
   -> `17 passed`.
 - `.venv/bin/python -m pytest -q tests/test_architecture_contracts.py tests/test_run_replay_cli.py`
   -> `89 passed, 22 skipped`.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.C implementation files> --plan-evidence docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.C implementation files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/plan.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.C implementation files> --work-record-path docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.C implementation files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/work_log.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.C implementation files> --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.C implementation files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.C implementation files> --json`
   -> `{"ok": true, "issues": []}`.
@@ -129,19 +129,19 @@ Closeout verification:
 
 - `python3 scripts/topology_doctor.py --navigation --task "P0 4.2.C market-events empty-table preflight planning packet" --files <4.2.C planning files>`
   -> navigation ok.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.C planning files> --plan-evidence docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.C planning files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/plan.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.C planning files> --work-record-path docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.C planning files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/work_log.md --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.C planning files> --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.C planning files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.C planning files> --json`
   -> `{"ok": true, "issues": []}`.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json --json`
   -> `{"ok": true, "issues": []}`.
 - `git diff --check -- <4.2.C planning files>`
   -> passed.
-- `python3 -m json.tool docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json`
+- `python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json`
   -> passed.
 
 ## Next Steps

@@ -39,14 +39,17 @@ commit on its own.
 
 ### 2.1 `scope.yaml`
 
-Every packet folder under `docs/operations/task_*_*/` carries a `scope.yaml`
-file conforming to `architecture/scope_schema.json`:
+Every independent package folder under `docs/operations/task_*_*/` may carry a
+`scope.yaml` file. Multi-phase packages keep phase-local scopes under
+`docs/operations/task_*_*/phases/task_*_*/scope.yaml` rather than creating
+sibling top-level packages for each phase. Scope files conform to
+`architecture/scope_schema.json`:
 
 ```yaml
 $schema: ../../../architecture/scope_schema.json
 schema_version: 1
 packet: task_YYYY-MM-DD_<slug>
-status: in_progress | landed
+status: in_progress | landed | closed
 branch: <branch-name>
 worktree: <absolute path>
 

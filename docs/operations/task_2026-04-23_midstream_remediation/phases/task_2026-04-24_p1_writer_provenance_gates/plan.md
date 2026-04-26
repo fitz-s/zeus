@@ -23,7 +23,7 @@ written now, this packet stops and a wider metric-identity/caller packet opens.
 ## Route
 
 - P1.1 source-role registry evidence:
-  `docs/operations/task_2026-04-24_p1_source_role_registry/`
+  `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/`
 - P1.1 implementation commit:
   `af7dd5289748b2cb6256df56f97f421490bf1925`
 - Forensic package input:
@@ -107,9 +107,9 @@ Closeout bookkeeping files after verification only:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 
 Forbidden files:
 
@@ -157,9 +157,9 @@ Planning commit changed files:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 
 ## Phase Topology
 

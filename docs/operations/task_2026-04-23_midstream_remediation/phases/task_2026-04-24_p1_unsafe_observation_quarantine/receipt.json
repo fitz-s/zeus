@@ -1,10 +1,10 @@
 {
   "task": "P1.3 unsafe observation quarantine implementation",
-  "packet": "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md"
   ],
   "packet_status": "implementation_closeout",
   "required_law": [
@@ -29,9 +29,9 @@
     "scripts/verify_truth_surfaces.py",
     "tests/test_truth_surface_health.py",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -51,9 +51,9 @@
     "scripts/verify_truth_surfaces.py",
     "tests/test_truth_surface_health.py",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
-    "docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json"
   ],
   "implementation_semantics": [
     "observations.verified_without_provenance treats NULL, SQL-empty, whitespace-only, '{}', and '[]' provenance as unsafe",

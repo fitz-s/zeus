@@ -81,9 +81,9 @@ Allowed files (organized by slice):
 
 ### Shared packet surfaces
 
-- `docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md`
-- `docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md`
-- `docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/receipt.json`
 - `docs/operations/AGENTS.md` (register packet)
 - `docs/operations/current_state.md` (add packet pointer)
 

@@ -60,9 +60,9 @@ human-readable mirror._
 - `python3 scripts/topology_doctor.py --scripts --json`
 - `python3 scripts/topology_doctor.py --tests --json`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
+- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/receipt.json`
 - `git diff --check -- <packet files>`
 
 ## Closeout

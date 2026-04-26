@@ -18,10 +18,10 @@ Changed files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
-- `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md`
-- `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml`
-- `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/receipt.json`
 
 Summary: replay settlement reads now pin the settlement metric axis; canonical
 hourly-observations ban proof is recorded; operations routing now points at
@@ -36,7 +36,7 @@ Verification:
 - `python3 scripts/topology_doctor.py --tests --json`
 - `python3 scripts/topology_doctor.py --scripts --json`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet tests>`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
 - `git diff --check -- <packet files>`
 
@@ -87,7 +87,7 @@ Next: closed; P2 4.4.A1 obs_v2 revision-history packet is the active follow-up.
   - `python3 scripts/topology_doctor.py --tests --json` -> ok
   - `python3 scripts/topology_doctor.py --scripts --json` -> ok
   - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet tests>` -> ok
-  - `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md` -> ok
+  - `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md` -> ok
   - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>` -> ok
   - `git diff --check -- <packet files>` -> ok
 - Closeout:

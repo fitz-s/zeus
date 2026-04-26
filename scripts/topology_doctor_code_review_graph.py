@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -537,9 +538,17 @@ def build_code_impact_graph(api: Any, files: list[str], task: str = "") -> dict[
         payload["reason"] = "no source/test/script code files in this context pack"
         return payload
 
-    try:
+    status_signature = inspect.signature(api.run_code_review_graph_status)
+    supports_include_appendix = (
+        "include_appendix" in status_signature.parameters
+        or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in status_signature.parameters.values()
+        )
+    )
+    if supports_include_appendix:
         status = api.run_code_review_graph_status(code_files, include_appendix=False)
-    except TypeError:
+    else:
         status = api.run_code_review_graph_status(code_files)
     health_issues = [api.asdict(issue) for issue in status.issues]
     payload["graph_health"] = {

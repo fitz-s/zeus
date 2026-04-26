@@ -53,10 +53,10 @@ Packet opened after phase-entry reassessment found:
 - `python3 scripts/topology_doctor.py --scripts --json` passed.
 - `python3 scripts/topology_doctor.py --tests --json` passed.
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files ...` passed.
-- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md` passed.
-- `python3 scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json` passed.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json` passed.
-- `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md` passed.
+- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md` passed.
+- `python3 scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json` passed.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json` passed.
+- `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md` passed.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` passed after registering packet evidence in `architecture/docs_registry.yaml`.
 - `python3 scripts/topology_doctor.py --navigation --task "P2 4.4.B-lite add backfill completeness manifests and fail-threshold guardrails to observation backfill scripts without DB schema or write-path changes" ...` passed.
 - `git diff --check -- <packet files>` passed.

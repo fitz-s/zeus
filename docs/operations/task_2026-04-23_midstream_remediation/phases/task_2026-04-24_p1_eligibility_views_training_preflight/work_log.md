@@ -18,16 +18,16 @@ Implementation commit `99c4ac3` file set:
 - `scripts/topology_doctor_test_checks.py`
 - `tests/test_truth_surface_health.py`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 
 Post-close closeout/checker changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
-- `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json`
 - `scripts/topology_doctor_docs_checks.py`
 - `tests/test_topology_doctor.py`
 
@@ -205,7 +205,7 @@ Commands run:
 - `.venv/bin/python scripts/semantic_linter.py --check <touched files>`
   replaced `python3 scripts/semantic_linter.py` because system `python3`
   cannot parse the script's modern type-union syntax in this environment.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json`
   -> ok
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <P1.5a files> --json`
   -> ok

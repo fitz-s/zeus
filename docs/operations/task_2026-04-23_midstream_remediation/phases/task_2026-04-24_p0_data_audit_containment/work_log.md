@@ -11,9 +11,9 @@ Changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
 - `docs/operations/runtime_artifact_inventory.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json`
 
 Summary:
 - Added read-only `training-readiness` mode to `verify_truth_surfaces.py`.
@@ -72,11 +72,11 @@ Verification:
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit ...`
   passed for the P0 changed-file set.
 - `git diff --check -- <P0 changed files>` passed.
-- `python scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `python scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`
   passed.
-- `python scripts/topology_doctor.py --work-record ... --work-record-path docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `python scripts/topology_doctor.py --work-record ... --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md`
   passed.
-- `python scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- `python scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json`
   passed.
 - `python scripts/topology_doctor.py --freshness-metadata ...` passed on
   touched script/test files.
@@ -111,9 +111,9 @@ Changed files:
 - `tests/test_truth_surface_health.py`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json`
 
 Plan:
 - Reuse this P0 packet and the existing `verify_truth_surfaces.py`
@@ -140,15 +140,15 @@ Verification:
 - `python3 scripts/topology_doctor.py --navigation --task "POST_AUDIT_HANDOFF 4.2.A P0 readiness guard normalization in existing P0 data-audit containment packet" --files <4.2.A files> --json`
   -> `ok: true`, no direct blockers; repo-wide docs/source/lore debt remains
   outside this packet.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.A files> --plan-evidence docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <4.2.A files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.A files> --work-record-path docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <4.2.A files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.A files> --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <4.2.A files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
   -> `{ok: true, issues: []}`.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <4.2.A files> --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
   -> `{ok: true, issues: []}`.
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --json`
   -> `{ok: true, issues: []}`.
@@ -173,17 +173,17 @@ Task: close the operations pointers after 4.2.A implementation commit
 Changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md`
 
 Verification:
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout docs> --plan-evidence docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout docs> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <closeout docs> --work-record-path docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <closeout docs> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout docs> --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout docs> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
   -> `{ok: true, issues: []}`.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json --json`
   -> `{ok: true, issues: []}`.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout docs> --json`
   -> `{ok: true, issues: []}`.

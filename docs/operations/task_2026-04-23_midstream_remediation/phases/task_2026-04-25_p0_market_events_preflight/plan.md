@@ -86,9 +86,9 @@ Allowed implementation/control files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/work_log.md`
-- `docs/operations/task_2026-04-25_p0_market_events_preflight/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/receipt.json`
 - `architecture/docs_registry.yaml`
 - `src/engine/replay.py`
 - `scripts/run_replay.py`
@@ -149,7 +149,7 @@ Forbidden for this implementation packet:
 - Cross-module smoke if replay/live seam widens:
   `.venv/bin/python -m pytest -q tests/test_cross_module_invariants.py tests/test_cross_module_relationships.py tests/test_bug100_k1_k2_structural.py`
 - Topology:
-  `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md --json`
+  `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_market_events_preflight/plan.md --json`
 - Packet closeout:
   work-record, change-receipts, current-state-receipt-bound,
   map-maintenance, freshness checks, and `git diff --check`.

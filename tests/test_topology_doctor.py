@@ -541,6 +541,16 @@ def test_build_code_impact_graph_extracts_callers_and_tests(monkeypatch, tmp_pat
     assert payload["test_gaps"] == []
 
 
+def test_code_impact_graph_does_not_swallow_status_type_errors(monkeypatch):
+    def broken_status(files, *, include_appendix=False):
+        raise TypeError("internal status bug")
+
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", broken_status)
+
+    with pytest.raises(TypeError, match="internal status bug"):
+        topology_doctor.build_code_impact_graph(["src/example.py"], task="review code")
+
+
 def test_cli_json_parity_for_closeout_command(monkeypatch):
     payload = {
         "ok": True,

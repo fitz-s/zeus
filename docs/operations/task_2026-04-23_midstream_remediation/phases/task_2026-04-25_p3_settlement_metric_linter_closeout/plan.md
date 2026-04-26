@@ -81,9 +81,9 @@ human-readable mirror._
 - `python3 scripts/semantic_linter.py --check scripts/backfill_ens.py scripts/backfill_observations_from_settlements.py scripts/bridge_oracle_to_calibration.py scripts/investigate_ecmwf_bias.py scripts/etl_historical_forecasts.py scripts/etl_forecast_skill_from_forecasts.py scripts/validate_dynamic_alpha.py`
 - `pytest tests/test_semantic_linter.py -q`
 - `python3 scripts/topology_doctor.py --tests --json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/work_log.md`
+- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_settlement_metric_linter_closeout/work_log.md`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet scripts/tests>`
 - `git diff --check -- <packet files>`
 

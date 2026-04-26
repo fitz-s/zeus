@@ -1,10 +1,10 @@
 {
   "task": "P1.5a eligibility preflight implementation",
-  "packet": "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md"
   ],
     "packet_status": "closed_post_close_control_surface_aligned",
   "prior_commits": {
@@ -23,16 +23,16 @@
     "scripts/topology_doctor_test_checks.py",
     "tests/test_truth_surface_health.py",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
   ],
   "post_close_closeout_files": [
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json",
     "scripts/topology_doctor_docs_checks.py",
     "tests/test_topology_doctor.py"
   ],
@@ -65,9 +65,9 @@
         "scripts/topology_doctor_test_checks.py",
         "tests/test_truth_surface_health.py",
         "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
   ],
     "forbidden_files": [
     "state/**",
@@ -93,9 +93,9 @@
         "scripts/topology_doctor_test_checks.py",
         "tests/test_truth_surface_health.py",
         "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
-    "docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json"
   ],
   "implementation_decisions": [
     "Add read-only calibration-pair rebuild preflight mode instead of changing src/state eligibility views",
@@ -146,19 +146,19 @@
         "python3 scripts/topology_doctor.py --tests --json -> ok",
         "python3 scripts/topology_doctor.py --naming-conventions --json -> ok",
         "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <touched script/test files> --json -> ok",
-        "python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files plus topology hygiene files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
-        "python3 scripts/topology_doctor.py --work-record --changed-files <P1.5a files plus topology hygiene files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
-        "python3 scripts/topology_doctor.py --change-receipts --changed-files <P1.5a files plus topology hygiene files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
-        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --planning-lock --changed-files <P1.5a files plus topology hygiene files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
+        "python3 scripts/topology_doctor.py --work-record --changed-files <P1.5a files plus topology hygiene files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
+        "python3 scripts/topology_doctor.py --change-receipts --changed-files <P1.5a files plus topology hygiene files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
         "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <P1.5a files plus topology hygiene files> --json -> ok",
         "pre-99c4ac3 implementation staged exact-set check against implementation files -> ok; no state/**",
         "git diff --check -> ok",
-        "python3 scripts/topology_doctor.py --navigation --task \"P1.5a post-close operations registry closeout after pushed implementation\" --files docs/operations/AGENTS.md docs/operations/current_state.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> allowed files plus known global red context",
-        "python3 -m json.tool docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json -> ok",
-        "python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
-        "python3 scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
-        "python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
-        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --navigation --task \"P1.5a post-close operations registry closeout after pushed implementation\" --files docs/operations/AGENTS.md docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> allowed files plus known global red context",
+        "python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json -> ok",
+        "python3 scripts/topology_doctor.py --planning-lock --changed-files <closeout files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md --json -> ok",
+        "python3 scripts/topology_doctor.py --work-record --changed-files <closeout files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/work_log.md --json -> ok",
+        "python3 scripts/topology_doctor.py --change-receipts --changed-files <closeout files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
+        "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/receipt.json --json -> ok",
         "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <closeout files> --json -> ok",
         "python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/topology_doctor_docs_checks.py tests/test_topology_doctor.py --json -> ok",
         "python3 scripts/topology_doctor.py --scripts --json -> ok",

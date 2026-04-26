@@ -1,9 +1,9 @@
 {
   "task": "P1.2 observation_instants_v2 writer provenance gates implementation",
-  "packet": "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md"
   ],
   "planning_commit": "e498b0dc7f1adf184e94b952bea9a441a8ab7c20",
   "implementation_commit": "16292e289e445ef46fa5b57439cbc8c28b2cb1b8",
@@ -30,9 +30,9 @@
   "allowed_files": [
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
     "src/data/observation_instants_v2_writer.py",
     "tests/test_obs_v2_writer.py",
     "tests/test_hk_rejects_vhhh_source.py"
@@ -45,9 +45,9 @@
   "future_closeout_bookkeeping_files": [
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -62,13 +62,13 @@
   "changed_files": [
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json",
     "src/data/observation_instants_v2_writer.py",
     "tests/test_obs_v2_writer.py"
   ],
   "tests_evidence": [
-    "docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md"
   ]
 }

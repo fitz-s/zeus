@@ -1,5 +1,6 @@
-# Created: 2026-04-25
-# Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-26; last_reused=2026-04-26
+# Purpose: Lock packet-runtime CLI behavior and scope-schema contracts.
+# Reuse: Run when changing `zpkt`, packet scope parsing, or `architecture/scope_schema.json`.
 """Behavioral tests for the ``zpkt`` Packet Runtime CLI.
 
 These tests build a throwaway git repository in ``tmp_path``, drop the
@@ -106,6 +107,41 @@ def test_start_creates_packet(synthetic_repo: Path) -> None:
     assert (pkt_dir / "work_log.md").is_file()
     assert (synthetic_repo / "state" / "active_packet.txt").read_text().strip() == \
         "task_2099-01-02_demo_pkt"
+
+
+def test_start_can_create_phase_inside_existing_package(synthetic_repo: Path) -> None:
+    package = synthetic_repo / "docs" / "operations" / "task_2099-01-01_parent"
+    package.mkdir(parents=True)
+    (package / "plan.md").write_text("parent\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=synthetic_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "parent package"], cwd=synthetic_repo, check=True)
+
+    cp = _run(
+        synthetic_repo,
+        "start",
+        "phase demo",
+        "--inplace",
+        "--date",
+        "2099-01-02",
+        "--package",
+        "task_2099-01-01_parent",
+    )
+    payload = json.loads(cp.stdout)
+    packet_path = "task_2099-01-01_parent/phases/task_2099-01-02_phase_demo"
+    assert payload["packet_path"] == packet_path
+    pkt_dir = synthetic_repo / "docs" / "operations" / packet_path
+    assert (pkt_dir / "plan.md").is_file()
+    assert (synthetic_repo / "state" / "active_packet.txt").read_text().strip() == packet_path
+
+    import yaml
+    scope_doc = yaml.safe_load((pkt_dir / "scope.yaml").read_text())
+    assert scope_doc["$schema"] == "../../../../../architecture/scope_schema.json"
+    assert scope_doc["in_scope"] == [f"docs/operations/{packet_path}/**"]
+
+
+def test_scope_schema_accepts_closed_packet_status() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert "closed" in schema["properties"]["status"]["enum"]
 
 
 def test_scope_show_and_add(synthetic_repo: Path) -> None:

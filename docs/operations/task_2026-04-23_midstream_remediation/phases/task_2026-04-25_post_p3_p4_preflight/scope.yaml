@@ -1,11 +1,11 @@
-$schema: ../../../architecture/scope_schema.json
+$schema: ../../../../../architecture/scope_schema.json
 schema_version: 1
 packet: task_2026-04-25_post_p3_p4_preflight
 status: closed
 branch: midstream_remediation
 worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
 in_scope:
-- docs/operations/task_2026-04-25_post_p3_p4_preflight/**
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/**
 - docs/operations/current_state.md
 - docs/operations/AGENTS.md
 - docs/AGENTS.md

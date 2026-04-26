@@ -42,7 +42,7 @@ P1.4 planning entry evidence:
   `validation/required_db_queries.md`.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
-- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence-only finalization policy planning" --files docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md docs/operations/known_gaps.md --json`
+- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence-only finalization policy planning" --files docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md docs/operations/known_gaps.md --json`
   returned known global docs/source/history-lore red issues. Those are derived
   routing debt and do not authorize skipping this packet's scoped gates.
 - Scout review mapped the settlement/finality anchors across P1.3, the
@@ -102,9 +102,9 @@ Planning commit may change:
 - `architecture/docs_registry.yaml`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
 
 Implementation files after plan freeze and post-close review:
 
@@ -115,9 +115,9 @@ Optional future closeout bookkeeping:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
 
 Forbidden files:
 
@@ -184,7 +184,7 @@ Future implementation must run:
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json`
 - `python3 scripts/topology_doctor.py --fatal-misreads --json`
 - `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence policy implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md --json`
 - `python3 scripts/topology_doctor.py impact --files <files>`
 - `python3 scripts/semantic_linter.py --check <files>` when the implementation
   touches scripts or source-like diagnostics

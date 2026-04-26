@@ -82,10 +82,11 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/plans/docs-truth-refresh-p0-ralplan-2026-04-22.md` | current docs truth refresh P0 ralplan | Active local planning evidence for P0 stale-truth purge and current-fact install; summarize in the 2026-04-22 packet before deleting local runtime state. |
 | `.omx/plans/guidance-kernel-semantic-boot-ralplan-2026-04-23.md` | active guidance-kernel ralplan | Planning evidence for the active guidance-kernel semantic boot packet. |
 | `.omx/plans/kernel-gamechanger-ralplan-2026-04-23.md` | active authority-kernel ralplan | Planning evidence for the active authority-kernel gamechanger packet. |
+| `.omx/plans/topology_system_deep_improvement_plan_2026-04-24.md` | topology-system improvement plan | Runtime-local planning evidence for the topology deep-evaluation package; mirror into an active packet before implementation. |
 | `.omx/plans/zeus-data-improve-pre-tigge-repair-packet-plan-2026-04-11.md` | stale packet plan | Historical only. |
-| `.omx/plans/post-p1-forensic-mainline-ralplan-2026-04-24.md` | active post-audit mainline ralplan | Mirrored into `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local Ralph planning evidence only. |
-| `.omx/plans/prd-p0-data-audit-containment.md` | active P0 Ralph PRD | Mirrored into `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local planning evidence only. |
-| `.omx/plans/test-spec-p0-data-audit-containment.md` | active P0 Ralph test spec | Mirrored into `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local planning evidence only. |
+| `.omx/plans/post-p1-forensic-mainline-ralplan-2026-04-24.md` | active post-audit mainline ralplan | Mirrored into `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local Ralph planning evidence only. |
+| `.omx/plans/prd-p0-data-audit-containment.md` | active P0 Ralph PRD | Mirrored into `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local planning evidence only. |
+| `.omx/plans/test-spec-p0-data-audit-containment.md` | active P0 Ralph test spec | Mirrored into `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`; use as local planning evidence only. |
 
 ## Runtime Context Artifacts With Durable Lessons
 
@@ -103,4 +104,4 @@ It prevents useful packet knowledge from living only in ignored runtime state.
 | `.omx/context/docs-truth-refresh-p0-20260422T084000Z.md` | P0 context snapshot for docs truth refresh stale-reference purge. | Summarize in the 2026-04-22 docs truth refresh packet. |
 | `.omx/context/guidance-kernel-semantic-boot-20260423T005005Z.md` | Guidance-kernel semantic boot context snapshot. | Summarized in the active guidance-kernel packet. |
 | `.omx/context/kernel-gamechanger-20260423T035846Z.md` | Authority-kernel gamechanger context snapshot. | Summarized in the active authority-kernel packet. |
-| `.omx/context/post-p1-forensic-mainline-20260424T025628Z.md` | Post-P-1 forensic mainline context snapshot for P0-P4 sequencing. | Summarized in `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`. |
+| `.omx/context/post-p1-forensic-mainline-20260424T025628Z.md` | Post-P-1 forensic mainline context snapshot for P0-P4 sequencing. | Summarized in `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`. |

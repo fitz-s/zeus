@@ -7,15 +7,15 @@ Changed files:
 - `src/data/tier_resolver.py`
 - `tests/test_tier_resolver.py`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json`
 
 Planning commit changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json`
 
 Summary:
 - Closed P0 status in the live pointer and rotated active operations routing
@@ -69,11 +69,11 @@ Verification:
   non-authority.
 - Broad navigation/source checks remain known-red on pre-existing global
   registry/archive/source-rationale debt outside this packet.
-- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-24_p1_source_role_registry/plan.md --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md --json`
   passed for the planning-only changed-file set.
-- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md --json`
+- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md --json`
   passed.
-- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json --json`
+- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json --json`
   passed after narrowing `route_evidence` to the current packet plan and
   recording this work log as planning evidence.
 - `python scripts/topology_doctor.py --current-state-receipt-bound --json`
@@ -90,7 +90,7 @@ Verification:
   31 passed.
 - `.venv/bin/python -m pytest tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_backfill_scripts_match_live_config.py -q`
   passed: 50 passed.
-- `python scripts/topology_doctor.py --planning-lock --changed-files src/data/tier_resolver.py tests/test_tier_resolver.py --plan-evidence docs/operations/task_2026-04-24_p1_source_role_registry/plan.md --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/data/tier_resolver.py tests/test_tier_resolver.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md --json`
   passed.
 - `git diff --check -- src/data/tier_resolver.py tests/test_tier_resolver.py`
   passed.

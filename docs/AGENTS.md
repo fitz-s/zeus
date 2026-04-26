@@ -43,17 +43,7 @@ body or bundle.
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
-| `operations/task_2026-04-25_p0_market_events_preflight/` | Closed POST_AUDIT 4.2.C implementation packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p1_daily_observation_writer_provenance/` | Closed POST_AUDIT 4.3.B-lite daily observation writer provenance packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p1_obs_v2_provenance_identity/` | Closed POST_AUDIT 4.3.B obs_v2 writer/producer provenance identity packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p2_backfill_completeness_guardrails/` | Closed POST_AUDIT 4.4.B-lite backfill completeness guardrail packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p2_obs_v2_revision_history/` | Closed POST_AUDIT 4.4.A1 obs_v2 revision-history packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p2_daily_observation_revision_history/` | Closed POST_AUDIT 4.4.A2 daily observation backfill revision-history packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_post_p3_p4_preflight/` | Closed post-P3/P4 preflight evidence packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p4_readiness_checker/` | Closed read-only P4 readiness-checker packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p3_obs_v2_reader_gate/` | Closed POST_AUDIT 4.5.B-lite obs_v2 reader-gate consumer-hardening packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p3_settlement_metric_linter_closeout/` | Closed POST_AUDIT 4.5.A settlement metric-read linter closeout packet; route through `operations/current_state.md` |
-| `operations/task_2026-04-25_p3_usage_path_residual_guards/` | Closed P3 residual usage-path guard packet; route through `operations/current_state.md` |
+| `operations/task_2026-04-23_midstream_remediation/` | Midstream remediation package; phase evidence lives under `phases/` and routes through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |

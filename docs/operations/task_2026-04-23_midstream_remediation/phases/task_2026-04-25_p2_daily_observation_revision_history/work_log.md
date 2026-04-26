@@ -45,9 +45,9 @@ Next: Verify the daily-specific helper/schema + two script write-path updates, t
   - `python3 scripts/topology_doctor.py --tests --json` -> ok
   - `python3 scripts/topology_doctor.py --scripts --json` -> ok
   - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <A2 source/script/test files>` -> ok
-  - `python3 scripts/topology_doctor.py --planning-lock --changed-files <A2 packet files> --plan-evidence docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md` -> ok
+  - `python3 scripts/topology_doctor.py --planning-lock --changed-files <A2 packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/plan.md` -> ok
   - `python3 scripts/topology_doctor.py --current-state-receipt-bound` -> ok
-  - `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p2_daily_observation_revision_history/work_log.md` -> ok
+  - `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/work_log.md` -> ok
   - `git diff --check -- architecture docs scripts src tests` -> ok
 - `python scripts/semantic_linter.py --check` passed for A2 source/script and
   focused tests. The broader impacted-test run still reports pre-existing

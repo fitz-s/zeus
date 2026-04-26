@@ -101,9 +101,9 @@ human-readable mirror._
 - `python3 scripts/topology_doctor.py --tests --json`
 - `python3 scripts/topology_doctor.py --scripts --json`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/etl_diurnal_curves.py scripts/verify_truth_surfaces.py scripts/semantic_linter.py tests/test_obs_v2_reader_gate.py tests/test_truth_surface_health.py tests/test_semantic_linter.py`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json`
+- `python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_obs_v2_reader_gate/receipt.json`
 - `git diff --check -- <packet files>`
 
 ## Closeout

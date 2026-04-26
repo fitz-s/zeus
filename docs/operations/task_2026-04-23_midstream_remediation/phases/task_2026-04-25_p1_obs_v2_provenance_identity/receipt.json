@@ -1,10 +1,10 @@
 {
   "task": "P1 obs_v2 provenance identity contract",
-  "packet": "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -42,9 +42,9 @@
     "docs/README.md",
     "docs/operations/current_state.md",
     "docs/operations/AGENTS.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -79,9 +79,9 @@
     "docs/README.md",
     "docs/operations/current_state.md",
     "docs/operations/AGENTS.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
-    "docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json"
   ],
   "implementation_semantics": [
     "ObsV2Row rejects provenance JSON lacking payload_hash, parser_version, source identity, or station identity.",
@@ -99,9 +99,9 @@
     "python3 scripts/topology_doctor.py --tests --json",
     "python3 scripts/topology_doctor.py --scripts --json",
     "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet files> --json",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md --json",
-    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md --json",
-    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json --json",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md --json",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/work_log.md --json",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_obs_v2_provenance_identity/receipt.json --json",
     "python3 scripts/topology_doctor.py --current-state-receipt-bound --json",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files <packet files> --json",
     "critic review PASS; non-blocking packet-accounting mismatch fixed; producer behavior tests added for DST-gap and Meteostat rows",

@@ -15,7 +15,7 @@ source roles conservatively without silently promoting legacy or fallback rows.
 
 - Mainline ralplan: `.omx/plans/post-p1-forensic-mainline-ralplan-2026-04-24.md`
 - P0 containment evidence:
-  `docs/operations/task_2026-04-24_p0_data_audit_containment/`
+  `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/`
 - Post-audit handoff:
   `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
 - Forensic package input:
@@ -130,9 +130,9 @@ Planning-only changed files:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json`
 
 Allowed future implementation code files, after this plan is reviewed,
 pushed, and post-close reviewed:
@@ -144,9 +144,9 @@ Closeout bookkeeping files, after code verification only:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json`
 
 Forbidden files:
 
@@ -209,9 +209,9 @@ Future P1.1 implementation must run at minimum:
   constants used by `src/data/observation_instants_v2_writer.py` and
   `scripts/backfill_obs_v2.py` are unchanged; registry helpers must be additive
   unless a later packet widens the scope.
-- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-24_p1_source_role_registry/plan.md`
-- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-24_p1_source_role_registry/work_log.md`
-- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-24_p1_source_role_registry/receipt.json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/plan.md`
+- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/work_log.md`
+- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_source_role_registry/receipt.json`
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files ...`
 - `git diff --check -- <P1.1 changed files>`
 

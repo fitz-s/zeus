@@ -54,7 +54,7 @@ P1.3 implementation entry evidence:
   `docs/operations/known_gaps.md`.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
-- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
+- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
   returned known global docs/source/history-lore red issues and generic source
   modification warnings. Those are derived routing debt; this packet remains
   scoped to read-only diagnostics/tests and closeout bookkeeping.
@@ -97,16 +97,16 @@ Planning commit may change:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 - `docs/AGENTS.md`
 - `docs/README.md`
 - `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Allowed future implementation files after plan freeze and post-close review:
 
@@ -118,17 +118,17 @@ Implemented files:
 - `scripts/verify_truth_surfaces.py`
 - `tests/test_truth_surface_health.py`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Optional future closeout bookkeeping:
 
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Forbidden files:
 
@@ -194,7 +194,7 @@ Future implementation must run:
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json`
 - `python3 scripts/topology_doctor.py --fatal-misreads --json`
 - `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md --json`
 - `.venv/bin/python -m py_compile scripts/verify_truth_surfaces.py`
 - Audit `tests/test_truth_surface_health.py` under the restored test-trust
   policy before using full-file results as closeout evidence. The file has a

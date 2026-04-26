@@ -106,7 +106,7 @@ human-readable mirror._
   smoke coverage for `apply_v2_schema`.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json`
 - `python3 scripts/topology_doctor.py --fatal-misreads --json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_obs_v2_writer.py`
 - `git diff --check -- <packet files>`
@@ -126,4 +126,4 @@ human-readable mirror._
 
 - Implementation commit: `0837afc` (`Preserve obs v2 evidence when payloads drift`)
 - Pushed to `origin/midstream_remediation`.
-- Follow-up packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
+- Follow-up packet: `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/plan.md`

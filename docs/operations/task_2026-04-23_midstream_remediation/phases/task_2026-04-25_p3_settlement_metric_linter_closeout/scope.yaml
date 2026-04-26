@@ -1,11 +1,11 @@
-$schema: ../../../architecture/scope_schema.json
+$schema: ../../../../../architecture/scope_schema.json
 schema_version: 1
 packet: task_2026-04-25_p3_settlement_metric_linter_closeout
 status: in_progress
 branch: midstream_remediation
 worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
 in_scope:
-- docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/**
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_settlement_metric_linter_closeout/**
 - scripts/semantic_linter.py
 - tests/test_semantic_linter.py
 - docs/operations/AGENTS.md

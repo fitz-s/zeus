@@ -1,0 +1,38 @@
+$schema: ../../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_pr17_review_fixes
+status: closed
+branch: main
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+in_scope:
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/**
+- docs/operations/current_state.md
+- docs/operations/AGENTS.md
+- docs/AGENTS.md
+- docs/README.md
+- architecture/docs_registry.yaml
+- architecture/topology.yaml
+- architecture/scope_schema.json
+- pytest.ini
+- scripts/topology_doctor_code_review_graph.py
+- src/engine/replay.py
+- tests/test_digest_profile_matching.py
+- tests/test_run_replay_cli.py
+- tests/test_topology_doctor.py
+- tests/test_zpkt.py
+allow_companions:
+- AGENTS.md
+- src/engine/AGENTS.md
+- scripts/AGENTS.md
+- tests/AGENTS.md
+- architecture/AGENTS.md
+- docs/operations/AGENTS.md
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- state/*.db
+- production DB mutation
+- runtime artifact tracking policy changes
+- P4 data population
+- source-role decisions
+- launch environment changes

@@ -35,9 +35,9 @@ def test_generic_source_word_does_not_route_to_data_ingestion():
 def test_generic_test_word_does_not_route_to_test_profile():
     digest = build_digest("clean up unit test docstrings", ["tests/test_foo.py"])
     # If a "test" profile exists, this must not auto-resolve via the bare token.
-    assert digest["profile"] in {"generic", "modify pipeline logic"} or digest[
-        "admission"
-    ]["status"] in {"advisory_only", "scope_expansion_required"}
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["admission"]["admitted_files"] == []
 
 
 def test_generic_signal_word_does_not_route_to_signal_profile():

@@ -1,11 +1,11 @@
 {
   "task": "P3 usage-path residual guards",
-  "packet": "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-  "scope": "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+  "scope": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -44,10 +44,10 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/receipt.json"
   ],
   "forbidden_files": [
     "state/*.db",
@@ -73,10 +73,10 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
-    "docs/operations/task_2026-04-25_p3_usage_path_residual_guards/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/receipt.json"
   ],
   "implementation_semantics": [
     "Replay settlement reads now pin the settlement metric axis instead of matching only city and target_date.",
@@ -94,7 +94,7 @@
     "python3 scripts/topology_doctor.py --tests --json -> ok",
     "python3 scripts/topology_doctor.py --scripts --json -> ok",
     "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet tests> -> ok",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md -> ok",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md -> ok",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files> -> ok",
     "git diff --check -- <packet files> -> ok"
   ],
@@ -107,6 +107,6 @@
     "implementation_commit": "3e8056b",
     "pushed_to": "origin/midstream_remediation",
     "closed_at": "2026-04-25",
-    "follow_up_packet": "docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md"
+    "follow_up_packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md"
   }
 }

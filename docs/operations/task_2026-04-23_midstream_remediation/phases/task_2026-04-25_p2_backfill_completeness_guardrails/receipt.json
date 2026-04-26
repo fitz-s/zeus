@@ -1,10 +1,10 @@
 {
   "task": "P2 4.4.B-lite backfill completeness guardrails",
-  "packet": "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
   "route_source": "manual_packet",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -40,9 +40,9 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json"
   ],
   "forbidden_files": [
     "state/**",
@@ -73,9 +73,9 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md",
-    "docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json"
   ],
   "implementation_semantics": [
     "Added a shared import-only script helper for completeness CLI flags, manifest JSON emission, and final threshold decisions.",
@@ -95,10 +95,10 @@
     "python3 scripts/topology_doctor.py --scripts --json -> ok",
     "python3 scripts/topology_doctor.py --tests --json -> ok",
     "python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet scripts/tests> -> ok",
-    "python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md -> ok",
-    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json -> ok",
-    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json -> ok",
-    "python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md -> ok",
+    "python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/work_log.md -> ok",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json -> ok",
+    "python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/receipt.json -> ok",
+    "python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md -> ok",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ... -> ok",
     "python3 scripts/topology_doctor.py --navigation --task P2 4.4.B-lite ... -> ok",
     "git diff --check -- <packet files> -> ok"

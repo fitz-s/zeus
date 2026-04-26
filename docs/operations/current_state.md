@@ -4,23 +4,16 @@ Role: single live control pointer for the repo.
 
 ## Active program
 
-- Branch: `midstream_remediation`
-- Mainline task: **Post-audit remediation mainline — P4 read-only readiness checker closed; P4 mutation blocked**
+- Branch: `main`
+- Mainline task: **Post-audit remediation mainline — operations package cleanup closed; P4 mutation blocked**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`
+- Active package plan: `docs/operations/task_2026-04-23_midstream_remediation/plan.md`
 - Active execution packet: none frozen; next packet pending phase-entry
-- Closeout evidence packet: `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
-- Prior post-P3/P4 preflight closeout evidence packet: `docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md`
-- Prior P3 B-lite closeout evidence packet: `docs/operations/task_2026-04-25_p3_obs_v2_reader_gate/plan.md`
-- Prior P2 A2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_daily_observation_revision_history/plan.md`
-- Prior P2 A1 closeout evidence packet: `docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md`
-- Prior P3 residual closeout evidence packet: `docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
-- Prior P3 closeout evidence packet: `docs/operations/task_2026-04-25_p3_settlement_metric_linter_closeout/plan.md`
-- Prior P2 closeout evidence packet: `docs/operations/task_2026-04-25_p2_backfill_completeness_guardrails/plan.md`
-- Prior P1 closeout evidence packet: `docs/operations/task_2026-04-25_p1_obs_v2_provenance_identity/plan.md`
-- Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
-- Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
-- Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
+- Phase evidence root: `docs/operations/task_2026-04-23_midstream_remediation/phases/`
+- Phase evidence index: `docs/operations/task_2026-04-23_midstream_remediation/phases/README.md`
+- Closeout evidence packet: `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/plan.md`
+- Prior PR #17 review-fix evidence packet: `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md`
+- Receipt-bound source: `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -91,12 +84,26 @@ Role: single live control pointer for the repo.
   --json` reports `NOT_READY`, preserving P4 blocker status without DB or
   runtime mutation.
 
+  PR #17 review fixes are closed on `main`: replay strict preflight now matches
+  market-event bins semantically instead of by raw label text, packet
+  `scope.yaml` schema accepts the emitted `closed` status, the Code Review
+  Graph context-pack path no longer swallows internal `TypeError`s, the bare
+  `test` digest regression is strict, and `pytest.ini` states that full
+  automated coverage must override the default `live_topology` marker filter.
+  Heartbeat untracking remains a future runtime-governance decision, not part
+  of this safe review-fix packet.
+
+  Operations package cleanup is closed: midstream remediation phase evidence
+  now lives under the single
+  `docs/operations/task_2026-04-23_midstream_remediation/phases/` root, and
+  guidance/tooling now says phases of one package must stay inside that package.
+
 ## Required evidence
 
-- `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml`
-- `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/scope.yaml`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/receipt.json`
 
 ## Freeze point
 
@@ -107,15 +114,16 @@ Role: single live control pointer for the repo.
   (`P-1 Pre-P0 Post-Audit Cleanup -- 2026-04-24`), and 4.2.A closed at
   `0b61261`, while 4.2.B closed at `3e1bda7`, 4.2.C planning closed at
   `8e94f4a`, and 4.2.C implementation closed at `1411017`. The P1.5/P1.5a packet
-  `docs/operations/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
+  `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_eligibility_views_training_preflight/plan.md`
   remains a historical topology anchor only; it is not the active slice.
   WU/HKO daily observation writer provenance identity, obs_v2 provenance
   identity, P2 4.4.B-lite backfill completeness guardrails, P2 4.4.A1/A2
   revision history, P3 4.5.A settlement metric-read enforcement, the P3
   residual replay usage-path guard, P3 4.5.B-lite obs_v2 reader-gate consumer
-  hardening, post-P3/P4 preflight evidence, and the read-only P4 readiness
-  checker are closed. No active implementation packet is frozen. This pointer
-  does not authorize production DB mutation,
+  hardening, post-P3/P4 preflight evidence, the read-only P4 readiness
+  checker, PR #17 review fixes, and operations package cleanup are closed. No
+  active implementation packet is frozen. This pointer does not authorize
+  production DB mutation,
   `settlements_v2` population, market-identity backfill, live executor DB
   authority, legacy-settlement promotion, broad P1 source-role/view work,
   row-level quarantine, live daily ingest changes, shared obs_v2 view redesign,
@@ -131,6 +139,10 @@ Role: single live control pointer for the repo.
 
 - Use `docs/operations/AGENTS.md` for non-default packet/package routing.
 - Use `docs/archive_registry.md` for archived packet lookup.
+- Independent top-level operation packages retained outside the midstream
+  phase tree: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`,
+  `docs/operations/task_2026-04-23_graph_rendering_integration/`, and
+  `docs/operations/task_2026-04-25_p2_packet_runtime/`.
 
 ## Parallel infrastructure packet
 

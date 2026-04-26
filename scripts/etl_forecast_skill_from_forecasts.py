@@ -5,7 +5,7 @@
 # Reuse: H3 (2026-04-24) hardened the JOIN to pin s.temperature_metric='high'
 #        because forecasts stores forecast_high without a metric column; LOW
 #        settlements would otherwise spuriously double-match. See packet
-#        docs/operations/task_2026-04-24_midstream_tier2_adversarial_followups/.
+#        docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/.
 """Materialize forecast_skill/model_bias from the local forecasts table.
 
 This fills the gap left by the older ladder backfill, which only covered the

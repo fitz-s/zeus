@@ -1,11 +1,11 @@
-$schema: ../../../architecture/scope_schema.json
+$schema: ../../../../../architecture/scope_schema.json
 schema_version: 1
 packet: task_2026-04-25_p2_daily_observation_revision_history
 status: landed
 branch: midstream_remediation
 worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
 in_scope:
-- docs/operations/task_2026-04-25_p2_daily_observation_revision_history/**
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_daily_observation_revision_history/**
 - src/state/db.py
 - src/data/daily_observation_writer.py
 - src/data/daily_obs_append.py
@@ -24,10 +24,10 @@ in_scope:
 - docs/README.md
 - docs/operations/AGENTS.md
 - docs/operations/current_state.md
-- docs/operations/task_2026-04-25_p2_obs_v2_revision_history/plan.md
-- docs/operations/task_2026-04-25_p2_obs_v2_revision_history/work_log.md
-- docs/operations/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml
-- docs/operations/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/plan.md
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/work_log.md
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/scope.yaml
+- docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p2_obs_v2_revision_history/receipt.json
 allow_companions:
 - tests/test_backfill_scripts_match_live_config.py
 - AGENTS.md

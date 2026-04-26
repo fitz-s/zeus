@@ -71,9 +71,9 @@ Allowed evidence/control files:
 - `docs/README.md`
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
-- `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p0_legacy_hourly_evidence_view/receipt.json`
 
 Forbidden files:
 

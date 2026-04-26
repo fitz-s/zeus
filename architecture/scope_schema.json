@@ -23,7 +23,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["planned", "in_progress", "in_review", "landed", "abandoned"],
+      "enum": ["planned", "in_progress", "in_review", "landed", "abandoned", "closed"],
       "description": "Lifecycle status. Updated by `zpkt close`."
     },
     "branch": {

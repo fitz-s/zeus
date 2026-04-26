@@ -1,0 +1,88 @@
+{
+  "task": "PR 17 review fixes",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md",
+  "scope": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/scope.yaml",
+  "route_source": "manual_packet",
+  "status": "closed",
+  "route_evidence": [
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/work_log.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "src/engine/AGENTS.md",
+    "scripts/AGENTS.md",
+    "tests/AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/script_manifest.yaml",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md"
+  ],
+  "allowed_files": [
+    "architecture/docs_registry.yaml",
+    "architecture/scope_schema.json",
+    "architecture/topology.yaml",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/work_log.md",
+    "pytest.ini",
+    "scripts/topology_doctor_code_review_graph.py",
+    "src/engine/replay.py",
+    "tests/test_digest_profile_matching.py",
+    "tests/test_run_replay_cli.py",
+    "tests/test_topology_doctor.py",
+    "tests/test_zpkt.py"
+  ],
+  "forbidden_files": [
+    "state/zeus-world.db",
+    "state/zeus-world.db-*",
+    "state/*.db",
+    "production DB mutation",
+    "runtime artifact tracking policy changes",
+    "P4 data population",
+    "source-role decisions",
+    "launch environment changes"
+  ],
+  "changed_files": [
+    "architecture/docs_registry.yaml",
+    "architecture/scope_schema.json",
+    "architecture/topology.yaml",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/work_log.md",
+    "pytest.ini",
+    "scripts/topology_doctor_code_review_graph.py",
+    "src/engine/replay.py",
+    "tests/test_digest_profile_matching.py",
+    "tests/test_run_replay_cli.py",
+    "tests/test_topology_doctor.py",
+    "tests/test_zpkt.py"
+  ],
+  "tests_evidence": [
+    "python3 -m py_compile src/engine/replay.py scripts/topology_doctor_code_review_graph.py tests/test_run_replay_cli.py tests/test_topology_doctor.py tests/test_digest_profile_matching.py tests/test_zpkt.py",
+    "pytest -q tests/test_run_replay_cli.py -k \"market_events or semantic\"",
+    "pytest -q tests/test_topology_doctor.py -k \"code_impact_graph\"",
+    "pytest -q tests/test_digest_profile_matching.py -k \"generic_test_word\"",
+    "pytest -q tests/test_zpkt.py -k \"scope_schema\"",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <changed files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md",
+    "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <changed files>",
+    "python3 scripts/topology_doctor.py --change-receipts --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/receipt.json",
+    "python3 scripts/topology_doctor.py --freshness-metadata --changed-files scripts/topology_doctor_code_review_graph.py tests/test_digest_profile_matching.py tests/test_run_replay_cli.py tests/test_topology_doctor.py tests/test_zpkt.py",
+    "python3 scripts/topology_doctor.py --scripts --json",
+    "python3 scripts/topology_doctor.py --tests --json",
+    "git diff --check -- <changed files>"
+  ],
+  "known_gaps": [
+    "Heartbeat tracking policy is intentionally left for a future governance packet."
+  ]
+}

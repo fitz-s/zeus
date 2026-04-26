@@ -7,8 +7,8 @@ Task: P1.4 legacy settlement evidence-only / finalization policy implementation
 Changed files:
 - `scripts/verify_truth_surfaces.py`
 - `tests/test_truth_surface_health.py`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
-- `docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json`
 - `docs/operations/current_state.md`
 - `docs/operations/AGENTS.md`
 
@@ -71,7 +71,7 @@ Verification:
   `validation/required_db_queries.md`.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
-- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence-only finalization policy planning" --files docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md docs/operations/known_gaps.md --json`
+- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence-only finalization policy planning" --files docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md docs/operations/known_gaps.md --json`
   returned known global docs/source/history-lore red issues. Those are derived
   routing debt and do not authorize skipping scoped gates.
 - First map-maintenance run reported required companion updates for
@@ -102,7 +102,7 @@ Verification:
   the P1.4 plan.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
-- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence policy implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json --json`
+- `python3 scripts/topology_doctor.py --navigation --task "P1.4 legacy settlement evidence policy implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/work_log.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/receipt.json --json`
   returned known global docs/source/history-lore red issues, with the scoped
   implementation files allowed and `state/*.db` / `.omx/**` forbidden.
 - Read-only live schema probe confirmed `settlements` has 1,561 rows with
@@ -124,7 +124,7 @@ Verification:
   `settlements.legacy_finalization_policy_missing=1561`,
   `settlements.legacy_evidence_only=1561`, and
   `settlements.legacy_value_complete` PASS/count 0.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --plan-evidence docs/operations/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_legacy_settlement_evidence_policy/plan.md --json`
   passed.
 - `python3 scripts/topology_doctor.py impact --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py`
   reported no source zones, write routes, hazards, or required tests; it

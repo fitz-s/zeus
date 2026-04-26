@@ -1,5 +1,6 @@
-# Created: 2026-04-25
-# Last reused/audited: 2026-04-25
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-26; last_reused=2026-04-26
+# Purpose: Lock replay CLI and market-events preflight behavior against unsafe diagnostic fallback.
+# Reuse: Run when replay preflight, WU settlement sweep, or replay CLI error handling changes.
 # Authority basis: POST_AUDIT_HANDOFF 4.2.C market-events preflight packet
 from types import SimpleNamespace
 import sys
@@ -8,6 +9,8 @@ import pytest
 
 from src.engine.replay import (
     ReplayPreflightError,
+    ReplayContext,
+    _assert_market_events_ready_for_replay,
     _market_price_linkage_limitations,
     run_replay,
 )
@@ -196,6 +199,39 @@ def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypa
 
     with pytest.raises(ReplayPreflightError, match="Paris:2026-04-03:12°C"):
         run_replay("2026-04-03", "2026-04-03", mode="wu_settlement_sweep")
+
+
+def test_market_events_preflight_matches_bins_semantically(tmp_path):
+    db_path = tmp_path / "semantic-market-label.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        """
+    )
+    _seed_market_events(
+        conn,
+        "Paris",
+        "2026-04-03",
+        ("Will the temperature in Paris be 12°C on April 3?",),
+    )
+    rows = conn.execute(
+        """
+        SELECT city, target_date, settlement_value, winning_bin
+        FROM settlements
+        WHERE target_date = '2026-04-03'
+        """
+    ).fetchall()
+
+    _assert_market_events_ready_for_replay(
+        ReplayContext(conn),
+        rows,
+        start_date="2026-04-03",
+        end_date="2026-04-03",
+        lane="wu_settlement_sweep",
+    )
 
 
 def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monkeypatch):

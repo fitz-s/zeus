@@ -36,7 +36,7 @@ law or implementation permission.
 ### Active Execution Packet
 
 No active execution packet is frozen. The latest closeout evidence packet is
-`task_2026-04-25_p4_readiness_checker/plan.md`.
+`task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/plan.md`.
 
 Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
 already landed and closed; do not reuse those slices as execution packets
@@ -44,8 +44,8 @@ without new evidence. The latest implementation packets closed P2 backfill
 completeness, P2 4.4.A1/A2 revision history, P3 4.5.A metric-read linter
 enforcement, the P3 residual replay usage-path guard, and P3 4.5.B-lite
 obs_v2 reader-gate consumer hardening. The latest closeout evidence packet is
-the P4 readiness checker, which is read-only and records that P4 mutation
-remains blocked by operator evidence. This
+the operations package cleanup packet; the prior P4 readiness checker remains
+read-only evidence that P4 mutation is blocked by operator evidence. This
 router does not authorize production DB mutation, canonical v2 population,
 market-identity backfill, live executor DB authority, legacy-settlement
 promotion, broad P1 source-role/view work, live daily-ingest changes, row-level
@@ -117,28 +117,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-20_workspace_authority_reconstruction/` | packet evidence | Workspace-authority reconstruction execution packet |
 | `task_2026-04-21_gate_f_data_backfill/` | packet evidence | Local Gate F data backfill packet present on disk |
 | `task_2026-04-22_orphan_artifact_cleanup/` | packet evidence | Cleanup of stale root scratch files and inactive workbook artifacts |
-| `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation packet (test-currency + D3/D4/D6 antibody wave + data-readiness-tail follow-ups); includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
+| `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation package; phase evidence lives under `phases/` and includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
 | `task_2026-04-23_live_harvester_enablement_dr33/` | packet evidence | DR-33-A live-harvester enablement packet (code-only scaffold behind ZEUS_HARVESTER_LIVE_ENABLED default OFF) |
 | `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
-| `task_2026-04-24_p0_data_audit_containment/` | packet evidence | Closed P0 post-audit containment packet for read-only training-readiness blockers and legacy-hourly static lint |
-| `task_2026-04-24_p1_source_role_registry/` | packet evidence | Closed P1.1 source-role registry packet (plan `2424264`, implementation `af7dd52`; post-close critic/verifier PASS) |
-| `task_2026-04-24_p1_writer_provenance_gates/` | packet evidence | Closed P1.2 writer provenance gates packet (plan `e498b0d`, implementation `16292e2`; post-close reassessment closed the writer-local slice and corrected future P1/P3 boundaries) |
-| `task_2026-04-24_p1_unsafe_observation_quarantine/` | packet evidence | Closed P1.3 unsafe-observation quarantine diagnostics packet (implementation `7a3524e`; read-only training-readiness blockers for unsafe observation rows) |
-| `task_2026-04-24_p1_legacy_settlement_evidence_policy/` | packet evidence | Closed P1.4 implementation packet for read-only legacy settlement evidence-only / finalization policy blockers before eligibility-view adoption and v2 population (`df9ece5`) |
-| `task_2026-04-24_p1_eligibility_views_training_preflight/` | packet evidence | Closed P1.5/P1.5a packet for script-side eligibility/preflight adapters before any calibration/training cutover (`07c86d8` planning, `99c4ac3` implementation) |
-| `task_2026-04-25_p0_legacy_hourly_evidence_view/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.2.B schema-view packet for `v_evidence_hourly_observations`, bare-table lint proof, and required state-gate test-surface fix (`3e1bda7`) |
-| `task_2026-04-25_p0_market_events_preflight/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.2.C implementation packet for market-events empty-table replay preflight |
-| `task_2026-04-25_p1_daily_observation_writer_provenance/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B-lite packet for WU/HKO daily observation writer provenance identity |
-| `task_2026-04-25_p1_obs_v2_provenance_identity/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.3.B packet for observation_instants_v2 provenance identity and active obs_v2 producer stamps |
 | `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, scope.yaml schema, and tooling_runtime test category |
-| `task_2026-04-25_p2_backfill_completeness_guardrails/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.B-lite packet for script-level backfill completeness manifests and fail-threshold guardrails |
-| `task_2026-04-25_p2_obs_v2_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A1 packet for schema-backed observation_instants_v2 hash-checked revision history |
-| `task_2026-04-25_p2_daily_observation_revision_history/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.4.A2 packet for daily WU/HKO observations backfill revision history |
-| `task_2026-04-25_post_p3_p4_preflight/` | packet evidence | Closed post-P3/P4 preflight evidence packet for remaining blocker and operator-decision gates |
-| `task_2026-04-25_p4_readiness_checker/` | packet evidence | Closed read-only P4 readiness-checker packet for blocker status reporting |
-| `task_2026-04-25_p3_obs_v2_reader_gate/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.5.B-lite packet for obs_v2 reader-gate consumer hardening |
-| `task_2026-04-25_p3_settlement_metric_linter_closeout/` | packet evidence | Closed POST_AUDIT_HANDOFF 4.5.A closeout packet for settlement metric-read lint enforcement |
-| `task_2026-04-25_p3_usage_path_residual_guards/` | packet evidence | Closed P3 residual usage-path guard packet for replay settlement metric predicates and hourly canonical-ban proof |
 | `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
 
 ## Rules
@@ -146,11 +128,19 @@ make a surface default-read unless `current_state.md` routes it.
 - `current_state.md` stays thin: current program, active packet, required
   evidence, freeze point, next action, and compact references to other
   registered surfaces.
-- Non-trivial repo changes update a short work record in the active task folder.
-- New multi-file execution packets use `task_YYYY-MM-DD_name/`.
+- Non-trivial repo changes update a short work record in the active package or
+  phase folder.
+- New independent multi-file packages use `task_YYYY-MM-DD_name/`.
+- New phases of an existing package live under that package, usually
+  `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`; do not create
+  sibling top-level folders for phases of the same package.
 - Do not leave completed packet material in the live pointer after closeout.
 - Runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
   before they are treated as durable work evidence.
+- `state/daemon-heartbeat.json` and `state/status_summary.json` are live
+  runtime projections. Treat them as interference for ordinary docs/source/test
+  packets; exclude them from non-runtime-governance receipts and closeout diffs
+  unless the packet explicitly owns runtime state policy.
 - Current-fact surfaces require fresh packet/operator evidence. Do not update
   them from memory, and re-audit if they are older than their refresh protocol
   allows for the task at hand.

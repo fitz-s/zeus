@@ -39,7 +39,7 @@ allowed_route_classes:
 
 record_contract:
   applies_to: repo_changes
-  preferred_record: docs/operations/task_YYYY-MM-DD_slug/work_log.md
+  preferred_record: docs/operations/task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/work_log.md
   minimum_fields:
     - Date
     - Branch
@@ -50,6 +50,7 @@ record_contract:
     - Next
   approved_record_globs:
     - docs/operations/task_????-??-??_*/work_log.md
+    - docs/operations/task_????-??-??_*/phases/task_????-??-??_*/work_log.md
     - docs/operations/task_????-??-??_*.md
     - docs/operations/runtime_artifact_inventory.md
     - .omx/context/**/*.md
@@ -69,6 +70,7 @@ artifact_classes:
     purpose: Short factual record of what an agent changed, verified, and left next.
     active_paths:
       - docs/operations/task_YYYY-MM-DD_slug/work_log.md
+      - docs/operations/task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/work_log.md
       - docs/operations/task_YYYY-MM-DD_slug.md
     archive_paths:
       - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
@@ -78,6 +80,7 @@ artifact_classes:
     purpose: Multi-file solution package kept as an atomic active unit.
     active_paths:
       - docs/operations/task_YYYY-MM-DD_slug/
+      - docs/operations/task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/
     archive_paths:
       - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/
       - docs/archives/work_packets/trees/<tree-name>/<program_domain>/YYYY-MM-DD_slug/
@@ -88,6 +91,7 @@ artifact_classes:
       - docs/artifacts/
       - docs/to-do-list/
       - docs/operations/task_YYYY-MM-DD_slug/evidence/
+      - docs/operations/task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/evidence/
       - raw/oracle_shadow_snapshots/
       - .omx/context/
     archive_paths:
@@ -116,6 +120,7 @@ classification_rules:
     path_globs:
       - docs/operations/task_????-??-??_*.md
       - docs/operations/task_????-??-??_*/
+      - docs/operations/task_????-??-??_*/phases/task_????-??-??_*/
     artifact_class: active_solution_package
     lifecycle: active
     destination_rule: Keep only active packet/control work here.

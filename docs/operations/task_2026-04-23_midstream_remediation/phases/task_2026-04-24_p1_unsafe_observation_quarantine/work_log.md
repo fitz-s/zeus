@@ -7,16 +7,16 @@ Task: P1.3 unsafe observation quarantine planning packet
 Changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 - `docs/AGENTS.md`
 - `docs/README.md`
 - `architecture/topology.yaml`
 - `architecture/docs_registry.yaml`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Summary:
 - Reopened the phase entry using current root `AGENTS.md` and topology after
@@ -63,11 +63,11 @@ Verification:
   after the architect fix pass.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed after
   the architect fix pass.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md --json`
   passed.
-- `python3 scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md --json`
+- `python3 scripts/topology_doctor.py --work-record --changed-files <files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md --json`
   passed.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files <files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
   passed.
 - `python3 scripts/topology_doctor.py --current-state-receipt-bound --json`
   passed.
@@ -94,7 +94,7 @@ Verification:
   `current_state.md` and this work log on the final next action, and rerun
   whitespace evidence so untracked new packet files are covered. The pointer
   was updated to commit/push-only after reviews.
-- `git add -N docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/{plan.md,work_log.md,receipt.json}`
+- `git add -N docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/{plan.md,work_log.md,receipt.json}`
   followed by `git diff --check --cached -- <new P1.3 packet files>` passed,
   making whitespace evidence real for the new untracked files.
 - After verifier fixes, reran JSON validation, planning-lock, work-record,
@@ -120,9 +120,9 @@ Changed files:
 - `scripts/verify_truth_surfaces.py`
 - `tests/test_truth_surface_health.py`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
-- `docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json`
 
 Summary:
 - Confirmed branch cleanup before implementation: local branches are only
@@ -154,7 +154,7 @@ Verification:
   `docs/operations/known_gaps.md`, and the active P1.3 packet.
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
-- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
+- `python3 scripts/topology_doctor.py --navigation --task "P1.3 unsafe observation quarantine implementation" --files scripts/verify_truth_surfaces.py tests/test_truth_surface_health.py docs/operations/current_state.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/work_log.md docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_unsafe_observation_quarantine/receipt.json --json`
   reported known global docs/source/history-lore red issues and generic source
   modification warnings. These are derived routing debt; this implementation
   stayed inside the active packet's read-only diagnostics/test scope.

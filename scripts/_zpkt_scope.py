@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-26; last_reused=2026-04-26
+# Purpose: Load packet scope sidecars and classify paths for packet-runtime and hook checks.
+# Reuse: Update when scope.yaml location, active-packet pointer semantics, or scope glob behavior changes.
 """Packet scope load + match helpers shared by ``zpkt`` and the pre-commit hook.
 
 Authoritative answer for: *given a staged file path, is it in scope for the
@@ -142,7 +145,7 @@ def classify_many(scope: PacketScope, paths: Iterable[str]) -> list[Classificati
 
 
 def find_active_packet(repo_root: Path) -> str | None:
-    """Read state/active_packet.txt; return packet basename or None."""
+    """Read state/active_packet.txt; return packet path under docs/operations."""
     pointer = repo_root / ACTIVE_PACKET_FILE
     if not pointer.is_file():
         return None

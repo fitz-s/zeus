@@ -167,6 +167,7 @@ raw/**/*.h5
 .claude/settings.local.json
 .claude/**/logs/
 .claude/**/transcripts/
+.claude/worktrees/
 .claude/scheduled_tasks.lock
 
 .code-review-graph/*

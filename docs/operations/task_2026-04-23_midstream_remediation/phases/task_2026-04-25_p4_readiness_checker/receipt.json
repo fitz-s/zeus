@@ -1,13 +1,13 @@
 {
   "task": "P4 read-only readiness checker",
-  "packet": "docs/operations/task_2026-04-25_p4_readiness_checker/plan.md",
-  "scope": "docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/plan.md",
+  "scope": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/scope.yaml",
   "route_source": "manual_packet",
   "status": "closed",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_p4_readiness_checker/plan.md",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/preflight.md"
   ],
   "required_law": [
     "AGENTS.md",
@@ -16,7 +16,7 @@
     "tests/AGENTS.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/preflight.md",
     "architecture/script_manifest.yaml",
     "architecture/test_topology.yaml"
   ],
@@ -27,10 +27,10 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/plan.md",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/work_log.md",
     "scripts/verify_truth_surfaces.py",
     "tests/test_truth_surface_health.py"
   ],
@@ -56,10 +56,10 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/plan.md",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/scope.yaml",
-    "docs/operations/task_2026-04-25_p4_readiness_checker/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p4_readiness_checker/work_log.md",
     "scripts/verify_truth_surfaces.py",
     "tests/test_truth_surface_health.py"
   ],

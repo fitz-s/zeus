@@ -83,9 +83,9 @@ The machine-readable list lives in `scope.yaml`.
 - `python3 scripts/audit_replay_fidelity.py`
 - `python3 scripts/topology_doctor.py --tests --json`
 - `python3 scripts/topology_doctor.py --scripts --json`
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/plan.md`
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files>`
-- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-25_p3_usage_path_residual_guards/work_log.md`
+- `python3 scripts/topology_doctor.py --work-record --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p3_usage_path_residual_guards/work_log.md`
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files <packet tests>`
 - `git diff --check -- <packet files>`
 

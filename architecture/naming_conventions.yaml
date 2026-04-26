@@ -116,6 +116,8 @@ file_naming:
   operations_packets:
     single_file_pattern: "docs/operations/task_YYYY-MM-DD_slug.md"
     folder_pattern: "docs/operations/task_YYYY-MM-DD_slug/"
+    phase_folder_pattern: "docs/operations/task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/"
+    grouping_rule: "Phases of the same package belong under one package folder, not as sibling top-level task folders."
     archive_pattern: "docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/"
   docs:
     rule: Generic names like plan.md/progress.md are allowed only inside active task folders.

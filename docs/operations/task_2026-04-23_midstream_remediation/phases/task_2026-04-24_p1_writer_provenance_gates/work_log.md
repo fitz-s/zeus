@@ -6,9 +6,9 @@ Task: P1.2 observation_instants_v2 writer provenance gates ralplan
 Changed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
-- `docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json`
 - `src/data/observation_instants_v2_writer.py`
 - `tests/test_obs_v2_writer.py`
 
@@ -40,11 +40,11 @@ Verification:
 - `python scripts/topology_doctor.py --code-review-graph-status --json`
   remains known-red on derived graph state from unrelated workspace changes;
   graph output is not authority for this packet.
-- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-24_p1_writer_provenance_gates/plan.md --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/plan.md --json`
   passed for the planning-only changed-file set.
-- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-24_p1_writer_provenance_gates/work_log.md --json`
+- `python scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/work_log.md --json`
   passed.
-- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-24_p1_writer_provenance_gates/receipt.json --json`
+- `python scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p1_writer_provenance_gates/receipt.json --json`
   passed.
 - `python scripts/topology_doctor.py --current-state-receipt-bound --json`
   passed.

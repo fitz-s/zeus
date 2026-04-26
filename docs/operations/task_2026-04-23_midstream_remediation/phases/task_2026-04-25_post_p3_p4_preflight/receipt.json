@@ -1,13 +1,13 @@
 {
   "task": "Post-P3 phase-entry reassessment and P4 preflight evidence",
-  "packet": "docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md",
-  "scope": "docs/operations/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
+  "packet": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md",
+  "scope": "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
   "route_source": "manual_packet",
   "status": "closed_verified",
   "route_evidence": [
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/preflight.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/work_log.md",
     "docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md"
   ],
   "required_law": [
@@ -32,11 +32,11 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/preflight.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/work_log.md"
   ],
   "forbidden_files": [
     "state/zeus-world.db",
@@ -59,11 +59,11 @@
     "docs/README.md",
     "docs/operations/AGENTS.md",
     "docs/operations/current_state.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/preflight.md",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
-    "docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md"
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/preflight.md",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/scope.yaml",
+    "docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/work_log.md"
   ],
   "read_only_evidence": [
     "market_events_v2=0 rows",
@@ -86,11 +86,11 @@
     "find state raw data -maxdepth 3 <TIGGE/market-rule artifact query> -> no local target artifacts found",
     "printenv WU_API_KEY -> missing",
     "python3 scripts/topology_doctor.py --current-state-receipt-bound -> ok",
-    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-25_post_p3_p4_preflight/work_log.md -> ok",
-    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json -> ok",
-    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-25_post_p3_p4_preflight/plan.md -> ok",
+    "python3 scripts/topology_doctor.py --work-record --changed-files <packet files> --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/work_log.md -> ok",
+    "python3 scripts/topology_doctor.py --change-receipts --changed-files <packet files> --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json -> ok",
+    "python3 scripts/topology_doctor.py --planning-lock --changed-files <packet files> --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/plan.md -> ok",
     "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <packet files> -> ok",
-    "python3 -m json.tool docs/operations/task_2026-04-25_post_p3_p4_preflight/receipt.json -> ok",
+    "python3 -m json.tool docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_post_p3_p4_preflight/receipt.json -> ok",
     "git diff --check -- <packet files> -> ok"
   ],
   "known_gaps": [

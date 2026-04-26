@@ -691,6 +691,20 @@ def bin_from_range_label(label: str, unit: str) -> Bin | None:
         return None
 
 
+def _bin_semantic_key(bin: Bin) -> tuple[str, str, str]:
+    """Label-independent identity for replay market-event preflight matching."""
+    low = "open" if bin.low is None else f"{float(bin.low):g}"
+    high = "open" if bin.high is None else f"{float(bin.high):g}"
+    return (bin.unit, low, high)
+
+
+def _range_label_semantic_key(label: str, unit: str) -> tuple[str, str, str] | None:
+    bin = bin_from_range_label(label, unit)
+    if bin is None:
+        return None
+    return _bin_semantic_key(bin)
+
+
 def derive_outcome_from_settlement_value(
     settlement_value: float | None,
     bin: Bin,
@@ -1617,13 +1631,26 @@ def _assert_market_events_ready_for_replay(
     if ctx.allow_snapshot_only_reference:
         return
 
-    required_subjects = sorted({
-        (str(row["city"]), str(row["target_date"]), str(row["winning_bin"] or ""))
-        for row in settlement_rows
-        if row["city"]
-        and row["target_date"]
-        and str(row["city"]) in cities_by_name
-    })
+    required_subjects = []
+    seen_subjects = set()
+    for row in settlement_rows:
+        city_name = str(row["city"]) if row["city"] else ""
+        if not city_name or not row["target_date"] or city_name not in cities_by_name:
+            continue
+        target_date = str(row["target_date"])
+        winning_bin = str(row["winning_bin"] or "")
+        city = cities_by_name[city_name]
+        semantic_key = (
+            _range_label_semantic_key(winning_bin, city.settlement_unit)
+            if winning_bin
+            else None
+        )
+        subject = (city_name, target_date, winning_bin, semantic_key)
+        if subject in seen_subjects:
+            continue
+        seen_subjects.add(subject)
+        required_subjects.append(subject)
+    required_subjects.sort(key=lambda subject: (subject[0], subject[1], subject[2]))
     if not required_subjects:
         return
 
@@ -1645,26 +1672,35 @@ def _assert_market_events_ready_for_replay(
             f"for {lane} subjects before diagnostic output can be trusted"
         ) from exc
 
-    available_pairs = {
-        (str(row["city"]), str(row["target_date"]))
-        for row in market_rows
-    }
-    available_labeled_subjects = {
-        (
-            str(row["city"]),
-            str(row["target_date"]),
-            str(row["range_label"]),
-        )
-        for row in market_rows
-    }
-    missing_subjects = [
-        subject for subject in required_subjects
-        if (
-            subject not in available_labeled_subjects
-            if subject[2]
-            else (subject[0], subject[1]) not in available_pairs
-        )
-    ]
+    available_pairs = set()
+    available_raw_labels: dict[tuple[str, str], set[str]] = {}
+    available_semantic_bins: dict[tuple[str, str], set[tuple[str, str, str]]] = {}
+    for row in market_rows:
+        city_name = str(row["city"])
+        target_date = str(row["target_date"])
+        range_label = str(row["range_label"])
+        pair = (city_name, target_date)
+        available_pairs.add(pair)
+        available_raw_labels.setdefault(pair, set()).add(range_label)
+        city = cities_by_name.get(city_name)
+        if city is None:
+            continue
+        semantic_key = _range_label_semantic_key(range_label, city.settlement_unit)
+        if semantic_key is not None:
+            available_semantic_bins.setdefault(pair, set()).add(semantic_key)
+
+    missing_subjects = []
+    for city_name, target_date, winning_bin, semantic_key in required_subjects:
+        pair = (city_name, target_date)
+        if not winning_bin:
+            if pair not in available_pairs:
+                missing_subjects.append((city_name, target_date, winning_bin))
+            continue
+        if semantic_key is not None and semantic_key in available_semantic_bins.get(pair, set()):
+            continue
+        if winning_bin in available_raw_labels.get(pair, set()):
+            continue
+        missing_subjects.append((city_name, target_date, winning_bin))
     if not missing_subjects:
         return
 

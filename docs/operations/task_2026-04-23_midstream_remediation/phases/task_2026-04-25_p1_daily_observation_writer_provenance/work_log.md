@@ -14,9 +14,9 @@ Changed files:
 - `docs/README.md`
 - `docs/operations/current_state.md`
 - `docs/operations/AGENTS.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md`
-- `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json`
 
 Summary:
 - Selected a narrow 4.3.B-lite packet after phase-entry reassessment: stop
@@ -41,11 +41,11 @@ Verification:
 - `python3 scripts/topology_doctor.py --task-boot-profiles --json` passed.
 - `python3 scripts/topology_doctor.py --fatal-misreads --json` passed.
 - `python3 scripts/topology_doctor.py --tests --json` passed.
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json` passed.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md --json` passed.
 - `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit --changed-files ... --json` required registry companions before closeout; companions were updated and rerun passed.
-- `python3 scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json` passed.
-- `python3 scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json` passed.
-- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json` passed.
+- `python3 scripts/topology_doctor.py --work-record --changed-files ... --work-record-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/work_log.md --json` passed.
+- `python3 scripts/topology_doctor.py --change-receipts --changed-files ... --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json` passed.
+- `python3 scripts/topology_doctor.py --current-state-receipt-bound --receipt-path docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-25_p1_daily_observation_writer_provenance/receipt.json --json` passed.
 - `.venv/bin/python -m py_compile scripts/backfill_wu_daily_all.py scripts/backfill_hko_daily.py tests/test_k2_live_ingestion_relationships.py` passed.
 - `.venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -k "provenance_identity" -q` passed: 4 tests.
 - `.venv/bin/python -m pytest tests/test_k2_live_ingestion_relationships.py -q` passed: 38 tests.

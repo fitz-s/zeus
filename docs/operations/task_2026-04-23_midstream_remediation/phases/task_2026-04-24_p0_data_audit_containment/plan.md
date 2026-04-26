@@ -32,9 +32,9 @@ Allowed files:
 - `docs/operations/AGENTS.md`
 - `docs/operations/current_state.md`
 - `docs/operations/runtime_artifact_inventory.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/plan.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/work_log.md`
-- `docs/operations/task_2026-04-24_p0_data_audit_containment/receipt.json`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/plan.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/work_log.md`
+- `docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_p0_data_audit_containment/receipt.json`
 
 Forbidden files:
 
