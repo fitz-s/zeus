@@ -28,6 +28,40 @@ from src.contracts.calibration_bins import F_CANONICAL_GRID, C_CANONICAL_GRID
 _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
 
+# Slice P3-fix2 (post-review MAJOR from both reviewers, 2026-04-26):
+# per-(path, cluster, season, metric) seen-set for v2→legacy fallback
+# WARNING dedup. v2 coverage may be sparse → without dedup the alert
+# fires every cycle for every uncovered bucket, drowning ops attention.
+# With dedup: first occurrence per process lifetime emits the WARNING;
+# subsequent identical fallbacks suppress (operator already alerted).
+# Module-level set is intentional — survives across get_calibrator
+# invocations within the same process.
+_V2_FALLBACK_SEEN: set[tuple[str, str, str, str]] = set()
+
+
+def _emit_v2_legacy_fallback_warning(
+    path: str, cluster: str, season: str, metric: str
+) -> None:
+    """Emit a deduplicated WARNING when v2 misses and legacy fills.
+
+    `path` is one of "primary" (cluster+season primary bucket) or
+    "season-pool" (season-only fallback to a different cluster). The
+    leading `v2_to_legacy_fallback path=...` token is stable so log
+    aggregators can group both paths into the same logical event family
+    while still distinguishing the originating fallback site.
+    """
+    key = (path, cluster, season, metric)
+    if key in _V2_FALLBACK_SEEN:
+        return
+    _V2_FALLBACK_SEEN.add(key)
+    logger.warning(
+        "v2_to_legacy_fallback path=%s cluster=%s season=%s metric=%s "
+        "v2 missed; serving legacy platt_models. Operator review v2 "
+        "coverage gap (per-bucket dedup — first occurrence only).",
+        path, cluster, season, metric,
+    )
+
+
 def lat_for_city(city_name: str) -> float:
     """Look up latitude for a city by name. Returns 90.0 (NH default) if not found."""
     from src.config import cities_by_name
@@ -170,18 +204,14 @@ def get_calibrator(
         # Legacy fallback only for HIGH — LOW has never existed in legacy
         bk = bucket_key(cluster, season)
         model_data = load_platt_model(conn, bk)
-        # Slice P3.4 (PR #19 phase 3, 2026-04-26): operator-visible WARNING
-        # when v2 misses and legacy fills. Pre-fix the fallback executed
-        # silently — operators monitoring calibration health had no signal
-        # that v2 coverage was incomplete for this (cluster, season). Surface
-        # the event so ops can drive v2-coverage backfill priority.
+        # Slice P3.4 + P3-fix2 (post-review MAJOR from both reviewers,
+        # 2026-04-26): operator-visible WARNING when v2 misses and legacy
+        # fills, deduplicated per-(path,cluster,season,metric) for the
+        # process lifetime. v2 coverage may be sparse → first cycle alerts
+        # operator; subsequent cycles for the same bucket suppress to
+        # avoid log spam (one fact, one alert).
         if model_data is not None:
-            logger.warning(
-                "v2_to_legacy_fallback: cluster=%s season=%s metric=high "
-                "primary v2 missed; serving legacy platt_models. Operator "
-                "review v2 coverage gap.",
-                cluster, season,
-            )
+            _emit_v2_legacy_fallback_warning("primary", cluster, season, "high")
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(
@@ -242,15 +272,10 @@ def get_calibrator(
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
             model_data = load_platt_model(conn, bk_fb)
-            # Slice P3.4 (PR #19 phase 3, 2026-04-26): twin-site WARNING
-            # for season-only fallback path.
+            # Slice P3.4 + P3-fix2: twin-site dedup per-bucket WARNING.
             if model_data is not None:
-                logger.warning(
-                    "v2_to_legacy_fallback: cluster=%s (season-fallback) "
-                    "season=%s metric=high primary v2 missed; serving legacy "
-                    "platt_models from fallback cluster. Operator review "
-                    "v2 coverage gap.",
-                    fallback_cluster, season,
+                _emit_v2_legacy_fallback_warning(
+                    "season-pool", fallback_cluster, season, "high",
                 )
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":

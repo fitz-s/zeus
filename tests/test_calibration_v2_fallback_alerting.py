@@ -156,6 +156,46 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
     )
 
 
+def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
+    """Slice P3-fix2: per-(path,cluster,season,metric) dedup. First fallback
+    emits WARNING; subsequent identical fallbacks suppress. Avoids log
+    spam when v2 coverage is sparse and many cycles hit the same bucket.
+
+    NOTE: this test runs after other tests in the same file that
+    populate _V2_FALLBACK_SEEN — clear it first for hermeticity.
+    """
+    from src.calibration.manager import _V2_FALLBACK_SEEN
+    _V2_FALLBACK_SEEN.clear()
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    city = _city()
+
+    monkeypatch.setattr(
+        mgr_module, "load_platt_model_v2",
+        lambda conn, *, temperature_metric, cluster, season: None,
+    )
+    monkeypatch.setattr(
+        mgr_module, "load_platt_model",
+        lambda conn, bk: _populated_legacy_model(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
+        for _ in range(3):
+            get_calibrator(conn, city, "2026-01-15", temperature_metric="high")
+
+    fallback_warnings = [
+        r for r in caplog.records
+        if "v2_to_legacy_fallback" in r.message
+    ]
+    assert len(fallback_warnings) == 1, (
+        f"P3-fix2 dedup antibody: 3 cycles for same (cluster, season, metric) "
+        f"bucket must emit exactly 1 WARNING (got {len(fallback_warnings)}). "
+        "Without dedup, sparse v2 coverage → log spam every cycle."
+    )
+
+
 def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
     """LOW callers skip legacy fallback entirely (per Phase 9C L3 + slice A2).
     No fallback warning should fire even when v2 misses."""
