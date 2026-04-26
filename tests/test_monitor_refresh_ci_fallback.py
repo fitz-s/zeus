@@ -127,13 +127,18 @@ def test_no_bootstrap_negative_entry_width_clamped_to_zero():
 
 
 def test_with_bootstrap_ctx_overrides_entry_fallback_via_source_check():
-    """Source-inspection check: monitor_refresh.py L719-735 must contain
+    """[TEXT-PINNING ANTIBODY — fragile to legitimate refactors]
+
+    Source-inspection check: monitor_refresh.py L719-735 must contain
     the bootstrap-context override block AFTER the entry_ci_width fallback.
 
-    A future refactor that accidentally removes the override path (so
-    even bootstrap-present cases fall back to entry CI) would silently
-    regress entry/exit symmetry on the happy path. This test pins the
-    code structure."""
+    Per code-reviewer M2 (2026-04-26 phase 3 review): this is a text-
+    pinning antibody, not a behavioral test. A future refactor that
+    legitimately extracts the fallback to a helper (preserving behavior)
+    will break this test. Keep as a regression-grep guard until/unless
+    a true integration test that drives refresh_position end-to-end is
+    available — see test_pre_live_integration.py for the harness shape
+    such a test would require."""
     import inspect
     from src.engine import monitor_refresh
     src = inspect.getsource(monitor_refresh)
@@ -150,10 +155,16 @@ def test_with_bootstrap_ctx_overrides_entry_fallback_via_source_check():
 
 
 def test_p3_2_replaced_pre_fix_degenerate_initialization():
-    """Antibody pin: the pre-fix `ci_lower = current_forward_edge` /
+    """[TEXT-PINNING ANTIBODY — fragile to legitimate refactors]
+
+    Antibody pin: the pre-fix `ci_lower = current_forward_edge` /
     `ci_upper = current_forward_edge` initialization must NOT exist in
     monitor_refresh.py anymore. A future regression that re-introduces
-    the degenerate pattern would trip this test."""
+    the degenerate pattern would trip this test.
+
+    Per code-reviewer M2 (2026-04-26 phase 3 review): same caveat as
+    test_with_bootstrap_ctx_overrides_entry_fallback_via_source_check —
+    text-pinning, not behavioral."""
     from src.engine import monitor_refresh
     import inspect
     src = inspect.getsource(monitor_refresh)

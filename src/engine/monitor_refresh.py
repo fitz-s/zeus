@@ -718,19 +718,35 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     current_forward_edge = current_p_posterior - current_p_market
 
     # A1: Recompute bootstrap CI from fresh data (symmetric with entry path).
-    # Slice P3.2 (PR #19 phase 3, 2026-04-26): when fresh bootstrap CI is
-    # unavailable (no cached _bootstrap_context — e.g. position re-loaded
-    # from JSON fallback after process restart, or test fixture without
-    # the cached context), fall back to entry's CI width rather than the
-    # pre-fix degenerate `ci_lower = ci_upper = current_forward_edge`
-    # (zero width). With degenerate fallback, conservative_forward_edge
-    # collapsed to point-estimate logic — exit decisions reverted to
-    # raw-point edge, breaking the entry/exit epistemic-symmetry contract
-    # that known_gaps.md says was fixed for the bootstrap-present path.
+    # Slice P3.2 + P3-fix3 (post-review critic Major #2, 2026-04-26): when
+    # fresh bootstrap CI is unavailable (no cached _bootstrap_context — e.g.
+    # position re-loaded from JSON fallback after process restart, or test
+    # fixture without the cached context), fall back to entry's CI width
+    # rather than the pre-P3.2 degenerate `ci_lower = ci_upper =
+    # current_forward_edge` (zero width). With degenerate fallback,
+    # conservative_forward_edge collapsed to point-estimate logic —
+    # exit decisions reverted to raw-point edge, breaking the entry/exit
+    # epistemic-symmetry contract that known_gaps.md says was fixed for
+    # the bootstrap-present path.
+    #
+    # CAVEAT (critic Major #2): entry_ci_width is FROZEN at entry-time
+    # (cycle_runtime.py:273; never updated post-entry). For positions held
+    # past significant bin-distribution evolution, this fallback gives
+    # STALE-but-defensive CI width — wider than current truth in late-
+    # cycle scenarios. Operationally bounded to post-restart first-cycle
+    # window since the recompute branch dominates steady-state. DEBUG
+    # log emitted on fallback so operators can audit incidence.
     _entry_ci_half = max(0.0, getattr(pos, "entry_ci_width", 0.0)) / 2.0
     ci_lower = current_forward_edge - _entry_ci_half
     ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
+    if bootstrap_ctx is None or len(bootstrap_ctx.get("bins", []) if bootstrap_ctx else []) <= 1:
+        logger.debug(
+            "P3.2 fallback: no _bootstrap_context; using stale entry_ci_width "
+            "for trade=%s entry_ci_width=%.6f",
+            getattr(pos, "trade_id", "?"),
+            getattr(pos, "entry_ci_width", 0.0),
+        )
     if bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
             from src.strategy.market_analysis import MarketAnalysis

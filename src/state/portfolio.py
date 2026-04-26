@@ -234,6 +234,13 @@ class Position:
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
     day0_entered_at: str = ""
+    # Slice P3-fix3 (post-review critic Major #2, 2026-04-26): ENTRY-TIME
+    # SNAPSHOT — frozen at construction (cycle_runtime.py:273) and NOT
+    # refreshed post-entry. Consumers reading this for stale-but-
+    # defensive CI fallback (e.g. monitor_refresh.py:730 P3.2) must
+    # accept that the width reflects entry-time bin geometry, not
+    # current. Steady-state uses fresh bootstrap CI; this fallback is
+    # bounded to post-restart first-cycle window.
     entry_ci_width: float = 0.0
 
     # Entry context (immutable snapshot — Blueprint v2 §2)
