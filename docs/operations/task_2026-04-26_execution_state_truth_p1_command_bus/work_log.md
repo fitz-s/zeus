@@ -311,3 +311,70 @@ pytest [wide-sweep 8 files] --tb=no -q  # 18 failed (parity with baseline)
 ### Commit
 
 `f7fc9be` u2014 P1.S3 followup: critic + reviewer fixes u2014 DB target, close, collision-retry, payload, fixtures
+
+## 2026-04-26 u2014 P1.S4: Command recovery loop u2014 INV-31
+
+### Scope landed
+
+New recovery loop that runs at cycle start, scanning venue_commands for rows in
+IN_FLIGHT_STATES and reconciling each against venue truth via `get_order` lookup.
+Appends durable events per the u00a7P1.S4 resolution table. Opens its own trade conn
+internally (P1.S5 will thread from cycle_runner).
+
+### Sequence executed
+
+1. Read `implementation_plan.md` u00a7P1.S4, `command_bus.py`, `venue_command_repo.py`,
+   `polymarket_client.py`, and `cycle_runner.py` for full context.
+2. Extended `src/data/polymarket_client.py`: added `get_order(order_id)` u2014 wraps
+   `_clob_client.get_order`, normalizes to `{orderID, status}`, returns `None` on
+   404/not-found (catches `httpx.HTTPStatusError` + "not found" text heuristic).
+3. Created `src/execution/command_recovery.py`: `reconcile_unresolved_commands(conn, client)`
+   with lazy-init for both args; `_reconcile_row()` applies the resolution table;
+   per-row try/except so a single bad row cannot kill the loop.
+4. Wired into `src/engine/cycle_runner.py`: after chain-sync/orphan-cleanup block,
+   before entry-bankroll / entry-decision blocks; wrapped in try/except that records
+   `summary["command_recovery"]` on both success and error paths.
+5. Added INV-31 to `architecture/invariants.yaml` (YAML-safe u2014 removed `):` pattern
+   that triggered ScannerError on the `caveat):` parenthetical in earlier draft).
+6. Created `tests/test_command_recovery.py` u2014 11 tests (8 INV-31 anchor + 3 supplementary).
+
+### Grammar deviation from plan
+
+The plan specified SUBMITTING-without-venue_order_id u2192 EXPIRED. `_TRANSITIONS` has
+no `("SUBMITTING", "EXPIRED")` edge (operator decision; plan explicitly forbids
+modifying `_TRANSITIONS`). Recovery emits `REVIEW_REQUIRED` instead (legal from
+SUBMITTING) with `payload["reason"] = "recovery_no_venue_order_id"`. Documented in
+module docstring and test comment. Test name kept as `test_submitting_without_order_id_resolves_to_expired`
+per INV-31 manifest but assertion checks `REVIEW_REQUIRED`.
+
+### Cross-DB handling
+
+Recovery opens its own `get_trade_connection_with_world()` connection when `conn=None`
+(try/finally close). Cycle_runner passes no conn today and calls
+`reconcile_unresolved_commands()` with no args; P1.S5 will thread the trade conn.
+
+### Verification commands
+
+```
+pytest tests/test_command_recovery.py -v
+  -> 11 passed
+
+pytest tests/test_executor_command_split.py tests/test_p0_hardening.py \
+       tests/test_command_bus_types.py tests/test_venue_command_repo.py -v
+  -> 136 passed, 1 skipped  (no regression vs P1.S3 baseline)
+
+pytest tests/ -q [wide sweep]
+  -> 129 failed, 2837 passed  (baseline b5fffb6: 130 failed -- no regression)
+```
+
+### Touched files
+
+- `src/execution/command_recovery.py` u2014 new module (INV-31 recovery loop)
+- `src/data/polymarket_client.py` u2014 `get_order()` SDK passthrough
+- `src/engine/cycle_runner.py` u2014 recovery call after chain-sync
+- `architecture/invariants.yaml` u2014 INV-31
+- `tests/test_command_recovery.py` u2014 new (11 tests)
+
+### Commit
+
+`828319d` u2014 Land P1.S4: command recovery loop u2014 INV-31
