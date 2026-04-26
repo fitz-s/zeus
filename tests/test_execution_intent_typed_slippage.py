@@ -113,3 +113,46 @@ def test_slippage_bps_rejects_inconsistent_zero_direction():
     """value_bps=0 with direction!="zero" is incoherent and rejected."""
     with pytest.raises(ValueError, match="incompatible with value_bps=0"):
         SlippageBps(value_bps=0.0, direction="adverse")
+
+
+# -----------------------------------------------------------------------------
+# Slice P3-fix1 (post-review BLOCKER): __post_init__ runtime isinstance guard
+# -----------------------------------------------------------------------------
+
+
+def test_execution_intent_rejects_raw_float_max_slippage():
+    """P3-fix1 antibody: raw float must be rejected at construction time.
+
+    Pre-fix the type annotation was a forward-ref string (TYPE_CHECKING),
+    so passing 0.02 silently stored as float — typing seam was illusory.
+    Post-fix the dataclass __post_init__ runs an isinstance check.
+    """
+    with pytest.raises(TypeError, match="must be SlippageBps"):
+        ExecutionIntent(
+            direction=Direction.YES,
+            target_size_usd=10.0,
+            limit_price=0.50,
+            toxicity_budget=0.05,
+            max_slippage=0.02,  # raw float — must raise
+            is_sandbox=False,
+            market_id="test-market",
+            token_id="test-token",
+            timeout_seconds=30,
+        )
+
+
+def test_execution_intent_rejects_other_non_slippage_types():
+    """Defensive: any non-SlippageBps value rejected, not just floats."""
+    for bad in (None, 200, "200bps", {"value_bps": 200}):
+        with pytest.raises(TypeError, match="must be SlippageBps"):
+            ExecutionIntent(
+                direction=Direction.YES,
+                target_size_usd=10.0,
+                limit_price=0.50,
+                toxicity_budget=0.05,
+                max_slippage=bad,  # type: ignore[arg-type]
+                is_sandbox=False,
+                market_id="test-market",
+                token_id="test-token",
+                timeout_seconds=30,
+            )
