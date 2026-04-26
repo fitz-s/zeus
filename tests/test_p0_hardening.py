@@ -517,6 +517,127 @@ class TestR3RuntimePostureBlocksEntry:
 
 
 # ---------------------------------------------------------------------------
+# R-W — execution-truth warnings (P0.3 / INV-27)
+# ---------------------------------------------------------------------------
+
+
+def test_inv27_execution_truth_warnings_law_registered():
+    """INV-27 must be registered with non-empty enforced_by."""
+    manifest = _load_yaml("architecture/invariants.yaml")
+    by_id = {item["id"]: item for item in manifest["invariants"]}
+    assert "INV-27" in by_id, "INV-27 (execution-truth warnings surface) missing from invariants.yaml"
+    assert by_id["INV-27"].get("enforced_by"), "INV-27 must declare enforced_by"
+
+
+class TestRWExecutionTruthWarnings:
+    """R-W: cycle summary surfaces operator-visible warnings for portfolio
+    positions in execution-unsafe states. Observability-only — never blocks
+    entries (operator decision 2026-04-26). INV-27.
+
+    Detection rules under K4-deferred heuristics:
+    - quarantined state + empty order_id → quarantine_without_order_authority
+    - pending_* state + empty order_id → pending_state_missing_order_id
+    """
+
+    def _make_position(self, *, state: str, order_id: str = "", trade_id: str = "pos-test"):
+        from src.state.portfolio import Position
+        return Position(
+            trade_id=trade_id,
+            market_id="m1",
+            city="NYC",
+            cluster="us-east",
+            target_date="2026-05-01",
+            bin_label="50-51",
+            direction="buy_yes",
+            size_usd=100.0,
+            entry_price=0.5,
+            p_posterior=0.5,
+            edge=0.0,
+            entry_ci_width=0.05,
+            state=state,
+            order_id=order_id,
+        )
+
+    def test_quarantined_without_order_id_surfaces_warning(self):
+        from src.engine.cycle_runner import _collect_execution_truth_warnings
+        from src.state.portfolio import PortfolioState
+
+        portfolio = PortfolioState(
+            positions=[self._make_position(state="quarantined", order_id="", trade_id="q-1")],
+            bankroll=150.0,
+        )
+        warnings = _collect_execution_truth_warnings(portfolio)
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["type"] == "quarantine_without_order_authority"
+        assert w["trade_id"] == "q-1"
+        assert w["state"] == "quarantined"
+        assert "no venue command authority" in w["reason"].lower() or "no order_id" in w["reason"].lower()
+
+    def test_pending_state_without_order_id_surfaces_warning(self):
+        from src.engine.cycle_runner import _collect_execution_truth_warnings
+        from src.state.portfolio import PortfolioState
+
+        portfolio = PortfolioState(
+            positions=[self._make_position(state="pending_tracked", order_id="", trade_id="p-1")],
+            bankroll=150.0,
+        )
+        warnings = _collect_execution_truth_warnings(portfolio)
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["type"] == "pending_state_missing_order_id"
+        assert w["trade_id"] == "p-1"
+        assert w["state"] == "pending_tracked"
+
+    def test_clean_portfolio_emits_no_warnings_key(self):
+        """A clean portfolio must produce zero warnings; summary should not gain
+        a stale execution_truth_warnings key when there is nothing to surface.
+        """
+        from src.engine.cycle_runner import _collect_execution_truth_warnings
+        from src.state.portfolio import PortfolioState
+
+        portfolio = PortfolioState(
+            positions=[
+                self._make_position(state="holding", order_id="ord-123", trade_id="a-1"),
+                self._make_position(state="pending_tracked", order_id="ord-456", trade_id="a-2"),
+            ],
+            bankroll=150.0,
+        )
+        warnings = _collect_execution_truth_warnings(portfolio)
+        assert warnings == []
+
+    def test_warnings_do_not_block_entries(self, monkeypatch):
+        """Operator decision 2026-04-26: surface only, do not block. The
+        cycle_runner entry-decision path must NOT consult
+        execution_truth_warnings as a block reason.
+        """
+        from src.engine import cycle_runner as cr
+        # Search the runner source: the warnings key must not appear in the
+        # entry-block elif chain (line range around the elif chain). Use a
+        # source-text containment check: presence of execution_truth_warnings
+        # in any branch that assigns entries_blocked_reason.
+        src = (ROOT / "src/engine/cycle_runner.py").read_text()
+        assert "summary[\"execution_truth_warnings\"]" in src, (
+            "execution_truth_warnings must be surfaced into summary"
+        )
+        # The warning collection must NOT appear in the entries_blocked_reason
+        # elif chain. We assert the helper is called BEFORE entries_blocked_reason
+        # is initialized (line index ordering).
+        warn_idx = src.find("_collect_execution_truth_warnings(portfolio)")
+        block_init_idx = src.find("entries_blocked_reason = None")
+        assert warn_idx > 0 and block_init_idx > 0, "code anchors must be present"
+        assert warn_idx < block_init_idx, (
+            "Warning collection must be observability-only and run before the "
+            "entry-decision elif chain. Found warning collection at index "
+            f"{warn_idx} but entries_blocked_reason init at {block_init_idx}."
+        )
+        # Verify no entries_blocked_reason branch references execution_truth_warnings
+        assert "execution_truth_warnings" not in src.split("entries_blocked_reason = None")[1].split("if entries_blocked_reason is None and _current_posture")[0], (
+            "execution_truth_warnings must not appear in the entry-block elif chain"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle hint — explicit deferrals
 # ---------------------------------------------------------------------------
 

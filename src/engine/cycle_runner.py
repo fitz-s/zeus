@@ -108,6 +108,51 @@ def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
     return risk_level == RiskLevel.GREEN
 
 
+# P0.3 (INV-27): observability-only surfacing of positions in execution-unsafe
+# states. Operator decision 2026-04-26: surface warnings, do NOT block entries.
+# K4 (P1+) will replace these heuristics with command-truth integration.
+_PENDING_STATE_PREFIX = "pending_"
+_QUARANTINED_STATE_VALUES = frozenset({"quarantined", "quarantine_expired"})
+
+
+def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
+    """Scan portfolio for positions in execution-unsafe states.
+
+    Returns a list of warning dicts. Each warning carries enough identity
+    (trade_id, state) for an operator to investigate; we do not block entries.
+
+    Detection rules (P0 conservative — pre-K4):
+    - Position in any quarantined state with empty `order_id`
+      → "quarantine_without_order_authority"
+    - Position in any pending_* state with empty `order_id`
+      → "pending_state_missing_order_id"
+
+    Once K4 lands a durable command journal, these heuristics are replaced
+    with command-truth lookup (UNKNOWN command authority for that position).
+    """
+    warnings: list[dict] = []
+    for pos in portfolio.positions:
+        raw_state = getattr(pos, "state", "") or ""
+        state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
+        order_id = str(getattr(pos, "order_id", "") or "").strip()
+        trade_id = getattr(pos, "trade_id", "") or ""
+        if state_val in _QUARANTINED_STATE_VALUES and not order_id:
+            warnings.append({
+                "type": "quarantine_without_order_authority",
+                "trade_id": trade_id,
+                "state": state_val,
+                "reason": "Position is quarantined without order_id; no venue command authority to verify state.",
+            })
+        elif state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
+            warnings.append({
+                "type": "pending_state_missing_order_id",
+                "trade_id": trade_id,
+                "state": state_val,
+                "reason": "Position in pending state without order_id; execution truth is unknown.",
+            })
+    return warnings
+
+
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
     if mode == DiscoveryMode.DAY0_CAPTURE:
         return "settlement_capture"
@@ -322,6 +367,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
+
+    # INV-27 / P0.3: surface execution-truth warnings for operator visibility.
+    # Observability-only — never blocks entries (per operator decision 2026-04-26).
+    # K4 (P1+) will replace this heuristic scan with command-journal truth.
+    _exec_truth_warnings = _collect_execution_truth_warnings(portfolio)
+    if _exec_truth_warnings:
+        summary["execution_truth_warnings"] = _exec_truth_warnings
 
     entries_blocked_reason = None
     has_quarantine = any(

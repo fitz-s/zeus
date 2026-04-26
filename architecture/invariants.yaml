@@ -210,3 +210,13 @@ invariants:
       tests:
         - tests/test_p0_hardening.py::TestR3RuntimePostureBlocksEntry::test_cycle_runner_posture_gate_blocks_with_reason
         - tests/test_p0_hardening.py::test_runtime_posture_yaml_present
+  - id: INV-27
+    zones: [K2_runtime]
+    statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
+    why: Without explicit operator visibility into execution-truth gaps, positions in unsafe states (quarantined without command authority, pending without order_id) silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Surfacing must not block entries (operator decision 2026-04-26) so entry-decision logic remains driven by risk_level / posture / quarantine, not by surface-warning side effects.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
