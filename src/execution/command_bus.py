@@ -105,23 +105,61 @@ TERMINAL_STATES: frozenset[CommandState] = frozenset({
     CommandState.REJECTED,
 })
 
+# Post-critic MAJOR-3 (2026-04-26): REVIEW_REQUIRED is a *quasi-terminal*
+# state. It is in IN_FLIGHT_STATES so the recovery loop / operator dashboards
+# surface it, but the closed grammar has zero outgoing transitions from it.
+# Operator manually voids/resolves the row out-of-band (e.g. by inserting a
+# follow-up command with a fresh idempotency key); the system does not
+# auto-recover. P1.S4 will add an explicit operator-unblock event type if
+# needed; deferring that decision keeps the grammar small.
+
+# Post-critic MAJOR-4 (2026-04-26): IdempotencyKey factory token.
+# Direct construction `IdempotencyKey(value="...")` is forbidden — callers
+# must use from_inputs() (for new commands) or from_external() (for row
+# projection). The sentinel object below is module-private; external code
+# cannot mint a matching token, so __post_init__ rejects any external
+# construction. Closes the "hand-rolled key monopolizes idempotency slot"
+# attack surface.
+_FACTORY_TOKEN: object = object()
+
 
 @dataclass(frozen=True)
 class IdempotencyKey:
     """SHA-256-derived deterministic key (D-P1-4-a).
 
-    Always construct via `from_inputs(...)`; the bare `value` field carries
-    the resulting 32-char hex prefix. Stable across separate Python process
-    invocations because hashlib is content-addressed and the canonicalization
-    is fully specified.
+    Construction policy: callers must use one of two factories:
+      - `from_inputs(...)` — for NEW commands; deterministic from canonical inputs
+      - `from_external(value)` — for row projection; wraps a value already
+        persisted to venue_commands.idempotency_key
+
+    Direct `IdempotencyKey(value="...")` is forbidden (raises TypeError).
+    The `_provenance` field is a private sentinel; external code cannot mint
+    a matching token.
     """
     value: str
+    _provenance: object = None
 
     def __post_init__(self) -> None:
+        if self._provenance is not _FACTORY_TOKEN:
+            raise TypeError(
+                "IdempotencyKey must be constructed via from_inputs(...) for new "
+                "commands or from_external(...) for row projection; direct "
+                "construction is forbidden (post-critic MAJOR-4)."
+            )
         if not isinstance(self.value, str):
             raise TypeError(f"IdempotencyKey.value must be str, got {type(self.value).__name__}")
         if len(self.value) != 32:
             raise ValueError(f"IdempotencyKey.value must be 32 hex chars, got {len(self.value)}")
+
+    @classmethod
+    def from_external(cls, value: str) -> "IdempotencyKey":
+        """Wrap a value already persisted to the venue_commands row.
+
+        Used by VenueCommand.from_row and any code that reads an idempotency
+        key string back from storage. Performs the same length/type checks as
+        from_inputs but skips canonicalization.
+        """
+        return cls(value=value, _provenance=_FACTORY_TOKEN)
 
     @staticmethod
     def from_inputs(
@@ -177,7 +215,7 @@ class IdempotencyKey:
             intent_kind.value,
         ])
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return IdempotencyKey(value=digest[:32])
+        return IdempotencyKey(value=digest[:32], _provenance=_FACTORY_TOKEN)
 
 
 @dataclass(frozen=True)
@@ -202,8 +240,12 @@ class VenueCommand:
     size: float
     price: float
     state: CommandState
-    venue_order_id: str = ""
-    last_event_id: str = ""
+    # Post-critic MAJOR-2 (2026-04-26): Optional[str] = None preserves SQL NULL
+    # semantics on the venue_order_id and last_event_id columns. P1.S3 row
+    # projection must distinguish "no order placed yet" (None) from "venue
+    # returned an empty order id" (which would be a venue bug worth surfacing).
+    venue_order_id: Optional[str] = None
+    last_event_id: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
     review_required_reason: Optional[str] = None
@@ -248,11 +290,16 @@ class VenueCommand:
             raise ValueError(
                 f"venue_commands.state={row.get('state')!r} is not a valid CommandState"
             ) from exc
+        # NULL preservation: do NOT collapse SQL NULL → "" via `or ""`.
+        # venue_order_id and last_event_id pass through as None when NULL.
+        # created_at and updated_at are NOT NULL in schema, so default to ""
+        # only as a defensive fallback for malformed rows (would surface in
+        # tests).
         return cls(
             command_id=row["command_id"],
             position_id=row["position_id"],
             decision_id=row["decision_id"],
-            idempotency_key=IdempotencyKey(value=row["idempotency_key"]),
+            idempotency_key=IdempotencyKey.from_external(row["idempotency_key"]),
             intent_kind=intent_kind_val,
             market_id=row["market_id"],
             token_id=row["token_id"],
@@ -260,8 +307,8 @@ class VenueCommand:
             size=float(row["size"]),
             price=float(row["price"]),
             state=state_val,
-            venue_order_id=row.get("venue_order_id") or "",
-            last_event_id=row.get("last_event_id") or "",
+            venue_order_id=row.get("venue_order_id"),
+            last_event_id=row.get("last_event_id"),
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
             review_required_reason=row.get("review_required_reason"),

@@ -170,7 +170,25 @@ def insert_command(
     then updates last_event_id on the command row.
 
     Raises sqlite3.IntegrityError if idempotency_key already exists.
+    Raises ValueError if intent_kind / side are not in their closed enum
+    grammar (post-critic MAJOR-1: pre-fix the repo persisted any string;
+    now it rejects "GIBBERISH" / "LONG" / etc. before INSERT). Defers the
+    full enum object to command_bus to avoid a circular import.
     """
+    # MAJOR-1: enum-grammar validation at the repo seam. Imported lazily so
+    # this module stays import-light and the type module doesn't have to
+    # depend on the repo.
+    from src.execution.command_bus import IntentKind as _IntentKind
+    if intent_kind not in {k.value for k in _IntentKind}:
+        raise ValueError(
+            f"intent_kind={intent_kind!r} is not a valid IntentKind; "
+            f"expected one of {sorted(k.value for k in _IntentKind)}"
+        )
+    if side not in ("BUY", "SELL"):
+        raise ValueError(
+            f"side={side!r} must be 'BUY' or 'SELL'"
+        )
+
     event_id = _new_id()
 
     with _savepoint_atomic(conn):
