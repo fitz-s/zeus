@@ -98,6 +98,12 @@ constraints:
         - zeus-no-fdr-family-key-drift
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+  - id: NC-16
+    statement: No direct place_limit_order call outside the gateway boundary (currently src/execution/executor.py and the SDK wrapper src/data/polymarket_client.py).
+    invariants: [INV-24]
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
   - id: NC-17
     statement: ExecutionIntent must not carry decorative capability labels (slice_policy, reprice_policy, liquidity_guard, or any future label) without an enforcing executor branch that exhibits real capability behavior. Logging-only branches do not count.
     invariants: [INV-23]

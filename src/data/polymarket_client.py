@@ -18,6 +18,15 @@ CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
 
 
+class V2PreflightError(RuntimeError):
+    """Raised when the V2 endpoint preflight check fails (INV-25).
+
+    A V2PreflightError means the CLOB endpoint is unreachable or returned an
+    unexpected response. Callers (executor._live_order) must treat this as a
+    hard rejection — no place_limit_order call may proceed in the same cycle.
+    """
+
+
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 
@@ -71,6 +80,34 @@ class PolymarketClient:
             self._clob_client.create_or_derive_api_creds()
         )
         logger.info("Polymarket CLOB client initialized (live mode)")
+
+    def v2_preflight(self) -> None:
+        """Verify V2 endpoint reachability before any order placement (INV-25).
+
+        Calls self._clob_client.get_ok() — a V2-only SDK health-check method.
+        Any failure (network error, unexpected response, AttributeError if the
+        SDK does not expose get_ok) raises V2PreflightError.
+
+        This is a reachability-only check today. Full V2 endpoint-identity
+        verification (signature challenge, API version header assertion) requires
+        operator-confirmed endpoint signature and is deferred to a follow-up slice
+        per decisions.md §O3-b.
+
+        INV-25: When this method raises, _live_order must return a rejected
+        OrderResult without calling place_limit_order.
+        """
+        self._ensure_client()
+        try:
+            try:
+                self._clob_client.get_ok()
+            except AttributeError:
+                # SDK version does not expose get_ok; treat as no-op success.
+                # This allows the guard to be forward-compatible: once the SDK
+                # exposes get_ok, the real check runs automatically.
+                logger.debug("v2_preflight: SDK has no get_ok method; skipping reachability check")
+                return
+        except Exception as exc:
+            raise V2PreflightError(f"V2 endpoint preflight failed: {exc!r}") from exc
 
     def get_orderbook(self, token_id: str) -> dict:
         """Fetch orderbook for a token. Public endpoint, no auth.

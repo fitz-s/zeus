@@ -183,3 +183,26 @@ invariants:
       negative_constraints: [NC-17]
       tests:
         - tests/test_p0_hardening.py::test_degraded_export_never_verified
+  - id: INV-24
+    zones: [K2_runtime]
+    statement: place_limit_order is gateway-only; non-gateway call sites are forbidden.
+    why: Allowing arbitrary callers to invoke place_limit_order bypasses the gateway boundary, creating multiple uncontrolled order-placement paths. The gateway (executor.py) is the single enforcement point for pre-flight checks, idempotency keys, and rejection-reason surfacing.
+    enforced_by:
+      negative_constraints: [NC-16]
+      tests:
+        - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
+  - id: INV-25
+    zones: [K2_runtime]
+    statement: When V2 endpoint preflight fails, no live place_limit_order call may be issued for that cycle.
+    why: A failed V2 preflight indicates the CLOB endpoint is unreachable or non-responsive. Proceeding with order placement against an unverified endpoint risks silent API errors, duplicate order submission, or orders against a stale/wrong endpoint.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::test_v2_preflight_blocks_placement
+  - id: INV-26
+    zones: [K2_runtime]
+    statement: runtime_posture is read-only at runtime; the entry-decision path must consult it; non-NORMAL posture blocks new entry irrespective of risk_level.
+    why: runtime_posture is a committed YAML law document (O2-c). Allowing runtime mutation or ignoring it in the entry path recreates the second-authority-plane problem. The posture gate is additive with risk_level — both must pass for entry to proceed.
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::test_runtime_posture_blocks_new_entry
+        - tests/test_p0_hardening.py::test_runtime_posture_yaml_present

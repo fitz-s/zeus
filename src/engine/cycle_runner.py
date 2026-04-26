@@ -346,7 +346,29 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
         summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
-    if not chain_ready:
+    # INV-26 / O2-c posture gate: consult committed runtime_posture.yaml BEFORE
+    # the risk-level gate. Non-NORMAL posture blocks new entries. Monitor, exit,
+    # and reconciliation paths continue regardless of posture.
+    # Wrapped in try/except so a posture read failure does NOT crash the cycle —
+    # fail-closed means posture.read_runtime_posture() already returns
+    # NO_NEW_ENTRIES on error, but an unexpected exception here falls through
+    # to the risk gate (which also fails closed for non-GREEN).
+    _posture_blocked_reason: str | None = None
+    try:
+        from src.runtime.posture import read_runtime_posture
+        _current_posture = read_runtime_posture()
+        if _current_posture != "NORMAL":
+            _posture_blocked_reason = f"posture={_current_posture}"
+    except Exception as _posture_exc:
+        logger.error(
+            "runtime_posture read raised unexpectedly: %s; treating as NO_NEW_ENTRIES",
+            _posture_exc,
+        )
+        _posture_blocked_reason = "posture=NO_NEW_ENTRIES"
+
+    if _posture_blocked_reason is not None:
+        entries_blocked_reason = _posture_blocked_reason
+    elif not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
     elif has_quarantine:
         entries_blocked_reason = "portfolio_quarantined"

@@ -483,6 +483,14 @@ class TestRBTEntriesBlockedReasonDegraded:
             "src.observability.status_summary.write_status",
             lambda cycle_summary=None: None,
         )
+        # K2+K5+Posture slice (2026-04-26): posture gate now runs BEFORE the
+        # risk-level gate (INV-26). Tests that exercise the risk-level / degraded
+        # path must set posture to NORMAL so the posture gate does not intercept.
+        # We patch read_runtime_posture at its definition site and clear the cache
+        # so cycle_runner's local import picks up the mock.
+        from src.runtime import posture as _posture_mod
+        _posture_mod._clear_cache()
+        monkeypatch.setattr(_posture_mod, "read_runtime_posture", lambda: "NORMAL")
 
     def test_run_cycle_degraded_sets_entries_blocked_reason_data_degraded(
         self, monkeypatch

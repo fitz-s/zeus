@@ -358,7 +358,7 @@ def _live_order(
     shares: float,
 ) -> OrderResult:
     """Live mode: place order via Polymarket CLOB API."""
-    from src.data.polymarket_client import PolymarketClient
+    from src.data.polymarket_client import PolymarketClient, V2PreflightError
 
     timeout = intent.timeout_seconds
 
@@ -400,6 +400,29 @@ def _live_order(
             order_role="entry",
         )
 
+    # K5 / INV-25: V2 endpoint-identity preflight. Client is instantiated here
+    # (before the preflight) so that both the preflight and the subsequent
+    # place_limit_order share the same client instance. If the preflight raises
+    # V2PreflightError, we return a rejected OrderResult without ever reaching
+    # place_limit_order, satisfying INV-25.
+    client = PolymarketClient()
+    try:
+        client.v2_preflight()
+    except V2PreflightError as exc:
+        logger.error(
+            "LIVE ORDER rejected: v2_preflight_failed for trade_id=%s: %s",
+            trade_id,
+            exc,
+        )
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"v2_preflight_failed: {exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+        )
+
     logger.info(
         "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
         intent.direction.value,
@@ -408,7 +431,6 @@ def _live_order(
     )
 
     try:
-        client = PolymarketClient()
         result = client.place_limit_order(
             token_id=intent.token_id,
             price=intent.limit_price,
