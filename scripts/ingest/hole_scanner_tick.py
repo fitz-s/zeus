@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
-from src.data.hole_scanner import HoleScanner
+# G10 syspath-shim (2026-04-26, con-nyx MAJOR #2): bootstrap sys.path
+# so direct invocation works. See daily_obs_tick.py for rationale.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ingest._shared import setup_tick_logging, world_connection
+from src.data.hole_scanner import HoleScanner  # noqa: E402
+
+from scripts.ingest._shared import setup_tick_logging, world_connection  # noqa: E402
 
 
 def main() -> int:

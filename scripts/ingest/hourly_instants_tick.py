@@ -20,10 +20,15 @@ Isolation contract: see scripts/ingest/_shared.py docstring.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from src.data.hourly_instants_append import hourly_tick
+# G10 syspath-shim (2026-04-26, con-nyx MAJOR #2): bootstrap sys.path
+# so direct invocation works. See daily_obs_tick.py for rationale.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ingest._shared import run_tick
+from src.data.hourly_instants_append import hourly_tick  # noqa: E402
+
+from scripts.ingest._shared import run_tick  # noqa: E402
 
 
 def main() -> int:
