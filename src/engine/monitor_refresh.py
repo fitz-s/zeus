@@ -717,9 +717,19 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     # Wrap into verified EdgeContext
     current_forward_edge = current_p_posterior - current_p_market
 
-    # A1: Recompute bootstrap CI from fresh data (symmetric with entry path)
-    ci_lower = current_forward_edge
-    ci_upper = current_forward_edge
+    # A1: Recompute bootstrap CI from fresh data (symmetric with entry path).
+    # Slice P3.2 (PR #19 phase 3, 2026-04-26): when fresh bootstrap CI is
+    # unavailable (no cached _bootstrap_context — e.g. position re-loaded
+    # from JSON fallback after process restart, or test fixture without
+    # the cached context), fall back to entry's CI width rather than the
+    # pre-fix degenerate `ci_lower = ci_upper = current_forward_edge`
+    # (zero width). With degenerate fallback, conservative_forward_edge
+    # collapsed to point-estimate logic — exit decisions reverted to
+    # raw-point edge, breaking the entry/exit epistemic-symmetry contract
+    # that known_gaps.md says was fixed for the bootstrap-present path.
+    _entry_ci_half = max(0.0, getattr(pos, "entry_ci_width", 0.0)) / 2.0
+    ci_lower = current_forward_edge - _entry_ci_half
+    ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
     if bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
