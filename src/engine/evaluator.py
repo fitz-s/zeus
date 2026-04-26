@@ -1040,7 +1040,10 @@ def evaluate_candidate(
             # raises NotImplementedError on legacy metric="low" reads;
             # LOW callers retain the broader unscoped check via metric=None,
             # which is correct since LOW writes don't go to legacy table).
-            _gate_metric = "high" if temperature_metric.temperature_metric == "high" else None
+            # Slice P2-fix5 (post-review MINOR #8 from code-reviewer, 2026-04-26):
+            # use the typed `is_high()` helper rather than string-compare on
+            # the inner attribute; that's why the typed atom exists.
+            _gate_metric = "high" if temperature_metric.is_high() else None
             _unverified_pairs = _get_pairs(
                 conn, city.cluster, _cal_season,
                 authority_filter='UNVERIFIED',

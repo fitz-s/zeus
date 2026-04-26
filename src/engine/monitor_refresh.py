@@ -98,6 +98,15 @@ def _refresh_ens_member_counting(
     target_d,
 ) -> tuple[float, list[str]]:
     """Recompute fresh probability with the same ENS member-counting path as entry."""
+    # Slice P2-fix5 (post-review MAJOR #5 from code-reviewer, 2026-04-26):
+    # hoist resolver call to function entry. Pre-fix called
+    # resolve_position_metric(position) at L149 + L192 + L224 (3 sites in
+    # this function). The resolver result is invariant within a single
+    # monitor cycle, so each redundant call wasted attribute lookups and
+    # — for missing-metric positions — emitted 3 identical DEBUG log
+    # lines per cycle, inflating the audit trail and confusing operator
+    # review.
+    _position_metric_str = resolve_position_metric(position)[0]
 
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
@@ -146,7 +155,7 @@ def _refresh_ens_member_counting(
     # operators can audit silent-HIGH events.
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=resolve_position_metric(position)[0],
+        temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -189,7 +198,7 @@ def _refresh_ens_member_counting(
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
-        _gate_metric = "high" if resolve_position_metric(position)[0] == "high" else None
+        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(
                 conn, city.cluster, _cal_season,
@@ -219,9 +228,13 @@ def _refresh_ens_member_counting(
 
     # Persistence anomaly check: if ENS predicts a historically rare
     # day-to-day temperature change, discount model trust
+    # Slice P2-fix5 (post-review MAJOR #6): route bare attribute access
+    # through the same hoisted resolver result. Pre-fix would AttributeError
+    # on a position with missing temperature_metric attr (now uses the
+    # resolver default).
     anomaly_discount = _check_persistence_anomaly(
         conn, city.name, target_d, float(np.mean(ens.member_maxes)),
-        temperature_metric=position.temperature_metric,
+        temperature_metric=_position_metric_str,
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
@@ -272,6 +285,13 @@ def _refresh_day0_observation(
     city,
     target_d,
 ) -> tuple[float, list[str]]:
+    # Slice P2-fix5 (post-review MAJOR #5 from code-reviewer, 2026-04-26):
+    # hoist resolver call to function entry. Pre-fix called
+    # resolve_position_metric(position) at L323 (audit), L376 (Day0 exit
+    # calibrator), L417 (K4 gate) — 3 sites. Hoist eliminates redundant
+    # attribute lookups + collapses 3 identical DEBUG log lines per cycle
+    # into 1 for missing-metric positions.
+    _position_metric_str = resolve_position_metric(position)[0]
     """Recompute fresh probability through the Day0 observation + ENS path."""
 
     # Semantic Provenance Guard
@@ -320,7 +340,9 @@ def _refresh_day0_observation(
     # emits DEBUG audit log (preserves P2-C2 visibility), but the actual
     # MetricIdentity comes from the raw position attribute so garbage still
     # raises ValueError at the typed-atom boundary.
-    resolve_position_metric(position)  # audit-only side-effect (DEBUG log)
+    # _position_metric_str already bound at function entry (P2-fix5 hoist);
+    # the resolver fired its audit log there. Construct MetricIdentity from
+    # raw position attribute so garbage strings still raise (P2-fix1 antibody).
     temperature_metric = MetricIdentity.from_raw(
         getattr(position, "temperature_metric", "high")
     )
@@ -356,11 +378,11 @@ def _refresh_day0_observation(
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
     # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
-    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical resolver
-    # for operator-visible silent-HIGH audit trail.
+    # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
+    # already fired audit log at function entry).
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=resolve_position_metric(position)[0],
+        temperature_metric=_position_metric_str,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -401,7 +423,7 @@ def _refresh_day0_observation(
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
-        _gate_metric = "high" if resolve_position_metric(position)[0] == "high" else None
+        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
             _unverified_pairs = _get_pairs(
                 conn, city.cluster, _cal_season,
