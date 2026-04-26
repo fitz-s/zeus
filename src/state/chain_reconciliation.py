@@ -25,6 +25,17 @@ from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Po
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 
+# Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
+# learning-authority contract previously held only in resolve_rescue_authority's
+# docstring. Any downstream learning consumer that ingests rescue_events_v2
+# rows MUST filter on authority = LEARNING_AUTHORITY_REQUIRED to avoid silently
+# misclassifying legacy / placeholder / quarantine-default rows (which are
+# tagged UNVERIFIED + 'position_missing_metric:...') as VERIFIED training
+# evidence. The relationship test in
+# tests/test_authority_strict_learning.py scans the repo for SELECT-side
+# reads of rescue_events_v2 and asserts each carries this filter.
+LEARNING_AUTHORITY_REQUIRED = "VERIFIED"
+
 
 def resolve_rescue_authority(position) -> tuple[str, str, str]:
     """Resolve (temperature_metric, authority, authority_source) for a
