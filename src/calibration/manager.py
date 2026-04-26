@@ -189,6 +189,15 @@ def get_calibrator(
             level = maturity_level(model_data["n_samples"])
             return cal, level
 
+    # Maturity threshold is needed by both the HIGH on-the-fly path AND the
+    # season-only fallback loop below; bind it once before the HIGH branch
+    # so LOW callers (which skip the on-the-fly attempt) still have it
+    # available at L225. Slice A2-fix1 (post-review BLOCKER from
+    # code-reviewer 2026-04-26): pre-fix kept this binding inside the HIGH
+    # branch and crashed LOW callers with UnboundLocalError when a v2
+    # fallback model existed in another cluster's bucket.
+    _, _, level3 = calibration_maturity_thresholds()
+
     # Check if we have enough pairs to fit on the fly.
     # Phase 9C.1 + slice A2 (PR #19 followup, 2026-04-26): on-the-fly refit
     # is HIGH-only because legacy calibration_pairs has no temperature_metric
@@ -198,7 +207,6 @@ def get_calibrator(
     # discarded anyway (`_fit_from_pairs` short-circuits on non-HIGH at L267).
     if temperature_metric == "high":
         n = get_decision_group_count(conn, cluster, season, metric="high")
-        _, _, level3 = calibration_maturity_thresholds()
         if n >= level3:
             cal = _fit_from_pairs(
                 conn, cluster, season, unit=city.settlement_unit,
