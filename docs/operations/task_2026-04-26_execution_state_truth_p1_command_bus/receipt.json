@@ -1,11 +1,14 @@
 {
   "packet": "task_2026-04-26_execution_state_truth_p1_command_bus",
-  "slice": "P1.S5",
-  "status": "implemented_local_unpushed",
+  "slice": "P1_packet_complete",
+  "status": "complete_pending_push",
   "branch": "claude/pr18-execution-state-truth-fix-plan-2026-04-26",
   "date": "2026-04-26",
   "p1_complete": true,
   "slices_landed": ["P1.S1", "P1.S2", "P1.S3", "P1.S4", "P1.S5"],
+  "post_critic_followup_landed": "973d23c (HIGH-1 grammar + HIGH-2 venue status branch)",
+  "all_invariants_added": ["INV-28", "INV-29", "INV-30", "INV-31", "INV-32"],
+  "all_negative_constraints_added": ["NC-18", "NC-19"],
   "allowed_files": [
     "src/execution/executor.py",
     "src/engine/cycle_runtime.py",
