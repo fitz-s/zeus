@@ -90,7 +90,7 @@ class TestVenueCommandFrozen:
         from src.execution.command_bus import (
             CommandState, IdempotencyKey, VenueCommand,
         )
-        idem = IdempotencyKey(value="0" * 32)
+        idem = IdempotencyKey.from_external("0" * 32)
         with pytest.raises(TypeError, match="intent_kind must be IntentKind"):
             VenueCommand(
                 command_id="cmd-1", position_id="pos-1", decision_id="dec-1",
@@ -176,12 +176,12 @@ class TestIdempotencyKeyDeterministic:
                 price=0.5, size=10.0, intent_kind=IntentKind.ENTRY,
             )
 
-    def test_value_format_validated(self):
+    def test_value_format_validated_via_external(self):
         from src.execution.command_bus import IdempotencyKey
         with pytest.raises(TypeError):
-            IdempotencyKey(value=123)  # type: ignore[arg-type]
+            IdempotencyKey.from_external(123)  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="32 hex chars"):
-            IdempotencyKey(value="too-short")
+            IdempotencyKey.from_external("too-short")
 
     def test_key_stable_across_separate_processes(self, tmp_path):
         """The strongest determinism test: two separate Python processes
@@ -406,6 +406,171 @@ class TestVenueCommandFromRow:
 # ---------------------------------------------------------------------------
 # Post-reviewer MEDIUM-2: CANCEL_PENDING in IN_FLIGHT_STATES
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Post-critic MAJOR-1: repo seam enum-grammar validation
+# insert_command must reject intent_kind/side outside the closed enum.
+# ---------------------------------------------------------------------------
+
+
+class TestRepoSeamEnumGrammar:
+    def _conn(self):
+        import sqlite3
+        from src.state.db import init_schema
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        init_schema(c)
+        return c
+
+    def test_insert_command_rejects_gibberish_intent_kind(self):
+        from src.state.venue_command_repo import insert_command
+        conn = self._conn()
+        with pytest.raises(ValueError, match="intent_kind.*GIBBERISH.*not a valid IntentKind"):
+            insert_command(
+                conn, command_id="x", position_id="p", decision_id="d",
+                idempotency_key="k" * 32, intent_kind="GIBBERISH",
+                market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
+                created_at="2026-04-26T00:00:00Z",
+            )
+        # And the row must NOT have been persisted partially.
+        rows = conn.execute("SELECT * FROM venue_commands").fetchall()
+        assert len(rows) == 0
+
+    def test_insert_command_rejects_invalid_side(self):
+        from src.state.venue_command_repo import insert_command
+        conn = self._conn()
+        with pytest.raises(ValueError, match="side.*LONG.*BUY.*SELL"):
+            insert_command(
+                conn, command_id="x", position_id="p", decision_id="d",
+                idempotency_key="k" * 32, intent_kind="ENTRY",
+                market_id="m", token_id="t", side="LONG", size=1.0, price=0.5,
+                created_at="2026-04-26T00:00:00Z",
+            )
+
+    def test_insert_command_accepts_all_four_intent_kinds(self):
+        from src.execution.command_bus import IntentKind
+        from src.state.venue_command_repo import insert_command
+        conn = self._conn()
+        for i, kind in enumerate(IntentKind):
+            insert_command(
+                conn, command_id=f"cmd-{i}", position_id="p", decision_id="d",
+                idempotency_key=f"k{i}".ljust(32, "0"), intent_kind=kind.value,
+                market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
+                created_at="2026-04-26T00:00:00Z",
+            )
+        rows = conn.execute("SELECT intent_kind FROM venue_commands").fetchall()
+        assert len(rows) == 4
+
+
+# ---------------------------------------------------------------------------
+# Post-critic MAJOR-2: NULL preservation in row → VenueCommand projection
+# ---------------------------------------------------------------------------
+
+
+class TestVenueCommandFromRowNullPreservation:
+    def test_unpopulated_venue_order_id_stays_None_not_empty_string(self):
+        """A freshly-inserted command has venue_order_id NULL in DB. from_row
+        must surface that as None — not coerce to '' which would conflate with
+        a hypothetical 'venue returned empty string' bug.
+        """
+        import sqlite3
+        from src.execution.command_bus import VenueCommand
+        from src.state.db import init_schema
+        from src.state.venue_command_repo import get_command, insert_command
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        insert_command(
+            conn, command_id="cmd-null", position_id="p", decision_id="d",
+            idempotency_key="k" * 32, intent_kind="ENTRY",
+            market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
+            created_at="2026-04-26T00:00:00Z",
+        )
+        row = get_command(conn, "cmd-null")
+        cmd = VenueCommand.from_row(row)
+        assert cmd.venue_order_id is None, "NULL must round-trip as None, not ''"
+        # last_event_id WAS populated by insert_command's INTENT_CREATED event,
+        # so it should NOT be None.
+        assert cmd.last_event_id is not None
+        assert isinstance(cmd.last_event_id, str)
+
+
+# ---------------------------------------------------------------------------
+# Post-critic MAJOR-4: IdempotencyKey direct construction blocked
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotencyKeyFactoryEnforcement:
+    def test_direct_construction_with_only_value_raises(self):
+        """`IdempotencyKey(value="0"*32)` — bypasses canonicalization,
+        attack-surface for hand-rolled keys monopolizing UNIQUE slots.
+        """
+        from src.execution.command_bus import IdempotencyKey
+        with pytest.raises(TypeError, match="must be constructed via from_inputs"):
+            IdempotencyKey(value="0" * 32)  # missing _provenance
+
+    def test_direct_construction_with_wrong_provenance_raises(self):
+        """A caller can't mint a fake sentinel — the module-private object
+        identity check fails."""
+        from src.execution.command_bus import IdempotencyKey
+        fake_sentinel = object()
+        with pytest.raises(TypeError, match="must be constructed via from_inputs"):
+            IdempotencyKey(value="0" * 32, _provenance=fake_sentinel)
+
+    def test_from_external_succeeds(self):
+        """For row-projection: from_external is the supported path."""
+        from src.execution.command_bus import IdempotencyKey
+        idem = IdempotencyKey.from_external("0" * 32)
+        assert idem.value == "0" * 32
+
+    def test_from_external_validates_format(self):
+        from src.execution.command_bus import IdempotencyKey
+        with pytest.raises(ValueError, match="32 hex chars"):
+            IdempotencyKey.from_external("too-short")
+        with pytest.raises(TypeError):
+            IdempotencyKey.from_external(123)  # type: ignore[arg-type]
+
+    def test_from_inputs_succeeds(self):
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        idem = IdempotencyKey.from_inputs(
+            decision_id="d", token_id="t", side="BUY",
+            price=0.5, size=10.0, intent_kind=IntentKind.ENTRY,
+        )
+        assert len(idem.value) == 32
+
+
+# ---------------------------------------------------------------------------
+# Post-critic MAJOR-3: REVIEW_REQUIRED is quasi-terminal in the closed grammar
+# Asserts the contract documented in command_bus.py: REVIEW_REQUIRED is in
+# IN_FLIGHT_STATES (operator visibility) but has zero outgoing transitions.
+# Operator-unblock event is intentionally NOT in this slice; P1.S4 will add
+# it if the operator dashboard demands an in-grammar resume path.
+# ---------------------------------------------------------------------------
+
+
+class TestReviewRequiredIsQuasiTerminal:
+    def test_review_required_has_no_outgoing_transitions(self):
+        """No (REVIEW_REQUIRED, *) → * transition exists. Operator must
+        manually resolve via a fresh idempotency key (a NEW command), not by
+        re-driving the existing REVIEW_REQUIRED row through events."""
+        from src.state.venue_command_repo import _TRANSITIONS
+        outgoing = [
+            (state, event, after) for (state, event), after in _TRANSITIONS.items()
+            if state == "REVIEW_REQUIRED"
+        ]
+        assert outgoing == [], (
+            f"REVIEW_REQUIRED is documented as quasi-terminal but found "
+            f"outgoing transitions: {outgoing}. Update docs OR the grammar."
+        )
+
+    def test_review_required_is_in_flight_for_visibility(self):
+        """REVIEW_REQUIRED stays in IN_FLIGHT_STATES so operator dashboards
+        and recovery diagnostics surface it, even though recovery cannot
+        auto-resolve it."""
+        from src.execution.command_bus import CommandState, IN_FLIGHT_STATES
+        assert CommandState.REVIEW_REQUIRED in IN_FLIGHT_STATES
 
 
 class TestCancelPendingInRecoveryFilter:
