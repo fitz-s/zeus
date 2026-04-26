@@ -312,9 +312,17 @@ def _refresh_day0_observation(
 
     # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
     # so Day0Signal receives the typed object, not a bare str.
-    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical resolver.
+    # Slice P2-fix1 (post-review BLOCKER from code-reviewer + critic M1,
+    # 2026-04-26): split audit (via resolver) from value construction (via
+    # MetricIdentity.from_raw direct). Pre-fix1, routing the value through
+    # resolver coerced garbage strings ("HIGH", " low ", etc.) silently to
+    # HIGH, removing MetricIdentity.from_raw's loud antibody. Now: resolver
+    # emits DEBUG audit log (preserves P2-C2 visibility), but the actual
+    # MetricIdentity comes from the raw position attribute so garbage still
+    # raises ValueError at the typed-atom boundary.
+    resolve_position_metric(position)  # audit-only side-effect (DEBUG log)
     temperature_metric = MetricIdentity.from_raw(
-        resolve_position_metric(position)[0]
+        getattr(position, "temperature_metric", "high")
     )
 
     extrema, hours_remaining = remaining_member_extrema_for_day0(
