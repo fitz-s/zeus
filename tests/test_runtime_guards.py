@@ -1116,11 +1116,15 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    # P3-fix1c (post-review side-fix, 2026-04-26): market dict needs
+    # temperature_metric — P2-fix3 routes via _normalize_temperature_metric
+    # which now raises on missing/invalid (post-A3 antibody).
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
         "city": NYC,
         "target_date": "2026-04-01",
         "hours_since_open": 1.0,
         "hours_to_resolution": 24.0,
+        "temperature_metric": "high",
         "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
