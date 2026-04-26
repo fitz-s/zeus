@@ -119,10 +119,17 @@ _CALIBRATION_PAIRS_V2_TABLE_REF_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 # Allowlist for files that legitimately need cross-metric diagnostic
-# reads (typically operator audit scripts). Empty by default — same
-# threshold as the settlements pattern; new entries require operator
-# justification at PR review.
-CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset()
+# reads (typically operator audit scripts). New entries require
+# operator justification at PR review.
+CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+    # verify_truth_surfaces.py uses dynamic f-string SQL `SELECT COUNT(*)
+    # FROM {table}` for cross-table cardinality diagnostics. The linter
+    # statically matches the substring `calibration_pairs_v2` in nearby
+    # docstring/comment context but the SQL itself is parameterized; not
+    # an actual unmasked v2 read. Allowlisted post-A1b false-positive
+    # surface (P4-2 commit ca38df0).
+    "scripts/verify_truth_surfaces.py",
+})
 _SQL_ALIAS_STOPWORDS: frozenset[str] = frozenset(
     {
         "CROSS",
