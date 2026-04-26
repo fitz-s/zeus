@@ -282,3 +282,23 @@ invariants:
         - tests/test_executor_command_split.py::test_synthetic_decision_id_emits_warning
         - tests/test_executor_db_target.py::TestExecutorDbTarget::test_live_order_writes_command_to_trades_db
         - tests/test_executor_db_target.py::TestExecutorDbTarget::test_exit_order_writes_command_to_trades_db
+  - id: INV-31
+    zones: [K2_runtime]
+    statement: Cycle start must scan venue_commands for unresolved states (SUBMITTING,
+      UNKNOWN, REVIEW_REQUIRED, CANCEL_PENDING) and apply reconciliation events
+      based on venue truth. Cross-DB note per INV-30 — venue_commands lives in
+      zeus_trades.db; reconciliation does not block the cycle on errors.
+    why: Without active reconciliation, UNKNOWN/SUBMITTING rows accumulate
+      indefinitely. Recovery is the only path that turns runtime crash debris
+      into a clean operator surface. P2/K4 will extend with chain-truth integration
+      for FILL_CONFIRMED.
+    enforced_by:
+      tests:
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_submitting_with_venue_order_resolves_to_acked
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_submitting_without_order_id_resolves_to_expired
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_unknown_with_venue_order_resolves_to_acked
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_unknown_without_venue_order_resolves_to_review_required
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_cancel_pending_with_missing_order_resolves_to_cancelled
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_review_required_is_skipped
+        - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_venue_lookup_exception_leaves_state
+        - tests/test_command_recovery.py::TestRecoveryCycleIntegration::test_cycle_runner_calls_recovery

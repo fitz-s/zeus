@@ -199,6 +199,50 @@ class PolymarketClient:
                      side, token_id[:12], price, size, result.get("status"))
         return result
 
+    def get_order(self, order_id: str) -> Optional[dict]:
+        """Fetch a single order by venue order ID. Returns None if not found.
+
+        Wraps SDK's get_order. Normalizes response to at least
+        {"orderID": str, "status": str} so the recovery loop is stable
+        against SDK response shape changes.
+
+        Returns None when the venue returns 404 or similar "not found" signal.
+        Other exceptions (network error, auth failure) propagate — the
+        recovery loop catches and logs them so a single bad lookup does not
+        kill the loop.
+        """
+        self._ensure_client()
+        try:
+            result = self._clob_client.get_order(order_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        except Exception as exc:
+            # Some SDK versions raise a plain exception on 404; treat any
+            # message containing "not found" (case-insensitive) as None.
+            if "not found" in str(exc).lower() or "404" in str(exc):
+                return None
+            raise
+
+        if result is None:
+            return None
+
+        # Normalize to stable shape if SDK returns a non-dict (e.g. a model obj).
+        if not isinstance(result, dict):
+            try:
+                result = dict(result)
+            except (TypeError, ValueError):
+                result = {"orderID": order_id, "status": str(result)}
+
+        # Guarantee the two load-bearing keys downstream code reads.
+        if "orderID" not in result:
+            result.setdefault("orderID", result.get("id") or result.get("order_id") or order_id)
+        if "status" not in result:
+            result.setdefault("status", result.get("state") or result.get("order_status") or "UNKNOWN")
+
+        return result
+
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
         self._ensure_client()

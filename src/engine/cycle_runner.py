@@ -334,6 +334,16 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     if stale_cancelled:
         summary["stale_orders_cancelled"] = stale_cancelled
 
+    # INV-31: command-recovery loop. Reconciles unresolved venue_commands
+    # against venue state. Errors don't fail the cycle.
+    try:
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        rec_summary = reconcile_unresolved_commands()
+        summary["command_recovery"] = rec_summary
+    except Exception as exc:
+        logger.error("command_recovery raised; continuing cycle: %s", exc)
+        summary["command_recovery"] = {"error": str(exc)}
+
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 
