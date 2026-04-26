@@ -47,7 +47,9 @@ from src.data.ingestion_guard import (
     IngestionRejected,
     UnitConsistencyViolation,
 )
-from src.signal.diurnal import _is_missing_local_hour
+# G10 helper-extraction (2026-04-26, con-nyx MAJOR #1): import from canonical
+# location to avoid transitively pulling src.signal into the ingest lane.
+from src.contracts.dst_semantics import _is_missing_local_hour
 from src.state.data_coverage import (
     CoverageReason,
     DataTable,

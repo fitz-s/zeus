@@ -192,3 +192,175 @@ def test_each_tick_script_carries_lifecycle_header():
         "Tick scripts missing required lifecycle headers:\n"
         + "\n".join(f"  - {p}: missing {m!r}" for p, m in missing)
     )
+
+
+# ---------------------------------------------------------------------------
+# Transitive-import audit (6) — con-nyx G10 MAJOR #1 fix
+# ---------------------------------------------------------------------------
+
+
+def _tick_modules() -> list[str]:
+    """List of importable scripts.ingest.X_tick module names."""
+    return sorted(
+        f"scripts.ingest.{p.stem}"
+        for p in INGEST_DIR.glob("*_tick.py")
+    )
+
+
+def test_no_forbidden_transitive_imports_in_ingest():
+    """Subprocess-isolated audit: each tick's full import closure is forbidden-clean.
+
+    AST-walk antibody (test_no_forbidden_imports_in_ingest) catches DIRECT
+    imports only. A tick that does `from src.data.daily_obs_append import X`
+    transitively pulls whatever `src.data.daily_obs_append` imports — and if
+    THAT chain reaches src.signal / src.engine / etc, the decoupling premise
+    breaks silently.
+
+    This test runs each tick's import in a fresh Python subprocess (so no
+    sys.modules pollution from pytest's own import graph) and verifies the
+    set of newly-loaded src.* modules contains NONE of FORBIDDEN_IMPORT_PREFIXES.
+
+    Pre-G10-helper-extraction (commit pending), this test fired on:
+    - daily_obs_tick: pulled src.signal.diurnal via daily_obs_append
+    - hourly_instants_tick: same via hourly_instants_append
+
+    G10-helper-extraction moved _is_missing_local_hour to
+    src.contracts.dst_semantics (allowed) and updated the *_append imports.
+    Now all 5 ticks should pass.
+    """
+    import subprocess
+
+    forbidden_pickled = repr(list(FORBIDDEN_IMPORT_PREFIXES))
+    violators_per_tick: dict[str, list[str]] = {}
+
+    for tick_module in _tick_modules():
+        probe = f"""
+import sys, json
+sys.path.insert(0, {repr(str(PROJECT_ROOT))})
+forbidden = {forbidden_pickled}
+before = set(sys.modules.keys())
+__import__({tick_module!r})
+new = sorted(set(sys.modules.keys()) - before)
+violators = [
+    m for m in new
+    if any(m == p or m.startswith(p + '.') for p in forbidden)
+]
+print(json.dumps(violators))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            # Subprocess crashed during import — record as a violation surface,
+            # not a green pass.
+            violators_per_tick[tick_module] = [
+                f"subprocess-import-error: {result.stderr.strip().splitlines()[-1] if result.stderr else 'unknown'}"
+            ]
+            continue
+        try:
+            import json as _json
+            violators = _json.loads(result.stdout.strip().splitlines()[-1])
+        except Exception:
+            violators = [f"unparseable-output: {result.stdout!r}"]
+        if violators:
+            violators_per_tick[tick_module] = violators
+
+    assert not violators_per_tick, (
+        "Transitive forbidden-import violation in scripts/ingest/* ticks. "
+        "Direct imports are clean (per test_no_forbidden_imports_in_ingest), "
+        "but the import closure transitively pulls a forbidden module. "
+        "Fix: extract the offending helper to src.contracts.* or src.types.* "
+        "(allowed for both lanes). Per-tick violators:\n"
+        + "\n".join(
+            f"  - {tick}: {viol}"
+            for tick, viol in sorted(violators_per_tick.items())
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# sys.path bootstrap audit (7) — con-nyx G10 MAJOR #2 fix
+# ---------------------------------------------------------------------------
+
+
+def test_each_tick_script_self_bootstraps_syspath():
+    """Each *_tick.py inserts the repo root into sys.path before project imports.
+
+    Required so `python scripts/ingest/X_tick.py` (direct invocation, the
+    canonical_command in script_manifest.yaml) resolves `src.*` and
+    `scripts.*`. Without this shim, default sys.path[0] is the script's
+    directory and `from src.data.X import Y` fails with ModuleNotFoundError
+    even though the project structure is correct.
+
+    Convention matches scripts/live_smoke_test.py:23.
+    """
+    tick_files = [p for p in _ingest_python_files() if p.name.endswith("_tick.py")]
+    assert tick_files, "No *_tick.py scripts found"
+
+    missing: list[str] = []
+    for py_path in tick_files:
+        src = py_path.read_text(encoding="utf-8")
+        # Substring match — must contain a sys.path.insert with parents[2]
+        # OR an equivalent bootstrap. Conservative: require the literal phrase.
+        if "sys.path.insert(0, str(Path(__file__).resolve().parents[2]))" not in src:
+            missing.append(str(py_path.relative_to(PROJECT_ROOT)))
+
+    assert not missing, (
+        "Tick scripts missing sys.path bootstrap. Required for direct\n"
+        "invocation `python scripts/ingest/X_tick.py`. Add to top of file\n"
+        "before any `from src.X` import:\n"
+        "  sys.path.insert(0, str(Path(__file__).resolve().parents[2]))\n"
+        "Offenders:\n"
+        + "\n".join(f"  - {p}" for p in missing)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Negative-detection (8) — con-nyx pattern feedback #12
+# ---------------------------------------------------------------------------
+
+
+def test_antibody_self_test_catches_synthetic_violation(tmp_path):
+    """Programmatically craft a violating tick; assert the AST-walk antibody detects it.
+
+    Without this test, N/N green doesn't prove the antibody actually FIRES on
+    a real violation — only that current files happen to be clean. This test
+    builds a fake tick with `from src.engine.cycle_runner import KNOWN_STRATEGIES`
+    in a tmp dir, runs `_collect_imports` on it, and confirms a violation
+    is detected.
+    """
+    fake_tick = tmp_path / "fake_violator_tick.py"
+    fake_tick.write_text(
+        "# Lifecycle: created=test; last_reviewed=test; last_reused=never\n"
+        "# Purpose: synthetic violator for antibody self-test\n"
+        "# Reuse: test fixture only\n"
+        "# Authority basis: tests/test_ingest_isolation.py\n"
+        "from src.engine.cycle_runner import KNOWN_STRATEGIES\n"
+        "from src.signal.diurnal import _is_missing_local_hour\n"
+        "def main(): return 0\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+
+    imports = _collect_imports(fake_tick)
+    violations: list[str] = []
+    for module in imports:
+        for prefix in FORBIDDEN_IMPORT_PREFIXES:
+            if module == prefix or module.startswith(prefix + "."):
+                violations.append((module, prefix))
+                break
+
+    assert ("src.engine.cycle_runner", "src.engine") in violations, (
+        f"Antibody failed to detect synthetic violation of src.engine.* — "
+        f"either _collect_imports is broken or FORBIDDEN_IMPORT_PREFIXES "
+        f"dropped src.engine. Detected: {violations}"
+    )
+    assert ("src.signal.diurnal", "src.signal") in violations, (
+        f"Antibody failed to detect synthetic violation of src.signal.* — "
+        f"either _collect_imports is broken or FORBIDDEN_IMPORT_PREFIXES "
+        f"dropped src.signal. Detected: {violations}"
+    )

@@ -1,7 +1,23 @@
 {
   "schema_version": 1,
   "packet": "task_2026-04-26_g10_ingest_scaffold",
-  "status": "closed",
+  "status": "closed_approved_with_conditions",
+  "critic_approval_2026_04_26": {
+    "verdict": "APPROVE_WITH_CONDITIONS",
+    "verifier": "con-nyx@zeus-live-readiness-debate",
+    "category_immunity_score_at_review": 0.65,
+    "category_immunity_score_post_helper_extraction": "0.85 (predicted)",
+    "MAJOR_findings_discharged_in_followup_slice": {
+      "MAJOR_1_transitive_imports": "discharged via task_2026-04-26_g10_helper_extraction (commit pending) — _is_missing_local_hour moved to src.contracts.dst_semantics; daily_obs_append + hourly_instants_append re-pointed; subprocess-isolated transitive audit added.",
+      "MAJOR_2_direct_invocation_broken": "discharged via same followup slice — sys.path.insert shim added to all 5 ticks; substring-grep antibody added."
+    },
+    "NICE_TO_HAVE_followups": [
+      "G10-AST-walk-dynamic-imports (~15min)",
+      "G10-antibody-self-test (LANDED inline in helper-extraction slice)",
+      "G10-tick-suffix-broadening (~5min)",
+      "G10-calibration-fence (~30min)"
+    ]
+  },
   "branch": "claude/live-readiness-completion-2026-04-26",
   "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
   "parent_packet": "task_2026-04-26_live_readiness_completion",

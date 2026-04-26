@@ -24,10 +24,19 @@ Verified by tests/test_ingest_isolation.py.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from src.data.daily_obs_append import daily_tick
+# G10 syspath-shim (2026-04-26, con-nyx MAJOR #2): bootstrap sys.path so
+# `python scripts/ingest/daily_obs_tick.py` (direct invocation) resolves
+# `src.*` and `scripts.*` from the repo root. Without this, default
+# sys.path[0] is the script's directory and project imports fail with
+# ModuleNotFoundError. Matches the convention in scripts/live_smoke_test.py.
+# Both `python scripts/ingest/X.py` and `python -m scripts.ingest.X` work.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ingest._shared import run_tick
+from src.data.daily_obs_append import daily_tick  # noqa: E402
+
+from scripts.ingest._shared import run_tick  # noqa: E402
 
 
 def main() -> int:
