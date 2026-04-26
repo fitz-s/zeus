@@ -302,3 +302,19 @@ invariants:
         - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_review_required_is_skipped
         - tests/test_command_recovery.py::TestRecoveryResolutionTable::test_venue_lookup_exception_leaves_state
         - tests/test_command_recovery.py::TestRecoveryCycleIntegration::test_cycle_runner_calls_recovery
+  - id: INV-32
+    zones: [K2_runtime]
+    statement: Position authority (materialize_position) advances ONLY after the
+      venue command has reached state ACKED, PARTIAL, or FILLED. Commands in
+      SUBMITTING / UNKNOWN / REVIEW_REQUIRED do not yield position rows; recovery
+      resolves them out-of-band.
+    why: >
+      Pre-P1, materialize_position fired on result.status == pending regardless
+      of command state. That races the command journal: a position appeared as
+      active while the venue might never have received the order. Tying
+      materialization to durable ack closes that window.
+    enforced_by:
+      tests:
+        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_submitting_command
+        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_unknown_command
+        - tests/test_discovery_idempotency.py::test_materialize_runs_for_acked_command

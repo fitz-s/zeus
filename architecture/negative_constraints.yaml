@@ -125,3 +125,13 @@ constraints:
         - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo
         - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_catches_known_evasion_shapes
         - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_does_not_false_positive_on_benign_strings
+  - id: NC-19
+    statement: Discovery phase must not call client.place_limit_order (or its
+      indirect equivalents via execute_intent) without first checking
+      find_command_by_idempotency_key for an existing row, AND it must not
+      materialize a position from a SUBMITTING / UNKNOWN command state.
+    invariants: [INV-32]
+    enforced_by:
+      tests:
+        - tests/test_discovery_idempotency.py::test_idempotency_key_skips_duplicate_submit
+        - tests/test_discovery_idempotency.py::test_retry_after_unknown_does_not_double_place

@@ -64,6 +64,10 @@ class OrderResult:
     venue_status: Optional[str] = None
     idempotency_key: Optional[str] = None
     decision_edge: float = 0.0
+    # P1.S5: INV-32 — materialize_position gates on this value.
+    # Set to the CommandState enum string after the ack phase resolves.
+    # None means the result was rejected before any command was persisted.
+    command_state: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,93 @@ class ExitOrderIntent:
     best_bid: Optional[float] = None
     intent_id: Optional[str] = None
     idempotency_key: Optional[str] = None
+
+
+def _orderresult_from_existing(
+    existing: "VenueCommand",  # type: ignore[name-defined]
+    trade_id: str,
+    limit_price: float,
+    shares: float,
+    idem_value: str,
+    intent_id: Optional[str],
+    order_role: str,
+) -> "OrderResult":
+    """Map an existing VenueCommand row to an OrderResult without re-submitting.
+
+    P1.S5: used by both the pre-submit lookup path and the IntegrityError
+    collision handler in _live_order and execute_exit_order. Extracted once to
+    prevent 4-way drift (P1.S3 critic MAJOR-deferred, now closed).
+
+    The command_state field is populated so cycle_runtime can gate
+    materialize_position on INV-32.
+    """
+    # Lazy import to avoid circular deps at module load time.
+    from src.execution.command_bus import CommandState
+
+    s = existing.state
+    if s in (CommandState.ACKED, CommandState.PARTIAL):
+        return OrderResult(
+            trade_id=trade_id,
+            status="pending",
+            reason="idempotency_collision: prior attempt acked",
+            submitted_price=limit_price,
+            shares=shares,
+            order_role=order_role,
+            external_order_id=existing.venue_order_id,
+            idempotency_key=idem_value,
+            intent_id=intent_id,
+            command_state=s.value,
+        )
+    if s == CommandState.FILLED:
+        return OrderResult(
+            trade_id=trade_id,
+            status="pending",
+            reason="idempotency_collision: prior attempt filled",
+            submitted_price=limit_price,
+            shares=shares,
+            order_role=order_role,
+            external_order_id=existing.venue_order_id,
+            idempotency_key=idem_value,
+            intent_id=intent_id,
+            command_state=s.value,
+        )
+    if s in (CommandState.SUBMITTING, CommandState.UNKNOWN):
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason="idempotency_collision: prior attempt in flight; recovery will resolve",
+            submitted_price=limit_price,
+            shares=shares,
+            order_role=order_role,
+            idempotency_key=idem_value,
+            intent_id=intent_id,
+            command_state=s.value,
+        )
+    if s in (CommandState.REJECTED, CommandState.CANCELLED, CommandState.EXPIRED):
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"idempotency_collision: prior attempt {s.value}",
+            submitted_price=limit_price,
+            shares=shares,
+            order_role=order_role,
+            external_order_id=existing.venue_order_id,
+            idempotency_key=idem_value,
+            intent_id=intent_id,
+            command_state=s.value,
+        )
+    # REVIEW_REQUIRED, INTENT_CREATED, or any future state
+    return OrderResult(
+        trade_id=trade_id,
+        status="rejected",
+        reason=f"idempotency_collision: prior attempt {s.value}",
+        submitted_price=limit_price,
+        shares=shares,
+        order_role=order_role,
+        idempotency_key=idem_value,
+        intent_id=intent_id,
+        command_state=s.value,
+    )
 
 
 def create_execution_intent(
@@ -110,7 +201,7 @@ def create_execution_intent(
         elif gap > best_ask * 0.05:
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
-                           
+
     if edge.direction.value == "buy_yes":
         order_token = token_id
     elif edge.direction.value == "buy_no":
@@ -121,7 +212,7 @@ def create_execution_intent(
     if mode not in MODE_TIMEOUTS:
         raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
     timeout = MODE_TIMEOUTS[mode]
-    
+
     return ExecutionIntent(
         direction=Direction(edge.direction),
         target_size_usd=size_usd,
@@ -135,12 +226,22 @@ def create_execution_intent(
         decision_edge=edge.edge,
     )
 
+
 def execute_intent(
     intent: ExecutionIntent,
     edge_vwmp: float,  # Phase 2: remove this parameter (dead after _paper_fill deletion)
     label: str,
-) -> OrderResult:
-    """Execute the instantiated live domain intent."""
+    conn: Optional[sqlite3.Connection] = None,
+    decision_id: str = "",
+) -> "OrderResult":
+    """Execute the instantiated live domain intent.
+
+    P1.S5: conn and decision_id are threaded through to _live_order so that
+    the pre-submit idempotency lookup (INV-32 / NC-19) uses the same DB
+    connection as the insert. Callers that pass decision_id enable
+    retry-safe idempotency; empty string falls back to a synthetic id
+    with a WARNING log.
+    """
 
     trade_id = str(uuid.uuid4())[:12]
 
@@ -157,7 +258,7 @@ def execute_intent(
         )
 
     return _live_order(
-        trade_id, intent, shares
+        trade_id, intent, shares, conn=conn, decision_id=decision_id
     )
 
 
@@ -217,7 +318,7 @@ def execute_exit_order(
     intent: ExitOrderIntent,
     conn: Optional[sqlite3.Connection] = None,
     decision_id: str = "",
-) -> OrderResult:
+) -> "OrderResult":
     """Place a live sell order via the executor and return a normalized OrderResult.
 
     Phase order (INV-30):
@@ -289,8 +390,8 @@ def execute_exit_order(
     # build phase — pure, no I/O (INV-30)
     # -----------------------------------------------------------------------
     # Derive a synthetic decision_id from trade_id when the caller has not
-    # supplied a real one. P1.S5 will wire real decision_id from upstream;
-    # for now this ensures IdempotencyKey.from_inputs gets a non-empty string.
+    # supplied a real one. P1.S5 wires real decision_id from upstream;
+    # exit path still uses synthetic when called without decision_id.
     effective_decision_id = decision_id or f"exit:{intent.trade_id}"
     idem = IdempotencyKey.from_inputs(
         decision_id=effective_decision_id,
@@ -308,6 +409,7 @@ def execute_exit_order(
 
     # -----------------------------------------------------------------------
     # persist phase — insert command row + transition to SUBMITTING (INV-30)
+    # P1.S5: open conn BEFORE lookup so lookup + insert share the same handle.
     # -----------------------------------------------------------------------
     # Post-critic CRITICAL/HIGH (2026-04-26): fallback uses
     # get_trade_connection_with_world() because that's where init_schema
@@ -321,10 +423,34 @@ def execute_exit_order(
     if not decision_id:
         logger.warning(
             "EXECUTOR: synthetic decision_id %s — retry-idempotency NOT guaranteed; "
-            "pass decision_id explicitly (P1.S5 will wire upstream)",
+            "pass decision_id explicitly",
             effective_decision_id,
         )
     try:
+        # -------------------------------------------------------------------
+        # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
+        # Check BEFORE the INSERT to avoid a failed-INSERT roundtrip on retries.
+        # The IntegrityError handler below is the race-condition safety belt.
+        # -------------------------------------------------------------------
+        from src.state.venue_command_repo import find_command_by_idempotency_key
+        from src.execution.command_bus import VenueCommand
+        pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
+        if pre_lookup_row is not None:
+            logger.info(
+                "execute_exit_order: pre-submit lookup found existing command for "
+                "idem=%s trade_id=%s — skipping submit",
+                idem.value, intent.trade_id,
+            )
+            return _orderresult_from_existing(
+                VenueCommand.from_row(pre_lookup_row),
+                trade_id=intent.trade_id,
+                limit_price=limit_price,
+                shares=shares,
+                idem_value=idem.value,
+                intent_id=intent.intent_id,
+                order_role="exit",
+            )
+
         try:
             insert_command(
                 conn,
@@ -351,97 +477,41 @@ def execute_exit_order(
             else:
                 conn.commit()
         except sqlite3.IntegrityError as exc:
-            # Idempotency key collision: a command with identical inputs already
-            # exists. Do NOT submit — the existing command is the canonical record.
+            # Race-condition safety belt: another process inserted between our
+            # lookup and our INSERT. Existing command is the canonical record.
             logger.warning(
-                "execute_exit_order: idempotency key collision for trade_id=%s idem=%s: %s",
+                "execute_exit_order: idempotency key collision (race) for trade_id=%s idem=%s: %s",
                 intent.trade_id, idem.value, exc,
             )
-            from src.state.venue_command_repo import find_command_by_idempotency_key
-            from src.execution.command_bus import VenueCommand, CommandState
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
-                existing = VenueCommand.from_row(existing_row)
-                s = existing.state
-                if s in (CommandState.ACKED, CommandState.PARTIAL):
-                    collision_result = OrderResult(
-                        trade_id=intent.trade_id,
-                        status="pending",
-                        reason="idempotency_collision: prior attempt acked",
-                        submitted_price=limit_price,
-                        shares=shares,
-                        order_role="exit",
-                        intent_id=intent.intent_id,
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s == CommandState.FILLED:
-                    collision_result = OrderResult(
-                        trade_id=intent.trade_id,
-                        status="pending",
-                        reason="idempotency_collision: prior attempt filled",
-                        submitted_price=limit_price,
-                        shares=shares,
-                        order_role="exit",
-                        intent_id=intent.intent_id,
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s in (CommandState.REJECTED, CommandState.CANCELLED, CommandState.EXPIRED):
-                    collision_result = OrderResult(
-                        trade_id=intent.trade_id,
-                        status="rejected",
-                        reason=f"idempotency_collision: prior attempt {s.value}",
-                        submitted_price=limit_price,
-                        shares=shares,
-                        order_role="exit",
-                        intent_id=intent.intent_id,
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s in (CommandState.SUBMITTING, CommandState.UNKNOWN):
-                    collision_result = OrderResult(
-                        trade_id=intent.trade_id,
-                        status="rejected",
-                        reason="idempotency_collision: prior attempt in flight; recovery will resolve",
-                        submitted_price=limit_price,
-                        shares=shares,
-                        order_role="exit",
-                        intent_id=intent.intent_id,
-                        idempotency_key=idem.value,
-                    )
-                else:
-                    # REVIEW_REQUIRED, INTENT_CREATED, or any future state
-                    collision_result = OrderResult(
-                        trade_id=intent.trade_id,
-                        status="rejected",
-                        reason=f"idempotency_collision: prior attempt {s.value}",
-                        submitted_price=limit_price,
-                        shares=shares,
-                        order_role="exit",
-                        intent_id=intent.intent_id,
-                        idempotency_key=idem.value,
-                    )
-            else:
-                # Defensive fallback: row not found despite collision
-                collision_result = OrderResult(
+                return _orderresult_from_existing(
+                    VenueCommand.from_row(existing_row),
                     trade_id=intent.trade_id,
-                    status="rejected",
-                    reason=f"idempotency_collision: {exc}",
-                    submitted_price=limit_price,
+                    limit_price=limit_price,
                     shares=shares,
-                    order_role="exit",
+                    idem_value=idem.value,
                     intent_id=intent.intent_id,
-                    idempotency_key=intent.idempotency_key,
+                    order_role="exit",
                 )
-            return collision_result
+            # Defensive fallback: row not found despite collision
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"idempotency_collision: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+            )
 
         logger.info(
             "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
             intent.token_id[:8], intent.token_id[-4:], limit_price, shares,
             current_price, f"{best_bid:.3f}" if best_bid else "N/A",
         )
-    
+
         # -----------------------------------------------------------------------
         # submit phase — SDK call (INV-30: row already SUBMITTING)
         # -----------------------------------------------------------------------
@@ -484,7 +554,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
             )
-    
+
         # -----------------------------------------------------------------------
         # ack phase — durable journal record of outcome
         # -----------------------------------------------------------------------
@@ -515,7 +585,7 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
             )
-    
+
         order_id = (
             result.get("orderID")
             or result.get("orderId")
@@ -549,7 +619,7 @@ def execute_exit_order(
                 idempotency_key=intent.idempotency_key,
                 venue_status=str(result.get("status") or ""),
             )
-    
+
         # SUBMIT_ACKED — order placed successfully
         try:
             append_event(
@@ -566,7 +636,7 @@ def execute_exit_order(
                 "execute_exit_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
                 command_id, order_id, inner,
             )
-    
+
         result_obj = OrderResult(
             trade_id=intent.trade_id,
             status="pending",
@@ -579,6 +649,7 @@ def execute_exit_order(
             external_order_id=order_id,
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
+            command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
         )
         try:
             alert_trade(
@@ -604,7 +675,7 @@ def _live_order(
     shares: float,
     conn: Optional[sqlite3.Connection] = None,
     decision_id: str = "",
-) -> OrderResult:
+) -> "OrderResult":
     """Live mode: place order via Polymarket CLOB API.
 
     Phase order (INV-30):
@@ -665,7 +736,6 @@ def _live_order(
     # -----------------------------------------------------------------------
     # Phase 2: build — pure, no I/O (INV-30)
     # Derive a synthetic decision_id when caller hasn't supplied a real one.
-    # P1.S5 will wire real decision_id from upstream.
     # -----------------------------------------------------------------------
     effective_decision_id = decision_id or f"entry:{trade_id}"
     idem = IdempotencyKey.from_inputs(
@@ -681,6 +751,7 @@ def _live_order(
 
     # -----------------------------------------------------------------------
     # Phase 3: persist — insert command row + transition to SUBMITTING (INV-30)
+    # P1.S5: open conn BEFORE lookup so lookup + insert share the same handle.
     # -----------------------------------------------------------------------
     # Post-critic CRITICAL/HIGH: fallback uses get_trade_connection_with_world()
     # because that's where init_schema runs; get_connection() targets zeus.db.
@@ -691,10 +762,34 @@ def _live_order(
     if not decision_id:
         logger.warning(
             "EXECUTOR: synthetic decision_id %s — retry-idempotency NOT guaranteed; "
-            "pass decision_id explicitly (P1.S5 will wire upstream)",
+            "pass decision_id explicitly",
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
+        # -------------------------------------------------------------------
+        # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
+        # Check BEFORE the INSERT to avoid a failed-INSERT roundtrip on retries.
+        # The IntegrityError handler below is the race-condition safety belt.
+        # -------------------------------------------------------------------
+        from src.state.venue_command_repo import find_command_by_idempotency_key
+        from src.execution.command_bus import VenueCommand
+        pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
+        if pre_lookup_row is not None:
+            logger.info(
+                "_live_order: pre-submit lookup found existing command for "
+                "idem=%s trade_id=%s — skipping submit",
+                idem.value, trade_id,
+            )
+            return _orderresult_from_existing(
+                VenueCommand.from_row(pre_lookup_row),
+                trade_id=trade_id,
+                limit_price=intent.limit_price,
+                shares=shares,
+                idem_value=idem.value,
+                intent_id=None,
+                order_role="entry",
+            )
+
         try:
             insert_command(
                 conn,
@@ -719,82 +814,32 @@ def _live_order(
             if _own_conn:
                 conn.commit()
         except sqlite3.IntegrityError as exc:
-            # Idempotency key collision: existing command is canonical record.
+            # Race-condition safety belt: another process inserted between our
+            # lookup and our INSERT. Existing command is the canonical record.
             logger.warning(
-                "_live_order: idempotency key collision for trade_id=%s idem=%s: %s",
+                "_live_order: idempotency key collision (race) for trade_id=%s idem=%s: %s",
                 trade_id, idem.value, exc,
             )
-            from src.state.venue_command_repo import find_command_by_idempotency_key
-            from src.execution.command_bus import VenueCommand, CommandState
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
-                existing = VenueCommand.from_row(existing_row)
-                s = existing.state
-                if s in (CommandState.ACKED, CommandState.PARTIAL):
-                    collision_result = OrderResult(
-                        trade_id=trade_id,
-                        status="pending",
-                        reason="idempotency_collision: prior attempt acked",
-                        submitted_price=intent.limit_price,
-                        shares=shares,
-                        order_role="entry",
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s == CommandState.FILLED:
-                    collision_result = OrderResult(
-                        trade_id=trade_id,
-                        status="pending",
-                        reason="idempotency_collision: prior attempt filled",
-                        submitted_price=intent.limit_price,
-                        shares=shares,
-                        order_role="entry",
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s in (CommandState.REJECTED, CommandState.CANCELLED, CommandState.EXPIRED):
-                    collision_result = OrderResult(
-                        trade_id=trade_id,
-                        status="rejected",
-                        reason=f"idempotency_collision: prior attempt {s.value}",
-                        submitted_price=intent.limit_price,
-                        shares=shares,
-                        order_role="entry",
-                        external_order_id=existing.venue_order_id,
-                        idempotency_key=idem.value,
-                    )
-                elif s in (CommandState.SUBMITTING, CommandState.UNKNOWN):
-                    collision_result = OrderResult(
-                        trade_id=trade_id,
-                        status="rejected",
-                        reason="idempotency_collision: prior attempt in flight; recovery will resolve",
-                        submitted_price=intent.limit_price,
-                        shares=shares,
-                        order_role="entry",
-                        idempotency_key=idem.value,
-                    )
-                else:
-                    # REVIEW_REQUIRED, INTENT_CREATED, or any future state
-                    collision_result = OrderResult(
-                        trade_id=trade_id,
-                        status="rejected",
-                        reason=f"idempotency_collision: prior attempt {s.value}",
-                        submitted_price=intent.limit_price,
-                        shares=shares,
-                        order_role="entry",
-                        idempotency_key=idem.value,
-                    )
-            else:
-                # Defensive fallback: row not found despite collision
-                collision_result = OrderResult(
+                return _orderresult_from_existing(
+                    VenueCommand.from_row(existing_row),
                     trade_id=trade_id,
-                    status="rejected",
-                    reason=f"idempotency_collision: {exc}",
-                    submitted_price=intent.limit_price,
+                    limit_price=intent.limit_price,
                     shares=shares,
+                    idem_value=idem.value,
+                    intent_id=None,
                     order_role="entry",
                 )
-            return collision_result
+            # Defensive fallback: row not found despite collision
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"idempotency_collision: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
 
         # -----------------------------------------------------------------------
         # Phase 4: V2 endpoint-identity preflight (INV-25 / K5)
@@ -943,6 +988,7 @@ def _live_order(
             external_order_id=order_id,
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
+            command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
         )
         try:
             alert_trade(

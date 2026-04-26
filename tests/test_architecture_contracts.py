@@ -3630,6 +3630,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         shares=20.0,
         order_id="ord-1",
         timeout_seconds=None,
+        command_state="ACKED",  # P1.S5 INV-32: required for materialize_position gate
     )
 
     portfolio = SimpleNamespace(positions=[], effective_bankroll=150.0)
