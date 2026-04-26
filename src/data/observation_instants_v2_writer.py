@@ -84,6 +84,15 @@ _ALLOWED_TIME_BASIS: frozenset[str] = frozenset(
 
 _ALLOWED_TEMP_UNITS: frozenset[str] = frozenset({"F", "C"})
 
+# B4 antibody (2026-04-26): physical bounds for obs_v2 temperature columns.
+# Catches the Warsaw 88°C class of poison-data failure (workbook N1.8).
+# Lower bound covers Vostok station 1983 record (-89.2°C) with margin;
+# upper covers Death Valley extreme (54.4°C verified, 56.7°C disputed)
+# with margin. Kelvin is rejected upstream by _ALLOWED_TEMP_UNITS so K-bounds
+# not needed. Inclusive on both ends — matches BETWEEN semantic in CHECK.
+_PHYSICAL_TEMP_BOUNDS_C: tuple[float, float] = (-90.0, 60.0)
+_PHYSICAL_TEMP_BOUNDS_F: tuple[float, float] = (-130.0, 140.0)
+
 _CAUSALITY_OK = "OK"
 _CAUSALITY_RUNTIME_ONLY_FALLBACK = "RUNTIME_ONLY_FALLBACK"
 _CAUSALITY_REQUIRES_SOURCE_REAUDIT = "REQUIRES_SOURCE_REAUDIT"
@@ -244,6 +253,31 @@ class ObsV2Row:
             raise InvalidObsV2RowError(
                 f"temp_unit={self.temp_unit!r} not in {sorted(_ALLOWED_TEMP_UNITS)}"
             )
+
+        # B4 antibody (2026-04-26): physical bounds on temp_current /
+        # running_max / running_min. Skip None inputs (nullable per schema).
+        # Bounds depend on temp_unit (validated to {"F", "C"} above).
+        bounds = (
+            _PHYSICAL_TEMP_BOUNDS_C if self.temp_unit == "C"
+            else _PHYSICAL_TEMP_BOUNDS_F
+        )
+        for field_name, value in (
+            ("temp_current", self.temp_current),
+            ("running_max", self.running_max),
+            ("running_min", self.running_min),
+        ):
+            if value is None:
+                continue
+            if value < bounds[0] or value > bounds[1]:
+                raise InvalidObsV2RowError(
+                    f"B4 violation (city={self.city}, utc={self.utc_timestamp}): "
+                    f"{field_name}={value} {self.temp_unit} is out of bounds "
+                    f"{bounds[0]}-{bounds[1]} {self.temp_unit}. Catches the "
+                    f"Warsaw 88°C class of poison-data failure (workbook N1.8). "
+                    f"If a sensor genuinely reports beyond this range, escalate "
+                    f"via packet — do not widen bounds without explicit review."
+                )
+
         if not _looks_like_iso_date(self.target_date):
             raise InvalidObsV2RowError(
                 f"target_date={self.target_date!r} must be YYYY-MM-DD"

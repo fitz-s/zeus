@@ -1,9 +1,24 @@
 # Operations Archive Deferrals — 2026-04-24
 
 Created: 2026-04-24
+Last audited: 2026-04-26
 Authority basis: `docs/operations/` packet audit 2026-04-24 (23 packets
 triaged; Sonnet audit report routed through team-lead).
 Status: operational evidence / task queue (NOT authority)
+
+## 2026-04-26 status update
+
+| ID | Status as of 2026-04-26 | Source |
+|---|---|---|
+| **D1** TIGGE GRIB ingest | OPEN — operator decision still pending | unchanged from 2026-04-24 |
+| **D2** Source-attestation | OPEN — operator decision still pending | unchanged from 2026-04-24 |
+| **D3** venue_commands spine | **ABSORBED by `zeus-pr18-fix-plan-20260426`** — P1 packet open; P1.S1 schema landed at `0a7845f`, closeout at `7ebed4e` | live worktree HEAD verified 2026-04-26 |
+| **D4** Archive cold-storage | **CLOSED** — `docs/archives/{packets,bundles,...}/` + `docs/archive_registry.md` both present | `ls docs/archives/` + `ls docs/archive_registry.md` |
+| **D5** current_state.md trim | **NEAR-CLOSED** — `current_state.md "Other operations surfaces"` is already minimal (2 redirect lines); folded into next hygiene pass | direct read |
+
+Companion audit: `docs/operations/task_2026-04-26_live_readiness_completion/evidence/audit_2026-04-26.md`.
+
+Only **D1 + D2** remain awaiting explicit operator ruling. D3/D4/D5 are no longer load-bearing on this workbook.
 
 ## Purpose
 

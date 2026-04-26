@@ -25,6 +25,7 @@ from src.riskguard.riskguard import get_current_level, get_force_exit_review, ti
 from src.state.canonical_write import commit_then_export
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.db import get_trade_connection_with_world, record_token_suppression
+from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
@@ -49,14 +50,11 @@ logger = logging.getLogger(__name__)
 KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
 
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED
-# force-exit sweep. Mirrors `_TERMINAL_POSITION_STATES` in src/state/portfolio.py
-# (module-private there; duplicated here to avoid cross-layer coupling).
-_TERMINAL_POSITION_STATES_FOR_SWEEP = frozenset({
-    "settled",
-    "voided",
-    "admin_closed",
-    "quarantined",
-})
+# force-exit sweep. Slice B1 (PR #19 finding 9, 2026-04-26) collapsed the
+# prior local frozenset into the canonical TERMINAL_STATES owned by
+# src.state.lifecycle_manager (derived programmatically from
+# LEGAL_LIFECYCLE_FOLDS so future fold edits cannot drift from this site).
+_TERMINAL_POSITION_STATES_FOR_SWEEP = TERMINAL_STATES
 
 
 def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
@@ -400,11 +398,20 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         smoke_test_cap = None
     open_cost_basis_usd = 0.0
     if smoke_test_cap is not None:
-        terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}
+        # Slice B1 SEMANTIC FIX (PR #19 finding 9, 2026-04-26):
+        # the prior inline set {settled, voided, admin_closed, economically_closed}
+        # disagreed with portfolio.py + cycle_runner sweep set + LEGAL_LIFECYCLE_FOLDS
+        # ground truth. ECONOMICALLY_CLOSED is NOT terminal (folds to
+        # {ECONOMICALLY_CLOSED, SETTLED, VOIDED}); QUARANTINED IS terminal
+        # (folds to {QUARANTINED}). Routing through is_terminal_state aligns
+        # this exposure-block sum with the canonical terminal definition.
+        # Net behavior change: economically_closed positions now contribute
+        # to open_cost_basis_usd until on-chain settle; quarantined positions
+        # no longer inflate the sum.
         open_cost_basis_usd = sum(
             float(getattr(pos, "cost_basis_usd", 0.0) or 0.0)
             for pos in portfolio.positions
-            if str(getattr(pos, "state", "") or "") not in terminal_states
+            if not is_terminal_state(getattr(pos, "state", ""))
         )
         summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
         summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)

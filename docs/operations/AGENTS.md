@@ -59,9 +59,11 @@ next implementation slice.
 `current_state.md` names one as the active execution packet. Read them only when
 the active task routes you there.
 
-Tracked packet evidence currently includes topology, dual-track, graph,
-workspace-artifact, code-impact, execution-state, and Gate F data-backfill
-packets.
+Tracked packet evidence currently includes the active execution-state truth
+upgrade, graph rendering integration, midstream remediation, packet runtime
+(`zpkt`), and live-readiness completion packets. Closed packet evidence has
+been archived to `docs/archives/packets/` and is indexed in
+`docs/archive_registry.md`.
 
 ### Attached Package Inputs
 
@@ -95,33 +97,20 @@ make a surface default-read unless `current_state.md` routes it.
 | `runtime_artifact_inventory.md` | active support | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
-| `task_2026-04-21_docs_reclassification_reference_extraction/` | packet evidence | Closed docs reclassification/reference extraction packet |
-| `task_2026-04-22_docs_truth_refresh/` | packet evidence | Closed docs truth refresh / stale-reference purge packet |
-| `task_2026-04-23_guidance_kernel_semantic_boot/` | packet evidence | Closed guidance-kernel semantic boot refactor packet |
-| `task_2026-04-23_authority_kernel_gamechanger/` | packet evidence | Closed authority-kernel gamechanger packet |
-| `task_2026-04-23_authority_rehydration/` | packet evidence | Closed dense module reference / manifest rehydration packet |
-| `task_2026-04-23_graph_refresh_official_integration/` | packet evidence | Closed official-first graph refresh verification and usage-integration packet |
-| `task_2026-04-23_graph_rendering_integration/` | packet evidence | Graph deep-rendering remaining-value integration packet |
-| `task_2026-04-23_data_readiness_remediation/` | packet evidence | Local data-readiness remediation packet shell present on disk |
-| `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
-| `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap; not universal authority |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |
-
-| `task_2026-04-16_dual_track_metric_spine/` | packet evidence | Dual-track metric spine refactor packet and evidence |
-| `task_2026-04-16_function_naming_freshness/` | packet evidence | Governance package for naming and freshness metadata |
-| `task_2026-04-19_code_review_graph_topology_bridge/` | packet evidence | Code Review Graph topology-first integration package |
-| `task_2026-04-19_execution_state_truth_upgrade/` | packet evidence | Local execution-state truth upgrade packet present on disk |
-| `task_2026-04-19_workspace_artifact_sync/` | packet evidence | Workspace artifact synchronization package |
-| `task_2026-04-20_code_impact_graph_context_pack/` | packet evidence | Code impact graph context-pack package |
-| `task_2026-04-20_code_review_graph_online_context/` | packet evidence | Tracked Code Review Graph online-context package |
-| `task_2026-04-20_workspace_authority_reconstruction/` | packet evidence | Workspace-authority reconstruction execution packet |
-| `task_2026-04-21_gate_f_data_backfill/` | packet evidence | Local Gate F data backfill packet present on disk |
-| `task_2026-04-22_orphan_artifact_cleanup/` | packet evidence | Cleanup of stale root scratch files and inactive workbook artifacts |
+| `task_2026-04-19_execution_state_truth_upgrade/` | packet evidence | Execution-state truth upgrade planning packet present on disk |
+| `task_2026-04-23_graph_rendering_integration/` | packet evidence | Graph deep-rendering remaining-value integration packet |
 | `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation package; phase evidence lives under `phases/` and includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
-| `task_2026-04-23_live_harvester_enablement_dr33/` | packet evidence | DR-33-A live-harvester enablement packet (code-only scaffold behind ZEUS_HARVESTER_LIVE_ENABLED default OFF) |
-| `task_2026-04-23_data_readiness_remediation/` | packet evidence | Data-readiness workstream CLOSED 2026-04-23 (8/8 packets APPROVED; settlements canonical-authority-grade) |
-| `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, scope.yaml schema, and tooling_runtime test category |
-| `docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/` | archive evidence | Adversarial forensic audit package (20 major findings + P0→P4 apply order ruling); DO NOT MODIFY — evidence at specific timestamp |
+| `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, `scope.yaml` schema, and tooling_runtime test category |
+| `task_2026-04-26_live_readiness_completion/` | packet evidence | Live-readiness completion planning packet (K=4 antibodies for 11 open B/G/U/N items); implementation lands in `claude/live-readiness-completion-2026-04-26` worktree |
+| `task_2026-04-26_polymarket_clob_v2_migration/` | packet evidence | Polymarket CLOB V1→V2 migration packet (scoping; Phase 0 operator investigation gates Phase 1; no code change yet); contains `v2_system_impact_report.md`, `plan.md`, `zeus_touchpoint_inventory.md`, `open_questions.md` |
+| `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
+| `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |
+
+Archived packet evidence (physically moved to `docs/archives/packets/`) is
+listed in `docs/archive_registry.md`; do not re-list those packets here. When
+a packet closes and is archived, remove its row from this registry and the
+archive_registry entry becomes its single source of historical truth.
 
 ## Rules
 

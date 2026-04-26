@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_live_readiness_completion
+status: in_progress
+branch: main
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+
+# This packet is PLANNING ONLY. It produces plan.md + scope.yaml + audit
+# evidence on main, plus archives the 4 closed companion workbooks. Each
+# implementation slice is its own child packet on its own worktree
+# (planned: claude/live-readiness-completion-2026-04-26).
+
+in_scope:
+  # New packet body
+  - docs/operations/task_2026-04-26_live_readiness_completion/plan.md
+  - docs/operations/task_2026-04-26_live_readiness_completion/scope.yaml
+  - docs/operations/task_2026-04-26_live_readiness_completion/evidence/audit_2026-04-26.md
+  # Workbook archive moves
+  - docs/to-do-list/archive/2026-04-26_closed/zeus_midstream_fix_plan_2026-04-23.md
+  - docs/to-do-list/archive/2026-04-26_closed/zeus_midstream_trust_upgrade_checklist_2026-04-23.md
+  - docs/to-do-list/archive/2026-04-26_closed/zeus_data_improve_bug_audit_100_dual_track_reassessment.md
+  - docs/to-do-list/archive/2026-04-26_closed/zeus_bug100_reassessment_table.csv
+  - docs/to-do-list/archive/2026-04-26_closed/zeus_live_readiness_upgrade_checklist_2026-04-23.md
+  - docs/to-do-list/archive/2026-04-26_closed/README.md
+  # Source workbook removals (git mv pair)
+  - docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md
+  - docs/to-do-list/zeus_midstream_trust_upgrade_checklist_2026-04-23.md
+  - docs/to-do-list/zeus_data_improve_bug_audit_100_dual_track_reassessment.md
+  - docs/to-do-list/zeus_bug100_reassessment_table.csv
+  - docs/to-do-list/zeus_live_readiness_upgrade_checklist_2026-04-23.md
+  # Update remaining workbook (D3 absorbed, D4 closed, D5 near-closed)
+  - docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md
+
+allow_companions:
+  - docs/to-do-list/AGENTS.md   # registry trim
+
+out_of_scope:
+  # No code, no DB, no production schema mutation in this planning packet.
+  - src/**
+  - scripts/**
+  - tests/**
+  - state/**
+  - architecture/**            # registry updates land in implementation child packets
+  - docs/operations/current_state.md   # this is parallel infra, not the active execution packet
+  # Other agents' worktrees — never touch from main:
+  - docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/**
+  - docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/**
+  - docs/operations/task_2026-04-26_full_data_midstream_fix_plan/**

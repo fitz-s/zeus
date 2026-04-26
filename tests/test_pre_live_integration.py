@@ -3,18 +3,21 @@ import numpy as np
 from src.contracts.semantic_types import Direction, EntryMethod
 from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.edge_context import EdgeContext
+from src.contracts.slippage_bps import SlippageBps
 from src.state.portfolio import Position
 from src.execution.exit_triggers import evaluate_exit_triggers
 from src.execution.executor import execute_intent
 
 @pytest.mark.skip(reason="Phase2: is_sandbox path removed; no monkeypatch available")
 def test_execution_intent_schema():
+    # P3-fix1 (post-review BLOCKER, 2026-04-26): max_slippage now requires
+    # SlippageBps per ExecutionIntent.__post_init__ runtime guard.
     intent = ExecutionIntent(
         direction=Direction("buy_no"),
         target_size_usd=100.0,
         limit_price=0.45,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=True,
         market_id="m123",
         token_id="t123",

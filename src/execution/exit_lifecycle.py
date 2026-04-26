@@ -36,6 +36,68 @@ from src.state.portfolio import (
 
 logger = logging.getLogger(__name__)
 
+
+def _emit_typed_realized_fill(
+    *,
+    actual_price: float,
+    expected_price: float,
+    side: str,
+    shares: float,
+    trade_id: str,
+) -> None:
+    """Slice P5-1 (PR #19 closeout completion, 2026-04-26): construct
+    typed RealizedFill at the fill-receipt seam.
+
+    P3.3 commit message promised "thread RealizedFill at fill receipt"
+    but only delivered planning-side typing. P5-1 closes the receipt
+    half: build RealizedFill from the actual vs intended price pair so
+    SlippageBps + ExecutionPrice contracts validate on every exit fill.
+    Construction itself is the value — invalid prices raise at
+    __post_init__ before downstream attribution can consume bad data.
+
+    Wrapped defensively so a malformed-price edge case (zero/NaN intent
+    price, side mismatch) never crashes the exit flow; the typed
+    construction failure surfaces as a WARNING for ops review.
+    """
+    try:
+        from src.contracts.execution_price import ExecutionPrice
+        from src.contracts.realized_fill import RealizedFill
+        if expected_price <= 0 or actual_price < 0 or shares <= 0 or not trade_id:
+            return  # Insufficient context for typed RealizedFill — skip silently
+        actual = ExecutionPrice(
+            value=float(actual_price),
+            price_type="vwmp",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+        expected = ExecutionPrice(
+            value=float(expected_price),
+            price_type="vwmp",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+        realized = RealizedFill.from_prices(
+            execution_price=actual,
+            expected_price=expected,
+            side=side,
+            shares=float(shares),
+            trade_id=trade_id,
+        )
+        logger.debug(
+            "realized_fill: trade=%s side=%s shares=%.4f actual=%.4f "
+            "expected=%.4f slippage=%.2f bps direction=%s",
+            trade_id, side, realized.shares,
+            realized.execution_price.value,
+            realized.expected_price.value,
+            realized.slippage.value_bps,
+            realized.slippage.direction,
+        )
+    except Exception as exc:
+        logger.warning(
+            "RealizedFill construction failed at fill-receipt for trade=%s: %s",
+            trade_id, exc,
+        )
+
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
 
@@ -455,6 +517,21 @@ def _execute_live_exit(
                             best_bid=best_bid,
                             timestamp=getattr(closed, "last_exit_at", None),
                         )
+                    # Slice P5-1 (PR #19 closeout completion, 2026-04-26):
+                    # construct typed RealizedFill at the fill-receipt seam.
+                    # P3.3 commit message promised this; P3.3b delivered the
+                    # planning-side SlippageBps wrap; P5-1 closes the receipt
+                    # half. The construction is the structural value: any
+                    # invalid price pair raises at __post_init__ before
+                    # downstream attribution can consume bad data. DEBUG log
+                    # surfaces typed slippage for ops audit.
+                    _emit_typed_realized_fill(
+                        actual_price=actual_price,
+                        expected_price=current_market_price,
+                        side="sell",
+                        shares=getattr(closed, "shares", 0.0),
+                        trade_id=getattr(closed, "trade_id", ""),
+                    )
                 return f"exit_filled: {exit_context.exit_reason}"
             else:
                 # Not filled yet — will be checked next cycle
@@ -601,6 +678,16 @@ def check_pending_exits(
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
                         timestamp=getattr(closed, "last_exit_at", None),
+                    )
+                    # Slice P5-1 third site: typed RealizedFill at the
+                    # async-monitor fill-receipt seam (same construction
+                    # pattern as L453/L600).
+                    _emit_typed_realized_fill(
+                        actual_price=actual_price,
+                        expected_price=pos.last_monitor_market_price or pos.entry_price,
+                        side="sell",
+                        shares=getattr(closed, "shares", 0.0),
+                        trade_id=getattr(closed, "trade_id", ""),
                     )
             stats["filled"] += 1
         elif status in VOID_STATUSES:

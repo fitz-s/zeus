@@ -46,6 +46,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
 | `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
+| `.agents/` | Repo-local workflow skills and AI handoff guidance | `.agents/skills/AGENTS.md` |
 
 ## Machine manifests
 

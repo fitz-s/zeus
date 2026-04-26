@@ -7,7 +7,7 @@ This constraint dramatically narrows probability distribution near settlement.
 
 import numpy as np
 
-from src.config import day0_n_mc, day0_obs_dominates_threshold
+from src.config import day0_n_mc
 from typing import Callable
 
 from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
@@ -246,12 +246,11 @@ class Day0Signal:
             obs_exceeds_ens_fraction=float(np.clip(np.mean(self.ens_remaining <= self.obs_high), 0.0, 1.0)),
         )
 
-    def obs_dominates(self) -> bool:
-        """True if observation already exceeds most ENS remaining forecasts.
-
-        Legacy boolean interface. Prefer observation_weight() for continuous blending.
-        """
-        return float(np.mean(self.ens_remaining <= self.obs_high)) > day0_obs_dominates_threshold()
+    # Slice P4-1 (PR #19 phase 4 cleanup, 2026-04-26): obs_dominates()
+    # legacy boolean interface removed — observation_weight() is the
+    # canonical continuous-blending replacement (FIXED 2026-03-31 per
+    # known_gaps.md). Phase 3 audit verified zero external callers.
+    # day0_obs_dominates_threshold() removed from src/config.py too.
 
     def forecast_context(self) -> dict:
         return {

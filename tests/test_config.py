@@ -13,7 +13,6 @@ from src.config import (
     calibration_clusters,
     calibration_maturity_thresholds,
     day0_n_mc,
-    day0_obs_dominates_threshold,
     edge_n_bootstrap,
     ensemble_bimodal_gap_ratio,
     ensemble_bimodal_kde_order,
@@ -178,17 +177,29 @@ def test_signal_constants_are_single_sourced_from_settings():
 
 def test_day0_constants_are_single_sourced_from_settings():
     from src.signal.day0_signal import Day0Signal
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
     import numpy as np
 
+    # P4-fix1 (post-review BLOCKER from code-reviewer, 2026-04-26):
+    # Day0Signal hardened to require explicit MetricIdentity (no default).
+    # Pre-fix1 the test silently relied on the now-removed permissive
+    # default and crashed at construction with TypeError; P4-1b preserved
+    # the broken call. Pass HIGH_LOCALDAY_MAX explicitly.
     sig = Day0Signal(
         observed_high_so_far=40.0,
         current_temp=39.0,
         hours_remaining=6.0,
         member_maxes_remaining=np.array([39.0, 40.0, 41.0]),
+        temperature_metric=HIGH_LOCALDAY_MAX,
     )
     assert day0_n_mc() == 5000
-    assert sig.obs_dominates() is False
-    assert day0_obs_dominates_threshold() == 0.8
+    # Slice P4-1 (PR #19 phase 4 cleanup, 2026-04-26): obs_dominates() and
+    # day0_obs_dominates_threshold() removed as dead code (zero callers
+    # outside legacy interface). Replaced with continuous observation_weight()
+    # check — observation_weight returns a finite float in [0, 1] for any
+    # valid Day0Signal.
+    weight = sig.observation_weight()
+    assert 0.0 <= weight <= 1.0
 
     p_vector_signature = inspect.signature(Day0Signal.p_vector)
     assert p_vector_signature.parameters["n_mc"].default is None

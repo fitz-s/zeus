@@ -1,0 +1,26 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_git_state_cleanup
+status: in_progress
+branch: chore/git-state-cleanup-2026-04-26
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus
+
+in_scope:
+  - docs/operations/task_2026-04-26_git_state_cleanup/**
+
+allow_companions:
+  - docs/operations/AGENTS.md
+
+out_of_scope:
+  - src/**
+  - tests/**
+  - scripts/**
+  - state/**
+  - architecture/**
+  - config/**
+  - docs/operations/task_2026-04-23_midstream_remediation/**
+  - docs/operations/task_2026-04-26_live_readiness_completion/**
+  - docs/operations/task_2026-04-19_execution_state_truth_upgrade/**
+  - docs/operations/task_2026-04-23_graph_rendering_integration/**
+  - docs/operations/task_2026-04-25_p2_packet_runtime/**
+  - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/**

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_g10_helper_extraction",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "predecessor_slice": "task_2026-04-26_g10_ingest_scaffold (commit dfd5fb0, APPROVE_WITH_CONDITIONS)",
+  "k_decision": "K3.G10-helper-extraction (discharges G10-scaffold MAJOR #1 + #2)",
+  "closed_at_utc": "2026-04-26",
+  "single_commit": true,
+  "discharges_conditions": {
+    "MAJOR_1_transitive_import_violation": {
+      "finding": "AST-walk antibody on G10-scaffold caught DIRECT imports only. daily_obs_tick + hourly_instants_tick directly import `from src.data.X_append` (allowed) but those modules transitively imported `from src.signal.diurnal import _is_missing_local_hour` (forbidden), so the decoupling premise was false for 2/5 ticks.",
+      "fix": "Extract `_is_missing_local_hour` to `src/contracts/dst_semantics.py` (allowed for both lanes). Update `src/data/daily_obs_append.py:73` + `src/data/hourly_instants_append.py:50` to import from canonical location. `src/signal/diurnal.py` re-exports for back-compat.",
+      "verification": "Subprocess-isolated audit (test_no_forbidden_transitive_imports_in_ingest) runs each tick in a fresh Python subprocess, captures sys.modules delta, asserts no entry matches FORBIDDEN_IMPORT_PREFIXES. All 5 ticks now clean."
+    },
+    "MAJOR_2_direct_invocation_broken": {
+      "finding": "`python scripts/ingest/X_tick.py` failed with ModuleNotFoundError because default sys.path[0] is the script's directory, not repo root.",
+      "fix": "Add `sys.path.insert(0, str(Path(__file__).resolve().parents[2]))` to each tick before any project import. Matches scripts/live_smoke_test.py:23 convention. Both `python scripts/ingest/X.py` and `python -m scripts.ingest.X` invocation modes now work.",
+      "verification": "Empirical: ran each tick via direct invocation in subprocess. 5/5 imports resolve cleanly (failures at runtime are sqlite OperationalError on empty test DB — expected, not import errors)."
+    },
+    "NICE_TO_HAVE_2_negative_detection_inline": {
+      "finding": "AST-walk antibody passing 5/5 GREEN doesn't prove it would catch a real violation — only that current files happen to be clean. Without negative-detection, a future antibody-implementation regression silently passes.",
+      "fix": "test_antibody_self_test_catches_synthetic_violation programmatically writes a fake tick with two forbidden imports and asserts both are detected by _collect_imports. Validates the antibody's enforcement mechanism, not just current-file cleanliness.",
+      "verification": "Test passes — both src.engine.cycle_runner and src.signal.diurnal violations surface as expected."
+    }
+  },
+  "antibody_test_count_delta": "5 → 8 (3 new tests in tests/test_ingest_isolation.py)",
+  "antibody_test_pass_rate": "8/8",
+  "regression_panel": {
+    "scope": [
+      "tests/test_obs_v2_dst_missing_hour_flag.py",
+      "tests/test_obs_v2_writer.py",
+      "tests/test_ingest_isolation.py",
+      "tests/test_architecture_contracts.py",
+      "tests/test_live_safety_invariants.py",
+      "tests/test_cross_module_invariants.py"
+    ],
+    "baseline_failures": 5,
+    "post_commit_failures": 5,
+    "delta_new_failures": 0,
+    "back_compat_verified": "tests/test_obs_v2_dst_missing_hour_flag.py 6/6 — uses `from src.signal.diurnal import _is_missing_local_hour` (re-export); confirms `_is_missing_local_hour` accessible from BOTH src.signal.diurnal AND src.contracts.dst_semantics."
+  },
+  "files_touched": [
+    "src/contracts/dst_semantics.py (NEW)",
+    "src/signal/diurnal.py",
+    "src/data/daily_obs_append.py",
+    "src/data/hourly_instants_append.py",
+    "scripts/ingest/daily_obs_tick.py",
+    "scripts/ingest/hourly_instants_tick.py",
+    "scripts/ingest/solar_daily_tick.py",
+    "scripts/ingest/forecasts_daily_tick.py",
+    "scripts/ingest/hole_scanner_tick.py",
+    "tests/test_ingest_isolation.py"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "category_immunity_score_target": "0.85 — predicted post-third-pass review (was 0.65 on G10-scaffold pre-fix)",
+  "downstream_unblocked": {
+    "G10-cutover": "Wave 2 — now unblocked on the helper-extraction front. Still gated on operator + launchd plists + cycle proof.",
+    "G10-launchd-plists": "Now unblocked — plists can use `python /path/to/scripts/ingest/X_tick.py` directly without PYTHONPATH ceremony."
+  },
+  "followups_owed": [
+    {
+      "id": "G10-AST-walk-dynamic-imports",
+      "summary": "Extend AST-walk to detect __import__() and importlib.import_module() string-arg violations (con-nyx NICE-TO-HAVE #1).",
+      "estimated_hours": 0.25
+    },
+    {
+      "id": "G10-tick-suffix-broadening",
+      "summary": "Broaden main()-required check beyond `*_tick.py` (con-nyx NICE-TO-HAVE #3).",
+      "estimated_hours": 0.1
+    },
+    {
+      "id": "G10-calibration-fence",
+      "summary": "Decision on adding src.calibration to FORBIDDEN_IMPORT_PREFIXES + extract season_from_date to src/contracts/season.py if so. Operator-gated (workbook-vs-reality call). Folds with this slice's pattern.",
+      "estimated_hours": 0.5
+    }
+  ],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "Pattern lessons #11 (subprocess-isolated transitive audit) + #12 (negative-detection for scaffold antibodies) are now baked into tests/test_ingest_isolation.py. If a 3rd similar lane appears (e.g., scripts/strategy/* or scripts/calibration/*), extract the audit + negative-detection patterns to a shared test helper."
+}

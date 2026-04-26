@@ -29,6 +29,25 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    # PR #19 fix-plan packet (Phase 1+2+3+4 antibody tests, 2026-04-26).
+    # P4-fix2 (post-review MAJOR from code-reviewer, 2026-04-26):
+    # categories: core_law_antibody: registration is insufficient —
+    # topology_doctor_digest.py:759 reads `trusted_tests:` keys ONLY
+    # for the trust check. Both registrations are required.
+    tests/test_authority_strict_learning.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
+    tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
@@ -51,13 +70,18 @@ test_trust_policy:
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
+    tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
+    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-23"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_obs_v2_physical_bounds.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_reader_gate.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -186,6 +210,23 @@ categories:
     - tests/test_pe_reconstruction_relationships.py
     - tests/test_settlements_authority_trigger.py
     - tests/test_settlements_verified_row_integrity.py
+
+    # PR #19 fix-plan packet (Phase 1+2+3+4 antibody tests, 2026-04-26).
+    # All carry standard `# Created:` + `# Last reused/audited:` +
+    # `# Authority basis:` headers per project rule → trusted classification.
+    - tests/test_authority_strict_learning.py
+    - tests/test_calibration_manager_low_fallback_regression.py
+    - tests/test_calibration_pairs_v2_metric_linter.py
+    - tests/test_calibration_store_metric_required.py
+    - tests/test_calibration_v2_fallback_alerting.py
+    - tests/test_ensemble_snapshots_bias_corrected_schema.py
+    - tests/test_evaluator_metric_normalizer_failclosed.py
+    - tests/test_execution_intent_typed_slippage.py
+    - tests/test_lifecycle_terminal_predicate.py
+    - tests/test_monitor_refresh_ci_fallback.py
+    - tests/test_position_metric_resolver.py
+    - tests/test_realized_fill_at_receipt.py
+    - tests/test_evaluate_candidate_metric_integration.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py

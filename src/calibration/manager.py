@@ -28,6 +28,40 @@ from src.contracts.calibration_bins import F_CANONICAL_GRID, C_CANONICAL_GRID
 _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
 
+# Slice P3-fix2 (post-review MAJOR from both reviewers, 2026-04-26):
+# per-(path, cluster, season, metric) seen-set for v2→legacy fallback
+# WARNING dedup. v2 coverage may be sparse → without dedup the alert
+# fires every cycle for every uncovered bucket, drowning ops attention.
+# With dedup: first occurrence per process lifetime emits the WARNING;
+# subsequent identical fallbacks suppress (operator already alerted).
+# Module-level set is intentional — survives across get_calibrator
+# invocations within the same process.
+_V2_FALLBACK_SEEN: set[tuple[str, str, str, str]] = set()
+
+
+def _emit_v2_legacy_fallback_warning(
+    path: str, cluster: str, season: str, metric: str
+) -> None:
+    """Emit a deduplicated WARNING when v2 misses and legacy fills.
+
+    `path` is one of "primary" (cluster+season primary bucket) or
+    "season-pool" (season-only fallback to a different cluster). The
+    leading `v2_to_legacy_fallback path=...` token is stable so log
+    aggregators can group both paths into the same logical event family
+    while still distinguishing the originating fallback site.
+    """
+    key = (path, cluster, season, metric)
+    if key in _V2_FALLBACK_SEEN:
+        return
+    _V2_FALLBACK_SEEN.add(key)
+    logger.warning(
+        "v2_to_legacy_fallback path=%s cluster=%s season=%s metric=%s "
+        "v2 missed; serving legacy platt_models. Operator review v2 "
+        "coverage gap (per-bucket dedup — first occurrence only).",
+        path, cluster, season, metric,
+    )
+
+
 def lat_for_city(city_name: str) -> float:
     """Look up latitude for a city by name. Returns 90.0 (NH default) if not found."""
     from src.config import cities_by_name
@@ -40,44 +74,19 @@ def bucket_key(cluster: str, season: str) -> str:
     return f"{cluster}_{season}"
 
 
-_SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
-
-
-def season_from_month(month: int, lat: float = 90.0) -> str:
-    """Map month integer to meteorological season code, hemisphere-aware."""
-    if month in (12, 1, 2):
-        season = "DJF"
-    elif month in (3, 4, 5):
-        season = "MAM"
-    elif month in (6, 7, 8):
-        season = "JJA"
-    else:
-        season = "SON"
-    return _SH_FLIP[season] if lat < 0 else season
-
-
-def hemisphere_for_lat(lat: float) -> str:
-    """Return 'N' for Northern Hemisphere, 'S' for Southern (equator = N)."""
-    return "N" if lat >= 0 else "S"
-
-
-def season_from_date(date_str: str, lat: float = 90.0) -> str:
-    """Map date string to meteorological season code, hemisphere-aware.
-
-    For Southern Hemisphere (lat < 0), labels are flipped so that
-    DJF always means "cold season" and JJA always means "warm season",
-    regardless of hemisphere.
-    """
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        season = "DJF"
-    elif month in (3, 4, 5):
-        season = "MAM"
-    elif month in (6, 7, 8):
-        season = "JJA"
-    else:
-        season = "SON"
-    return _SH_FLIP[season] if lat < 0 else season
+# G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4): season helpers
+# moved to src.contracts.season so the ingest lane (scripts/ingest/*) can call
+# them without transitively pulling src.calibration into the import graph.
+# Re-exported here for back-compat — existing callers (harvester.py,
+# observation_client.py, replay.py, this module's own L85/L159/L354) keep
+# working unchanged. _SH_FLIP also re-exported for any subclass/extension
+# that depended on the symbol.
+from src.contracts.season import (  # noqa: F401  (re-export)
+    _SH_FLIP,
+    hemisphere_for_lat,
+    season_from_date,
+    season_from_month,
+)
 
 
 def route_to_bucket(city: City, target_date: str) -> str:
@@ -170,6 +179,14 @@ def get_calibrator(
         # Legacy fallback only for HIGH — LOW has never existed in legacy
         bk = bucket_key(cluster, season)
         model_data = load_platt_model(conn, bk)
+        # Slice P3.4 + P3-fix2 (post-review MAJOR from both reviewers,
+        # 2026-04-26): operator-visible WARNING when v2 misses and legacy
+        # fills, deduplicated per-(path,cluster,season,metric) for the
+        # process lifetime. v2 coverage may be sparse → first cycle alerts
+        # operator; subsequent cycles for the same bucket suppress to
+        # avoid log spam (one fact, one alert).
+        if model_data is not None:
+            _emit_v2_legacy_fallback_warning("primary", cluster, season, "high")
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(
@@ -189,17 +206,32 @@ def get_calibrator(
             level = maturity_level(model_data["n_samples"])
             return cal, level
 
-    # Check if we have enough pairs to fit on the fly
-    n = get_decision_group_count(conn, cluster, season)
+    # Maturity threshold is needed by both the HIGH on-the-fly path AND the
+    # season-only fallback loop below; bind it once before the HIGH branch
+    # so LOW callers (which skip the on-the-fly attempt) still have it
+    # available at L225. Slice A2-fix1 (post-review BLOCKER from
+    # code-reviewer 2026-04-26): pre-fix kept this binding inside the HIGH
+    # branch and crashed LOW callers with UnboundLocalError when a v2
+    # fallback model existed in another cluster's bucket.
     _, _, level3 = calibration_maturity_thresholds()
-    if n >= level3:
-        cal = _fit_from_pairs(
-            conn, cluster, season, unit=city.settlement_unit,
-            temperature_metric=temperature_metric,
-        )
-        if cal is not None:
-            level = maturity_level(n)
-            return cal, level
+
+    # Check if we have enough pairs to fit on the fly.
+    # Phase 9C.1 + slice A2 (PR #19 followup, 2026-04-26): on-the-fly refit
+    # is HIGH-only because legacy calibration_pairs has no temperature_metric
+    # column ("LOW has never existed in legacy" per Phase 9C L3). For LOW
+    # callers, skip the count + fit attempt and fall through to v2/fallback
+    # paths directly. This avoids a metric-blind count whose result would be
+    # discarded anyway (`_fit_from_pairs` short-circuits on non-HIGH at L267).
+    if temperature_metric == "high":
+        n = get_decision_group_count(conn, cluster, season, metric="high")
+        if n >= level3:
+            cal = _fit_from_pairs(
+                conn, cluster, season, unit=city.settlement_unit,
+                temperature_metric=temperature_metric,
+            )
+            if cal is not None:
+                level = maturity_level(n)
+                return cal, level
 
     # Fallback: season-only (pool all clusters). v2 FIRST per metric,
     # legacy only for HIGH backward compat (Phase 9C L3).
@@ -215,6 +247,11 @@ def get_calibrator(
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)
             model_data = load_platt_model(conn, bk_fb)
+            # Slice P3.4 + P3-fix2: twin-site dedup per-bucket WARNING.
+            if model_data is not None:
+                _emit_v2_legacy_fallback_warning(
+                    "season-pool", fallback_cluster, season, "high",
+                )
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":
                 logger.warning(
@@ -272,7 +309,13 @@ def _fit_from_pairs(
             cluster, season, temperature_metric,
         )
         return None
-    pairs = get_pairs_for_bucket(conn, cluster, season, bin_source_filter="canonical_v1")
+    # Slice A2 (PR #19 followup, 2026-04-26): metric="high" is structurally
+    # required because the gate at L267 already short-circuits non-HIGH;
+    # passing it explicitly makes the implicit invariant visible at the
+    # read seam and satisfies the store-side enforcement landed in slice A1.
+    pairs = get_pairs_for_bucket(
+        conn, cluster, season, bin_source_filter="canonical_v1", metric="high",
+    )
     _, _, level3 = calibration_maturity_thresholds()
     if len(pairs) < level3:
         return None

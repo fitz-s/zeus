@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_g10_nice_to_have_batch",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "predecessor_slice": "task_2026-04-26_g10_helper_extraction (commit e5e6a30, APPROVED)",
+  "k_decision": "K3.G10-nice-to-have-batch (3 of 4 G10 NICE-TO-HAVEs in single commit)",
+  "closed_at_utc": "2026-04-26",
+  "single_commit": true,
+  "discharges_nice_to_have": {
+    "G10_NICE_TO_HAVE_4_calibration_fence": {
+      "finding": "src.data.daily_obs_append:69 imports season_from_date from src.calibration.manager — pulls src.calibration into ingest lane transitively. season helpers are pure calendar code (no calibration dependencies).",
+      "fix": "Extract season_from_date + season_from_month + hemisphere_for_lat + _SH_FLIP to src/contracts/season.py (pure functions, allowed for both lanes). src/calibration/manager.py re-exports for back-compat. src/data/daily_obs_append.py re-pointed to canonical location. src.calibration added to FORBIDDEN_IMPORT_PREFIXES.",
+      "verification": "Subprocess audit confirms 5/5 ticks clean post-fix; 4 other src.calibration callers (harvester, observation_client, replay, calibration internal) work via re-export."
+    },
+    "G10_NICE_TO_HAVE_3_tick_suffix_broadening": {
+      "finding": "test_each_tick_script_has_main_callable filtered on `*_tick.py`. Future `daily_runner.py` or `obs_dispatcher.py` would skip the check.",
+      "fix": "Filter broadened to `name not in {'_shared.py', '__init__.py'}`. Any executable module under scripts/ingest/ now requires main()."
+    },
+    "G10_NICE_TO_HAVE_1_AST_walk_dynamic_imports": {
+      "finding": "_collect_imports only sees statement-level ast.Import + ast.ImportFrom. Dynamic call patterns __import__('x') and importlib.import_module('x') evade.",
+      "fix": "Added _collect_dynamic_imports() walking ast.Call nodes for the two patterns. test_no_forbidden_dynamic_imports_in_ingest applies same forbidden-prefix check.",
+      "scope_caveat": "Non-string first args (`__import__(some_var)`) ignored — un-auditable statically. Documented in helper docstring."
+    }
+  },
+  "deferred": {
+    "G10_NICE_TO_HAVE_2_negative_detection": "Already landed in G10-helper-extraction (commit e5e6a30) as test_antibody_self_test_catches_synthetic_violation.",
+    "G10-source-split": "Per con-nyx Ask #6, defer daily_tick API refactor to the source-split slice itself. Wave 2."
+  },
+  "antibody_test_count_delta": "8 → 9 (1 new test in tests/test_ingest_isolation.py)",
+  "antibody_test_pass_rate": "9/9",
+  "regression_panel": {
+    "scope": [
+      "tests/test_calibration_bins_canonical.py",
+      "tests/test_obs_v2_dst_missing_hour_flag.py",
+      "tests/test_ingest_isolation.py",
+      "tests/test_architecture_contracts.py",
+      "tests/test_live_safety_invariants.py",
+      "tests/test_cross_module_invariants.py",
+      "tests/test_hk_settlement_floor_rounding.py"
+    ],
+    "baseline_failures": 5,
+    "post_commit_failures": 5,
+    "delta_new_failures": 0
+  },
+  "files_touched": [
+    "src/contracts/season.py (NEW)",
+    "src/calibration/manager.py",
+    "src/data/daily_obs_append.py",
+    "tests/test_ingest_isolation.py"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "category_immunity_score_target": "0.90 — predicted post-review (was 0.85 on G10-helper-extraction; +0.05 for closing 3 NICE-TO-HAVEs)",
+  "followups_owed": [],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "Pattern: when the same extraction-then-re-export move repeats (helper-extraction did dst_semantics; this slice did season), there's an emerging idiom worth a lore card after the third occurrence. Track."
+}

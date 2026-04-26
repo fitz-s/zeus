@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_b5_dst_antibody",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "k_decision": "K3.B5-antibody",
+  "closed_at_utc": "2026-04-26",
+  "single_commit": true,
+  "absorbed_pre_existing": {
+    "writer_field": "src/data/observation_instants_v2_writer.py:138 (is_missing_local_hour: int = 0)",
+    "central_helper": "src/signal/diurnal.py:19 (_is_missing_local_hour)",
+    "caller_paths_correct": [
+      "src/data/wu_hourly_client.py:331",
+      "src/data/ogimet_hourly_client.py:402",
+      "src/data/meteostat_bulk_client.py:298",
+      "src/data/hourly_instants_append.py:153",
+      "src/data/daily_obs_append.py:668"
+    ],
+    "historical_backfill_script": "scripts/fill_obs_v2_dst_gaps.py (created 2026-04-22, last_reused 2026-04-25)"
+  },
+  "this_slice_contribution": "Regression antibody only — no production code change. Pins helper + ObsV2Row constructor + writer round-trip end-to-end so any future refactor of the field/helper/writer surfaces in tests immediately.",
+  "antibody_test": "tests/test_obs_v2_dst_missing_hour_flag.py",
+  "antibody_test_count": 6,
+  "antibody_test_pass_rate": "6/6",
+  "files_touched": [
+    "tests/test_obs_v2_dst_missing_hour_flag.py",
+    "architecture/test_topology.yaml"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "departures_from_g6_pattern": {
+    "skipped_red_commit": "Production code is pre-correct (writer + callers + script all shipped before). RED-then-GREEN ritual would be theatre. Single GREEN commit is honest scoping.",
+    "did_not_add_hard_reject": "Flag remains annotative by design. Promoting to a contract gate (e.g., reject obs_v2 row with local_timestamp in DST gap but is_missing_local_hour=0) would be a separate operator decision."
+  },
+  "followups_owed": [],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "If a future slice promotes is_missing_local_hour to hard-reject contract, extract a 'DST flag contract' lore card. Until then, the antibody is sufficient."
+}

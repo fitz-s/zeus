@@ -14,7 +14,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 import numpy as np
 
@@ -210,6 +210,8 @@ def get_pairs_for_bucket(
     season: str,
     authority_filter: str = 'VERIFIED',
     bin_source_filter: str | None = None,
+    *,
+    metric: Literal["high", "low"] | None = None,
 ) -> list[dict]:
     """Get calibration pairs for a bucket (cluster \u00d7 season).
 
@@ -220,9 +222,33 @@ def get_pairs_for_bucket(
     If the authority column is absent (pre-migration DB), the filter is
     silently skipped so existing callers are not broken by the schema gap.
 
+    `metric` makes the legacy-table HIGH-only convention structural
+    (PR #19 follow-up; see docs/operations/task_2026-04-26_full_data_midstream_fix_plan).
+    The legacy `calibration_pairs` schema has no `temperature_metric`
+    column; per Phase 9C L3 commentary in `manager.py`, "LOW has never
+    existed in legacy". Passing `metric="low"` is therefore a
+    category-error and raises NotImplementedError, pointing at the v2 API.
+
+    NOTE on error swallowing (post-review observation): `NotImplementedError`
+    is `RuntimeError`-derived and would be caught by `except Exception` at
+    existing call sites (evaluator.py:1029 + monitor_refresh.py:181/375).
+    Today only `manager.py` reaches this function with an explicit `metric`
+    value (always "high" per slice A2), so the error pathway is unreachable
+    in production. A future caller passing `metric="low"` from one of those
+    sites would silently fall through to "empty pairs" rather than raising
+    visibly. Add an explicit `if metric == "low": raise` guard at any new
+    call site if you want loud failure.
+
     Returns list of dicts with keys: p_raw, lead_days, outcome, range_label,
     decision_group_id.
     """
+    if metric == "low":
+        raise NotImplementedError(
+            "get_pairs_for_bucket reads legacy `calibration_pairs`, which "
+            "is HIGH-only by Phase 9C L3 convention (no temperature_metric "
+            "column). LOW reads must use calibration_pairs_v2 via the v2 "
+            "lookup API (load_platt_model_v2 / dedicated v2 readers)."
+        )
     if authority_filter == 'any':
         bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
         params = (
@@ -272,12 +298,24 @@ def get_pairs_count(
     cluster: str,
     season: str,
     authority_filter: str = "VERIFIED",
+    *,
+    metric: Literal["high", "low"] | None = None,
 ) -> int:
     """Count calibration pairs in a bucket.
 
     K4.5 H5 fix: filters by authority='VERIFIED' by default.
     Pass authority_filter='any' to count all rows (diagnostics only).
+
+    `metric` enforces the legacy-table HIGH-only convention
+    (see `get_pairs_for_bucket` docstring). `metric="low"` raises
+    immediately because legacy `calibration_pairs` has no
+    `temperature_metric` column.
     """
+    if metric == "low":
+        raise NotImplementedError(
+            "get_pairs_count reads legacy `calibration_pairs`, which is "
+            "HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+        )
     if authority_filter == "any" or not _has_authority_column(conn):
         return conn.execute("""
             SELECT COUNT(*) FROM calibration_pairs
@@ -294,8 +332,21 @@ def get_decision_group_count(
     cluster: str,
     season: str,
     authority_filter: str = "VERIFIED",
+    *,
+    metric: Literal["high", "low"] | None = None,
 ) -> int:
-    """Count independent decision groups in a calibration bucket."""
+    """Count independent decision groups in a calibration bucket.
+
+    `metric` enforces the legacy-table HIGH-only convention
+    (see `get_pairs_for_bucket` docstring). `metric="low"` raises
+    immediately because legacy `calibration_pairs` has no
+    `temperature_metric` column.
+    """
+    if metric == "low":
+        raise NotImplementedError(
+            "get_decision_group_count reads legacy `calibration_pairs`, "
+            "which is HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+        )
     if authority_filter == "any" or not _has_authority_column(conn):
         row = conn.execute("""
             SELECT COUNT(DISTINCT decision_group_id) FROM calibration_pairs

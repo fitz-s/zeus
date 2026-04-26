@@ -90,13 +90,14 @@ Role: single live control pointer for the repo.
   Graph context-pack path no longer swallows internal `TypeError`s, the bare
   `test` digest regression is strict, and `pytest.ini` states that full
   automated coverage must override the default `live_topology` marker filter.
-  Heartbeat untracking remains a future runtime-governance decision, not part
-  of this safe review-fix packet.
 
   Operations package cleanup is closed: midstream remediation phase evidence
   now lives under the single
   `docs/operations/task_2026-04-23_midstream_remediation/phases/` root, and
   guidance/tooling now says phases of one package must stay inside that package.
+  The follow-up runtime projection cleanup removed
+  `state/daemon-heartbeat.json` and `state/status_summary.json` from Git
+  tracking while leaving local daemon output intact.
 
 ## Required evidence
 
@@ -158,6 +159,19 @@ Role: single live control pointer for the repo.
   observation, calibration, or DB authority. Mainline P1/P2/P3 sequencing is
   unaffected.
 
+
+## Active worktrees (2026-04-26)
+
+Three claude worktrees are concurrently active. Per-worktree scope, file-touch
+inventory, and cross-worktree collision matrix live in
+`docs/operations/task_2026-04-26_live_readiness_completion/evidence/audit_2026-04-26.md`.
+Do not edit a file inventoried by another worktree without coordinating there first.
+
+| Worktree path | Branch | Packet root |
+|---|---|---|
+| `zeus-pr18-fix-plan-20260426` | `claude/pr18-execution-state-truth-fix-plan-2026-04-26` | `task_2026-04-26_execution_state_truth_p0_hardening/` + `..._p1_command_bus/` |
+| `zeus-fix-plan-20260426` | `claude/zeus-full-data-midstream-fix-plan-2026-04-26` | `task_2026-04-26_full_data_midstream_fix_plan/` |
+| `zeus-live-readiness-2026-04-26` | `claude/live-readiness-completion-2026-04-26` | `task_2026-04-26_live_readiness_completion/` (planning-only) |
 
 ## Next action
 

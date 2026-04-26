@@ -20,6 +20,7 @@ from typing import Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
+from src.contracts.slippage_bps import SlippageBps
 from src.contracts import (
     HeldSideProbability,
     NativeSidePrice,
@@ -213,12 +214,19 @@ def create_execution_intent(
         raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
     timeout = MODE_TIMEOUTS[mode]
 
+    # Slice P3.3 + P3-fix4 (post-review code-reviewer NIT-1): typed
+    # slippage budget. 0.02 fraction = 200 bps (2% adverse-direction
+    # limit). Wrapping in SlippageBps makes the units explicit at
+    # construction; pre-fix the raw 0.02 was unit-ambiguous and the
+    # type system couldn't catch a caller that meant 0.02 bps (200x
+    # tighter) instead of 0.02 fraction. Import hoisted to module top
+    # per PEP 8.
     return ExecutionIntent(
         direction=Direction(edge.direction),
         target_size_usd=size_usd,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=False,
         market_id=market_id,
         token_id=order_token,
@@ -345,9 +353,22 @@ def execute_exit_order(
     limit_price = base_price
 
     if best_bid is not None and best_bid < base_price:
-        slippage = current_price - best_bid
-        if current_price > 0 and slippage / current_price <= 0.03:
-            limit_price = best_bid
+        # Slice P3.3b (PR #19 phase 4 closeout, 2026-04-26): typed
+        # anticipated-slippage at the price-planning seam. Pre-fix used
+        # raw `slippage = current_price - best_bid` + raw `slippage /
+        # current_price <= 0.03` arithmetic — both unit-ambiguous and
+        # invisible to the type system. Now wraps in SlippageBps which
+        # enforces non-negative magnitude + direction semantics. The
+        # `.fraction` accessor (200 bps == 0.02 fraction) makes the
+        # 3% threshold compare cleanly against a typed value.
+        if current_price > 0:
+            slip_bps = abs(current_price - best_bid) / current_price * 10_000.0
+            slippage = SlippageBps(
+                value_bps=slip_bps,
+                direction="adverse",  # sell crossing down to bid receives adverse
+            )
+            if slippage.fraction <= 0.03:
+                limit_price = best_bid
 
     # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
     # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`

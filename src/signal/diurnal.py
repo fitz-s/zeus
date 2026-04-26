@@ -16,24 +16,15 @@ from src.types import Day0TemporalContext, ObservationInstant, SolarDay
 logger = logging.getLogger(__name__)
 
 
-def _is_missing_local_hour(local_dt: datetime, tz: ZoneInfo) -> bool:
-    """True if the wall-clock hour does not exist in the given timezone (spring-forward gap).
-
-    Example: London 2025-03-30 01:30 does not exist because clocks jumped 01:00 -> 02:00.
-    """
-    # Take the naive local datetime; try to localize in the tz; round-trip through UTC.
-    # If the round-trip shifts the hour or the date, the original hour was in a DST gap.
-    if local_dt.tzinfo is not None:
-        local_naive = local_dt.replace(tzinfo=None)
-    else:
-        local_naive = local_dt
-    # Localize with fold=0 (the "earlier" option) — in a gap, this produces a post-gap instant
-    localized = local_naive.replace(tzinfo=tz)
-    # Round-trip through UTC
-    utc = localized.astimezone(ZoneInfo("UTC"))
-    back = utc.astimezone(tz)
-    # If the hour or date changed, the original wall-clock hour does not exist
-    return back.hour != local_naive.hour or back.date() != local_naive.date()
+# G10 helper-extraction (2026-04-26, con-nyx APPROVE_WITH_CONDITIONS MAJOR #1):
+# `_is_missing_local_hour` moved to src.contracts.dst_semantics so ingest-lane
+# callers (src.data.daily_obs_append, src.data.hourly_instants_append, plus
+# scripts/ingest/* tick scripts) don't transitively pull in src.signal — the
+# trading-engine surface fenced off by tests/test_ingest_isolation.py.
+# Re-exported here for back-compat: existing callers (src.data.ingestion_guard,
+# this module's L340/L415, tests via `from src.signal.diurnal import
+# _is_missing_local_hour`) keep working unchanged.
+from src.contracts.dst_semantics import _is_missing_local_hour  # noqa: F401  (re-export)
 
 
 def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:

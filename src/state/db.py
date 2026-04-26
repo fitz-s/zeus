@@ -302,6 +302,13 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             data_version TEXT NOT NULL DEFAULT 'v1',
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             temperature_metric TEXT NOT NULL DEFAULT 'high',
+            -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
+            -- declared explicitly. Pre-fix, the column was added only via
+            -- the ALTER TABLE migration block below, so fresh init_schema
+            -- DBs (CI, dev, in-memory test fixtures) lacked it while
+            -- _store_snapshot_p_raw silently expected it. Cross-environment
+            -- fragility surfaced as runtime_guards test failures.
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -934,6 +941,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         # DELETE path in rebuild_calibration_pairs_canonical.py can target
         # WHERE bin_source='canonical_v1' without LIKE blast radius.
         "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
+        # Slice P2-B1 (PR #19 phase 2, 2026-04-26): idempotent migration
+        # for legacy DBs predating the CREATE TABLE addition above. Wrapped
+        # in try/except OperationalError; safe to no-op when column already
+        # exists. Default 0 matches `int(False)` from _store_snapshot_p_raw.
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
     ]:
         try:
             conn.execute(ddl)
@@ -3943,7 +3955,13 @@ def query_control_override_state(
     entries_pause_source = None
     entries_pause_reason = None
     edge_threshold_multiplier = 1.0
-    strategy_gates: dict[str, bool] = {}
+    # G6 BLOCKER #2 fix (2026-04-26, con-nyx review): emit GateDecision-shaped
+    # dicts (not bare bool) so control_plane.strategy_gates() — which expects
+    # dict and raises ValueError on bool — can deserialize them via
+    # GateDecision.from_dict. K1 migration set the in-memory writer
+    # (set_strategy_gate puts dict) but missed the DB reader; the boot
+    # guard introduced by G6 forced this latent debt onto every live launch.
+    strategy_gates: dict[str, dict] = {}
     seen_strategy_gate: set[str] = set()
     global_gate_seen = False
     global_threshold_seen = False
@@ -3976,7 +3994,17 @@ def query_control_override_state(
             global_threshold_seen = True
             continue
         if target_type == "strategy" and action_type == "gate" and target_key and target_key not in seen_strategy_gate:
-            strategy_gates[target_key] = not _parse_boolish_text(value)
+            # value="true" means gate IS active (strategy DISABLED), so enabled = NOT value.
+            # Synthesize GateDecision-shape from the row columns the DB already carries.
+            # reason_code defaults to OPERATOR_OVERRIDE since the DB doesn't store the original
+            # ReasonCode enum; reason_snapshot empty (DB doesn't store snapshot either).
+            strategy_gates[target_key] = {
+                "enabled": not _parse_boolish_text(value),
+                "reason_code": "operator_override",
+                "reason_snapshot": {},
+                "gated_at": str(row["issued_at"] or ""),
+                "gated_by": str(row["issued_by"] or "unknown"),
+            }
             seen_strategy_gate.add(target_key)
     return {
         "status": "ok",
