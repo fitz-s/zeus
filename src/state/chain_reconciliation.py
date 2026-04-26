@@ -34,6 +34,15 @@ PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "
 # evidence. The relationship test in
 # tests/test_authority_strict_learning.py scans the repo for SELECT-side
 # reads of rescue_events_v2 and asserts each carries this filter.
+#
+# Antibody scope (post-review honesty, code-reviewer fix#4): the scanner is
+# LOOSE — it accepts any `WHERE authority = ?` clause, including hardcoded
+# "VERIFIED" string literals that bypass this constant. A future consumer
+# can satisfy the antibody without importing LEARNING_AUTHORITY_REQUIRED.
+# This is intentional: requiring the import would be a stronger antibody
+# but would also reject legitimate diagnostic / one-off audit reads. Code
+# reviewers reading new SELECT-from-rescue_events_v2 sites should verify
+# the literal matches this constant value.
 LEARNING_AUTHORITY_REQUIRED = "VERIFIED"
 
 

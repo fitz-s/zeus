@@ -389,4 +389,27 @@ Memory citations applied:
 - `feedback_no_git_add_all_with_cotenant.md` — never `git add -A` with co-tenant active; commit only files under this packet folder.
 - `feedback_executor_commit_boundary_gate.md` (L22) — slice executor must NOT autocommit before critic review.
 
+---
+
+## 11. Post-review addendum (2026-04-26 — after critic + code-reviewer pass)
+
+Two parallel review agents (critic-opus + code-reviewer-opus) completed multi-perspective review of commits `7f0d4fa` (A1) → `829886f` (A4). Their findings drove 4 follow-up commits:
+
+- **`f19d4f1` A2-fix1** (BLOCKER from code-reviewer): `level3` UnboundLocalError for LOW callers in season-only fallback. Hoisted threshold binding above HIGH branch + new regression test `test_calibration_manager_low_fallback_regression.py` (2 tests).
+- **`27e35f1` A3-fix1** (M2 from critic + DummyEns fixture rot): `evaluator.py:775` was passing `getattr(candidate, "temperature_metric", "high")` to the normalizer, recreating the silent-HIGH default A3 just removed. Fixed to pass None. Also fixed `test_runtime_guards.py` DummyEns fixtures to provide `member_extrema` and `temperature_metric` (these tests were already failing on origin/main with `AttributeError: member_extrema`; A3 just changed the failure surface).
+- **`fae8946` B1-fix1** (minor from code-reviewer): hoisted deferred-style `TERMINAL_STATES` import in `portfolio.py:967` into the existing top-block at L36. Pure refactor; identity preserved.
+- **(this commit) A1+A4 docstring + addendum**: documented that `NotImplementedError` from `get_pairs_for_bucket(metric="low")` is `RuntimeError`-derived and would be silently swallowed by `except Exception` at `evaluator.py:1029` / `monitor_refresh.py:181/375`; documented that the A4 source scanner antibody is LOOSE (accepts `"VERIFIED"` string literal, not just `LEARNING_AUTHORITY_REQUIRED` import) — code reviewers must spot-check.
+
+### Reviewer findings explicitly NOT addressed (with rationale)
+
+- **Critic M1** (B1 smoke-test exposure semantics shift, ops note): the `summary["smoke_test_open_cost_basis_usd"]` field is part of the per-cycle summary dict; semantics shift is documented in commit `4f61bb4` and in `cycle_runner.py:341` inline comment. No external dashboard consumer is identified; the field is consumed in cycle logs and Discord status. Operator should verify on next live restart but no separate runbook needed.
+- **Critic M3** (A4 regex CTE blind spot): the regex caps `[^;]{0,500}` between SELECT and FROM, missing CTEs / multi-line subqueries that exceed 500 chars or use semicolons in comments. Today there are 0 SELECT-from-rescue_events_v2 sites so the antibody is vacuous; if a future consumer adds one with a CTE, the test self-test `test_source_scanner_actually_finds_violations` will need extension. Acknowledged limitation, not corrected.
+- **Code-reviewer A3 integration test gap**: an end-to-end test running `evaluate_market` with a malformed-metric candidate is left as a future packet. The unit-level fail-closed contracts at `_normalize_temperature_metric` and `_store_ens_snapshot` are the structural guarantee; an integration test would only verify that exceptions propagate, which the existing try/except wrapping at `evaluator.py:1905` already encodes.
+- **Critic missing-mesh** (`architecture/test_topology.yaml` + `architecture/source_rationale.yaml` registration of new symbols): per Zeus mesh maintenance rule, new test files and new public symbols should be registered. This packet adds 5 new test files + 2 new public symbols (`TERMINAL_STATES`, `is_terminal_state`, `LEARNING_AUTHORITY_REQUIRED`). Registration deferred to a separate mesh-maintenance packet to keep this packet under the 4-files-changed planning-lock threshold per file. Operator MUST run `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit` before merging this branch and file the registry update as a follow-on.
+
+### Final regression posture
+
+- 46 new antibody tests across A1+A2+B1+A3+A4 + post-review fixes pass cleanly.
+- Pre-existing failures on this branch (`test_rebuild_settlements_only_writes_verified_rows` ModuleNotFoundError, `test_runtime_guards.py` test-infra rot at `bias_corrected` schema gap, `test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only_quarantine` "pending future governance design") all reproduce identically on a pure `origin/main` checkout. None are introduced by this packet.
+
 End of plan.

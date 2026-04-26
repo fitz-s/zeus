@@ -227,7 +227,17 @@ def get_pairs_for_bucket(
     The legacy `calibration_pairs` schema has no `temperature_metric`
     column; per Phase 9C L3 commentary in `manager.py`, "LOW has never
     existed in legacy". Passing `metric="low"` is therefore a
-    category-error and raises immediately, pointing at the v2 API.
+    category-error and raises NotImplementedError, pointing at the v2 API.
+
+    NOTE on error swallowing (post-review observation): `NotImplementedError`
+    is `RuntimeError`-derived and would be caught by `except Exception` at
+    existing call sites (evaluator.py:1029 + monitor_refresh.py:181/375).
+    Today only `manager.py` reaches this function with an explicit `metric`
+    value (always "high" per slice A2), so the error pathway is unreachable
+    in production. A future caller passing `metric="low"` from one of those
+    sites would silently fall through to "empty pairs" rather than raising
+    visibly. Add an explicit `if metric == "low": raise` guard at any new
+    call site if you want loud failure.
 
     Returns list of dicts with keys: p_raw, lead_days, outcome, range_label,
     decision_group_id.
