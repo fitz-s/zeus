@@ -260,3 +260,54 @@ INTENT_CREATED + SUBMIT_REQUESTED + SUBMIT_UNKNOWN. Recovery loop can resolve.
   executor module level.
 - `test_clob_raises_exception` expected `CLOB down` in result.reason; the new
   code returns `submit_unknown: CLOB down` which still satisfies `in` check.
+
+## 2026-04-26 u2014 P1.S3 critic-followup: parallel reviewer + critic findings
+
+### Findings closed
+
+- **CRITICAL** (DB target, code-reviewer): `get_trade_connection_with_world()` already
+  in working tree; confirmed correct in both paths.
+- **HIGH / MAJOR-1** (connection leak): outer `try/finally` wrapping persist/submit/ack
+  body; `conn.close()` fires only on `_own_conn=True`. Placement: `executor.py` `try:`
+  block contains all phases through `return result_obj`; `finally:` is last statement.
+- **MEDIUM-1** (idempotency collision retry): `IntegrityError` handler now looks up
+  existing row via `find_command_by_idempotency_key` + `VenueCommand.from_row`; maps
+  all CommandState values to appropriate OrderResult; external_order_id threaded through.
+- **MEDIUM-2** (entry ACKED OrderResult): `_live_order` SUBMIT_ACKED result_obj now
+  carries `external_order_id=order_id`, `venue_status`, `idempotency_key=idem.value`.
+- **MEDIUM-3** (payload shapes): SUBMIT_UNKNOWN u2192 `{exception_type, exception_message}`;
+  SUBMIT_REJECTED (None/missing_order_id) u2192 `{reason: clob_returned_none}`;
+  SUBMIT_ACKED u2192 adds `venue_status`; applied in both paths.
+- **MAJOR-2** (synthetic decision_id WARNING): `logger.warning` fires on both paths
+  when `decision_id=""`; defers conn/decision_id threading to P1.S5.
+- **MAJOR-3** (fixture patch target): `test_live_execution.py` and
+  `test_executor_typed_boundary.py` now patch `get_trade_connection_with_world`.
+- **MAJOR-4** (missing autouse fixture): `test_executor.py` and
+  `test_polymarket_error_matrix.py` now have autouse `_mem_conn` fixture; resolved
+  +5 regressions (5 failures u2192 0).
+- **MAJOR-5** (INV-30 cross-DB doc): `architecture/invariants.yaml` INV-30 statement
+  extended with cross-DB atomicity caveat.
+
+### Verification commands run
+
+```
+pytest tests/test_executor_command_split.py -v  # 18 passed + 2 (db_target) = 20 passed
+pytest tests/test_executor.py tests/test_polymarket_error_matrix.py  # 17 passed
+pytest tests/test_p0_hardening.py tests/test_command_bus_types.py tests/test_venue_command_repo.py  # 118 passed
+pytest [wide-sweep 8 files] --tb=no -q  # 18 failed (parity with baseline)
+```
+
+### Touched files
+
+- `src/execution/executor.py` u2014 try/finally, collision retry, WARNING, payload shapes, ACKED result
+- `architecture/invariants.yaml` u2014 INV-30 cross-DB sentence + 6 new test citations
+- `tests/test_executor_command_split.py` u2014 +5 new tests (collision retry u00d73, warning, payload)
+- `tests/test_executor_db_target.py` u2014 new file (2 tests: DB target regression)
+- `tests/test_executor.py` u2014 autouse `_mem_conn` fixture
+- `tests/test_polymarket_error_matrix.py` u2014 autouse `_mem_conn` fixture
+- `tests/test_live_execution.py` u2014 patch target + `clob_returned_none` assertion
+- `tests/test_executor_typed_boundary.py` u2014 patch target
+
+### Commit
+
+`f7fc9be` u2014 P1.S3 followup: critic + reviewer fixes u2014 DB target, close, collision-retry, payload, fixtures
