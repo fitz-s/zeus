@@ -87,3 +87,25 @@ Receipt amended:
 - BLOCKER_1_resolved.verification_AMENDED_post_blocker2: corrected the inaccurate "verified production path" claim from previous round.
 - NEW BLOCKER_2_resolved section.
 - commits array completed (added 1c822ff close + 26729fd fix-1; this commit will be added too).
+
+### Step 7 (con-nyx third-pass APPROVE — d0a9406): G6 packet CLOSED
+
+con-nyx APPROVED `d0a9406` after empirically re-verifying:
+- Operator-remediation round-trip: 3-strategy upsert + restart + helper → SUCCESS, all 3 gates hydrated as full GateDecision dicts, enabled=False preserved.
+- Empty-DB control: fail-closed SystemExit fires correctly.
+
+All 3 conditions closed:
+- C1 (BLOCKER #1) FULLY CLOSED
+- C2 (boot-integration tests) FULLY CLOSED — fixture mirrors EXACT post-refresh shape
+- C3 (receipt amendment) HONEST — explicit acknowledgment of prior inaccurate "verified" claim per Fitz Constraint #2 discipline
+
+Three review passes:
+- Pass 1: 1 BLOCKER + 4 MAJOR + 3 MINOR (BLOCKER #1)
+- Pass 2: 1 NEW BLOCKER #2 (bool/dict, co-discovered)
+- Pass 3: APPROVE
+
+Category-immunity score: 0.85.
+
+NEW followup added per third-pass NICE-TO-HAVE #1: G6-NICE-reason-code-fidelity (~30min, can absorb into MAJOR-2 slice).
+
+G6 PACKET STATUS: CLOSED_APPROVED_BY_CRITIC.
