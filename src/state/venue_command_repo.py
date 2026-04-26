@@ -12,13 +12,22 @@ Public API:
   list_events(conn, command_id) -> list[dict]
 
 Only this module may INSERT/UPDATE/DELETE on venue_command_events (NC-18).
+
+Atomicity: mutating operations use SAVEPOINT-based context manager (not
+`with conn:`). Project memory L30 (`feedback_with_conn_nested_savepoint_audit`):
+Python sqlite3 `with conn:` commits + releases SAVEPOINTs, silently destroying
+any outer SAVEPOINT a caller may have established. SAVEPOINTs nest correctly,
+so callers can wrap repo calls inside their own transaction or savepoint without
+losing rollback granularity. P1.S3 executor will rely on this.
 """
 from __future__ import annotations
 
+import contextlib
+import datetime
 import json
 import sqlite3
 import uuid
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +91,60 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return dict(row)
 
 
+def _payload_default(value):
+    """JSON-serialize datetime, date, bytes; let everything else raise.
+
+    P1.S4 recovery loop will routinely attach datetime payloads (occurred_at
+    snapshots, etc.). Coerce known unserializable types to ISO/hex strings;
+    keep TypeError for genuinely unknown shapes so callers see the failure.
+    """
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.hex()
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable; "
+        f"convert to a serializable shape before passing to append_event(payload=...)."
+    )
+
+
+@contextlib.contextmanager
+def _savepoint_atomic(conn: sqlite3.Connection) -> Iterator[None]:
+    """Atomic-region context manager that nests inside outer transactions.
+
+    Unlike `with conn:` (which BEGINs/COMMITs at the statement level and
+    silently RELEASEs an outer SAVEPOINT mid-flight — see project memory L30),
+    SAVEPOINT/RELEASE/ROLLBACK TO compose. Callers can wrap repo calls inside
+    their own SAVEPOINT or transaction; if they rollback the outer scope, the
+    repo's writes roll back too.
+    """
+    sp_name = f"vcr_{uuid.uuid4().hex[:8]}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+
+
+@contextlib.contextmanager
+def _row_factory_as(conn: sqlite3.Connection, factory) -> Iterator[None]:
+    """Temporarily swap conn.row_factory; restore in `finally`.
+
+    Encapsulates the swap pattern used by every read function so callers
+    can't drift into ad-hoc swaps that forget to restore on exception.
+    """
+    saved = conn.row_factory
+    conn.row_factory = factory
+    try:
+        yield
+    finally:
+        conn.row_factory = saved
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -110,7 +173,7 @@ def insert_command(
     """
     event_id = _new_id()
 
-    with conn:
+    with _savepoint_atomic(conn):
         conn.execute(
             """
             INSERT INTO venue_commands (
@@ -171,20 +234,20 @@ def append_event(
 ) -> str:
     """Append a venue_command_events row and update venue_commands.state.
 
-    Returns the new event_id. Atomic (single `with conn:` block).
+    Returns the new event_id. Atomic via savepoint (composable with outer
+    transactions; see _savepoint_atomic).
     Raises ValueError on illegal grammar transition.
     Raises sqlite3.IntegrityError if (command_id, sequence_no) collides (shouldn't
     happen in normal usage but preserved for safety).
+    Raises TypeError if payload contains non-JSON-serializable shapes that
+    aren't datetime/date/bytes (which are coerced to ISO/hex automatically).
     """
-    with conn:
-        # Use positional access to avoid row_factory dependency.
-        saved_factory = conn.row_factory
-        conn.row_factory = None
-        row = conn.execute(
-            "SELECT state FROM venue_commands WHERE command_id = ?",
-            (command_id,),
-        ).fetchone()
-        conn.row_factory = saved_factory
+    with _savepoint_atomic(conn):
+        with _row_factory_as(conn, None):
+            row = conn.execute(
+                "SELECT state FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
         if row is None:
             raise ValueError(f"Unknown command_id: {command_id!r}")
 
@@ -198,15 +261,19 @@ def append_event(
 
         state_after = _TRANSITIONS[key]
 
-        seq_row = conn.execute(
-            "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_seq "
-            "FROM venue_command_events WHERE command_id = ?",
-            (command_id,),
-        ).fetchone()
+        with _row_factory_as(conn, None):
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_seq "
+                "FROM venue_command_events WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
         next_seq = seq_row[0]
 
         event_id = _new_id()
-        payload_json = json.dumps(payload) if payload is not None else None
+        payload_json = (
+            json.dumps(payload, default=_payload_default)
+            if payload is not None else None
+        )
 
         conn.execute(
             """
@@ -232,29 +299,21 @@ def append_event(
 
 def get_command(conn: sqlite3.Connection, command_id: str) -> Optional[dict]:
     """Return command row as dict, None if not found."""
-    orig_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
+    with _row_factory_as(conn, sqlite3.Row):
         row = conn.execute(
             "SELECT * FROM venue_commands WHERE command_id = ?",
             (command_id,),
         ).fetchone()
-    finally:
-        conn.row_factory = orig_factory
     return _row_to_dict(row) if row is not None else None
 
 
 def find_unresolved_commands(conn: sqlite3.Connection) -> Iterable[dict]:
     """Yield commands in {SUBMITTING, UNKNOWN, REVIEW_REQUIRED}."""
-    orig_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
+    with _row_factory_as(conn, sqlite3.Row):
         rows = conn.execute(
             "SELECT * FROM venue_commands "
             "WHERE state IN ('SUBMITTING', 'UNKNOWN', 'REVIEW_REQUIRED')"
         ).fetchall()
-    finally:
-        conn.row_factory = orig_factory
     return [_row_to_dict(r) for r in rows]
 
 
@@ -262,28 +321,20 @@ def find_command_by_idempotency_key(
     conn: sqlite3.Connection, key: str
 ) -> Optional[dict]:
     """Lookup an existing command by idempotency_key."""
-    orig_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
+    with _row_factory_as(conn, sqlite3.Row):
         row = conn.execute(
             "SELECT * FROM venue_commands WHERE idempotency_key = ?",
             (key,),
         ).fetchone()
-    finally:
-        conn.row_factory = orig_factory
     return _row_to_dict(row) if row is not None else None
 
 
 def list_events(conn: sqlite3.Connection, command_id: str) -> list[dict]:
     """Return all events for a command ordered by sequence_no ASC."""
-    orig_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
+    with _row_factory_as(conn, sqlite3.Row):
         rows = conn.execute(
             "SELECT * FROM venue_command_events "
             "WHERE command_id = ? ORDER BY sequence_no ASC",
             (command_id,),
         ).fetchall()
-    finally:
-        conn.row_factory = orig_factory
     return [_row_to_dict(r) for r in rows]
