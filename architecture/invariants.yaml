@@ -263,6 +263,9 @@ invariants:
     statement: client.place_limit_order MUST be preceded by a venue_commands row
       persisted with state=SUBMITTING within the SAME process invocation. Crash
       between submit and ack must leave the row in SUBMITTING state for recovery.
+      The venue_commands journal lives in the trades DB (zeus_trades.db); cross-DB
+      atomicity with positions in zeus.db is not guaranteed; P1.S4 recovery must
+      reconcile across both databases.
     why: Pre-side-effect persistence is the only mechanism that survives a daemon
       crash between submit and ack. Without it, an orphan order at the venue has
       no local record to reconcile against.
@@ -273,3 +276,9 @@ invariants:
         - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_idempotency_key_collision_raises_before_submit
         - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_persist_precedes_submit
         - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_returns_existing_state_acked
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_filled_state_returns_pending
+        - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_rejected_state_returns_rejected
+        - tests/test_executor_command_split.py::test_synthetic_decision_id_emits_warning
+        - tests/test_executor_db_target.py::TestExecutorDbTarget::test_live_order_writes_command_to_trades_db
+        - tests/test_executor_db_target.py::TestExecutorDbTarget::test_exit_order_writes_command_to_trades_db

@@ -1,5 +1,7 @@
 """Tests for executor and portfolio."""
 
+import sqlite3
+
 import pytest
 
 from src.execution.executor import (
@@ -16,6 +18,25 @@ from src.state.portfolio import (
     add_position, remove_position,
 )
 from src.types import Bin, BinEdge
+
+
+@pytest.fixture(autouse=True)
+def _mem_conn(monkeypatch):
+    """Inject an in-memory DB into executor fallback connection.
+
+    execute_exit_order and _live_order now call get_trade_connection_with_world()
+    when no explicit conn is provided. Supply an in-memory DB with schema so
+    unit tests don't depend on on-disk DB state.
+    """
+    from src.state.db import init_schema
+
+    mem = sqlite3.connect(":memory:")
+    mem.row_factory = sqlite3.Row
+    mem.execute("PRAGMA foreign_keys=ON")
+    init_schema(mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    yield mem
+    mem.close()
 
 
 class TestPortfolio:

@@ -612,6 +612,304 @@ class TestExitOrderCommandSplit:
 
 
 # ---------------------------------------------------------------------------
+# Idempotency collision retry (MEDIUM-1) — both paths
+# ---------------------------------------------------------------------------
+
+class TestIdempotencyCollisionRetry:
+    """Collision retry: second call with same key returns existing state, not raw exc."""
+
+    def test_idempotency_collision_returns_existing_state_acked(self, mem_conn):
+        """Insert command in ACKED state, attempt second insert with same key.
+
+        OrderResult.status must be 'pending' and reason includes 'prior attempt acked'.
+        """
+        from src.execution.executor import _live_order
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        from src.state.venue_command_repo import insert_command, append_event
+
+        intent = _make_entry_intent(token_id="tok-coll-acked" + "0" * 27)
+
+        # Pre-insert a command and advance it to ACKED state
+        idem = IdempotencyKey.from_inputs(
+            decision_id="dec-coll-acked",
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.limit_price,
+            size=18.19,
+            intent_kind=IntentKind.ENTRY,
+        )
+        insert_command(
+            mem_conn,
+            command_id="pre-cmd-acked",
+            position_id="trd-pre-acked",
+            decision_id="dec-coll-acked",
+            idempotency_key=idem.value,
+            intent_kind="ENTRY",
+            market_id="mkt-test-001",
+            token_id=intent.token_id,
+            side="BUY",
+            size=18.19,
+            price=intent.limit_price,
+            created_at="2026-04-26T00:00:00+00:00",
+        )
+        # Advance to ACKED via SUBMIT_REQUESTED -> SUBMIT_ACKED
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-acked",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:00:00+00:00",
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-acked",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:00:01+00:00",
+            payload={"venue_order_id": "acked-ord-001"},
+        )
+        mem_conn.commit()
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-collision-acked",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-coll-acked",
+            )
+
+        assert result.status == "pending", (
+            f"Expected pending for ACKED collision, got {result.status!r}"
+        )
+        assert result.reason is not None and "prior attempt acked" in result.reason, (
+            f"Expected reason to contain 'prior attempt acked', got {result.reason!r}"
+        )
+        mock_inst.place_limit_order.assert_not_called()
+
+    def test_idempotency_collision_with_filled_state_returns_pending(self, mem_conn):
+        """Insert command in FILLED state; collision must return status=pending."""
+        from src.execution.executor import _live_order
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        from src.state.venue_command_repo import insert_command, append_event
+
+        intent = _make_entry_intent(token_id="tok-coll-filled" + "0" * 25)
+
+        idem = IdempotencyKey.from_inputs(
+            decision_id="dec-coll-filled",
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.limit_price,
+            size=18.19,
+            intent_kind=IntentKind.ENTRY,
+        )
+        insert_command(
+            mem_conn,
+            command_id="pre-cmd-filled",
+            position_id="trd-pre-filled",
+            decision_id="dec-coll-filled",
+            idempotency_key=idem.value,
+            intent_kind="ENTRY",
+            market_id="mkt-test-001",
+            token_id=intent.token_id,
+            side="BUY",
+            size=18.19,
+            price=intent.limit_price,
+            created_at="2026-04-26T00:00:00+00:00",
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-filled",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:00:00+00:00",
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-filled",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:00:01+00:00",
+            payload={"venue_order_id": "fill-ord-001"},
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-filled",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:00:02+00:00",
+        )
+        mem_conn.commit()
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-collision-filled",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-coll-filled",
+            )
+
+        assert result.status == "pending", (
+            f"Expected pending for FILLED collision, got {result.status!r}"
+        )
+        assert result.reason is not None and "prior attempt filled" in result.reason
+        mock_inst.place_limit_order.assert_not_called()
+
+    def test_idempotency_collision_with_rejected_state_returns_rejected(self, mem_conn):
+        """Insert command in REJECTED state; collision must return status=rejected."""
+        from src.execution.executor import _live_order
+        from src.execution.command_bus import IdempotencyKey, IntentKind
+        from src.state.venue_command_repo import insert_command, append_event
+
+        intent = _make_entry_intent(token_id="tok-coll-rejected" + "0" * 23)
+
+        idem = IdempotencyKey.from_inputs(
+            decision_id="dec-coll-rejected",
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.limit_price,
+            size=18.19,
+            intent_kind=IntentKind.ENTRY,
+        )
+        insert_command(
+            mem_conn,
+            command_id="pre-cmd-rejected",
+            position_id="trd-pre-rejected",
+            decision_id="dec-coll-rejected",
+            idempotency_key=idem.value,
+            intent_kind="ENTRY",
+            market_id="mkt-test-001",
+            token_id=intent.token_id,
+            side="BUY",
+            size=18.19,
+            price=intent.limit_price,
+            created_at="2026-04-26T00:00:00+00:00",
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-rejected",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:00:00+00:00",
+        )
+        append_event(
+            mem_conn,
+            command_id="pre-cmd-rejected",
+            event_type="SUBMIT_REJECTED",
+            occurred_at="2026-04-26T00:00:01+00:00",
+            payload={"reason": "v2_preflight_failed"},
+        )
+        mem_conn.commit()
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-collision-rejected",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-coll-rejected",
+            )
+
+        assert result.status == "rejected", (
+            f"Expected rejected for REJECTED collision, got {result.status!r}"
+        )
+        assert result.reason is not None and "prior attempt" in result.reason
+        mock_inst.place_limit_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2 WARNING: synthetic decision_id emits warning
+# ---------------------------------------------------------------------------
+
+def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
+    """When decision_id is empty, executor emits WARNING about synthetic id."""
+    from src.execution.executor import _live_order
+    import logging
+
+    intent = _make_entry_intent()
+
+    with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        mock_inst = MagicMock()
+        MockClient.return_value = mock_inst
+        mock_inst.v2_preflight.return_value = None
+        mock_inst.place_limit_order.return_value = {"orderID": "ord-synth-001"}
+
+        with patch("src.execution.executor.alert_trade", lambda **kw: None):
+            with caplog.at_level(logging.WARNING, logger="src.execution.executor"):
+                result = _live_order(
+                    trade_id="trd-synth",
+                    intent=intent,
+                    shares=18.19,
+                    conn=mem_conn,
+                    decision_id="",  # empty => synthetic
+                )
+
+    assert result.status == "pending"
+    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    synth_warnings = [m for m in warning_messages if "synthetic decision_id" in m]
+    assert len(synth_warnings) >= 1, (
+        f"Expected WARNING about synthetic decision_id, got: {warning_messages}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-3 payload shape: v2_preflight SUBMIT_REJECTED payload
+# ---------------------------------------------------------------------------
+
+def test_v2_preflight_payload_shape(mem_conn):
+    """V2 preflight failure must write SUBMIT_REJECTED with payload {{reason: v2_preflight_failed}}."""
+    from src.execution.executor import _live_order
+    from src.data.polymarket_client import V2PreflightError
+    from src.state.venue_command_repo import get_command, list_events
+
+    intent = _make_entry_intent()
+    command_ids_seen: list[str] = []
+
+    import src.state.venue_command_repo as _repo
+    _real_insert = _repo.insert_command
+
+    def capturing_insert(*args, **kwargs):
+        command_ids_seen.append(kwargs["command_id"])
+        return _real_insert(*args, **kwargs)
+
+    with patch(
+        "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+    ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        mock_inst = MagicMock()
+        MockClient.return_value = mock_inst
+        mock_inst.v2_preflight.side_effect = V2PreflightError("endpoint down")
+
+        result = _live_order(
+            trade_id="trd-v2pf-payload",
+            intent=intent,
+            shares=18.19,
+            conn=mem_conn,
+            decision_id="dec-v2pf-payload",
+        )
+
+    assert result.status == "rejected"
+    assert len(command_ids_seen) == 1
+
+    events = list_events(mem_conn, command_ids_seen[0])
+    rejected_events = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"]
+    assert len(rejected_events) == 1
+
+    import json
+    payload = rejected_events[0].get("payload_json") or "{}"
+    payload_dict = json.loads(payload)
+    assert payload_dict.get("reason") == "v2_preflight_failed", (
+        f"Expected payload {{\"reason\": \"v2_preflight_failed\"}}, got {payload_dict}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # INV-30 manifest test — all enforced_by.tests entries must be collect-able
 # ---------------------------------------------------------------------------
 
