@@ -120,12 +120,18 @@ def create_execution_intent(
         raise ValueError(f"Unknown execution mode '{mode}' cannot default to timeout. Explicit runtime mode required.")
     timeout = MODE_TIMEOUTS[mode]
     
+    # Slice P3.3 (PR #19 phase 3, 2026-04-26): typed slippage budget.
+    # 0.02 fraction = 200 bps (2% adverse-direction limit). Wrapping in
+    # SlippageBps makes the units explicit at construction; pre-fix the
+    # raw 0.02 was unit-ambiguous and the type system couldn't catch a
+    # caller that meant 0.02 bps (200x tighter) instead of 0.02 fraction.
+    from src.contracts.slippage_bps import SlippageBps
     return ExecutionIntent(
         direction=Direction(edge.direction),
         target_size_usd=size_usd,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=False,
         market_id=market_id,
         token_id=order_token,
