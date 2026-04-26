@@ -34,6 +34,7 @@ from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, 
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
+    TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
     enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
@@ -962,9 +963,8 @@ class DeprecatedStateFileError(RuntimeError):
 #
 # Slice B1 (PR #19 finding 9, 2026-04-26): canonical set lives in
 # src/state/lifecycle_manager.TERMINAL_STATES, derived from
-# LEGAL_LIFECYCLE_FOLDS. Re-imported here under the local name for zero
-# call-site churn at L1008/L1343.
-from src.state.lifecycle_manager import TERMINAL_STATES as _TERMINAL_POSITION_STATES
+# LEGAL_LIFECYCLE_FOLDS. Imported at module top under the local alias
+# `_TERMINAL_POSITION_STATES` for zero call-site churn at L1008/L1343.
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:
