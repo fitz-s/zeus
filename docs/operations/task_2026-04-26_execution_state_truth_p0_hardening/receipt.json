@@ -61,26 +61,23 @@
     "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/work_log.md",
     "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/receipt.json"
   ],
-  "structural_decisions_landed": ["K1", "K3"],
-  "structural_decisions_remaining": ["K2", "K4", "K5"],
-  "invariants_added": ["INV-23"],
-  "negative_constraints_added": ["NC-17"],
+  "structural_decisions_landed": ["K1", "K3", "K2", "K5"],
+  "structural_decisions_remaining": ["K4"],
+  "posture": "NORMAL_via_O2-c_committed_yaml",
+  "invariants_added": ["INV-23", "INV-24", "INV-25", "INV-26"],
+  "negative_constraints_added": ["NC-16", "NC-17"],
   "tests_evidence": [
-    "pytest tests/test_p0_hardening.py — 6 passed, 3 skipped (R-2/R-3/R-5 placeholders)",
-    "pytest tests/test_p0_hardening.py tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py tests/test_architecture_contracts.py — 121 passed, 26 skipped, 1 pre-existing baseline failure (test_full_monitoring_pipeline, MODEL_DIVERGENCE_PANIC, unrelated)",
+    "pytest tests/test_p0_hardening.py — 18 passed, 1 skipped (R-5 deferred P2) — K1+K2+K3+K5+Posture all green",
+    "pytest tests/test_p0_hardening.py tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py tests/test_architecture_contracts.py — 133 passed, 24 skipped, 1 pre-existing baseline failure (test_full_monitoring_pipeline, MODEL_DIVERGENCE_PANIC, unrelated)",
     "Pre-existing baseline confirmed via stash rollback: 126 failures + 14 errors on broader pytest already present on main HEAD 2a8902c without this slice"
   ],
-  "open_decisions_blocking_next_slices": [
-    "O1 — V2 SDK pin (blocks K5 / V2 preflight)",
-    "O2 — runtime_posture lifecycle (blocks posture work and K1+K2 cross-cut)",
-    "O3 — V2 cutover URL evidence (advisory; blocks date-driven behavior if any)"
-  ],
+  "open_decisions_blocking_next_slices": [],
   "known_gaps": [
-    "Local commit only; not pushed to origin per operator directive (final remote consideration deferred).",
+    "Local commits only; not pushed to origin per operator directive.",
     "current_state.md not promoted; this packet is not the active execution packet.",
-    "K2 (gateway-only static guard for place_limit_order) not landed.",
-    "K4 (UNKNOWN composition + remove fabricated unknown_entered_at) not landed.",
-    "K5 (V2 endpoint-identity preflight) not landed.",
+    "K4 (UNKNOWN composition + remove fabricated unknown_entered_at) not landed — P1.",
+    "K2 semgrep rule deferred to follow-up slice (test-based guard only in P0).",
+    "V2 preflight is reachability-only (get_ok); full endpoint-identity check deferred per O3-b.",
     "Pre-existing baseline test failures remain — not in scope for this slice."
   ]
 }
