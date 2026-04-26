@@ -13,6 +13,7 @@ task queues or audit inventories. They are operational evidence, not authority.
 | `zeus_midstream_trust_upgrade_checklist_2026-04-23.md` | Midstream trust upgrade checklist (T1 test-currency + T2 midstream fails + T3 D4 + T4-D3/D1/D2/D5/D6) derived from 2026-04-23 pro/con Opus midstream debate converged verdict; task queue, not authority |
 | `zeus_midstream_fix_plan_2026-04-23.md` | Joint 36-slice implementation plan v2 (Waves 1–4 CONDITIONAL at ~10 engineer-days / ~5 with 2-engineer parallelism, Wave 5 TRUSTWORTHY substrate-deferred) decomposed by pro-vega (T1/T2/T5/T7) + con-nyx (T3/T4/T6/N1); task queue, not authority |
 | `zeus_operations_archive_deferrals_2026-04-24.md` | Operations archive deferrals workbook from 2026-04-24 session; task queue, not authority |
+| `zeus_full_data_midstream_review_2026-04-26.md` | Full upstream/backfill plus midstream data-to-order review and follow-up todo workbook; evidence only |
 
 ## Rules
 
