@@ -184,12 +184,21 @@ def test_main_boot_wiring_imports_assert_helper():
 def _populate_strategy_gates(_control_state: dict, gates: dict[str, bool]) -> None:
     """Test helper: install strategy_gates into the control_plane module cache.
 
-    Mirrors the post-refresh shape: _control_state["strategy_gates"] is a
-    dict[str, dict] where each value is a GateDecision-shaped dict with at
-    minimum a `enabled: bool` key.
+    Mirrors the EXACT post-refresh shape that
+    src/state/db.py::query_control_override_state emits (BLOCKER #2 fix
+    2026-04-26): each value is a full GateDecision-shaped dict with
+    enabled / reason_code / reason_snapshot / gated_at / gated_by keys.
+    Fixtures that drift from production shape were how BLOCKER #2 hid in
+    G6 first-pass tests.
     """
     _control_state["strategy_gates"] = {
-        name: {"enabled": enabled, "reason": "test_setup", "set_at": "2026-04-26T00:00:00Z"}
+        name: {
+            "enabled": enabled,
+            "reason_code": "operator_override",
+            "reason_snapshot": {},
+            "gated_at": "2026-04-26T00:00:00Z",
+            "gated_by": "test_setup",
+        }
         for name, enabled in gates.items()
     }
 
@@ -295,3 +304,122 @@ def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypat
 
     cp._control_state.clear()
     cp._control_state.update(original_state)
+
+
+# ---------------------------------------------------------------------------
+# Real-DB round-trip integration tests (12-13) — con-nyx CONDITION C2 redo
+# (BLOCKER #2 surfaced because the synthetic _populate_strategy_gates fixture
+# bypasses query_control_override_state entirely. These tests round-trip
+# through the actual DB writer + reader path so a future regression of the
+# bool/dict shape mismatch fires here.)
+# ---------------------------------------------------------------------------
+
+
+def test_boot_helper_round_trips_real_db_gate(monkeypatch, tmp_path):
+    """Operator-remediation scenario: set_strategy_gate writes DB → restart → guard reads.
+
+    This is the path operators are instructed to take by the FATAL message.
+    Pre-BLOCKER-2-fix it crashed with `ValueError: Legacy bool strategy gate
+    found for ...` because query_control_override_state returned bare bool
+    that strategy_gates() rejected. Post-fix, the reader emits
+    GateDecision-shaped dicts and the round-trip succeeds.
+
+    Uses real sqlite DB on disk (tmp_path), real init_schema, real
+    upsert_control_override, real refresh_control_state. Only
+    get_world_connection is monkeypatched to point at the temp DB.
+    """
+    import sqlite3
+    import src.control.control_plane as cp
+    import src.main as main_mod
+    import src.state.db as db
+    from src.state.db import init_schema, upsert_control_override
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    db_path = tmp_path / "round_trip.db"
+
+    def fake_conn():
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        return c
+
+    # Setup: operator issues set_strategy_gate for all 3 non-safe strategies.
+    conn = fake_conn()
+    init_schema(conn)
+    for strategy in ("center_buy", "shoulder_sell", "settlement_capture"):
+        upsert_control_override(
+            conn,
+            override_id=f"cp:strategy:{strategy}:gate",
+            target_type="strategy",
+            target_key=strategy,
+            action_type="gate",
+            value="true",  # gate=true means strategy DISABLED
+            issued_by="operator",
+            issued_at="2026-04-26T00:00:00Z",
+            reason="G6_remediation_round_trip_test",
+            precedence=10,
+        )
+    conn.commit()
+    conn.close()
+
+    # Simulate fresh process: empty _control_state, refresh from real DB.
+    monkeypatch.setattr(db, "get_world_connection", fake_conn)
+    monkeypatch.setattr(cp, "get_world_connection", fake_conn)
+    monkeypatch.setattr(cp, "_control_state", {})
+
+    # Production path: refresh_state=True (the default — what main() uses).
+    # Pre-BLOCKER-2-fix this raised ValueError. Post-fix it must NOT raise.
+    main_mod._assert_live_safe_strategies_or_exit()
+
+    # Post-condition: gates were hydrated with GateDecision-shaped dicts.
+    gates = cp._control_state.get("strategy_gates", {})
+    assert "center_buy" in gates, f"center_buy gate missing after refresh: {list(gates.keys())}"
+    assert isinstance(gates["center_buy"], dict), (
+        f"BLOCKER #2 regression: gate value is {type(gates['center_buy']).__name__}, "
+        f"expected dict (GateDecision shape). query_control_override_state "
+        f"must emit dicts, not bare bools."
+    )
+    assert gates["center_buy"]["enabled"] is False, (
+        f"value='true' (gate active) should resolve enabled=False, got {gates['center_buy']!r}"
+    )
+
+
+def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_path):
+    """Inverse of the above: empty DB → refresh yields strategy_gates={} → default-True → SystemExit.
+
+    Confirms the post-fix path is still fail-closed when the operator has
+    NOT issued any set_strategy_gate commands. Without this control, the
+    bool-to-dict fix could over-correct by silently treating empty as safe.
+    """
+    import sqlite3
+    import src.control.control_plane as cp
+    import src.main as main_mod
+    import src.state.db as db
+    from src.state.db import init_schema
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    db_path = tmp_path / "empty.db"
+
+    def fake_conn():
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        return c
+
+    # Setup: empty DB, schema only (no overrides).
+    conn = fake_conn()
+    init_schema(conn)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "get_world_connection", fake_conn)
+    monkeypatch.setattr(cp, "get_world_connection", fake_conn)
+    monkeypatch.setattr(cp, "_control_state", {})
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod._assert_live_safe_strategies_or_exit()
+
+    msg = str(exc_info.value)
+    for offender in ("center_buy", "shoulder_sell", "settlement_capture"):
+        assert offender in msg, (
+            f"Empty-DB scenario must surface non-safe strategies. "
+            f"Missing {offender!r} in: {msg!r}"
+        )
