@@ -467,11 +467,13 @@ class TestAnnotateTruthPayloadProductionCallers:
             f"got {truth_authority!r}"
         )
 
-    def test_save_portfolio_degraded_stamps_verified(self):
-        """R-AE.1 (acceptance): save_portfolio with degraded state must write truth['authority']='VERIFIED'.
+    def test_save_portfolio_degraded_stamps_degraded_projection(self):
+        """R-AE.1 (REVERSED): save_portfolio with degraded state must write truth['authority']='DEGRADED_PROJECTION'.
 
-        Per MAJOR-4 round-2 ruling (2026-04-17): degraded means DB was reachable but projection
-        non-canonical — it was loaded from an authoritative source, so VERIFIED is correct.
+        2026-04-26 reversal of the 2026-04-17 MAJOR-4 round-2 ruling. PR #18
+        (Refresh execution-state truth operations package) and INV-23 establish
+        that a degraded loader signals lost canonical authority; the export must
+        not collapse to VERIFIED.
         """
         import json
         import tempfile
@@ -486,8 +488,8 @@ class TestAnnotateTruthPayloadProductionCallers:
             written = json.loads(path.read_text())
 
         truth_authority = written.get("truth", {}).get("authority")
-        assert truth_authority == "VERIFIED", (
-            f"save_portfolio with authority='degraded' must write truth['authority']='VERIFIED', "
+        assert truth_authority == "DEGRADED_PROJECTION", (
+            f"save_portfolio with authority='degraded' must write truth['authority']='DEGRADED_PROJECTION' (INV-23), "
             f"got {truth_authority!r}"
         )
 

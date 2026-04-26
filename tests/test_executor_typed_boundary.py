@@ -65,9 +65,6 @@ def _make_intent(limit_price: float) -> ExecutionIntent:
         market_id="test-market",
         token_id="test-token-12345",
         timeout_seconds=3600,
-        slice_policy="single_shot",
-        reprice_policy="static",
-        liquidity_guard=False,
         decision_edge=0.05,
     )
 

@@ -19,9 +19,6 @@ def test_execution_intent_schema():
         market_id="m123",
         token_id="t123",
         timeout_seconds=3600,
-        slice_policy="iceberg",
-        reprice_policy="static",
-        liquidity_guard=True
     )
     assert intent.limit_price == 0.45
     

@@ -17,7 +17,4 @@ class ExecutionIntent:
     market_id: str
     token_id: str
     timeout_seconds: int
-    slice_policy: str = "single_shot"
-    reprice_policy: str = "static"
-    liquidity_guard: bool = True
     decision_edge: float = 0.0  # T5.a 2026-04-23: field was read at src/execution/executor.py:136,428 but missing from dataclass, latent TypeError on live entry; paired default maintains backward compatibility.

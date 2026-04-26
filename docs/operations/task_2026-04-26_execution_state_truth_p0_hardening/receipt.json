@@ -1,0 +1,86 @@
+{
+  "task": "P0 hardening micro-slice — K1 (degraded label) + K3 (decorative capability removal)",
+  "packet": "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/fix_plan.md",
+  "route_source": "manual_packet",
+  "status": "implemented_local_unpushed",
+  "route_evidence": [
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/fix_plan.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/decisions.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/pr18_audit.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/work_log.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "docs/operations/task_2026-04-19_execution_state_truth_upgrade/project_brief.md",
+    "docs/operations/task_2026-04-19_execution_state_truth_upgrade/implementation_plan.md",
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml"
+  ],
+  "allowed_files": [
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "src/contracts/execution_intent.py",
+    "src/execution/executor.py",
+    "src/state/portfolio.py",
+    "tests/test_p0_hardening.py",
+    "tests/test_phase5a_truth_authority.py",
+    "tests/test_pre_live_integration.py",
+    "tests/test_executor_typed_boundary.py",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/"
+  ],
+  "forbidden_files": [
+    "state/*.db",
+    "state/zeus-world.db*",
+    "state/auto_pause_failclosed.tombstone",
+    "state/status_summary.json",
+    "src/state/db.py",
+    "src/state/chain_state.py",
+    "src/state/chain_reconciliation.py",
+    "src/data/polymarket_client.py",
+    "venue_commands schema or migration",
+    "src/execution/command_bus.py",
+    "src/execution/command_recovery.py",
+    "src/state/venue_command_repo.py",
+    "docs/operations/current_state.md"
+  ],
+  "changed_files": [
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "src/contracts/execution_intent.py",
+    "src/execution/executor.py",
+    "src/state/portfolio.py",
+    "tests/test_p0_hardening.py",
+    "tests/test_phase5a_truth_authority.py",
+    "tests/test_pre_live_integration.py",
+    "tests/test_executor_typed_boundary.py",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/fix_plan.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/decisions.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/pr18_audit.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/work_log.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/receipt.json"
+  ],
+  "structural_decisions_landed": ["K1", "K3"],
+  "structural_decisions_remaining": ["K2", "K4", "K5"],
+  "invariants_added": ["INV-23"],
+  "negative_constraints_added": ["NC-17"],
+  "tests_evidence": [
+    "pytest tests/test_p0_hardening.py — 6 passed, 3 skipped (R-2/R-3/R-5 placeholders)",
+    "pytest tests/test_p0_hardening.py tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py tests/test_architecture_contracts.py — 121 passed, 26 skipped, 1 pre-existing baseline failure (test_full_monitoring_pipeline, MODEL_DIVERGENCE_PANIC, unrelated)",
+    "Pre-existing baseline confirmed via stash rollback: 126 failures + 14 errors on broader pytest already present on main HEAD 2a8902c without this slice"
+  ],
+  "open_decisions_blocking_next_slices": [
+    "O1 — V2 SDK pin (blocks K5 / V2 preflight)",
+    "O2 — runtime_posture lifecycle (blocks posture work and K1+K2 cross-cut)",
+    "O3 — V2 cutover URL evidence (advisory; blocks date-driven behavior if any)"
+  ],
+  "known_gaps": [
+    "Local commit only; not pushed to origin per operator directive (final remote consideration deferred).",
+    "current_state.md not promoted; this packet is not the active execution packet.",
+    "K2 (gateway-only static guard for place_limit_order) not landed.",
+    "K4 (UNKNOWN composition + remove fabricated unknown_entered_at) not landed.",
+    "K5 (V2 endpoint-identity preflight) not landed.",
+    "Pre-existing baseline test failures remain — not in scope for this slice."
+  ]
+}

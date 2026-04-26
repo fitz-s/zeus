@@ -56,7 +56,7 @@ POSITIONS_PATH = state_path("positions.json")
 
 _TRUTH_AUTHORITY_MAP: dict[str, str] = {
     "canonical_db": "VERIFIED",
-    "degraded": "VERIFIED",
+    "degraded": "DEGRADED_PROJECTION",
     "unverified": "UNVERIFIED",
 }
 
