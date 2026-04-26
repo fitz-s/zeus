@@ -34,6 +34,7 @@ from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, 
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
+    TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
     enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
@@ -233,6 +234,13 @@ class Position:
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
     day0_entered_at: str = ""
+    # Slice P3-fix3 (post-review critic Major #2, 2026-04-26): ENTRY-TIME
+    # SNAPSHOT — frozen at construction (cycle_runtime.py:273) and NOT
+    # refreshed post-entry. Consumers reading this for stale-but-
+    # defensive CI fallback (e.g. monitor_refresh.py:730 P3.2) must
+    # accept that the width reflects entry-time bin geometry, not
+    # current. Steady-state uses fresh bootstrap CI; this fallback is
+    # bounded to post-restart first-cycle window.
     entry_ci_width: float = 0.0
 
     # Entry context (immutable snapshot — Blueprint v2 §2)
@@ -959,12 +967,11 @@ class DeprecatedStateFileError(RuntimeError):
 # (derived surfaces should not write at all) — if any code path accidentally
 # leaves a settled row in state.positions, the write-side filter strips it;
 # if a stale JSON file lingers on disk, the read-side filter strips it.
-_TERMINAL_POSITION_STATES = frozenset({
-    "settled",
-    "voided",
-    "admin_closed",
-    "quarantined",
-})
+#
+# Slice B1 (PR #19 finding 9, 2026-04-26): canonical set lives in
+# src/state/lifecycle_manager.TERMINAL_STATES, derived from
+# LEGAL_LIFECYCLE_FOLDS. Imported at module top under the local alias
+# `_TERMINAL_POSITION_STATES` for zero call-site churn at L1008/L1343.
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:

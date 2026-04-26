@@ -27,6 +27,7 @@ from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
+from src.state.chain_reconciliation import resolve_position_metric
 from src.state.portfolio import Position
 from src.strategy.market_fusion import compute_alpha, vwmp
 from src.types import Bin
@@ -97,6 +98,15 @@ def _refresh_ens_member_counting(
     target_d,
 ) -> tuple[float, list[str]]:
     """Recompute fresh probability with the same ENS member-counting path as entry."""
+    # Slice P2-fix5 (post-review MAJOR #5 from code-reviewer, 2026-04-26):
+    # hoist resolver call to function entry. Pre-fix called
+    # resolve_position_metric(position) at L149 + L192 + L224 (3 sites in
+    # this function). The resolver result is invariant within a single
+    # monitor cycle, so each redundant call wasted attribute lookups and
+    # — for missing-metric positions — emitted 3 identical DEBUG log
+    # lines per cycle, inflating the audit trail and confusing operator
+    # review.
+    _position_metric_str = resolve_position_metric(position)[0]
 
     # Semantic Provenance Guard
     if False: _ = None.selected_method; _ = None.entry_method
@@ -135,9 +145,17 @@ def _refresh_ens_member_counting(
     # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
     # its own Platt model (pre-P9C this was metric-blind and LOW silently
     # received HIGH calibration — critical blocker for LOW deployment).
+    # Slice P2-C2 (PR #19 phase 2, 2026-04-26): route via canonical
+    # resolver. Pre-fix, `getattr(position, "temperature_metric", "high")`
+    # silently substituted HIGH for any position with missing metric,
+    # directly undermining the L3 Phase 9C metric-aware gate at the entry
+    # seam (a LOW position with no attribute received HIGH calibration
+    # silently). Post-fix, the resolver still defaults to HIGH for
+    # backward compat, but emits a DEBUG log identifying the position so
+    # operators can audit silent-HIGH events.
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=getattr(position, "temperature_metric", "high"),
+        temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -172,12 +190,21 @@ def _refresh_ens_member_counting(
 
     # K1/#68: verify calibration authority before computing alpha.
     # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
+    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): scope to active metric so
+    # cross-metric noise doesn't trigger false-positive stale-probability
+    # warnings. Resolver from P2-C1 already determined position metric
+    # for this monitor cycle (post-P2-C2 routing); reuse it here.
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
+        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
-            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+            _unverified_pairs = _get_pairs(
+                conn, city.cluster, _cal_season,
+                authority_filter='UNVERIFIED',
+                metric=_gate_metric,
+            )
         except Exception:
             _unverified_pairs = []
         if _unverified_pairs:
@@ -201,9 +228,13 @@ def _refresh_ens_member_counting(
 
     # Persistence anomaly check: if ENS predicts a historically rare
     # day-to-day temperature change, discount model trust
+    # Slice P2-fix5 (post-review MAJOR #6): route bare attribute access
+    # through the same hoisted resolver result. Pre-fix would AttributeError
+    # on a position with missing temperature_metric attr (now uses the
+    # resolver default).
     anomaly_discount = _check_persistence_anomaly(
         conn, city.name, target_d, float(np.mean(ens.member_maxes)),
-        temperature_metric=position.temperature_metric,
+        temperature_metric=_position_metric_str,
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
@@ -254,6 +285,13 @@ def _refresh_day0_observation(
     city,
     target_d,
 ) -> tuple[float, list[str]]:
+    # Slice P2-fix5 (post-review MAJOR #5 from code-reviewer, 2026-04-26):
+    # hoist resolver call to function entry. Pre-fix called
+    # resolve_position_metric(position) at L323 (audit), L376 (Day0 exit
+    # calibrator), L417 (K4 gate) — 3 sites. Hoist eliminates redundant
+    # attribute lookups + collapses 3 identical DEBUG log lines per cycle
+    # into 1 for missing-metric positions.
+    _position_metric_str = resolve_position_metric(position)[0]
     """Recompute fresh probability through the Day0 observation + ENS path."""
 
     # Semantic Provenance Guard
@@ -294,6 +332,17 @@ def _refresh_day0_observation(
 
     # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
     # so Day0Signal receives the typed object, not a bare str.
+    # Slice P2-fix1 (post-review BLOCKER from code-reviewer + critic M1,
+    # 2026-04-26): split audit (via resolver) from value construction (via
+    # MetricIdentity.from_raw direct). Pre-fix1, routing the value through
+    # resolver coerced garbage strings ("HIGH", " low ", etc.) silently to
+    # HIGH, removing MetricIdentity.from_raw's loud antibody. Now: resolver
+    # emits DEBUG audit log (preserves P2-C2 visibility), but the actual
+    # MetricIdentity comes from the raw position attribute so garbage still
+    # raises ValueError at the typed-atom boundary.
+    # _position_metric_str already bound at function entry (P2-fix5 hoist);
+    # the resolver fired its audit log there. Construct MetricIdentity from
+    # raw position attribute so garbage strings still raise (P2-fix1 antibody).
     temperature_metric = MetricIdentity.from_raw(
         getattr(position, "temperature_metric", "high")
     )
@@ -329,9 +378,11 @@ def _refresh_day0_observation(
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
     # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
+    # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
+    # already fired audit log at function entry).
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
-        temperature_metric=getattr(position, "temperature_metric", "high"),
+        temperature_metric=_position_metric_str,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -366,12 +417,19 @@ def _refresh_day0_observation(
             pass
 
     # K1/#68: verify calibration authority before computing alpha.
+    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —
+    # scope to active metric for the same false-positive-suppression reason.
     _authority_verified = False
     if conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d, lat=city.lat)
+        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
         try:
-            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+            _unverified_pairs = _get_pairs(
+                conn, city.cluster, _cal_season,
+                authority_filter='UNVERIFIED',
+                metric=_gate_metric,
+            )
         except Exception:
             _unverified_pairs = []
         if _unverified_pairs:
@@ -659,10 +717,36 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     # Wrap into verified EdgeContext
     current_forward_edge = current_p_posterior - current_p_market
 
-    # A1: Recompute bootstrap CI from fresh data (symmetric with entry path)
-    ci_lower = current_forward_edge
-    ci_upper = current_forward_edge
+    # A1: Recompute bootstrap CI from fresh data (symmetric with entry path).
+    # Slice P3.2 + P3-fix3 (post-review critic Major #2, 2026-04-26): when
+    # fresh bootstrap CI is unavailable (no cached _bootstrap_context — e.g.
+    # position re-loaded from JSON fallback after process restart, or test
+    # fixture without the cached context), fall back to entry's CI width
+    # rather than the pre-P3.2 degenerate `ci_lower = ci_upper =
+    # current_forward_edge` (zero width). With degenerate fallback,
+    # conservative_forward_edge collapsed to point-estimate logic —
+    # exit decisions reverted to raw-point edge, breaking the entry/exit
+    # epistemic-symmetry contract that known_gaps.md says was fixed for
+    # the bootstrap-present path.
+    #
+    # CAVEAT (critic Major #2): entry_ci_width is FROZEN at entry-time
+    # (cycle_runtime.py:273; never updated post-entry). For positions held
+    # past significant bin-distribution evolution, this fallback gives
+    # STALE-but-defensive CI width — wider than current truth in late-
+    # cycle scenarios. Operationally bounded to post-restart first-cycle
+    # window since the recompute branch dominates steady-state. DEBUG
+    # log emitted on fallback so operators can audit incidence.
+    _entry_ci_half = max(0.0, getattr(pos, "entry_ci_width", 0.0)) / 2.0
+    ci_lower = current_forward_edge - _entry_ci_half
+    ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
+    if bootstrap_ctx is None or len(bootstrap_ctx.get("bins", []) if bootstrap_ctx else []) <= 1:
+        logger.debug(
+            "P3.2 fallback: no _bootstrap_context; using stale entry_ci_width "
+            "for trade=%s entry_ci_width=%.6f",
+            getattr(pos, "trade_id", "?"),
+            getattr(pos, "entry_ci_width", 0.0),
+        )
     if bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
             from src.strategy.market_analysis import MarketAnalysis

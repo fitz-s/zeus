@@ -25,10 +25,88 @@ from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Po
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 
+# Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
+# learning-authority contract previously held only in resolve_rescue_authority's
+# docstring. Any downstream learning consumer that ingests rescue_events_v2
+# rows MUST filter on authority = LEARNING_AUTHORITY_REQUIRED to avoid silently
+# misclassifying legacy / placeholder / quarantine-default rows (which are
+# tagged UNVERIFIED + 'position_missing_metric:...') as VERIFIED training
+# evidence. The relationship test in
+# tests/test_authority_strict_learning.py scans the repo for SELECT-side
+# reads of rescue_events_v2 and asserts each carries this filter.
+#
+# Antibody scope (post-review honesty, code-reviewer fix#4): the scanner is
+# LOOSE — it accepts any `WHERE authority = ?` clause, including hardcoded
+# "VERIFIED" string literals that bypass this constant. A future consumer
+# can satisfy the antibody without importing LEARNING_AUTHORITY_REQUIRED.
+# This is intentional: requiring the import would be a stronger antibody
+# but would also reject legitimate diagnostic / one-off audit reads. Code
+# reviewers reading new SELECT-from-rescue_events_v2 sites should verify
+# the literal matches this constant value.
+LEARNING_AUTHORITY_REQUIRED = "VERIFIED"
+
+
+def resolve_position_metric(position) -> tuple[str, str, str]:
+    """Peer of resolve_rescue_authority for non-rescue position-metric reads.
+
+    Slice P2-C1 (PR #19 phase 2, 2026-04-26): consolidates the 4 silent-
+    HIGH defaults at lifecycle_events.py:100, monitor_refresh.py:140/298/334
+    into one helper that preserves UNVERIFIED authority tagging.
+
+    Pre-P2-C1, those sites used `getattr(position, "temperature_metric",
+    "high")` which silently substituted HIGH for missing metric WITHOUT
+    informing downstream consumers. monitor_refresh.py:140 was the most
+    severe case — passing the silent HIGH directly into get_calibrator,
+    undermining Phase 9C L3's metric-aware calibrator gate at the entry
+    seam (a LOW position with missing metric received the HIGH Platt
+    model silently).
+
+    Return shape mirrors resolve_rescue_authority exactly so analytics
+    consumers can apply the same authority='VERIFIED' filter pattern.
+    Emits a DEBUG log when the UNVERIFIED default fires so operators can
+    audit which positions are being defaulted.
+
+    Returns:
+        (metric, authority, source)
+        - metric: str — "high" or "low" (always in domain; defaults to "high"
+          for backward compat with legacy positions whose metric was never set).
+        - authority: str — "VERIFIED" iff metric was materialized from a valid
+          (high|low) value; "UNVERIFIED" otherwise.
+        - source: str — provenance string for forensic filtering.
+    """
+    # Slice P2-fix4 (post-review MAJOR #4 from code-reviewer, 2026-04-26):
+    # type guard for the most common caller-bug case (passing None instead
+    # of a Position). Without this guard, None inputs would silently produce
+    # the same audit-log line as a legitimate quarantine-default Position,
+    # making programmer errors invisible to ops review. dict / attribute-
+    # less objects fall through to the UNVERIFIED default below — they
+    # surface in DEBUG audit logs as `position_missing_metric:None`.
+    if position is None:
+        raise TypeError(
+            "resolve_position_metric expected a Position-like object; got None"
+        )
+    _raw_metric = getattr(position, "temperature_metric", None)
+    if _raw_metric in ("high", "low"):
+        return (_raw_metric, "VERIFIED", "position_materialized")
+    logger.debug(
+        "resolve_position_metric: defaulting to HIGH+UNVERIFIED for "
+        "position trade_id=%s raw_metric=%r",
+        getattr(position, "trade_id", "?"),
+        _raw_metric,
+    )
+    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
+
 
 def resolve_rescue_authority(position) -> tuple[str, str, str]:
     """Resolve (temperature_metric, authority, authority_source) for a
     rescue_events_v2 row from a Position object.
+
+    Slice P2-fix4 (post-review MAJOR #3 from code-reviewer, 2026-04-26):
+    delegates to resolve_position_metric. Pre-fix4 had byte-identical
+    semantics maintained as two separate function bodies + a symmetry
+    test pinning their equivalence — textbook DRY violation. Now one
+    canonical implementation; the two names remain for caller-context
+    documentation (rescue vs non-rescue read sites).
 
     SD-1 (binary temperature_metric) + SD-H (provenance on authority):
     - Position materialized through materialize_position() carries a valid
@@ -43,10 +121,7 @@ def resolve_rescue_authority(position) -> tuple[str, str, str]:
     `_emit_rescue_event` (live path) and B063 tests import this function to
     avoid logic drift between prod and test (B063 P1 fix per critic review).
     """
-    _raw_metric = getattr(position, "temperature_metric", None)
-    if _raw_metric in ("high", "low"):
-        return (_raw_metric, "VERIFIED", "position_materialized")
-    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
+    return resolve_position_metric(position)
 
 
 @dataclass

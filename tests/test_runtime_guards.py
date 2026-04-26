@@ -28,6 +28,7 @@ from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
@@ -1115,11 +1116,15 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    # P3-fix1c (post-review side-fix, 2026-04-26): market dict needs
+    # temperature_metric — P2-fix3 routes via _normalize_temperature_metric
+    # which now raises on missing/invalid (post-A3 antibody).
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
         "city": NYC,
         "target_date": "2026-04-01",
         "hours_since_open": 1.0,
         "hours_to_resolution": 24.0,
+        "temperature_metric": "high",
         "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
@@ -3762,13 +3767,21 @@ def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
     init_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
+    # `member_extrema` (not the old `member_maxes` name) and now also requires
+    # `temperature_metric` (MetricIdentity) — pre-A3 it silently defaulted to
+    # HIGH; post-A3 it raises. The DummyEns fixture pre-existed both gaps and
+    # was already failing on origin/main with `AttributeError: member_extrema`;
+    # A3 just changed the failure surface to the metric assertion. Fixing the
+    # fixture to satisfy both contracts lets the test exercise the writer.
     ens = type(
         "DummyEns",
         (),
         {
-            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
             "spread_float": lambda self: 1.25,
             "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
         },
     )()
     ens_result = {
@@ -3816,13 +3829,16 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    # Slice A3 follow-up (see twin fix above): satisfy both `member_extrema`
+    # and `temperature_metric` contracts the writer enforces.
     ens = type(
         "DummyEns",
         (),
         {
-            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
             "spread_float": lambda self: 1.25,
             "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
         },
     )()
     ens_result = {

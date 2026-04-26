@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from src.contracts.decision_evidence import DecisionEvidence
+from src.state.chain_reconciliation import resolve_position_metric
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     fold_lifecycle_phase,
@@ -66,6 +67,7 @@ def projection_updated_at(position: Any) -> str:
 
 
 def build_position_current_projection(position: Any) -> dict:
+    _position_metric = resolve_position_metric(position)
     return {
         "position_id": getattr(position, "trade_id"),
         "phase": canonical_phase_for_position(position),
@@ -97,7 +99,19 @@ def build_position_current_projection(position: Any) -> dict:
         "order_id": _nullable(getattr(position, "order_id", "")),
         "order_status": _nullable(getattr(position, "order_status", "")),
         "updated_at": projection_updated_at(position),
-        "temperature_metric": getattr(position, "temperature_metric", "high"),
+        # Slice P2-C2 (PR #19 phase 2, 2026-04-26) + P2-fix2 (post-review
+        # BLOCKER #1, 2026-04-26): route via resolver for audit trail
+        # (DEBUG log identifies missing-metric positions). The
+        # *_authority and *_source extension was reverted: those keys
+        # were silently dropped by upsert_position_current because they
+        # are not declared in CANONICAL_POSITION_CURRENT_COLUMNS, AND
+        # the lifecycle event payload_json builders read from raw
+        # position.* attributes (not from this projection dict). Adding
+        # the keys delivered no downstream value; persisting the
+        # authority signal requires a schema migration on
+        # position_current + payload_json builder edits, deferred to a
+        # separate packet.
+        "temperature_metric": _position_metric[0],
     }
 
 

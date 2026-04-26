@@ -302,6 +302,13 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             data_version TEXT NOT NULL DEFAULT 'v1',
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             temperature_metric TEXT NOT NULL DEFAULT 'high',
+            -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
+            -- declared explicitly. Pre-fix, the column was added only via
+            -- the ALTER TABLE migration block below, so fresh init_schema
+            -- DBs (CI, dev, in-memory test fixtures) lacked it while
+            -- _store_snapshot_p_raw silently expected it. Cross-environment
+            -- fragility surfaced as runtime_guards test failures.
+            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
             UNIQUE(city, target_date, issue_time, data_version)
         );
 
@@ -884,6 +891,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         # DELETE path in rebuild_calibration_pairs_canonical.py can target
         # WHERE bin_source='canonical_v1' without LIKE blast radius.
         "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
+        # Slice P2-B1 (PR #19 phase 2, 2026-04-26): idempotent migration
+        # for legacy DBs predating the CREATE TABLE addition above. Wrapped
+        # in try/except OperationalError; safe to no-op when column already
+        # exists. Default 0 matches `int(False)` from _store_snapshot_p_raw.
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
     ]:
         try:
             conn.execute(ddl)

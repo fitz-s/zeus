@@ -90,6 +90,39 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
 }
 
 
+# Terminal-state ownership (PR #19 finding 9, slice B1 — 2026-04-26).
+#
+# Single canonical source of truth, derived programmatically from
+# LEGAL_LIFECYCLE_FOLDS so future fold-table edits cannot diverge from
+# consumer-side hardcoded literals. A phase is terminal iff its legal fold
+# is exactly {phase} — i.e., the only legal next state is itself.
+#
+# Currently: SETTLED, VOIDED, QUARANTINED, ADMIN_CLOSED.
+# Notably NOT terminal: ECONOMICALLY_CLOSED (folds to {ECONOMICALLY_CLOSED,
+# SETTLED, VOIDED}). Pre-B1, src/engine/cycle_runner.py:341 hardcoded a
+# wrong set including economically_closed and excluding quarantined; that
+# semantic bug is fixed by routing through is_terminal_state below.
+TERMINAL_STATES: frozenset[str] = frozenset(
+    phase.value
+    for phase, fold in LEGAL_LIFECYCLE_FOLDS.items()
+    if phase is not None and fold == frozenset({phase})
+)
+
+
+def is_terminal_state(state: object) -> bool:
+    """True iff `state` is a terminal lifecycle phase per LEGAL_LIFECYCLE_FOLDS.
+
+    Accepts string state values, LifecyclePhase enum members, or anything
+    with a `.value` attribute. Returns False for None / unknown / non-terminal
+    inputs; never raises (suitable for defensive filters in load paths).
+    """
+    if state is None:
+        return False
+    if hasattr(state, "value"):
+        state = getattr(state, "value")
+    return str(state).strip().lower() in TERMINAL_STATES
+
+
 def _normalized_state(value: object) -> str:
     if hasattr(value, "value"):
         return str(getattr(value, "value"))
