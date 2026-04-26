@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_g6_live_safe_strategies",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "k_decision": "K1.G6",
+  "closed_at_utc": "2026-04-26",
+  "commits": [
+    {
+      "sha": "78f523c",
+      "stage": "scaffold",
+      "summary": "Open slice G6 — LIVE_SAFE_STRATEGIES typed frozenset + boot assert"
+    },
+    {
+      "sha": "2d1b1dd",
+      "stage": "RED",
+      "summary": "Slice G6 RED — LIVE_SAFE_STRATEGIES antibody (8 tests, all failing)"
+    },
+    {
+      "sha": "211d0ec",
+      "stage": "GREEN",
+      "summary": "Slice G6 GREEN — wire LIVE_SAFE_STRATEGIES into live boot"
+    }
+  ],
+  "antibody_test": "tests/test_live_safe_strategies.py",
+  "antibody_test_count": 8,
+  "antibody_test_pass_rate": "8/8",
+  "regression_panel": {
+    "scope": [
+      "tests/test_architecture_contracts.py",
+      "tests/test_live_safety_invariants.py",
+      "tests/test_cross_module_invariants.py"
+    ],
+    "baseline_failures": 5,
+    "post_green_failures": 5,
+    "delta_new_failures": 0,
+    "method": "stash-test confirmed identical baseline pre/post GREEN",
+    "preexisting_failures": [
+      "test_live_safety_invariants::test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only_quarantine",
+      "test_live_safety_invariants::test_monitoring_transitions_holding_position_into_day0_window",
+      "test_live_safety_invariants::test_same_cycle_day0_crossing_refreshes_through_day0_semantics",
+      "test_live_safety_invariants::test_day0_refresh_fallback_keeps_probability_stale",
+      "test_cross_module_invariants::test_structural_linter_gate (T3.4 upstream-K4-blocked per midstream_fix_plan)"
+    ]
+  },
+  "files_touched": [
+    "src/control/control_plane.py",
+    "src/main.py",
+    "tests/test_live_safe_strategies.py",
+    "architecture/test_topology.yaml"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "operator_visible_breaking_change": {
+    "applies_when": "ZEUS_MODE=live AND any of {settlement_capture, shoulder_sell, center_buy} is enabled (default state)",
+    "behavior": "Daemon refuses to launch with FATAL exit message naming offending strategies",
+    "remediation": "Operator must explicitly disable each non-allowlisted strategy via control_plane set_strategy_gate before relaunching live daemon",
+    "rationale": "Workbook G6 acceptance — 'Live boot raises if any non-allowlisted strategy reaches discovery'. Today only opening_inertia is operator-approved for live execution."
+  },
+  "followups_owed": [
+    {
+      "id": "G7",
+      "summary": "LIVE_SAFE_CITIES typed frozenset + executor.py pre-CLOB assertion (same pattern as G6)",
+      "wave": "Wave 2",
+      "gating": "Wait for zeus-pr18-fix-plan-20260426 to merge (executor.py overlap)"
+    }
+  ],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "Pattern reusable for G7. If a third typed-allowlist arrives, extract a shared 'live-allowlist boot guard' helper to architecture/. Until then, copy-paste cost < abstraction cost."
+}
