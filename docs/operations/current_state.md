@@ -90,13 +90,14 @@ Role: single live control pointer for the repo.
   Graph context-pack path no longer swallows internal `TypeError`s, the bare
   `test` digest regression is strict, and `pytest.ini` states that full
   automated coverage must override the default `live_topology` marker filter.
-  Heartbeat untracking remains a future runtime-governance decision, not part
-  of this safe review-fix packet.
 
   Operations package cleanup is closed: midstream remediation phase evidence
   now lives under the single
   `docs/operations/task_2026-04-23_midstream_remediation/phases/` root, and
   guidance/tooling now says phases of one package must stay inside that package.
+  The follow-up runtime projection cleanup removed
+  `state/daemon-heartbeat.json` and `state/status_summary.json` from Git
+  tracking while leaving local daemon output intact.
 
 ## Required evidence
 
