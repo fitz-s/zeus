@@ -1030,10 +1030,18 @@ files:
   src/state/chain_reconciliation.py:
     zone: K2_runtime
     authority_role: chain_truth_reconciliation
-    why: Applies Chain > Chronicler > Portfolio reconciliation rules.
+    why: |
+      Applies Chain > Chronicler > Portfolio reconciliation rules.
+      Public symbols (PR #19 phase 1 A4 + phase 2 P2-C1):
+      - resolve_rescue_authority(position) -> (metric, authority, source)
+      - resolve_position_metric(position) -> (metric, authority, source) — peer for non-rescue reads
+      - LEARNING_AUTHORITY_REQUIRED = "VERIFIED" — anchor for downstream
+        learning consumers that filter rescue_events_v2 reads.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
+    - src/engine/lifecycle_events.py
+    - src/engine/monitor_refresh.py
   src/state/chain_state.py:
     zone: K2_runtime
     authority_role: chain_state_read_model
@@ -1123,10 +1131,20 @@ files:
   src/state/lifecycle_manager.py:
     zone: K0_frozen_kernel
     authority_role: lifecycle_law
-    why: Only legal lifecycle transition authority; enforces LEGAL_LIFECYCLE_FOLDS.
+    why: |
+      Only legal lifecycle transition authority; enforces LEGAL_LIFECYCLE_FOLDS.
+      Public symbols (PR #19 phase 1 B1):
+      - LifecyclePhase enum + LEGAL_LIFECYCLE_FOLDS dict
+      - TERMINAL_STATES = frozenset (derived programmatically from
+        LEGAL_LIFECYCLE_FOLDS — phases whose fold = {phase})
+      - is_terminal_state(state) -> bool — single canonical predicate
+        consumed by portfolio.py + cycle_runner.py to eliminate the
+        prior 3-source-of-truth drift on terminal-state membership.
     downstream:
     - src/engine/cycle_runtime.py
     - src/engine/lifecycle_events.py
+    - src/state/portfolio.py
+    - src/engine/cycle_runner.py
     - src/execution/exit_lifecycle.py
     - src/execution/fill_tracker.py
     - src/execution/harvester.py
