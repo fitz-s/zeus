@@ -40,3 +40,25 @@ After this slice lands in production:
 - `ZEUS_MODE=live` daemon refuses to launch unless settlement_capture, shoulder_sell, center_buy are all explicitly disabled via `control_plane set_strategy_gate`.
 - This is intentional per workbook G6 acceptance criterion.
 - Remediation: operator runs `set_strategy_gate` for each non-safe strategy before relaunching.
+
+### Step 5 (post-review): con-nyx BLOCKER #1 fix — commit pending
+
+con-nyx adversarial review surfaced 1 BLOCKER + 4 MAJOR + 3 MINOR. BLOCKER #1 was a real production issue: cold `_control_state` cache + `is_strategy_enabled` default-True semantic meant the guard refused every live launch regardless of operator action.
+
+Applied fix path 1:
+- Extracted `_assert_live_safe_strategies_or_exit(*, refresh_state=True)` helper at `src/main.py` module level.
+- Helper calls `refresh_control_state()` before composing enabled set.
+- Reordered boot to invoke guard AFTER `init_schema(conn)` + `conn.close()` so `control_overrides` table exists when refresh reads it.
+
+Added 3 boot-integration tests (CONDITION C2):
+- `test_boot_helper_refuses_when_unsafe_strategy_enabled` — hydrated state + center_buy enabled → SystemExit (production scenario)
+- `test_boot_helper_silent_when_only_safe_strategy_enabled` — hydrated state + only opening_inertia → silent (post-fix happy path)
+- `test_boot_helper_with_cold_cache_refuses_via_default_true_semantic` — pin cold-cache contract (con-nyx empirical scenario)
+
+Empirical re-verification: ran the cold-cache scenario directly via Python in worktree post-fix; `_assert_live_safe_strategies_or_exit(refresh_state=False)` still refuses (as designed — the default `refresh_state=True` is what production uses).
+
+Antibody count: 8 → 11. All green. Regression panel delta still 0.
+
+Receipt amended with C3 (operator-visible-breaking-change framing now walks the actual runtime sequence) + 3 followup entries (MAJOR #2/#3/#4) in `receipt.followups_owed`.
+
+MINORs #1-#3 accepted as-is (Iterable[str] OK; mode-aware coupling acceptable; SystemExit not masked).
