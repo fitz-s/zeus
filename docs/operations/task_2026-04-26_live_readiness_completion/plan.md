@@ -6,6 +6,31 @@ Authority basis: source workbook `docs/to-do-list/zeus_live_readiness_upgrade_ch
 Status: planning evidence; not authority. Implementation has NOT begun. No code/DB mutation in this packet body.
 Companion: `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md` D1+D2 (operator-decision dependents — kept on the to-do-list workbook, NOT folded here).
 
+## STATUS: Wave 1 FUNCTIONALLY COMPLETE (2026-04-26)
+
+All 7 in-scope slices closed with con-nyx critic APPROVE (or accepted-without-formal-review for the structurally-clean cases). 16 commits total since main. 41+ antibody tests, all GREEN. Regression delta=0 throughout the entire packet.
+
+| Slice | Status | con-nyx verdict | Immunity |
+|---|---|---|---|
+| G6 LIVE_SAFE_STRATEGIES | CLOSED + 2 BLOCKER fixes | APPROVE (3 passes) | 0.85 |
+| B2 settlement backfill | ABSORBED_BY_PREDECESSOR | (n/a — structural antibody pre-existed) | (n/a) |
+| B5 DST antibody | CLOSED (single-commit B5 pattern) | accepted | (n/a) |
+| B4 obs_v2 physical-bounds | CLOSED + amendments | APPROVE post-amendments | 0.85 |
+| G10-scaffold | CLOSED_WITH_CONDITIONS | APPROVE_WITH_CONDITIONS — discharged via G10-helper-extraction | 0.85 |
+| G10-helper-extraction | CLOSED (discharges G10 MAJORs) | APPROVE | 0.85 |
+| U1 HK floor antibody | CLOSED double-absorption + amendments | APPROVE | **0.90** (highest of packet) |
+
+**Followup queue** (~7-8h total, none commit-blocking on Wave 1; absorb opportunistically into Wave 2):
+- 4 G10 NICE-TO-HAVEs (~50min)
+- G6 MAJOR-2/3/4 + NICE-reason-code-fidelity (~5h)
+- B4-legacy-quarantine (~1h, operator-gated for production UPDATE)
+- B4-source-binding (gated on truth-surface format)
+- U1 NICE-TO-HAVEs absorbed inline (commit `c91f138`)
+
+**14 pattern lessons accumulated** (numbered 1-14) — see slice receipts. Lesson #14 (L20 grep-gate before scoping multi-deliverable workbook entries) elevated to critic standing-order per con-nyx U1 review.
+
+Wave 2 (collision-gated): G7 (LIVE_SAFE_CITIES, recommend HK in initial set per U1 verdict), G5 (paper/live DB isolation), G9 (auto-pause diagnostics), G10-cutover (gated on G10-source-split + launchd plists).
+
 ## 0. Scope statement
 
 This packet plans the **remaining live-readiness antibodies** that are:
