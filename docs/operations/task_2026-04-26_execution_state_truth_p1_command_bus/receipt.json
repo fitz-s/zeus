@@ -1,0 +1,31 @@
+{
+  "packet": "task_2026-04-26_execution_state_truth_p1_command_bus",
+  "slice": "P1.S1",
+  "status": "implemented_local_unpushed",
+  "commit": "0a7845f",
+  "branch": "claude/pr18-execution-state-truth-fix-plan-2026-04-26",
+  "date": "2026-04-26",
+  "allowed_files": [
+    "src/state/db.py",
+    "src/state/venue_command_repo.py",
+    "tests/test_venue_command_repo.py",
+    "architecture/invariants.yaml",
+    "architecture/negative_constraints.yaml",
+    "architecture/ast_rules/semgrep_zeus.yml",
+    "architecture/ast_rules/forbidden_patterns.md",
+    "tests/test_architecture_contracts.py",
+    "docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/work_log.md",
+    "docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/receipt.json"
+  ],
+  "tests_evidence": {
+    "test_venue_command_repo": "44 passed, 0 failed",
+    "test_init_schema_creates_venue_command_tables": "1 passed",
+    "test_semgrep_rules_cover_core_forbidden_moves": "1 passed (now covers 5 rule IDs)",
+    "test_p0_hardening": "25 passed, 1 skipped (baseline parity)",
+    "wide_suite_regression": "18 failed, 234 passed, 25 skipped (baseline was 18 failed)"
+  },
+  "decisions_applied": ["D-P1-1-a", "D-P1-2-a", "D-P1-3-a", "D-P1-4-a (key persisted as TEXT; construction deferred to P1.S2)", "D-P1-5-a"],
+  "invariants_added": ["INV-28"],
+  "negative_constraints_added": ["NC-18"],
+  "semgrep_rules_added": ["zeus-no-direct-venue-command-update"]
+}
