@@ -362,10 +362,22 @@ def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
 
     Wraps the raw string from MarketCandidate.temperature_metric into a typed
     MetricIdentity. All downstream signal code receives the MetricIdentity object.
+
+    Slice A3 (PR #19 finding 7, 2026-04-26): pre-A3 this function silently
+    defaulted None / empty / unrecognized inputs to HIGH (`raw = "low" if
+    text == "low" else "high"`), making it impossible for callers to know
+    when their identity was lost. Now raises ValueError on invalid input
+    so the silent fallback to HIGH cannot mask a missing or corrupt metric
+    upstream. MarketCandidate(temperature_metric: str = "high") still
+    protects callers that intentionally rely on the default; only callers
+    that pass None / empty / garbage are surfaced.
     """
     text = str(value or "").strip().lower()
-    raw = "low" if text == "low" else "high"
-    return MetricIdentity.from_raw(raw)
+    if text not in ("high", "low"):
+        raise ValueError(
+            f"temperature_metric must be 'high' or 'low'; got {value!r}"
+        )
+    return MetricIdentity.from_raw(text)
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -489,12 +501,17 @@ def _record_selection_family_facts(
     candidate_id = candidate.event_id or candidate.slug or f"{candidate.city.name}|{candidate.target_date}"
     rows = []
     if hypotheses is not None:
+        # Slice A3 (PR #19 finding 7, 2026-04-26): route raw candidate metric
+        # through the canonical normalizer so invalid inputs raise instead of
+        # silently defaulting to HIGH at the family-id seam.
         family_id = make_hypothesis_family_id(
             cycle_mode=cycle_mode,
             city=candidate.city.name,
             target_date=candidate.target_date,
             # S4 R9 P10B: pass metric so HIGH and LOW candidates never share a budget
-            temperature_metric=candidate.temperature_metric or "high",
+            temperature_metric=_normalize_temperature_metric(
+                candidate.temperature_metric
+            ).temperature_metric,
             discovery_mode=discovery_mode,
             decision_snapshot_id=decision_snapshot_id,
         )
@@ -529,12 +546,16 @@ def _record_selection_family_facts(
     else:
         for edge in edges:
             strategy_key = _strategy_key_for(candidate, edge)
+            # Slice A3 (PR #19 finding 7, 2026-04-26): canonical normalizer
+            # eliminates silent HIGH fallback at the edge family-id seam.
             family_id = make_edge_family_id(
                 cycle_mode=cycle_mode,
                 city=candidate.city.name,
                 target_date=candidate.target_date,
                 # S4 R9 P10B: pass metric so HIGH and LOW edges never share a budget
-                temperature_metric=candidate.temperature_metric or "high",
+                temperature_metric=_normalize_temperature_metric(
+                    candidate.temperature_metric
+                ).temperature_metric,
                 strategy_key=strategy_key,
                 discovery_mode=discovery_mode,
                 decision_snapshot_id=decision_snapshot_id,
@@ -666,12 +687,16 @@ def _selected_edge_keys_from_full_family(
     cycle_mode = candidate.discovery_mode or "unknown"
     discovery_mode = candidate.discovery_mode or ""
     rows = []
+    # Slice A3 (PR #19 finding 7, 2026-04-26): canonical normalizer
+    # eliminates silent HIGH fallback at the day0 hypothesis-replay seam.
     family_id = make_hypothesis_family_id(
         cycle_mode=cycle_mode,
         city=candidate.city.name,
         target_date=candidate.target_date,
         # S4 R9 P10B: pass metric so HIGH and LOW candidates never share a budget
-        temperature_metric=candidate.temperature_metric or "high",
+        temperature_metric=_normalize_temperature_metric(
+            candidate.temperature_metric
+        ).temperature_metric,
         discovery_mode=discovery_mode,
         decision_snapshot_id=decision_snapshot_id,
     )
@@ -1815,7 +1840,22 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         # P10D S3: stamp temperature_metric on each snapshot row so LOW rows
         # are distinguishable from HIGH rows in the legacy table.
         # ens.temperature_metric is a MetricIdentity — extract the string value.
-        snap_metric = getattr(getattr(ens, "temperature_metric", None), "temperature_metric", "high") or "high"
+        # Slice A3 (PR #19 finding 7, 2026-04-26): pre-A3 had a double-getattr
+        # `or "high"` fallback that silently stamped HIGH on any snapshot whose
+        # ens object lacked metric identity. That hid LOW writers and any
+        # malformed upstream as HIGH in the canonical ensemble_snapshots table —
+        # the same table the calibration_pairs replay reads back. Now fail
+        # closed at the writer seam: refuse the INSERT rather than mis-stamp.
+        _metric_identity = getattr(ens, "temperature_metric", None)
+        snap_metric = getattr(_metric_identity, "temperature_metric", None) if _metric_identity is not None else None
+        if snap_metric not in ("high", "low"):
+            raise ValueError(
+                "_store_ens_snapshot requires ens.temperature_metric to be a "
+                "MetricIdentity with temperature_metric in {'high','low'}; "
+                f"got ens.temperature_metric={_metric_identity!r}. Refusing to "
+                "silently stamp 'high' on a snapshot whose upstream identity "
+                "is missing or malformed (PR #19 F7 antibody)."
+            )
         logger.debug("snapshot_metric=%s city=%s date=%s", snap_metric, city.name, target_date)
 
         conn.execute(f"""
