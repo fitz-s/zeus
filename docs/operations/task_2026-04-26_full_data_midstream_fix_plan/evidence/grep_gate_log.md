@@ -131,6 +131,31 @@ A phase is terminal iff its fold is the singleton of itself. Only those 4 phases
 
 ---
 
+## Schema reality discovery (post-rebase 2026-04-26)
+
+Inspecting `src/state/db.py:309` `CREATE TABLE calibration_pairs` plus all
+`ALTER TABLE calibration_pairs` statements (none add `temperature_metric`):
+**legacy `calibration_pairs` table has no `temperature_metric` column.**
+Only `calibration_pairs_v2` carries that column.
+
+Implication for Workbook Finding 5: the cited risk
+"if legacy `calibration_pairs` contains both high and low canonical rows,
+HIGH on-the-fly refit can mix tracks" is theoretical, not actual — there
+is no schema mechanism by which LOW rows can be distinguished in legacy,
+and the code comment at `manager.py:165-170 Phase 9C L3 CRITICAL` records
+"LOW has never existed in legacy" as the operating convention.
+
+Slice A1 design therefore shifts from "filter on `temperature_metric`
+column" to "encode the LOW-never-in-legacy convention as structure":
+
+- Add `metric: Literal["high","low"] | None = None` kwarg to read functions.
+- `metric="high"` and `metric=None`: current behavior (legacy is HIGH-only).
+- `metric="low"`: raise `NotImplementedError` pointing to v2 API
+  (`load_platt_model_v2` / `calibration_pairs_v2` reads).
+
+This makes the implicit invariant structural — wrong code (asking for LOW
+from legacy) becomes unwritable rather than silently degrading.
+
 ## Discrepancies and follow-ups
 
 ### Discrepancy D1: AGENTS.md vs portfolio.py terminal-state vocab
