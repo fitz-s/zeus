@@ -102,6 +102,27 @@ _SETTLEMENTS_TABLE_REF_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+# Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin pattern for
+# calibration_pairs_v2 — extends the settlements metric-predicate
+# antibody to the dual-track v2 calibration table. Phase 4 audit
+# confirmed all 5 current v2 reader sites (refit_platt_v2.py:92,113;
+# rebuild_calibration_pairs_v2.py:198,205; verify_truth_surfaces.py:1631;
+# backfill_tigge_snapshot_p_raw_v2.py:132) include WHERE temperature_
+# metric = ?. This lint ensures FUTURE readers conform.
+_CALIBRATION_PAIRS_V2_TABLE_REF_RE = re.compile(
+    rf"""
+    \b(?P<op>FROM|JOIN)\s+
+    (?:(?P<schema>{_SQL_IDENTIFIER_RE})\s*\.\s*)?
+    (?P<table>"calibration_pairs_v2"|`calibration_pairs_v2`|\[calibration_pairs_v2\]|calibration_pairs_v2(?![A-Za-z0-9_$]))
+    (?P<tail>\s+(?:AS\s+)?(?P<alias>[A-Za-z_][A-Za-z0-9_$]*))?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+# Allowlist for files that legitimately need cross-metric diagnostic
+# reads (typically operator audit scripts). Empty by default — same
+# threshold as the settlements pattern; new entries require operator
+# justification at PR review.
+CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset()
 _SQL_ALIAS_STOPWORDS: frozenset[str] = frozenset(
     {
         "CROSS",
@@ -672,6 +693,89 @@ def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bo
     return False
 
 
+# Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin helpers for
+# calibration_pairs_v2 metric predicate enforcement.
+
+def _calibration_pairs_v2_table_aliases(sql: str) -> list[str | None]:
+    aliases: list[str | None] = []
+    for match in _CALIBRATION_PAIRS_V2_TABLE_REF_RE.finditer(sql):
+        alias = match.group("alias")
+        if alias and alias.upper() in _SQL_ALIAS_STOPWORDS:
+            alias = None
+        aliases.append(alias)
+    return aliases
+
+
+def _has_calibration_pairs_v2_metric_predicate(
+    sql: str, aliases: list[str | None]
+) -> bool:
+    unqualified = re.compile(
+        rf"(?<![A-Za-z0-9_$.])temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
+        re.IGNORECASE,
+    )
+    if unqualified.search(sql):
+        return True
+
+    candidate_aliases = {"calibration_pairs_v2"}
+    candidate_aliases.update(alias for alias in aliases if alias)
+    for alias in candidate_aliases:
+        alias_pattern = re.compile(
+            rf"\b{re.escape(alias)}\s*\.\s*temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
+            re.IGNORECASE,
+        )
+        if alias_pattern.search(sql):
+            return True
+    return False
+
+
+def _check_calibration_pairs_v2_metric_filter(
+    py_file: Path, content: str
+) -> list[str]:
+    """A1b: every calibration_pairs_v2 SELECT/JOIN must filter by metric.
+
+    Mirrors _check_settlements_metric_filter (H3). Dual-track v2 schema
+    requires explicit metric scoping on every read; without it, a
+    cross-metric row silently slips into HIGH-only or LOW-only consumer
+    flow and corrupts downstream Platt fits.
+    """
+    try:
+        repo_relative = py_file.resolve().relative_to(
+            Path(__file__).resolve().parents[1]
+        ).as_posix()
+    except ValueError:
+        repo_relative = py_file.as_posix()
+    if repo_relative in CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST:
+        return []
+    if "migrations" in py_file.parts or "tests" in py_file.parts:
+        return []
+
+    violations: list[str] = []
+    source_lines = content.splitlines()
+
+    for start_lineno, end_lineno, sql in _sql_call_literal_args(content):
+        normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        aliases = _calibration_pairs_v2_table_aliases(normalized_sql)
+        if aliases and not _has_calibration_pairs_v2_metric_predicate(
+            normalized_sql, aliases,
+        ):
+            line = (
+                source_lines[start_lineno - 1]
+                if start_lineno <= len(source_lines)
+                else ""
+            )
+            violations.append(
+                f"{py_file}:{start_lineno}:\n"
+                "  [ERROR] A1b: calibration_pairs_v2 read without "
+                "temperature_metric predicate.\n"
+                "  Dual-track schema requires `WHERE temperature_metric = ?` "
+                "on every SELECT/JOIN; otherwise a future cross-metric row "
+                "silently slips into the result set and corrupts downstream "
+                "Platt fits / replay.\n"
+                f"  Line: {line.rstrip()}\n"
+            )
+    return violations
+
+
 def _python_files_for_target(target: Path) -> list[Path]:
     if target.is_file():
         return [target] if target.suffix == ".py" else []
@@ -723,6 +827,12 @@ def run_linter(src_path: Path) -> int:
             total_violations += 1
 
         metric_violations = _check_settlements_metric_filter(py_file, content)
+        # Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin check for
+        # calibration_pairs_v2 metric predicate enforcement.
+        cal_v2_metric_violations = _check_calibration_pairs_v2_metric_filter(
+            py_file, content
+        )
+        metric_violations = metric_violations + cal_v2_metric_violations
         for violation in metric_violations:
             print(violation)
             total_violations += 1
