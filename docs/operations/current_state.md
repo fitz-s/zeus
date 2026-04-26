@@ -160,6 +160,19 @@ Role: single live control pointer for the repo.
   unaffected.
 
 
+## Active worktrees (2026-04-26)
+
+Three claude worktrees are concurrently active. Per-worktree scope, file-touch
+inventory, and cross-worktree collision matrix live in
+`docs/operations/task_2026-04-26_live_readiness_completion/evidence/audit_2026-04-26.md`.
+Do not edit a file inventoried by another worktree without coordinating there first.
+
+| Worktree path | Branch | Packet root |
+|---|---|---|
+| `zeus-pr18-fix-plan-20260426` | `claude/pr18-execution-state-truth-fix-plan-2026-04-26` | `task_2026-04-26_execution_state_truth_p0_hardening/` + `..._p1_command_bus/` |
+| `zeus-fix-plan-20260426` | `claude/zeus-full-data-midstream-fix-plan-2026-04-26` | `task_2026-04-26_full_data_midstream_fix_plan/` |
+| `zeus-live-readiness-2026-04-26` | `claude/live-readiness-completion-2026-04-26` | `task_2026-04-26_live_readiness_completion/` (planning-only) |
+
 ## Next action
 
 - Use the closed P4 readiness checker output to freeze the next narrow packet.
