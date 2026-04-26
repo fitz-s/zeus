@@ -139,3 +139,52 @@ pytest tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py te
 - **K4** (UNKNOWN composition + remove fabricated `unknown_entered_at`) — not landed, P1
 - **P0.11** — operator promotes packet via `current_state.md` (operator gate)
 - **P0.15** — second-pass demote/correct of stale present-tense authority claims
+
+---
+
+## 2026-04-26 — Critic-followup: BLOCKER #2 + MAJORs #1–#4 (commit `84e681f`)
+
+### Scope landed
+
+Five critic findings addressed after review of commit `a21988f`:
+
+- **BLOCKER #2-A (K2 test tightened)**: `test_place_limit_order_gateway_only` in `tests/test_p0_hardening.py` upgraded from substring search to AST-based `Call` node detection. Now walks both `src/` AND `scripts/`. `scripts/live_smoke_test.py` added to `_PLACE_LIMIT_ORDER_ALLOWED_FILES` as an explicit operator-bypass exemption (documented: must call `v2_preflight()` itself).
+
+- **BLOCKER #2-B (smoke test preflight)**: `scripts/live_smoke_test.py` now calls `client.v2_preflight()` BEFORE `place_limit_order`. Catches `V2PreflightError`, logs at error level, exits non-zero. Honors INV-25 on the operator-only path.
+
+- **MAJOR #1 (manifest pointer repair)**: `architecture/invariants.yaml` and `architecture/negative_constraints.yaml` rewritten to use fully-qualified `Class::method` test names as returned by `pytest --collect-only`. All 9 manifest pointer entries verified to resolve via `--collect-only` (9 collected, no not-found errors). Previous short names (`test_degraded_export_never_verified`, `test_v2_preflight_blocks_placement`, `test_runtime_posture_blocks_new_entry`, `test_execution_intent_no_decorative_labels`) were stale and did not match collected names.
+
+- **MAJOR #2 (preflight fail-closed)**: `v2_preflight()` in `src/data/polymarket_client.py` changed from swallowing `AttributeError` (fail-open) to `hasattr()` check: missing `get_ok` now raises `V2PreflightError`. Added `test_v2_preflight_fails_when_sdk_lacks_get_ok` (negative case). Updated `test_v2_preflight_success_does_not_block` to inject mock SDK with `get_ok` present and assert `v2_preflight.assert_called_once()`.
+
+- **MAJOR #3 (posture cache TTL)**: `src/runtime/posture.py` cache extended from "process-lifetime" to TTL+mtime+branch invalidation. Cache stores `(posture, branch, yaml_mtime, cached_at_ts)`. Re-reads when: `cached_at_ts` older than 60s, `yaml_mtime` differs, or branch changes. `_read_posture_uncached` return type changed to `tuple[str, str, float]`; `test_posture_normal_returns_normal` updated to pass a tuple.
+
+- **MAJOR #4 (DEGRADED_PROJECTION boundary documented)**: Verified by grep that `DEGRADED_PROJECTION` does not flow into `ObservationAtom` (`src/types/observation_atom.py`) or `MarketScanner` (`src/data/market_scanner.py`) typed boundaries. Added boundary comment to `src/state/portfolio.py` near `_TRUTH_AUTHORITY_MAP`. Verdict: **no leak**, boundaries are isolated.
+
+### Verification
+
+```
+pytest tests/test_p0_hardening.py -v
+# 19 passed, 1 skipped (R-5 deferred P2)
+
+pytest tests/test_runtime_guards.py --tb=no -q
+# 16 failed, 103 passed  ← matches baseline parity
+
+pytest tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py \
+  tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py \
+  tests/test_architecture_contracts.py tests/test_runtime_guards.py \
+  tests/test_live_execution.py tests/test_dual_track_law_stubs.py --tb=no -q
+# 18 failed, 233 passed, 25 skipped  ← matches HEAD a21988f baseline parity
+
+pytest --collect-only -q "tests/test_p0_hardening.py::{all 9 manifest entries}"
+# 9 tests collected  ← all resolve
+```
+
+### Touched files (local commit `84e681f` — not pushed)
+
+- `architecture/invariants.yaml` — repaired enforced_by.tests pointer blocks (INV-23/25/26)
+- `architecture/negative_constraints.yaml` — repaired NC-17 enforced_by.tests
+- `scripts/live_smoke_test.py` — v2_preflight() added before place_limit_order
+- `src/data/polymarket_client.py` — fail-closed hasattr() fix for v2_preflight
+- `src/runtime/posture.py` — TTL+mtime+branch cache invalidation
+- `src/state/portfolio.py` — DEGRADED_PROJECTION boundary comment
+- `tests/test_p0_hardening.py` — AST gateway test, 2 new preflight tests, tuple patch fix

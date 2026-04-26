@@ -67,9 +67,13 @@
   "invariants_added": ["INV-23", "INV-24", "INV-25", "INV-26"],
   "negative_constraints_added": ["NC-16", "NC-17"],
   "tests_evidence": [
-    "pytest tests/test_p0_hardening.py — 18 passed, 1 skipped (R-5 deferred P2) — K1+K2+K3+K5+Posture all green",
-    "pytest tests/test_p0_hardening.py tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py tests/test_architecture_contracts.py — 133 passed, 24 skipped, 1 pre-existing baseline failure (test_full_monitoring_pipeline, MODEL_DIVERGENCE_PANIC, unrelated)",
-    "Pre-existing baseline confirmed via stash rollback: 126 failures + 14 errors on broader pytest already present on main HEAD 2a8902c without this slice"
+    "pytest tests/test_p0_hardening.py — 18 passed, 1 skipped (R-5 deferred P2) — K1+K2+K3+K5+Posture all green [commit 1b6b3ec]",
+    "pytest tests/test_p0_hardening.py tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py tests/test_architecture_contracts.py — 133 passed, 24 skipped, 1 pre-existing baseline failure (test_full_monitoring_pipeline, MODEL_DIVERGENCE_PANIC, unrelated) [commit 1b6b3ec]",
+    "Pre-existing baseline confirmed via stash rollback: 126 failures + 14 errors on broader pytest already present on main HEAD 2a8902c without this slice",
+    "pytest tests/test_p0_hardening.py -v — 19 passed, 1 skipped [commit 84e681f critic-followup]",
+    "pytest tests/test_runtime_guards.py --tb=no -q — 16 failed, 103 passed (baseline parity) [commit 84e681f]",
+    "pytest wide-sweep (8 test files) --tb=no -q — 18 failed, 233 passed, 25 skipped (baseline parity matching HEAD a21988f) [commit 84e681f]",
+    "pytest --collect-only -q (9 manifest pointer entries) — 9 tests collected, 0 not-found [commit 84e681f]"
   ],
   "open_decisions_blocking_next_slices": [],
   "known_gaps": [
