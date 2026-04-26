@@ -55,6 +55,11 @@ FORBIDDEN_IMPORT_PREFIXES: tuple[str, ...] = (
     "src.control",
     "src.observability",
     "src.main",
+    # G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4):
+    # src.calibration writes to ensemble_snapshots_v2 + platt_models — surfaces
+    # the ingest lane should not reach into. season helpers extracted to
+    # src.contracts.season for callers that need calendar mapping only.
+    "src.calibration",
 )
 
 
@@ -140,9 +145,18 @@ def test_no_forbidden_imports_in_ingest():
 
 
 def test_each_tick_script_has_main_callable():
-    """Every *_tick.py defines a top-level main() function + __main__ block."""
-    tick_files = [p for p in _ingest_python_files() if p.name.endswith("_tick.py")]
-    assert tick_files, "No *_tick.py scripts found under scripts/ingest/"
+    """Every executable module under scripts/ingest/ defines main() + __main__ block.
+
+    Per con-nyx NICE-TO-HAVE #3 (G10 suffix broadening): broadened from
+    `*_tick.py` to "any non-_shared, non-__init__ module". A future
+    `daily_runner.py` or `obs_dispatcher.py` would have skipped the
+    `*_tick.py` filter; now it surfaces here.
+    """
+    tick_files = [
+        p for p in _ingest_python_files()
+        if p.name not in {"_shared.py", "__init__.py"}
+    ]
+    assert tick_files, "No executable scripts found under scripts/ingest/"
 
     missing_main: list[str] = []
     missing_dunder: list[str] = []
@@ -321,6 +335,73 @@ def test_each_tick_script_self_bootstraps_syspath():
 # ---------------------------------------------------------------------------
 # Negative-detection (8) — con-nyx pattern feedback #12
 # ---------------------------------------------------------------------------
+
+
+def _collect_dynamic_imports(py_path: Path) -> list[str]:
+    """Return the string-literal first args of __import__() and importlib.import_module() calls.
+
+    Per con-nyx NICE-TO-HAVE #1 (G10 dynamic-imports): the AST-walk antibody
+    in `_collect_imports` only handles ast.Import + ast.ImportFrom statement-
+    level imports. Dynamic call-expression imports (`__import__("x")` and
+    `importlib.import_module("x")`) evade because the module name is a string
+    literal in a Call node, not an Import node.
+
+    This helper inspects all Call nodes for those two patterns and returns
+    the string-literal first arguments. Non-string first args (e.g.,
+    `__import__(some_var)`) are ignored — they're un-auditable statically
+    and treated as out-of-scope by the antibody.
+    """
+    src = py_path.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(py_path))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        # Pattern 1: __import__("module.name")
+        if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                found.append(node.args[0].value)
+        # Pattern 2: importlib.import_module("module.name")
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "import_module"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "importlib"
+        ):
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                found.append(node.args[0].value)
+    return found
+
+
+def test_no_forbidden_dynamic_imports_in_ingest():
+    """Detect __import__() + importlib.import_module() string-arg violations.
+
+    Closes con-nyx NICE-TO-HAVE #1 — AST-walk's `_collect_imports` saw only
+    statement-level imports. A future contributor doing
+    `__import__("src.engine.cycle_runner")` or
+    `importlib.import_module("src.engine.cycle_runner")` would have evaded
+    test_no_forbidden_imports_in_ingest. This test scans Call-node patterns
+    and applies the same forbidden-prefix check.
+    """
+    violations: list[str] = []
+    for py_path in _ingest_python_files():
+        dynamic_imports = _collect_dynamic_imports(py_path)
+        for module in dynamic_imports:
+            for prefix in FORBIDDEN_IMPORT_PREFIXES:
+                if module == prefix or module.startswith(prefix + "."):
+                    rel = py_path.relative_to(PROJECT_ROOT)
+                    violations.append(
+                        f"{rel}: dynamic import of {module!r} (forbidden prefix {prefix!r})"
+                    )
+                    break
+
+    assert not violations, (
+        "Dynamic-import violation in scripts/ingest/* — __import__() or "
+        "importlib.import_module() resolves to a forbidden module. Static "
+        "AST walk catches statement-level imports; this test catches the "
+        "dynamic equivalents. Offenders:\n"
+        + "\n".join("  - " + v for v in violations)
+    )
 
 
 def test_antibody_self_test_catches_synthetic_violation(tmp_path):

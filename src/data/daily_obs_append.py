@@ -66,7 +66,10 @@ from zoneinfo import ZoneInfo
 import httpx
 import requests
 
-from src.calibration.manager import season_from_date
+# G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4): import from
+# canonical location to avoid transitively pulling src.calibration into the
+# ingest lane (FORBIDDEN per tests/test_ingest_isolation.py post-fix).
+from src.contracts.season import season_from_date
 from src.config import cities_by_name
 from src.data.daily_observation_writer import insert_or_update_current_observation
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected
