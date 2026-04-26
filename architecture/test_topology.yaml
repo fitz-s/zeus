@@ -45,6 +45,9 @@ test_trust_policy:
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
+    tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-04-23"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
@@ -217,6 +220,8 @@ categories:
     - tests/test_lifecycle_terminal_predicate.py
     - tests/test_monitor_refresh_ci_fallback.py
     - tests/test_position_metric_resolver.py
+    - tests/test_realized_fill_at_receipt.py
+    - tests/test_evaluate_candidate_metric_integration.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
