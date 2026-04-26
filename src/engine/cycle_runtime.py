@@ -294,7 +294,16 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         order_timeout_at=timeout_at,
         chain_state="local_only" if state == "pending_tracked" else "unknown",
         env=env,
-        temperature_metric=getattr(candidate, "temperature_metric", "high"),
+        # Slice P2-fix3 (post-review C1 from critic, 2026-04-26): drop the
+        # redundant `getattr(..., "high")` fallback. MarketCandidate is a
+        # dataclass with `temperature_metric: str = "high"` default at
+        # evaluator.py:91, so candidate.temperature_metric is always set
+        # for valid MarketCandidate instances. Pre-fix the getattr fallback
+        # silently HIGH-stamped non-MarketCandidate-shaped inputs (e.g.,
+        # custom test fixtures, dynamic dicts) onto Position, after which
+        # resolve_position_metric would falsely classify them VERIFIED.
+        # Now: AttributeError raises if a non-MarketCandidate flows here.
+        temperature_metric=candidate.temperature_metric,
         entry_model_agreement=getattr(decision, "agreement", "NOT_CHECKED"),
     )
 
@@ -925,7 +934,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     tracker_dirty = False
     market_candidate_ctor = getattr(deps, "MarketCandidate", None)
     if market_candidate_ctor is None:
-        from src.engine.evaluator import MarketCandidate as market_candidate_ctor
+        from src.engine.evaluator import (
+            MarketCandidate as market_candidate_ctor,
+            _normalize_temperature_metric,
+        )
 
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
         try:
@@ -1112,7 +1124,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             outcomes=market["outcomes"],
             hours_since_open=market["hours_since_open"],
             hours_to_resolution=market["hours_to_resolution"],
-            temperature_metric=str(market.get("temperature_metric", "high") or "high"),
+            # Slice P2-fix3 (post-review C1 from critic, 2026-04-26): route
+            # through canonical normalizer (post-A3 raises on missing/invalid)
+            # instead of double-defensive `... or "high"` silent default.
+            # If market dict lacks temperature_metric, the scanner upstream
+            # has a bug worth surfacing — fail loud rather than silently
+            # stamping HIGH onto every LOW market.
+            temperature_metric=_normalize_temperature_metric(
+                market.get("temperature_metric")
+            ).temperature_metric,
             event_id=market.get("event_id", ""),
             slug=market.get("slug", ""),
             observation=obs,
