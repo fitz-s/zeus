@@ -679,9 +679,24 @@ def _check_settlements_metric_filter(py_file: Path, content: str) -> list[str]:
     return violations
 
 
-def _settlements_table_aliases(sql: str) -> list[str | None]:
+# Slice P5-2 (PR #19 phase 4 closeout completion, 2026-04-26): registry-
+# based dispatcher for per-table metric predicate enforcement. Pre-fix
+# had 4 character-for-character clones (settlements + calibration_pairs_v2,
+# each with its own table_aliases + has_metric_predicate function).
+# Now: 2 generic helpers parameterized by (table_name, ref_re). Adding a
+# 3rd dual-track table requires only declaring the new RE; no new helper
+# bodies. The settlements/v2 backward-compat wrappers are preserved as
+# thin one-line delegates so existing call sites in run_linter() loop
+# need no edits.
+
+def _table_aliases_for_re(sql: str, ref_re: re.Pattern[str]) -> list[str | None]:
+    """Generic table-alias extractor parameterized by the table-ref regex.
+
+    Replaces the prior _settlements_table_aliases and
+    _calibration_pairs_v2_table_aliases clones.
+    """
     aliases: list[str | None] = []
-    for match in _SETTLEMENTS_TABLE_REF_RE.finditer(sql):
+    for match in ref_re.finditer(sql):
         alias = match.group("alias")
         if alias and alias.upper() in _SQL_ALIAS_STOPWORDS:
             alias = None
@@ -689,7 +704,14 @@ def _settlements_table_aliases(sql: str) -> list[str | None]:
     return aliases
 
 
-def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bool:
+def _has_metric_predicate_for_table(
+    sql: str, table_name: str, aliases: list[str | None]
+) -> bool:
+    """Generic temperature_metric predicate check parameterized by table name.
+
+    Replaces the prior _has_settlements_metric_predicate and
+    _has_calibration_pairs_v2_metric_predicate clones.
+    """
     unqualified = re.compile(
         rf"(?<![A-Za-z0-9_$.])temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
         re.IGNORECASE,
@@ -697,7 +719,7 @@ def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bo
     if unqualified.search(sql):
         return True
 
-    candidate_aliases = {"settlements"}
+    candidate_aliases = {table_name}
     candidate_aliases.update(alias for alias in aliases if alias)
     for alias in candidate_aliases:
         alias_pattern = re.compile(
@@ -709,39 +731,26 @@ def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bo
     return False
 
 
-# Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin helpers for
-# calibration_pairs_v2 metric predicate enforcement.
+# Backward-compat wrappers (thin delegates) so existing call sites in
+# _check_settlements_metric_filter / _check_calibration_pairs_v2_metric_
+# filter need no edits — they pre-date the registry refactor.
+
+def _settlements_table_aliases(sql: str) -> list[str | None]:
+    return _table_aliases_for_re(sql, _SETTLEMENTS_TABLE_REF_RE)
+
+
+def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bool:
+    return _has_metric_predicate_for_table(sql, "settlements", aliases)
+
 
 def _calibration_pairs_v2_table_aliases(sql: str) -> list[str | None]:
-    aliases: list[str | None] = []
-    for match in _CALIBRATION_PAIRS_V2_TABLE_REF_RE.finditer(sql):
-        alias = match.group("alias")
-        if alias and alias.upper() in _SQL_ALIAS_STOPWORDS:
-            alias = None
-        aliases.append(alias)
-    return aliases
+    return _table_aliases_for_re(sql, _CALIBRATION_PAIRS_V2_TABLE_REF_RE)
 
 
 def _has_calibration_pairs_v2_metric_predicate(
     sql: str, aliases: list[str | None]
 ) -> bool:
-    unqualified = re.compile(
-        rf"(?<![A-Za-z0-9_$.])temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
-        re.IGNORECASE,
-    )
-    if unqualified.search(sql):
-        return True
-
-    candidate_aliases = {"calibration_pairs_v2"}
-    candidate_aliases.update(alias for alias in aliases if alias)
-    for alias in candidate_aliases:
-        alias_pattern = re.compile(
-            rf"\b{re.escape(alias)}\s*\.\s*temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
-            re.IGNORECASE,
-        )
-        if alias_pattern.search(sql):
-            return True
-    return False
+    return _has_metric_predicate_for_table(sql, "calibration_pairs_v2", aliases)
 
 
 def _check_calibration_pairs_v2_metric_filter(
