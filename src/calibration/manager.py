@@ -189,17 +189,24 @@ def get_calibrator(
             level = maturity_level(model_data["n_samples"])
             return cal, level
 
-    # Check if we have enough pairs to fit on the fly
-    n = get_decision_group_count(conn, cluster, season)
-    _, _, level3 = calibration_maturity_thresholds()
-    if n >= level3:
-        cal = _fit_from_pairs(
-            conn, cluster, season, unit=city.settlement_unit,
-            temperature_metric=temperature_metric,
-        )
-        if cal is not None:
-            level = maturity_level(n)
-            return cal, level
+    # Check if we have enough pairs to fit on the fly.
+    # Phase 9C.1 + slice A2 (PR #19 followup, 2026-04-26): on-the-fly refit
+    # is HIGH-only because legacy calibration_pairs has no temperature_metric
+    # column ("LOW has never existed in legacy" per Phase 9C L3). For LOW
+    # callers, skip the count + fit attempt and fall through to v2/fallback
+    # paths directly. This avoids a metric-blind count whose result would be
+    # discarded anyway (`_fit_from_pairs` short-circuits on non-HIGH at L267).
+    if temperature_metric == "high":
+        n = get_decision_group_count(conn, cluster, season, metric="high")
+        _, _, level3 = calibration_maturity_thresholds()
+        if n >= level3:
+            cal = _fit_from_pairs(
+                conn, cluster, season, unit=city.settlement_unit,
+                temperature_metric=temperature_metric,
+            )
+            if cal is not None:
+                level = maturity_level(n)
+                return cal, level
 
     # Fallback: season-only (pool all clusters). v2 FIRST per metric,
     # legacy only for HIGH backward compat (Phase 9C L3).
@@ -272,7 +279,13 @@ def _fit_from_pairs(
             cluster, season, temperature_metric,
         )
         return None
-    pairs = get_pairs_for_bucket(conn, cluster, season, bin_source_filter="canonical_v1")
+    # Slice A2 (PR #19 followup, 2026-04-26): metric="high" is structurally
+    # required because the gate at L267 already short-circuits non-HIGH;
+    # passing it explicitly makes the implicit invariant visible at the
+    # read seam and satisfies the store-side enforcement landed in slice A1.
+    pairs = get_pairs_for_bucket(
+        conn, cluster, season, bin_source_filter="canonical_v1", metric="high",
+    )
     _, _, level3 = calibration_maturity_thresholds()
     if len(pairs) < level3:
         return None
