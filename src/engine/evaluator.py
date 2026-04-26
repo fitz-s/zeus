@@ -1032,7 +1032,20 @@ def evaluate_candidate(
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_date, lat=city.lat)
         try:
-            _unverified_pairs = _get_pairs(conn, city.cluster, _cal_season, authority_filter='UNVERIFIED')
+            # Slice P2-A1 (PR #19 phase 2, 2026-04-26): scope contamination
+            # check to the active metric track. Without metric, this gate
+            # would alert on cross-metric UNVERIFIED rows that don't actually
+            # affect this candidate's refit (HIGH eval shouldn't be blocked
+            # by LOW UNVERIFIED noise). Pass metric only for HIGH (slice A1
+            # raises NotImplementedError on legacy metric="low" reads;
+            # LOW callers retain the broader unscoped check via metric=None,
+            # which is correct since LOW writes don't go to legacy table).
+            _gate_metric = "high" if temperature_metric.temperature_metric == "high" else None
+            _unverified_pairs = _get_pairs(
+                conn, city.cluster, _cal_season,
+                authority_filter='UNVERIFIED',
+                metric=_gate_metric,
+            )
         except Exception as e:
             return [EdgeDecision(
                 decision_id=_generate_decision_id(),
