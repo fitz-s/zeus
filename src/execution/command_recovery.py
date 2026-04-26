@@ -138,30 +138,64 @@ def _reconcile_row(
         # ------------------------------------------------------------------ #
         if state == CommandState.SUBMITTING:
             if venue_resp is not None:
-                # Venue found the order u2014 ack it.
+                # Inspect venue status — pre-fix code unconditionally emitted
+                # SUBMIT_ACKED even when status="REJECTED" (HIGH-2).
+                venue_status = str(venue_resp.get("status") or "").upper()
+                if venue_status == "REJECTED":
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.SUBMIT_REJECTED.value,
+                        occurred_at=now,
+                        payload={"reason": "recovery_venue_rejected", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                    )
+                    logger.info(
+                        "recovery: command %s SUBMITTING -> REJECTED (venue status=%s)",
+                        cmd.command_id, venue_status,
+                    )
+                    return "advanced"
+                if venue_status in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                    # Terminal-but-no-fill ambiguity — operator review.
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.REVIEW_REQUIRED.value,
+                        occurred_at=now,
+                        payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                    )
+                    logger.warning(
+                        "recovery: command %s SUBMITTING -> REVIEW_REQUIRED (venue terminal status=%s)",
+                        cmd.command_id, venue_status,
+                    )
+                    return "advanced"
+                # Live / matched / active — ack it.
                 append_event(
                     conn,
                     command_id=cmd.command_id,
                     event_type=CommandEventType.SUBMIT_ACKED.value,
                     occurred_at=now,
-                    payload={"venue_order_id": venue_order_id, "venue_response": venue_resp},
+                    payload={"venue_order_id": venue_order_id, "venue_status": venue_status, "venue_response": venue_resp},
                 )
                 logger.info(
-                    "recovery: command %s SUBMITTING u2192 ACKED (venue found order %s)",
-                    cmd.command_id, venue_order_id,
+                    "recovery: command %s SUBMITTING -> ACKED (venue status=%s order %s)",
+                    cmd.command_id, venue_status, venue_order_id,
                 )
                 return "advanced"
             else:
-                # Venue returned None (order not found).
+                # Venue returned None (order not found). Pre-fix emitted
+                # EXPIRED which is grammar-illegal from SUBMITTING (HIGH-1
+                # symmetric fix). Use REVIEW_REQUIRED for consistency with
+                # the no-venue_order_id branch — operator distinguishes
+                # "never placed" from "ack lost".
                 append_event(
                     conn,
                     command_id=cmd.command_id,
-                    event_type=CommandEventType.EXPIRED.value,
+                    event_type=CommandEventType.REVIEW_REQUIRED.value,
                     occurred_at=now,
                     payload={"reason": "recovery_order_not_found_at_venue", "venue_order_id": venue_order_id},
                 )
-                logger.info(
-                    "recovery: command %s SUBMITTING u2192 EXPIRED (order not found at venue)",
+                logger.warning(
+                    "recovery: command %s SUBMITTING -> REVIEW_REQUIRED (order not found at venue)",
                     cmd.command_id,
                 )
                 return "advanced"
@@ -171,16 +205,44 @@ def _reconcile_row(
         # ------------------------------------------------------------------ #
         if state == CommandState.UNKNOWN:
             if venue_resp is not None:
+                # Same status-aware branching as SUBMITTING (HIGH-2 symmetric).
+                venue_status = str(venue_resp.get("status") or "").upper()
+                if venue_status == "REJECTED":
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.SUBMIT_REJECTED.value,
+                        occurred_at=now,
+                        payload={"reason": "recovery_venue_rejected", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                    )
+                    logger.info(
+                        "recovery: command %s UNKNOWN -> REJECTED (venue status=%s)",
+                        cmd.command_id, venue_status,
+                    )
+                    return "advanced"
+                if venue_status in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.REVIEW_REQUIRED.value,
+                        occurred_at=now,
+                        payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                    )
+                    logger.warning(
+                        "recovery: command %s UNKNOWN -> REVIEW_REQUIRED (venue terminal status=%s)",
+                        cmd.command_id, venue_status,
+                    )
+                    return "advanced"
                 append_event(
                     conn,
                     command_id=cmd.command_id,
                     event_type=CommandEventType.SUBMIT_ACKED.value,
                     occurred_at=now,
-                    payload={"venue_order_id": venue_order_id, "venue_response": venue_resp},
+                    payload={"venue_order_id": venue_order_id, "venue_status": venue_status, "venue_response": venue_resp},
                 )
                 logger.info(
-                    "recovery: command %s UNKNOWN u2192 ACKED (venue found order %s)",
-                    cmd.command_id, venue_order_id,
+                    "recovery: command %s UNKNOWN -> ACKED (venue status=%s order %s)",
+                    cmd.command_id, venue_status, venue_order_id,
                 )
                 return "advanced"
             else:
