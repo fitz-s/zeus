@@ -28,6 +28,7 @@ from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
 from src.execution.executor import OrderResult
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
@@ -3762,13 +3763,21 @@ def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
     init_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
+    # `member_extrema` (not the old `member_maxes` name) and now also requires
+    # `temperature_metric` (MetricIdentity) — pre-A3 it silently defaulted to
+    # HIGH; post-A3 it raises. The DummyEns fixture pre-existed both gaps and
+    # was already failing on origin/main with `AttributeError: member_extrema`;
+    # A3 just changed the failure surface to the metric assertion. Fixing the
+    # fixture to satisfy both contracts lets the test exercise the writer.
     ens = type(
         "DummyEns",
         (),
         {
-            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
             "spread_float": lambda self: 1.25,
             "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
         },
     )()
     ens_result = {
@@ -3816,13 +3825,16 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     conn.execute("ATTACH DATABASE ? AS world", (str(world_db),))
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    # Slice A3 follow-up (see twin fix above): satisfy both `member_extrema`
+    # and `temperature_metric` contracts the writer enforces.
     ens = type(
         "DummyEns",
         (),
         {
-            "member_maxes": np.array([40.0, 41.0, 42.0]),
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
             "spread_float": lambda self: 1.25,
             "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
         },
     )()
     ens_result = {

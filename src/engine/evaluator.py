@@ -772,8 +772,15 @@ def evaluate_candidate(
     city = candidate.city
     target_date = candidate.target_date
     outcomes = candidate.outcomes
+    # Slice A3-fix1 (post-review M2 from critic, 2026-04-26): pre-fix used
+    # `getattr(candidate, "temperature_metric", "high")` here, which silently
+    # substituted "high" before _normalize_temperature_metric could raise on
+    # missing attribute. That recreated the same silent-HIGH default A3 just
+    # removed at the normalizer body. Pass None instead so the normalizer
+    # surfaces a missing attribute as a loud ValueError. MarketCandidate's
+    # dataclass default at L91 still protects every standard-shape caller.
     temperature_metric = _normalize_temperature_metric(
-        getattr(candidate, "temperature_metric", "high")
+        getattr(candidate, "temperature_metric", None)
     )
     is_day0_mode = candidate.discovery_mode == "day0_capture"
     selected_method = (
