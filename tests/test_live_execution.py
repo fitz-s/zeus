@@ -29,7 +29,7 @@ def _mem_conn(monkeypatch):
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
-    monkeypatch.setattr("src.execution.executor.get_connection", lambda: mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
     yield mem
     mem.close()
 
@@ -96,7 +96,7 @@ class TestLiveOrderErrorModes:
         result = _live_order("trade-3", _make_intent(), shares=10.0)
 
         assert result.status == "rejected"
-        assert "None" in result.reason
+        assert "clob_returned_none" in result.reason
 
     def test_clob_raises_exception(self, monkeypatch):
         mock_client = MagicMock()

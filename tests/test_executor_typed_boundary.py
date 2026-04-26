@@ -55,7 +55,7 @@ def _inject_mem_conn(monkeypatch):
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
-    monkeypatch.setattr("src.execution.executor.get_connection", lambda: mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
     yield mem
     mem.close()
 
