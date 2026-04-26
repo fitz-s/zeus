@@ -20,7 +20,7 @@ Role: single live control pointer for the repo.
 - Prior closeout evidence packet: `docs/operations/task_2026-04-25_p1_daily_observation_writer_provenance/plan.md`
 - Earlier closeout evidence packet: `docs/operations/task_2026-04-25_p0_market_events_preflight/plan.md`
 - Legacy hourly evidence-view closeout anchor: `docs/operations/task_2026-04-25_p0_legacy_hourly_evidence_view/plan.md`
-- Receipt-bound source: `docs/operations/task_2026-04-25_p4_readiness_checker/receipt.json`
+- Receipt-bound source: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/receipt.json`
 - Status: P1.2 writer provenance gates are closed at implementation commit
   `16292e2`. P1.3 implemented read-only training-readiness quarantine
   diagnostics and tests for unsafe observation role/provenance/causality
@@ -98,6 +98,7 @@ Role: single live control pointer for the repo.
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/task_packet.md`
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/verification_plan.md`
 - `docs/operations/task_2026-04-19_execution_state_truth_upgrade/work_log.md`
+- `docs/operations/task_2026-04-19_execution_state_truth_upgrade/receipt.json`
 - Prior closeout remains available at `docs/operations/task_2026-04-25_p4_readiness_checker/plan.md`
 
 ## Freeze point

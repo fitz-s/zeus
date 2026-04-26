@@ -117,6 +117,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-19_execution_state_truth_upgrade/` | packet evidence | Local execution-state truth upgrade packet present on disk |
 | `task_2026-04-19_execution_state_truth_upgrade/task_packet.md` | packet evidence | Downstream handoff packet for execution-state truth upgrade |
 | `task_2026-04-19_execution_state_truth_upgrade/work_log.md` | packet evidence | Planning refresh evidence log for execution-state truth upgrade |
+| `task_2026-04-19_execution_state_truth_upgrade/receipt.json` | packet evidence | Scope/route receipt for execution-state truth planning refresh |
 | `task_2026-04-19_workspace_artifact_sync/` | packet evidence | Workspace artifact synchronization package |
 | `task_2026-04-20_code_impact_graph_context_pack/` | packet evidence | Code impact graph context-pack package |
 | `task_2026-04-20_code_review_graph_online_context/` | packet evidence | Tracked Code Review Graph online-context package |
