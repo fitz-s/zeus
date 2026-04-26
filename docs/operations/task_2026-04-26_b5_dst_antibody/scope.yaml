@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_b5_dst_antibody
+status: in_progress
+branch: claude/live-readiness-completion-2026-04-26
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26
+
+in_scope:
+  - tests/test_obs_v2_dst_missing_hour_flag.py
+  - docs/operations/task_2026-04-26_b5_dst_antibody/plan.md
+  - docs/operations/task_2026-04-26_b5_dst_antibody/scope.yaml
+  - docs/operations/task_2026-04-26_b5_dst_antibody/work_log.md
+  - docs/operations/task_2026-04-26_b5_dst_antibody/receipt.json
+
+allow_companions:
+  - architecture/test_topology.yaml
+
+out_of_scope:
+  - state/**
+  - src/data/observation_instants_v2_writer.py    # already correct (verified 2026-04-26)
+  - src/signal/diurnal.py                          # already correct
+  - scripts/fill_obs_v2_dst_gaps.py                # already shipped
+  # Other agents' worktrees
+  - docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/**
+  - docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/**
+  - docs/operations/task_2026-04-26_full_data_midstream_fix_plan/**

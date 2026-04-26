@@ -6,7 +6,10 @@ Narrow-by-intent: each command does exactly one thing.
 
 import json
 import logging
+import os
+import sys
 from datetime import datetime, timezone
+from typing import Iterable
 
 from src.config import state_path
 from src.control.gate_decision import GateDecision, ReasonCode
@@ -24,6 +27,13 @@ CONTROL_PATH = state_path("control_plane.json")
 DEFAULT_EDGE_THRESHOLD_MULTIPLIER = 1.0
 TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 
+# G6 antibody (2026-04-26): typed allowlist of strategies permitted to execute
+# under ZEUS_MODE=live. Universe of buildable strategies lives in
+# src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries); this set is the
+# subset operator-approved for live execution. Expansion REQUIRES an explicit
+# packet — accidental drift caught by tests/test_live_safe_strategies.py.
+LIVE_SAFE_STRATEGIES: frozenset[str] = frozenset({"opening_inertia"})
+
 COMMANDS = {
     "pause_entries",                # Stop entering, keep monitoring
     "resume",                       # Clear temporary global controls and resume entries
@@ -32,6 +42,30 @@ COMMANDS = {
     "set_strategy_gate",            # Enable/disable individual strategies
     "acknowledge_quarantine_clear", # Explicit operator intent before ignore/non-resurrection
 }
+
+
+def assert_live_safe_strategies_under_live_mode(enabled: Iterable[str]) -> None:
+    """Refuse daemon launch if any enabled strategy is outside LIVE_SAFE_STRATEGIES under live mode.
+
+    Helper called from src/main.py boot path AFTER ZEUS_MODE=live validation.
+    Exits via SystemExit (not RuntimeError) to match the existing FATAL boot
+    pattern at src/main.py:472-477 — daemon launchers consume SystemExit
+    cleanly; an unhandled RuntimeError would leak past launchd and create
+    zombie state.
+
+    Silent under any non-'live' ZEUS_MODE (paper/test/unset) — live-only
+    enforcement; experimental sessions remain free to run arbitrary strategies.
+    """
+    if os.environ.get("ZEUS_MODE") != "live":
+        return
+    enabled_set = frozenset(enabled)
+    offenders = sorted(enabled_set - LIVE_SAFE_STRATEGIES)
+    if offenders:
+        sys.exit(
+            f"FATAL: live mode refused — non-allowlisted strategies enabled: "
+            f"{offenders}. LIVE_SAFE_STRATEGIES={sorted(LIVE_SAFE_STRATEGIES)}. "
+            f"Disable each via control_plane set_strategy_gate before relaunching."
+        )
 
 _control_state: dict = {}
 
@@ -137,15 +171,34 @@ def get_edge_threshold_multiplier() -> float:
 
 
 def strategy_gates() -> dict[str, GateDecision]:
+    """Return the current strategy_gates table from _control_state.
+
+    BLOCKER #2 fix (2026-04-26, con-nyx review): accepts both dict shape
+    (current production — emitted by db.py::query_control_override_state
+    post-fix and by control_plane._apply_command set_strategy_gate handler)
+    AND legacy bare-bool shape (defense-in-depth for any cache-state path
+    that bypasses the BLOCKER #2 fix). The bool branch synthesizes an
+    UNSPECIFIED GateDecision so callers (is_strategy_enabled, status_summary)
+    don't crash on residual legacy state. Path 1 + Path 2 together cover
+    bool/dict mismatch from both ends.
+    """
     raw = _control_state.get("strategy_gates", {})
     result = {}
     for k, v in raw.items():
         if isinstance(v, dict):
             result[k] = GateDecision.from_dict(v)
+        elif isinstance(v, bool):
+            result[k] = GateDecision(
+                enabled=v,
+                reason_code=ReasonCode.UNSPECIFIED,
+                reason_snapshot={},
+                gated_at="",
+                gated_by="legacy_bool_cache",
+            )
         else:
             raise ValueError(
-                f"Legacy bool strategy gate found for {k!r}. "
-                "Must be migrated to a structured GateDecision dict."
+                f"Strategy gate for {k!r} has unsupported type {type(v).__name__}: {v!r}. "
+                "Expected dict (GateDecision shape) or bool (legacy)."
             )
     return result
 

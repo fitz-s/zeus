@@ -40,44 +40,19 @@ def bucket_key(cluster: str, season: str) -> str:
     return f"{cluster}_{season}"
 
 
-_SH_FLIP = {"DJF": "JJA", "JJA": "DJF", "MAM": "SON", "SON": "MAM"}
-
-
-def season_from_month(month: int, lat: float = 90.0) -> str:
-    """Map month integer to meteorological season code, hemisphere-aware."""
-    if month in (12, 1, 2):
-        season = "DJF"
-    elif month in (3, 4, 5):
-        season = "MAM"
-    elif month in (6, 7, 8):
-        season = "JJA"
-    else:
-        season = "SON"
-    return _SH_FLIP[season] if lat < 0 else season
-
-
-def hemisphere_for_lat(lat: float) -> str:
-    """Return 'N' for Northern Hemisphere, 'S' for Southern (equator = N)."""
-    return "N" if lat >= 0 else "S"
-
-
-def season_from_date(date_str: str, lat: float = 90.0) -> str:
-    """Map date string to meteorological season code, hemisphere-aware.
-
-    For Southern Hemisphere (lat < 0), labels are flipped so that
-    DJF always means "cold season" and JJA always means "warm season",
-    regardless of hemisphere.
-    """
-    month = int(date_str.split("-")[1])
-    if month in (12, 1, 2):
-        season = "DJF"
-    elif month in (3, 4, 5):
-        season = "MAM"
-    elif month in (6, 7, 8):
-        season = "JJA"
-    else:
-        season = "SON"
-    return _SH_FLIP[season] if lat < 0 else season
+# G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4): season helpers
+# moved to src.contracts.season so the ingest lane (scripts/ingest/*) can call
+# them without transitively pulling src.calibration into the import graph.
+# Re-exported here for back-compat — existing callers (harvester.py,
+# observation_client.py, replay.py, this module's own L85/L159/L354) keep
+# working unchanged. _SH_FLIP also re-exported for any subclass/extension
+# that depended on the symbol.
+from src.contracts.season import (  # noqa: F401  (re-export)
+    _SH_FLIP,
+    hemisphere_for_lat,
+    season_from_date,
+    season_from_month,
+)
 
 
 def route_to_bucket(city: City, target_date: str) -> str:

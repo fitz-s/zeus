@@ -6,6 +6,31 @@ Authority basis: source workbook `docs/to-do-list/zeus_live_readiness_upgrade_ch
 Status: planning evidence; not authority. Implementation has NOT begun. No code/DB mutation in this packet body.
 Companion: `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md` D1+D2 (operator-decision dependents — kept on the to-do-list workbook, NOT folded here).
 
+## STATUS: Wave 1 FUNCTIONALLY COMPLETE (2026-04-26)
+
+All 7 in-scope slices closed with con-nyx critic APPROVE (or accepted-without-formal-review for the structurally-clean cases). 16 commits total since main. 41+ antibody tests, all GREEN. Regression delta=0 throughout the entire packet.
+
+| Slice | Status | con-nyx verdict | Immunity |
+|---|---|---|---|
+| G6 LIVE_SAFE_STRATEGIES | CLOSED + 2 BLOCKER fixes | APPROVE (3 passes) | 0.85 |
+| B2 settlement backfill | ABSORBED_BY_PREDECESSOR | (n/a — structural antibody pre-existed) | (n/a) |
+| B5 DST antibody | CLOSED (single-commit B5 pattern) | accepted | (n/a) |
+| B4 obs_v2 physical-bounds | CLOSED + amendments | APPROVE post-amendments | 0.85 |
+| G10-scaffold | CLOSED_WITH_CONDITIONS | APPROVE_WITH_CONDITIONS — discharged via G10-helper-extraction | 0.85 |
+| G10-helper-extraction | CLOSED (discharges G10 MAJORs) | APPROVE | 0.85 |
+| U1 HK floor antibody | CLOSED double-absorption + amendments | APPROVE | **0.90** (highest of packet) |
+
+**Followup queue** (~7-8h total, none commit-blocking on Wave 1; absorb opportunistically into Wave 2):
+- 4 G10 NICE-TO-HAVEs (~50min)
+- G6 MAJOR-2/3/4 + NICE-reason-code-fidelity (~5h)
+- B4-legacy-quarantine (~1h, operator-gated for production UPDATE)
+- B4-source-binding (gated on truth-surface format)
+- U1 NICE-TO-HAVEs absorbed inline (commit `c91f138`)
+
+**14 pattern lessons accumulated** (numbered 1-14) — see slice receipts. Lesson #14 (L20 grep-gate before scoping multi-deliverable workbook entries) elevated to critic standing-order per con-nyx U1 review.
+
+Wave 2 (collision-gated): G7 (LIVE_SAFE_CITIES, recommend HK in initial set per U1 verdict), G5 (paper/live DB isolation), G9 (auto-pause diagnostics), G10-cutover (gated on G10-source-split + launchd plists).
+
 ## 0. Scope statement
 
 This packet plans the **remaining live-readiness antibodies** that are:
@@ -88,12 +113,12 @@ Per `zeus/AGENTS.md`:
 Independent micro-slices. Can ship in any order, in a single child packet `task_2026-04-XX_n1_operational_hygiene/`. N1.9 (legacy table DROP) gated on +30-day dwell from Gate F backfill — defer to a tombstoned wakeup if dwell not reached.
 
 ### Wave 1 — parallel-safe antibodies (~5 engineer-days)
-- **K1.G6** LIVE_SAFE_STRATEGIES typed frozenset + boot assert (~0.5d)
-- **K3.B2** settlement backfill scripts + bin-resolution antibody (~1d)
-- **K3.G10-scaffold** `scripts/ingest/*` skeleton + isolation antibody (~1.5d, no `src/main.py` changes yet)
-- **K1+K3.B4** obs_v2 physical-bounds CHECK + per-city source-binding test (~1d)
-- **K3.B5-backfill** DST retroactive fill script + obs_v2 row coverage extension (~0.5d)
-- **K4.U1** HK floor rounding + constitutional review packet (~0.5d, plus operator review time)
+- **K1.G6** LIVE_SAFE_STRATEGIES typed frozenset + boot assert (~0.5d) — **CLOSED 2026-04-26** commits `78f523c..1c822ff` (slice packet `task_2026-04-26_g6_live_safe_strategies/`)
+- **K3.B2** settlement backfill scripts + bin-resolution antibody — **ABSORBED_BY_PREDECESSOR 2026-04-26**: structural triggers `settlements_verified_insert_integrity` + `settlements_verified_update_integrity` already exist at `src/state/db.py:1071-1098` (S2.2 packet, 2026-04-23) with antibody coverage at `tests/test_settlements_verified_row_integrity.py`. Live-DB pre-apply probe (recorded in db.py:1063-1066) confirms 1469/1469 VERIFIED rows already satisfy. The 49+92 NULL counts among QUARANTINED rows are intentional quarantine semantics. No backfill scripts needed; no slice opened. Fitz §3 (predecessor solved it).
+- **K3.G10-scaffold** `scripts/ingest/*` skeleton + isolation antibody (~1.5d, no `src/main.py` changes yet) — **CLOSED 2026-04-26 via slice `task_2026-04-26_g10_ingest_scaffold/`**: 5 standalone tick scripts (1:1 mapping with `_k2_*_tick` in src/main.py) + `_shared.py` helpers + `__init__.py` package marker + AST-walk antibody (`tests/test_ingest_isolation.py`, 5/5 green). 9 new files; zero collision; G10-cutover (Wave 2) + G10-source-split (workbook 8-script split) + G10-launchd-plists (operator deploy) deferred to followups.
+- **K1+K3.B4** obs_v2 physical-bounds CHECK + per-city source-binding test (~1d) — **PARTIAL CLOSED 2026-04-26**: physical-bounds half closed via slice `task_2026-04-26_b4_physical_bounds/` (commits `cfa5c0e` RED + GREEN follow-up). Per-city source-binding deferred to followup `B4-source-binding` (gated on `current_source_validity.md` format stabilization).
+- **K3.B5-backfill** DST retroactive fill script + obs_v2 row coverage extension (~0.5d) — **CLOSED 2026-04-26 via slice `task_2026-04-26_b5_dst_antibody/`**: writer + callers + backfill script were all shipped pre-2026-04-26 (cited in slice receipt). Only the regression antibody (`tests/test_obs_v2_dst_missing_hour_flag.py`, 6/6 green) remained to ship. Single GREEN commit; no RED phase since production code was pre-correct.
+- **K4.U1** HK floor rounding + constitutional review packet (~0.5d, plus operator review time) — **CLOSED 2026-04-26 via slice `task_2026-04-26_u1_hk_floor_antibody/` with DOUBLE absorption**: (1) Code half ABSORBED — HK already uses `oracle_truncate` alias of floor at `src/contracts/settlement_semantics.py:171` (commit `d99273a`); (2) Constitutional half ABSORBED — `grep "WMO|half-up"` against AGENTS.md returns 0 matches, the universal claim is already gone; (3) Antibody half SHIPPED — `tests/test_hk_settlement_floor_rounding.py` 7/7 green pinning HK dispatch + floor truncation + alias contract. Single GREEN commit, no constitutional packet, no AGENTS.md amendment.
 
 Each slice is its own child packet with plan + scope.yaml + work_log + receipt. Lands independently; no cross-deps within Wave 1.
 

@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_g10_helper_extraction
+status: in_progress
+branch: claude/live-readiness-completion-2026-04-26
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26
+
+in_scope:
+  - src/contracts/dst_semantics.py
+  - src/signal/diurnal.py
+  - src/data/daily_obs_append.py
+  - src/data/hourly_instants_append.py
+  - scripts/ingest/daily_obs_tick.py
+  - scripts/ingest/hourly_instants_tick.py
+  - scripts/ingest/solar_daily_tick.py
+  - scripts/ingest/forecasts_daily_tick.py
+  - scripts/ingest/hole_scanner_tick.py
+  - tests/test_ingest_isolation.py
+  - docs/operations/task_2026-04-26_g10_helper_extraction/plan.md
+  - docs/operations/task_2026-04-26_g10_helper_extraction/scope.yaml
+  - docs/operations/task_2026-04-26_g10_helper_extraction/work_log.md
+  - docs/operations/task_2026-04-26_g10_helper_extraction/receipt.json
+
+allow_companions: []
+
+out_of_scope:
+  - state/**
+  # Adjacent _is_missing_local_hour callers — work via re-export, no edit needed
+  - src/data/ingestion_guard.py
+  # Other agents' worktrees
+  - docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/**
+  - docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/**
+  - docs/operations/task_2026-04-26_full_data_midstream_fix_plan/**

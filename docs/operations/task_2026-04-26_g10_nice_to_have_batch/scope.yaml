@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-04-26_g10_nice_to_have_batch
+status: in_progress
+branch: claude/live-readiness-completion-2026-04-26
+worktree: /Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26
+
+in_scope:
+  - src/contracts/season.py
+  - src/calibration/manager.py
+  - src/data/daily_obs_append.py
+  - tests/test_ingest_isolation.py
+  - docs/operations/task_2026-04-26_g10_nice_to_have_batch/plan.md
+  - docs/operations/task_2026-04-26_g10_nice_to_have_batch/scope.yaml
+  - docs/operations/task_2026-04-26_g10_nice_to_have_batch/work_log.md
+  - docs/operations/task_2026-04-26_g10_nice_to_have_batch/receipt.json
+
+allow_companions: []
+
+out_of_scope:
+  - state/**
+  - src/execution/harvester.py            # work via re-export
+  - src/data/observation_client.py        # work via re-export
+  - src/engine/replay.py                  # work via re-export
+  # G10-source-split deferred to Wave 2
+  - src/data/daily_obs_append.py:daily_tick  # API refactor not in this slice
+  # Other agents' worktrees
+  - docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/**
+  - docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/**
+  - docs/operations/task_2026-04-26_full_data_midstream_fix_plan/**

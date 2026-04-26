@@ -3893,7 +3893,13 @@ def query_control_override_state(
     entries_pause_source = None
     entries_pause_reason = None
     edge_threshold_multiplier = 1.0
-    strategy_gates: dict[str, bool] = {}
+    # G6 BLOCKER #2 fix (2026-04-26, con-nyx review): emit GateDecision-shaped
+    # dicts (not bare bool) so control_plane.strategy_gates() — which expects
+    # dict and raises ValueError on bool — can deserialize them via
+    # GateDecision.from_dict. K1 migration set the in-memory writer
+    # (set_strategy_gate puts dict) but missed the DB reader; the boot
+    # guard introduced by G6 forced this latent debt onto every live launch.
+    strategy_gates: dict[str, dict] = {}
     seen_strategy_gate: set[str] = set()
     global_gate_seen = False
     global_threshold_seen = False
@@ -3926,7 +3932,17 @@ def query_control_override_state(
             global_threshold_seen = True
             continue
         if target_type == "strategy" and action_type == "gate" and target_key and target_key not in seen_strategy_gate:
-            strategy_gates[target_key] = not _parse_boolish_text(value)
+            # value="true" means gate IS active (strategy DISABLED), so enabled = NOT value.
+            # Synthesize GateDecision-shape from the row columns the DB already carries.
+            # reason_code defaults to OPERATOR_OVERRIDE since the DB doesn't store the original
+            # ReasonCode enum; reason_snapshot empty (DB doesn't store snapshot either).
+            strategy_gates[target_key] = {
+                "enabled": not _parse_boolish_text(value),
+                "reason_code": "operator_override",
+                "reason_snapshot": {},
+                "gated_at": str(row["issued_at"] or ""),
+                "gated_by": str(row["issued_by"] or "unknown"),
+            }
             seen_strategy_gate.add(target_key)
     return {
         "status": "ok",
