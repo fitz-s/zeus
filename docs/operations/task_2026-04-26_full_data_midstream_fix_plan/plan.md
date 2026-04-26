@@ -54,13 +54,15 @@ Summary:
 |---|---|---|---|
 | F5: legacy refit reads metric-blind pairs/counts | `src/calibration/manager.py` calls `get_decision_group_count(conn, cluster, season)` and `get_pairs_for_bucket(..., bin_source_filter="canonical_v1")`; `src/calibration/store.py` lacks `temperature_metric` filter on those functions | `manager.py:193,275`; `store.py:207,292` | CURRENT |
 | F6: maturity gate vs refit input subset mismatch | `get_decision_group_count()` counts all VERIFIED groups in a cluster/season; `_fit_from_pairs()` reads only `canonical_v1` rows | `store.py:292` (count is metric-blind), `manager.py:275` (refit uses `bin_source_filter="canonical_v1"` only) | CURRENT |
-| F7: snapshot stamp `or "high"` fallback | `_store_ens_snapshot()` uses fallback `"high"` when `ens.temperature_metric` is missing | `evaluator.py:1819` (double-getattr fallback `or "high"`) + L497, L537, L674 (`candidate.temperature_metric or "high"`) + L91 (CandidateContext default `temperature_metric: str = "high"`) | CURRENT, ENRICHED — fallback exists in 4 sites, not 1 |
-| F8: rescue authority returns "high"+UNVERIFIED | `resolve_rescue_authority()` returns `("high", "UNVERIFIED", ...)` when `temperature_metric` missing | `chain_reconciliation.py:48` exact match | CURRENT |
-| F9: terminal-state set duplicated | `cycle_runner.py` mirrors terminal states from `portfolio.py` in a local frozenset | `portfolio.py:962` (canonical) + `cycle_runner.py:54` (frozenset mirror) + `cycle_runner.py:341` (THIRD inline set literal `{"settled","voided","admin_closed","economically_closed"}`) | CURRENT, EXTENDED — workbook said 1 duplicate, grep found 2 |
+| F7: snapshot stamp `or "high"` fallback | `_store_ens_snapshot()` uses fallback `"high"` when `ens.temperature_metric` is missing | `evaluator.py:1818` (double-getattr fallback `or "high"`) + L497, L537, L674 (`candidate.temperature_metric or "high"`) + L91 (CandidateContext default `temperature_metric: str = "high"`) | CURRENT, ENRICHED — fallback exists in 5 sites total, not 1 |
+| F8: rescue authority returns "high"+UNVERIFIED | `resolve_rescue_authority()` returns `("high", "UNVERIFIED", ...)` when `temperature_metric` missing | `chain_reconciliation.py:49` exact match | CURRENT |
+| F9: terminal-state set duplicated | `cycle_runner.py` mirrors terminal states from `portfolio.py` in a local frozenset | `portfolio.py:962` `{settled, voided, admin_closed, quarantined}` (canonical) + `cycle_runner.py:54` `{settled, voided, admin_closed, quarantined}` (frozenset mirror, agrees with portfolio) + `cycle_runner.py:341` `{settled, voided, admin_closed, economically_closed}` (THIRD inline set literal — **DISAGREES with canonical**: includes `economically_closed` (NOT terminal per `LEGAL_LIFECYCLE_FOLDS`) and excludes `quarantined` (IS terminal per folds)) | CURRENT, ELEVATED — finding 9 is a **semantic bug**, not duplication: the third set literal at L341 contains the wrong members |
 
-**Premise rot: 0% (within 10-minute window).** All workbook citations stand. Finding 9 is more severe than the workbook described (3 sources of truth, not 2).
+**Premise rot: 0% (within 10-minute window). Re-verified after rebase onto `origin/main` 2026-04-26.** All workbook citations stand. Finding 9 is more severe than the workbook described (3 sources of truth + the third disagrees on membership = real semantic bug).
 
 The remaining findings (F1–F4, F10) are governance/operator/data items whose verification is via `current_state.md` and `known_gaps.md`, not source grep. Confirmed via `current_state.md`: P4 mutation BLOCKED, `ensemble_snapshots_v2`/`market_events_v2`/`settlements_v2`/`calibration_pairs_v2` empty, `WU_API_KEY` missing in current shell, auto-pause tombstone is operator decision.
+
+**Post-rebase precedent discovery.** `scripts/semantic_linter.py:628 _has_settlements_metric_predicate` already enforces metric predicates on `settlements` reads (P3 4.5.A landed work). The slices A1+A2 in this plan extend the SAME antibody pattern to `calibration_pairs` reads. Slice A1 has a natural follow-on opportunity to add `_has_calibration_pairs_metric_predicate` to the same linter (filed as candidate slice A1b).
 
 ---
 
@@ -93,30 +95,33 @@ This is Fitz Constraint #1 in action: enumerate-and-patch produces 10 PRs and re
 - **F7** (snapshot stamp `or "high"` fallback): replaced with fail-closed assertion at writer + at `CandidateContext` construction.
 - **F8** (rescue authority "high" default): retain backward-compatible default but enforce consumer-side strict filter via relationship test that learning paths reject `authority != "VERIFIED"`.
 
-#### Slice A1 — Add metric-required signatures to calibration store
+#### Slice A1 — Add optional metric kwarg to calibration store (in-place extension)
+
+**DESIGN REVISION (post-rebase 2026-04-26)**: original plan called for sibling `_v2` functions. After re-reading store.py, both target functions ALREADY accept additive kwargs (`authority_filter`, `bin_source_filter`); adding `metric` as a third additive kwarg in-place is cleaner than duplicating function bodies. v2 sibling deferred to a future restrictive-typed packet if needed.
 
 Scope (additive, lowest blast):
 - `src/calibration/store.py` only.
 - Tests in `tests/test_calibration_store_metric_required.py` (NEW).
 
 Change shape:
-1. Introduce `get_pairs_for_bucket_v2(conn, cluster, season, *, metric: MetricIdentity, bin_source_filter: str | None = None, authority_filter: str = "VERIFIED")` and `get_decision_group_count_v2(conn, cluster, season, *, metric: MetricIdentity)` with **keyword-only required `metric`**.
-2. Old `get_pairs_for_bucket` / `get_decision_group_count` keep current behavior; emit `DeprecationWarning` if invoked. (Deprecation removal scheduled in slice A5 after C-track audits land.)
+1. Extend `get_pairs_for_bucket(conn, cluster, season, authority_filter='VERIFIED', bin_source_filter=None, *, metric: Literal["high","low"] | None = None)` — add keyword-only `metric` param defaulting to `None` (preserves existing behavior). When `metric` is provided, append `AND temperature_metric = ?` to all three SQL branches (any-filter, no-auth-column, VERIFIED-with-auth) and pass metric in params.
+2. Same extension for `get_decision_group_count(conn, cluster, season, authority_filter="VERIFIED", *, metric: Literal["high","low"] | None = None)` — applies to both branches (any-or-no-auth-column and VERIFIED-with-auth).
 
 Relationship tests (BEFORE implementation, per Fitz):
-- "Querying calibration_pairs for `metric=high` must never return rows where `temperature_metric='low'`" — assert against fixture DB seeded with mixed rows.
-- "Querying decision_group_count for `metric=low` must never include groups whose only outcomes are HIGH" — same fixture.
+- "Querying calibration_pairs for `metric='high'` must never return rows where `temperature_metric='low'`" — assert against fixture DB seeded with mixed rows.
+- "Querying decision_group_count for `metric='low'` must never include groups whose only outcomes are HIGH" — same fixture.
+- "Backward compatibility: `metric=None` (default) returns identical results to current callers" — fixture comparison.
 
 Function tests (after impl):
-- v2 functions filter by `(metric, bin_source, authority)` correctly across axes.
-- v2 functions reject `metric=None` and `metric="high"` (str) at runtime — only `MetricIdentity` accepted.
+- Function filters by `(metric, bin_source, authority)` correctly across all 3 SQL branches × both metrics.
+- `metric` kwarg is keyword-only (positional invocation raises TypeError).
 
 Acceptance:
-- v2 functions land with passing relationship + function tests.
-- Old functions still callable; deprecation warning visible in test logs.
+- Function extends with passing relationship + function tests.
+- All existing call sites still work without modification (additive only).
 - No DB mutation, no schema change.
 
-Blast radius: low (additive only).
+Blast radius: low (additive only). All 4 known internal call sites (manager.py L193, L275; harvester etc.) keep working; only manager passes `metric` explicitly in slice A2.
 
 #### Slice A2 — Switch `manager.py` to v2 metric-aware calls
 
@@ -188,40 +193,49 @@ Blast radius: low (mostly test). Code change only if a consumer is found broken.
 
 ---
 
-### 3.B Decision B: Lifecycle terminal predicate has single ownership
+### 3.B Decision B: Lifecycle terminal predicate has single ownership (SEMANTIC BUG, not just duplication)
 
-**Failure pattern.** Terminal-state membership is defined three times:
-1. `portfolio.py:962` `_TERMINAL_POSITION_STATES` (canonical).
-2. `cycle_runner.py:54` `_TERMINAL_POSITION_STATES_FOR_SWEEP` (frozenset mirror with comment "Mirrors `_TERMINAL_POSITION_STATES`").
-3. `cycle_runner.py:341` `terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}` (inline set literal, no cross-reference comment).
+**Failure pattern, ELEVATED post-rebase 2026-04-26.** Terminal-state membership is defined THREE times AND THE THREE DEFINITIONS DISAGREE:
 
-Three sources of truth → drift hazard at every minor lifecycle vocabulary change. If `LifecyclePhase` ever adds a new terminal phase, two of three sites silently disagree.
+1. `portfolio.py:962` `_TERMINAL_POSITION_STATES = {"settled", "voided", "admin_closed", "quarantined"}` (canonical, matches `LEGAL_LIFECYCLE_FOLDS` ground truth).
+2. `cycle_runner.py:54` `_TERMINAL_POSITION_STATES_FOR_SWEEP = {"settled", "voided", "admin_closed", "quarantined"}` (frozenset mirror, AGREES with portfolio).
+3. `cycle_runner.py:341` `terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}` (inline set literal, **DISAGREES with canonical** — includes `economically_closed` (NOT terminal per `LEGAL_LIFECYCLE_FOLDS["ECONOMICALLY_CLOSED"]` which transitions to SETTLED/VOIDED) and **excludes `quarantined`** (IS terminal per `LEGAL_LIFECYCLE_FOLDS["QUARANTINED"] = {QUARANTINED}`)).
 
-**Structural fix.** Single owner of `is_terminal_state(state) -> bool` and `TERMINAL_STATES: frozenset[str]` in `src/state/lifecycle_manager.py` (the lifecycle owner per AGENTS.md §1). All readers import the predicate.
+Authority proof from `src/state/lifecycle_manager.py` `LEGAL_LIFECYCLE_FOLDS`: a phase is terminal iff `LEGAL_LIFECYCLE_FOLDS[phase] = {phase}` (only fold to itself). Per the table, 4 phases satisfy this: `SETTLED`, `VOIDED`, `QUARANTINED`, `ADMIN_CLOSED`. `ECONOMICALLY_CLOSED` does NOT satisfy this (folds to `{ECONOMICALLY_CLOSED, SETTLED, VOIDED}`).
 
-#### Slice B1 — Centralize terminal predicate
+**Behavioral consequence of `cycle_runner.py:341` bug** (smoke-test portfolio cap exposure-block branch):
+- `economically_closed` positions are EXCLUDED from `open_cost_basis_usd` sum today, despite still carrying cost basis until on-chain settlement → exposure summary under-reports open exposure.
+- `quarantined` positions are INCLUDED in `open_cost_basis_usd` sum today, despite being terminal off-path positions → exposure summary over-reports open exposure (though the `has_quarantine` block at L327 already independently blocks new entries, mitigating the entry-blocking impact).
 
-Scope: `src/state/lifecycle_manager.py`, `src/engine/cycle_runner.py`, `src/state/portfolio.py`.
+**Structural fix.** Single owner of `is_terminal_state(state) -> bool` and `TERMINAL_STATES: frozenset[str]` in `src/state/lifecycle_manager.py`, **derived programmatically from `LEGAL_LIFECYCLE_FOLDS`** (so future enum/fold changes auto-update; the canonical set cannot be re-hardcoded incorrectly). All readers import the predicate. Site 3 (`cycle_runner.py:341`) gets a SEMANTIC FIX, not just a refactor — its behavior changes to match canonical.
+
+#### Slice B1 — Centralize terminal predicate (with semantic fix at site 3)
+
+Scope: `src/state/lifecycle_manager.py`, `src/engine/cycle_runner.py`, `src/state/portfolio.py`, plus new test file.
 
 Change:
-- Add `TERMINAL_STATES: frozenset[str]` and `def is_terminal_state(state: str) -> bool` to `src/state/lifecycle_manager.py`.
-- `portfolio.py:962`: replace `_TERMINAL_POSITION_STATES = frozenset({...})` with `from src.state.lifecycle_manager import TERMINAL_STATES as _TERMINAL_POSITION_STATES` (preserves local symbol name; zero call-site churn).
-- `cycle_runner.py:54`: replace `_TERMINAL_POSITION_STATES_FOR_SWEEP` with same import alias.
-- `cycle_runner.py:341`: replace inline `terminal_states = {...}` and call sites with `lifecycle_manager.is_terminal_state(state)` predicate calls.
+- Add `TERMINAL_STATES: frozenset[str]` and `def is_terminal_state(state: str) -> bool` to `src/state/lifecycle_manager.py`. **Derive `TERMINAL_STATES` programmatically from `LEGAL_LIFECYCLE_FOLDS`** by selecting phases whose fold equals `{phase}` — guarantees structural correctness, immune to future hardcoded-set drift.
+- `portfolio.py:962`: replace `_TERMINAL_POSITION_STATES = frozenset({...})` with import from `lifecycle_manager.TERMINAL_STATES`. Verify the resulting set matches the literal we replace (it does: `{settled, voided, admin_closed, quarantined}`).
+- `cycle_runner.py:54`: replace `_TERMINAL_POSITION_STATES_FOR_SWEEP` with same import. Verify set match (it does).
+- `cycle_runner.py:341`: replace inline `terminal_states = {...}` with `is_terminal_state(...)` predicate call. **This is a behavior change**: `economically_closed` positions now counted in `open_cost_basis_usd`; `quarantined` positions now excluded.
 
 Relationship test (NEW, before impl):
-- "All three readers (`portfolio` load filter, RED sweep filter, exposure-block filter) MUST produce identical terminal-state membership for every state in `LifecyclePhase` and for the 4 known terminals." — parametrized pytest comparing the three readers' answers.
+- "All three call sites MUST agree with `lifecycle_manager.is_terminal_state` for every `LifecyclePhase` member and for the 4 canonical terminal strings." — parametrized pytest.
+- "`TERMINAL_STATES` derived from `LEGAL_LIFECYCLE_FOLDS` MUST equal the manually-asserted canonical set `{settled, voided, admin_closed, quarantined}`" — invariant guard.
 
 Function tests:
-- `is_terminal_state` returns True iff state ∈ `{"settled", "voided", "admin_closed", "economically_closed"}` (per AGENTS.md §1 lifecycle reference).
-- Adding a hypothetical new terminal state to `lifecycle_manager.TERMINAL_STATES` is automatically picked up by all 3 sites without further edits (test by monkey-patching).
+- `is_terminal_state("settled")` / `("voided")` / `("admin_closed")` / `("quarantined")` → True.
+- `is_terminal_state("economically_closed")` → False (per `LEGAL_LIFECYCLE_FOLDS` it transitions to settled/voided).
+- `is_terminal_state("active")` / `("pending_entry")` / etc. → False.
+- Hypothetical new terminal phase added to `LifecyclePhase` + `LEGAL_LIFECYCLE_FOLDS[NEW] = {NEW}` is automatically picked up by `TERMINAL_STATES` (test by monkey-patching the folds dict in a fixture).
 
 Acceptance:
 - All 3 sites import from `lifecycle_manager`.
 - Relationship test passes.
-- Repository-wide grep for the literal set `{"settled", "voided", "admin_closed", "economically_closed"}` returns 1 hit (the canonical definition in `lifecycle_manager.py`).
+- Repository-wide grep for any hardcoded terminal set literal containing `{"settled", "voided"}` AND `"admin_closed"` AND any of `{"economically_closed", "quarantined"}` returns 1 hit (the lifecycle_manager.py derivation source) plus the test file.
+- Smoke-test portfolio cap exposure-block test (if exists) updated for new `economically_closed`-counted / `quarantined`-excluded semantics; if no such test exists, add one to prevent regression.
 
-Blast radius: low. Behaviorally a pure refactor; predicate semantics preserved.
+Blast radius: low to medium. Sites 1+2 are pure refactor (set unchanged). Site 3 is a behavior change at the smoke-test portfolio cap. The change makes exposure reporting more conservative for `economically_closed` and less inflated for `quarantined`. Both directions improve correctness against on-chain reality.
 
 ---
 

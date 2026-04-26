@@ -55,8 +55,8 @@ For each workbook citation, run a fresh grep against the current `src/` tree on 
 **Cited at**: `src/engine/evaluator.py::_store_ens_snapshot()` uses fallback of `"high"` when `ens.temperature_metric` is missing.
 
 **Verified at**:
-- `src/engine/evaluator.py:1819`: `snap_metric = getattr(getattr(ens, "temperature_metric", None), "temperature_metric", "high") or "high"` — DOUBLE fallback (`getattr` default + `or` clause).
-- `src/engine/evaluator.py:1802`: `def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:` — function definition matches.
+- `src/engine/evaluator.py:1818` (post-rebase, was 1819 pre-rebase): `snap_metric = getattr(getattr(ens, "temperature_metric", None), "temperature_metric", "high") or "high"` — DOUBLE fallback (`getattr` default + `or` clause).
+- `src/engine/evaluator.py:1801` (post-rebase, was 1802 pre-rebase): `def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:` — function definition matches.
 
 **Additional fallback sites discovered (not in workbook citation but same family)**:
 - `src/engine/evaluator.py:91`: `temperature_metric: str = "high"` — CandidateContext dataclass default.
@@ -72,23 +72,32 @@ For each workbook citation, run a fresh grep against the current `src/` tree on 
 
 **Verified at**:
 - `src/state/chain_reconciliation.py:29`: `def resolve_rescue_authority(position) -> tuple[str, str, str]:` — function exists.
-- `src/state/chain_reconciliation.py:48`: `return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")` — exact match.
-- `src/state/chain_reconciliation.py:33-37` docstring: "downstream analytics can filter on authority='VERIFIED' for strict forensic work" — confirms intent is in docstring, not structure.
+- `src/state/chain_reconciliation.py:49` (post-rebase, was 48 pre-rebase): `return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")` — exact match.
+- `src/state/chain_reconciliation.py:33-38` docstring: "downstream analytics can filter on authority='VERIFIED' for strict forensic work" — confirms intent is in docstring, not structure.
 
 **Status**: CURRENT.
 
-### Finding 9 — Terminal-state set duplicated
+### Finding 9 — Terminal-state set duplicated (ELEVATED to semantic-bug)
 
 **Cited at**: `src/engine/cycle_runner.py` mirrors terminal states from `_TERMINAL_POSITION_STATES` in `src/state/portfolio.py` in a local frozenset.
 
-**Verified at**:
-- `src/state/portfolio.py:962`: `_TERMINAL_POSITION_STATES = frozenset({...})` — canonical definition.
-- `src/engine/cycle_runner.py:54`: `_TERMINAL_POSITION_STATES_FOR_SWEEP = frozenset({...})` with comment at L51-52 "Mirrors `_TERMINAL_POSITION_STATES` in src/state/portfolio.py" — frozenset mirror confirmed.
+**Verified at (post-rebase exact contents)**:
+- `src/state/portfolio.py:962`: `_TERMINAL_POSITION_STATES = frozenset({"settled", "voided", "admin_closed", "quarantined"})` — canonical definition. Matches `LEGAL_LIFECYCLE_FOLDS` ground truth (4 phases that fold only to themselves).
+- `src/engine/cycle_runner.py:54`: `_TERMINAL_POSITION_STATES_FOR_SWEEP = frozenset({"settled", "voided", "admin_closed", "quarantined"})` with comment at L51-52 "Mirrors `_TERMINAL_POSITION_STATES` in src/state/portfolio.py" — **AGREES with canonical** (correct mirror).
 
-**Additional duplicate discovered (NOT in workbook)**:
-- `src/engine/cycle_runner.py:341`: `terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}` — inline set literal in a different function (exposure-block / non-terminal cost-basis sum), NO comment, NO cross-reference to canonical source.
+**Additional discovery (NOT in workbook), with SEMANTIC DISAGREEMENT**:
+- `src/engine/cycle_runner.py:341`: `terminal_states = {"settled", "voided", "admin_closed", "economically_closed"}` — inline set literal in `_evaluate_run_status` smoke-test portfolio cap branch, NO comment, NO cross-reference. **DISAGREES with canonical**: includes `economically_closed` (per `LEGAL_LIFECYCLE_FOLDS["ECONOMICALLY_CLOSED"] = {ECONOMICALLY_CLOSED, SETTLED, VOIDED}` — NOT terminal) and excludes `quarantined` (per `LEGAL_LIFECYCLE_FOLDS["QUARANTINED"] = {QUARANTINED}` — IS terminal).
 
-**Status**: CURRENT, EXTENDED — workbook described 1 duplicate; grep finds 2 duplicates totaling 3 sources of truth. Slice B1 must collapse all three.
+**Authority proof**: `src/state/lifecycle_manager.py:79-83`:
+```python
+LifecyclePhase.SETTLED: frozenset({LifecyclePhase.SETTLED}),
+LifecyclePhase.VOIDED: frozenset({LifecyclePhase.VOIDED}),
+LifecyclePhase.QUARANTINED: frozenset({LifecyclePhase.QUARANTINED}),
+LifecyclePhase.ADMIN_CLOSED: frozenset({LifecyclePhase.ADMIN_CLOSED}),
+```
+A phase is terminal iff its fold is the singleton of itself. Only those 4 phases satisfy this → canonical set = `{settled, voided, admin_closed, quarantined}`.
+
+**Status**: CURRENT, ELEVATED — finding 9 is not "1 extra duplicate" (workbook said 2 sources of truth) and not even just "3 sources of truth" — it is a **semantic bug**: the third source has the wrong set members. Slice B1 is no longer pure refactor; it includes a behavior fix at L341.
 
 ---
 
