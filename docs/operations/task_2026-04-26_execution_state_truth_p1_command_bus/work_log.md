@@ -165,3 +165,98 @@ pytest wide-sweep (8 files)
 
 All critic findings closed. Slice is now P1.S3-ready. P1.S2 (command_bus types)
 can start whenever operator confirms.
+
+---
+
+## 2026-04-26 u2014 P1.S3: Executor split build/persist/submit/ack
+
+### Scope landed
+
+Wired the P1.S1 repo + P1.S2 typed surface into the live order path. Both
+`_live_order` (entry / IntentKind.ENTRY) and `execute_exit_order` (exit /
+IntentKind.EXIT) now run 4-phase buildu2192persistu2192submitu2192ack before returning
+OrderResult. INV-30 registered in invariants.yaml.
+
+### File:line targets
+
+- `src/execution/executor.py:13-36` u2014 added `import sqlite3` + module-level
+  `from src.state.db import get_connection` for testability
+- `src/execution/executor.py:214-476` u2014 `execute_exit_order` rewritten with
+  build/persist/submit/ack phases; accepts `conn` and `decision_id` params
+- `src/execution/executor.py:479-750` u2014 `_live_order` rewritten with 6 phases
+  (ExecutionPrice guard, build, persist, V2 preflight gate, submit, ack);
+  accepts `conn` and `decision_id` params
+- `architecture/invariants.yaml` u2014 INV-30 added after INV-28 block
+- `tests/test_executor_command_split.py` u2014 new file, 13 tests
+- `tests/test_p0_hardening.py` u2014 `TestR2V2PreflightBlocksPlacement` extended
+  with `_mem_conn` fixture; test methods updated to pass `conn=_mem_conn`
+- `tests/test_live_execution.py` u2014 autouse `_mem_conn` fixture added
+- `tests/test_executor_typed_boundary.py` u2014 autouse `_inject_mem_conn` fixture added
+
+### INV-30 anchor
+
+client.place_limit_order MUST be preceded by a venue_commands row persisted
+with state=SUBMITTING within the SAME process invocation. Crash between submit
+and ack leaves the row in SUBMITTING for recovery loop (P1.S4).
+
+### Phase order (entry path)
+
+1. ExecutionPrice validation (pre-persist guard)
+2. build: IdempotencyKey.from_inputs + VenueCommand (pure)
+3. persist: insert_command (INTENT_CREATED) + append_event (SUBMIT_REQUESTED)
+4. V2 preflight (if fails: SUBMIT_REJECTED appended, return rejected)
+5. submit: client.place_limit_order
+6. ack: SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN based on result
+
+Exit path omits V2 preflight (5 phases total).
+
+### Verification commands
+
+```
+pytest tests/test_executor_command_split.py -v
+  u2192 13 passed
+
+pytest tests/test_p0_hardening.py tests/test_command_bus_types.py
+       tests/test_venue_command_repo.py -q
+  u2192 131 passed, 1 skipped  (no regression)
+
+pytest tests/test_phase5a_truth_authority.py tests/test_phase8_shadow_code.py
+       tests/test_executor_typed_boundary.py tests/test_pre_live_integration.py
+       tests/test_architecture_contracts.py tests/test_runtime_guards.py
+       tests/test_live_execution.py tests/test_dual_track_law_stubs.py --tb=no -q
+  u2192 18 failed, 234 passed, 25 skipped  (exact baseline parity with 1453eaf)
+```
+
+### Crash-injection drill result
+
+`test_submit_unknown_writes_event_with_state_unknown` (both entry and exit):
+place_limit_order raises RuntimeError. venue_commands row present with
+state=UNKNOWN; find_unresolved_commands returns 1 row; event chain contains
+INTENT_CREATED + SUBMIT_REQUESTED + SUBMIT_UNKNOWN. Recovery loop can resolve.
+
+### Touched files
+
+- `src/execution/executor.py` u2014 entry + exit paths rewritten
+- `architecture/invariants.yaml` u2014 INV-30
+- `tests/test_executor_command_split.py` u2014 new (13 tests)
+- `tests/test_p0_hardening.py` u2014 mem_conn fixture for R-2 tests
+- `tests/test_live_execution.py` u2014 autouse mem_conn fixture
+- `tests/test_executor_typed_boundary.py` u2014 autouse mem_conn fixture
+
+### Commit
+
+`4fcb2db` u2014 Land P1.S3: executor split build/persist/submit/ack u2014 INV-30
+
+### Deviations
+
+- `execute_exit_order` signature change extended to the P1.S5 wire-up surface
+  (`conn`, `decision_id` params); existing callers that pass no conn still work
+  via the `get_connection()` fallback.
+- `test_executor_typed_boundary.py`, `test_live_execution.py`,
+  `test_p0_hardening.py` required in-memory DB fixture additions because
+  these pre-existing tests call `_live_order` without conn and the new persist
+  phase otherwise hits a bare `get_connection()` against an uninitialized file
+  DB. Fixes are minimal: autouse fixtures patching `get_connection` at the
+  executor module level.
+- `test_clob_raises_exception` expected `CLOB down` in result.reason; the new
+  code returns `submit_unknown: CLOB down` which still satisfies `in` check.
