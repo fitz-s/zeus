@@ -259,7 +259,7 @@ def execute_exit_order(intent: ExitOrderIntent) -> OrderResult:
             slip_bps = abs(current_price - best_bid) / current_price * 10_000.0
             slippage = SlippageBps(
                 value_bps=slip_bps,
-                direction="adverse",  # buy crossing to lower bid pays adverse
+                direction="adverse",  # sell crossing down to bid receives adverse
             )
             if slippage.fraction <= 0.03:
                 limit_price = best_bid

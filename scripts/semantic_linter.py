@@ -122,12 +122,21 @@ _CALIBRATION_PAIRS_V2_TABLE_REF_RE = re.compile(
 # reads (typically operator audit scripts). New entries require
 # operator justification at PR review.
 CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
-    # verify_truth_surfaces.py uses dynamic f-string SQL `SELECT COUNT(*)
-    # FROM {table}` for cross-table cardinality diagnostics. The linter
-    # statically matches the substring `calibration_pairs_v2` in nearby
-    # docstring/comment context but the SQL itself is parameterized; not
-    # an actual unmasked v2 read. Allowlisted post-A1b false-positive
-    # surface (P4-2 commit ca38df0).
+    # P4-fix3 (post-review critic M1, 2026-04-26): rationale corrected.
+    # verify_truth_surfaces.py contains TWO interacting reads:
+    #   (a) L200 `_count_params(cur, table, where, params)` helper using
+    #       f-string `SELECT COUNT(*) FROM {table} WHERE {where}`. Caller
+    #       sites pass `table="calibration_pairs_v2"` with various WHERE
+    #       clauses including diagnostic `WHERE 1 = 0` cardinality probes.
+    #   (b) L1631 actual v2 SELECT — already includes WHERE
+    #       temperature_metric = ?, would pass the lint standalone.
+    # The lint can't statically distinguish the legitimate L1631 read from
+    # the constant-folded L200-helper invocations. Allowlist the file as
+    # a whole because it's a diagnostic / verification script (operator-
+    # run, reviewed at PR time per Zeus convention), not a runtime
+    # consumer that could silently leak cross-metric rows into training.
+    # If a NEW production data path is added to this file later, remove
+    # from the allowlist and route via store-side functions.
     "scripts/verify_truth_surfaces.py",
 })
 _SQL_ALIAS_STOPWORDS: frozenset[str] = frozenset(
