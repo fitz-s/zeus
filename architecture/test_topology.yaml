@@ -51,6 +51,7 @@ test_trust_policy:
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
+    tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
