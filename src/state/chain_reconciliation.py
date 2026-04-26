@@ -74,6 +74,17 @@ def resolve_position_metric(position) -> tuple[str, str, str]:
           (high|low) value; "UNVERIFIED" otherwise.
         - source: str — provenance string for forensic filtering.
     """
+    # Slice P2-fix4 (post-review MAJOR #4 from code-reviewer, 2026-04-26):
+    # type guard for the most common caller-bug case (passing None instead
+    # of a Position). Without this guard, None inputs would silently produce
+    # the same audit-log line as a legitimate quarantine-default Position,
+    # making programmer errors invisible to ops review. dict / attribute-
+    # less objects fall through to the UNVERIFIED default below — they
+    # surface in DEBUG audit logs as `position_missing_metric:None`.
+    if position is None:
+        raise TypeError(
+            "resolve_position_metric expected a Position-like object; got None"
+        )
     _raw_metric = getattr(position, "temperature_metric", None)
     if _raw_metric in ("high", "low"):
         return (_raw_metric, "VERIFIED", "position_materialized")
@@ -90,6 +101,13 @@ def resolve_rescue_authority(position) -> tuple[str, str, str]:
     """Resolve (temperature_metric, authority, authority_source) for a
     rescue_events_v2 row from a Position object.
 
+    Slice P2-fix4 (post-review MAJOR #3 from code-reviewer, 2026-04-26):
+    delegates to resolve_position_metric. Pre-fix4 had byte-identical
+    semantics maintained as two separate function bodies + a symmetry
+    test pinning their equivalence — textbook DRY violation. Now one
+    canonical implementation; the two names remain for caller-context
+    documentation (rescue vs non-rescue read sites).
+
     SD-1 (binary temperature_metric) + SD-H (provenance on authority):
     - Position materialized through materialize_position() carries a valid
       temperature_metric in {"high", "low"} → VERIFIED + "position_materialized".
@@ -103,10 +121,7 @@ def resolve_rescue_authority(position) -> tuple[str, str, str]:
     `_emit_rescue_event` (live path) and B063 tests import this function to
     avoid logic drift between prod and test (B063 P1 fix per critic review).
     """
-    _raw_metric = getattr(position, "temperature_metric", None)
-    if _raw_metric in ("high", "low"):
-        return (_raw_metric, "VERIFIED", "position_materialized")
-    return ("high", "UNVERIFIED", f"position_missing_metric:{_raw_metric!r}")
+    return resolve_position_metric(position)
 
 
 @dataclass
