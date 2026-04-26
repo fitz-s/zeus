@@ -114,11 +114,14 @@ constraints:
         - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_execution_intent_has_no_decorative_fields
         - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_executor_does_not_branch_on_decorative_labels
   - id: NC-18
-    statement: No direct UPDATE or DELETE on venue_command_events outside src/state/venue_command_repo.py.
-      The events table is append-only; mutations are recorded as new events, not edits.
+    statement: No direct UPDATE or DELETE on venue_commands / venue_command_events outside
+      src/state/venue_command_repo.py. Both tables are append-only via the repo seam;
+      mutations are recorded as new events, not edits to existing rows.
     invariants: [INV-28]
     enforced_by:
       semgrep_rule_ids:
         - zeus-no-direct-venue-command-update
       tests:
         - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_no_direct_venue_command_events_mutation_outside_repo
+        - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_catches_known_evasion_shapes
+        - tests/test_venue_command_repo.py::TestNoModuleOutsideRepoWritesEvents::test_regex_does_not_false_positive_on_benign_strings

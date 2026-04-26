@@ -179,8 +179,11 @@ rules:
   # P1.S1 (NC-18): venue_command_events is append-only outside the repo.
   # Mutating a recorded event creates a "fact rewrite" path that is invisible
   # to forensic recovery — append a new event instead.
+  # Post-critic MEDIUM-2 (2026-04-26): scope expanded to also cover
+  # venue_commands UPDATE/DELETE, matching the parallel test surface and
+  # closing the asymmetry between belt and suspenders.
   - id: zeus-no-direct-venue-command-update
-    message: "venue_command_events is append-only; record new events via venue_command_repo, do not UPDATE/DELETE."
+    message: "venue_commands / venue_command_events are append-only outside the repo; record new events via venue_command_repo, do not UPDATE/DELETE either table."
     languages: [python]
     severity: ERROR
     paths:
@@ -198,3 +201,11 @@ rules:
           $CONN.execute("UPDATE venue_command_events ...", ...)
       - pattern: |
           $CONN.execute("DELETE FROM venue_command_events ...", ...)
+      - pattern: |
+          $CONN.execute("UPDATE venue_commands ...")
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_commands ...")
+      - pattern: |
+          $CONN.execute("UPDATE venue_commands ...", ...)
+      - pattern: |
+          $CONN.execute("DELETE FROM venue_commands ...", ...)
