@@ -130,9 +130,6 @@ def create_execution_intent(
         market_id=market_id,
         token_id=order_token,
         timeout_seconds=timeout,
-        slice_policy="iceberg" if size_usd > 100 else "single_shot",
-        reprice_policy="dynamic_peg" if mode == "day0_capture" else "static",
-        liquidity_guard=True,
         decision_edge=edge.edge,
     )
 
@@ -146,13 +143,6 @@ def execute_intent(
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
-
-    # Phase 3: Adversarial Execution Evolutions
-    if intent.liquidity_guard:
-        logger.info(f"Liquidity guard active. Monitoring toxic sweep parameters against {intent.target_size_usd}")
-
-    if intent.slice_policy == "iceberg":
-        logger.info(f"Iceberg slice policy active: Will break {intent.target_size_usd} into micro-orders")
 
     # V6: Compute shares with proper quantization
     shares = intent.target_size_usd / limit_price if limit_price > 0 else 0

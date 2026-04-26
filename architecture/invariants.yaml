@@ -175,3 +175,11 @@ invariants:
       semgrep_rule_ids: [zeus-no-fdr-family-key-drift]
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+  - id: INV-23
+    zones: [K2_runtime]
+    statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
+    why: A degraded loader signals that DB authority was unreachable or the projection is non-canonical. Stamping that export as VERIFIED tells operator surfaces and downstream consumers that authority survived loss, which is false. Authority labels must reflect actual provenance, not load-success.
+    enforced_by:
+      negative_constraints: [NC-17]
+      tests:
+        - tests/test_p0_hardening.py::test_degraded_export_never_verified

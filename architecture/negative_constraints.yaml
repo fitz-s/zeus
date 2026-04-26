@@ -98,3 +98,9 @@ constraints:
         - zeus-no-fdr-family-key-drift
       tests:
         - tests/test_dual_track_law_stubs.py::test_fdr_family_key_is_canonical
+  - id: NC-17
+    statement: ExecutionIntent must not carry decorative capability labels (slice_policy, reprice_policy, liquidity_guard, or any future label) without an enforcing executor branch that exhibits real capability behavior. Logging-only branches do not count.
+    invariants: [INV-23]
+    enforced_by:
+      tests:
+        - tests/test_p0_hardening.py::test_execution_intent_no_decorative_labels
