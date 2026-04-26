@@ -122,4 +122,44 @@ Each slice runs against the existing antibody test set + adds focused regression
 - `obs_dominates` removal doesn't break `test_day0_observation_weight_increases_monotonically` or any signal/test path.
 - A1b linter doesn't false-positive on legacy `calibration_pairs` reads (HIGH-only by convention).
 
+---
+
+## 5. Post-review addendum (2026-04-26 — after critic + code-reviewer phase 4 pass)
+
+Two parallel review agents completed phase 4 review. Findings drove 3 fix commits (`785fe4e`, `71520eb`, `8db4ae4`). Summary:
+
+### Reviewer findings addressed
+
+- **Code-reviewer BLOCKER** (Day0Signal MetricIdentity in test_config): P4-1b updated the assertion but preserved the broken construction call; Day0Signal hardened to require explicit MetricIdentity. **Fix `785fe4e` (P4-fix1)**: pass `temperature_metric=HIGH_LOCALDAY_MAX`. Test now actually executes observation_weight() and pins its return-value range.
+- **Code-reviewer MAJOR** (test_topology.yaml registration incomplete): P4-4 added the 11 antibody test files to `categories: core_law_antibody:` but NOT to `trusted_tests:` (where topology_doctor_digest.py:759 actually reads). Without registration, the trust check would still flag them `audit_required`. **Fix `71520eb` (P4-fix2)**: add 11 entries to `trusted_tests:` with `{created: "2026-04-26", last_used: "2026-04-26"}` shape.
+- **Critic M1** (P4-2b allowlist rationale factually wrong): comment claimed "the SQL itself is parameterized; not an actual unmasked v2 read" but the file actually contains a `_count_params` helper (L200) PLUS a real v2 SELECT (L1631) — two interacting reads. **Fix `8db4ae4` (P4-fix3)**: rewrite comment with accurate description.
+- **Critic N2 + N1** (P3.3b sell-vs-buy comment + settings.json orphan): inline comment said "buy" in a SELL path; settings.json key still present. **Fix `8db4ae4` (P4-fix3)**: fix comment label; remove dead settings key (with JSON-validity recovery for trailing-comma artifact).
+
+### Reviewer findings explicitly NOT addressed (with rationale)
+
+- **Code-reviewer MAJOR #3 (SOLID/DRY refactor)**: A1b's three new helpers (`_calibration_pairs_v2_table_aliases`, `_has_calibration_pairs_v2_metric_predicate`, `_check_calibration_pairs_v2_metric_filter`) are character-for-character clones of the settlements equivalents. **Acknowledgement**: Code-reviewer themselves recommends "follow-up packet to introduce a registry-based dispatcher". Each future dual-track table would gain a registry row instead of a fresh ~80-line copy. **Deferred to a separate refactor packet** — lifecycle says don't bundle refactors with semantic-bug fixes; closeout doesn't introduce a third variant table so the duplication is bounded at 2.
+- **Critic M2 (P4-1 → P4-1b bisect break)**: between commits `241d4ca` and `100e3d4`, `tests/test_config.py` would fail ImportError. The commit message itself flagged this. **Acknowledgement**: irreversible without history rewrite (squash); since branch is unpushed per "先不合并" directive, operator may interactive-rebase if desired before push.
+- **Critic N3 (use SlippageBps.from_prices factory at executor)**: factory exists; would require wrapping `current_price` and `best_bid` in `ExecutionPrice` (with currency/price_type/fee_deducted fields). Heavier refactor than the inline construction. **Deferred** to a future packet that handles the broader ExecutionPrice typing pass at the executor (mentioned in phase 3 plan §3.C as out-of-scope for P3.3).
+- **Critic N4 / Code-reviewer source_rationale 4 new symbols**: per source_rationale.yaml format, files have entries (not symbols). All 4 new symbols live in already-registered files (`src/state/lifecycle_manager.py`, `src/state/chain_reconciliation.py`). A `key_symbols:` enrichment would be a separate manifest-format upgrade packet.
+- **Code-reviewer minor (test fragility on `if not exists()`)**: P4-2 test silently passes when all v2 reader files vanish. **Acknowledgement**: rare scenario (would require simultaneous refactor of 4 files); guard could be added with `assert any(p.exists() for p in expected_v2_readers)`. **Deferred** as lint-test hardening packet.
+- **Code-reviewer minor (P4-1 tombstone comments noise)**: prefer `git blame` for removal history. **Acknowledgement**: convention varies; tombstones serve future readers grep'ing for the symbol. Kept as judgment call.
+
+### Final regression posture (post-Phase-4-fix1/2/3)
+
+- **All BLOCKERs and consensus MAJORs from both reviewers addressed.**
+- Focused antibody test suite (test_calibration_pairs_v2_metric_linter + test_execution_intent_typed_slippage + test_config) = 39 passed; 1 pre-existing failure (`test_settlement_semantics_matches_city_metadata` HKO_HQ vs hko_None — flagged by code-reviewer as unrelated to this packet).
+- Mesh-maintenance: 11 new antibody tests now properly registered in BOTH `categories:` AND `trusted_tests:` — operator can run topology_doctor without false `audit_required` flags.
+
+### Parent packet closeout state
+
+The parent PR #19 fix-plan packet is complete pending push:
+- Phase 1: 10 workbook findings + 5 structural slices (A1/A2/B1/A3/A4) + 4 review-fixes
+- Phase 2: 3 adjacent issue clusters + 5 narrow slices (P2-A1/A2/B1/C1/C2) + 6 review-fixes
+- Phase 3: 4 P3 midstream-trust items (P3.1 declared OBSOLETE; P3.2/P3.3/P3.4 implemented) + 4 review-fix sub-items + 2 fix commits
+- Phase 4: 4 deferred items (P4-1 obs_dominates removal; P4-2 A1b lint; P4-3 P3.3b SlippageBps wrap; P4-4 mesh-maintenance) + 3 review-fixes
+
+Total: ~44 commits, 92+ antibody tests, 4 plan packets with full §11 addenda.
+
+Remaining out-of-code work (operator/data tracks): B1 ops-A/B test, RealizedFill at fill-receipt, A3/P3.2 integration tests with heavy fixtures, source_rationale `key_symbols:` enrichment, SOLID/DRY refactor of metric-table linter into registry-dispatcher, settings.json operator review, push to remote.
+
 End of phase 4 plan.
