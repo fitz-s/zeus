@@ -307,4 +307,42 @@ Memory citations applied:
 - `feedback_critic_reproduces_regression_baseline.md` — reviewers must independently re-run.
 - `feedback_no_git_add_all_with_cotenant.md` — multiple worktrees active; `git add` only files this packet owns.
 
+---
+
+## 12. Post-review addendum (2026-04-26 — after critic + code-reviewer phase 2 pass)
+
+Two parallel review agents completed multi-perspective review of phase 2 commits (`f234fd2` → `26540a4`). Their findings drove 6 follow-up commits (`595ff0f` … `2ec6904` + this commit). Summary:
+
+### Reviewer findings addressed
+
+- **Code-reviewer BLOCKER #1** (`bf361c4` lifecycle_events keys silently dropped): the `temperature_metric_authority` + `temperature_metric_source` keys added to `build_position_current_projection`'s return dict were silently discarded by `upsert_position_current` (not in `CANONICAL_POSITION_CURRENT_COLUMNS`) AND payload_json builders read from raw `position.*` (not from the projection dict). **Fix `51c796f` (P2-fix2)**: reverted the two extension keys; persisting the authority signal requires a separate schema-migration packet.
+- **Code-reviewer BLOCKER #2 + Critic M1** (`bf361c4` antibody removal at monitor_refresh:316): routing value construction through resolver coerced garbage strings to "high" silently. **Fix `595ff0f` (P2-fix1)**: split audit (resolver) from value (MetricIdentity.from_raw on raw attribute); garbage strings now raise again.
+- **Critic C1** (audit miss at cycle_runtime:297 + :1115): `getattr(candidate, "temperature_metric", "high")` upstream-defeated phase 2's resolver. **Fix `4b6db04` (P2-fix3)**: dropped redundant getattr fallback at L297 (relies on dataclass default); routed L1115 through `_normalize_temperature_metric` (post-A3 fail-loud).
+- **Code-reviewer MAJOR #3 + #4** (DRY + type guard): **Fix `5ea35e3` (P2-fix4)**: `resolve_rescue_authority` now delegates to `resolve_position_metric`; explicit None check raises TypeError to surface caller bugs.
+- **Code-reviewer MAJOR #5 + #6 + MINOR #8** (hot-path redundancy + L224 bare access + use is_high): **Fix `2ec6904` (P2-fix5)**: hoisted resolver to function entry (1 call per cycle, not 3-4); routed L224 through hoisted variable; evaluator.py:1043 uses typed `is_high()` helper.
+- **Code-reviewer MINOR #7** (`bias_corrected` not in data_rebuild_topology): **Fix (this commit, P2-fix6)**: added `bias_corrected` to `ensemble_snapshots.required_fields`.
+- **Critic C2** (plan claim about both runtime_guards tests fixed): **Fix (this commit, plan §3.B addendum below)**: only `test_store_ens_snapshot_routes_to_attached_world_db` actually passes; `test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly` still fails at a separate pre-existing bug (writer's `WHERE issue_time = ?` vs SQL NULL semantics) flagged in P2-B1 commit message.
+
+### Reviewer findings explicitly NOT addressed (with rationale)
+
+- **Critic M2** (P2-A1/A2 metric-arg semantics): the `metric` kwarg on `get_pairs_for_bucket` is an early-raise guard (`if metric == "low": raise`), NOT a SQL `WHERE temperature_metric = ?` filter. Legacy `calibration_pairs` schema has no metric column, so SQL filtering is impossible there. The "metric-scoped contamination signal" is achieved by the legacy table's HIGH-only convention (Phase 9C L3), not by SQL filter. **Acknowledgement**: documented honestly in slice A1 docstring; future schema migration to add `temperature_metric` column on legacy table is a separate packet.
+- **Critic M3** (no integration test for monitor_refresh:140 CRITICAL claim): unit-level fail-closed contracts at resolver + writer are pinned. End-to-end integration test through `refresh_position` would require heavy fixture setup (PolymarketClient stub, full Position state, ENS data, etc.). **Acknowledgement**: deferred to a future packet that builds shared monitor-cycle test fixtures.
+- **Code-reviewer NIT MINOR**: `_CapLogStub` reinventing pytest's caplog at test_position_metric_resolver.py — kept as-is for explicit context-manager idiom; not blocking.
+- **Critic open-question** (one-cycle dual-metric A/B for B1 smoke-test cap shift): operator-judgement call; deferred to operator on next live restart per phase 2 plan §9 Q1.
+- **Critic missing-mesh** (architecture/test_topology.yaml + source_rationale.yaml registration of new symbols): per parent §11 deferral, registration is a separate operator-driven mesh-maintenance packet to keep this packet under the 4-files-changed planning-lock threshold per file.
+
+### Plan §3.B accuracy correction (Critic C2)
+
+Section 3.B "Decision P2-B" originally claimed: "Both `test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly` and `test_store_ens_snapshot_routes_to_attached_world_db` now pass." This is incorrect:
+
+- `test_store_ens_snapshot_routes_to_attached_world_db` — **DOES pass** post-P2-B1.
+- `test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly` — **STILL FAILS** at a separate bug: writer's SELECT-after-INSERT uses `WHERE issue_time = ?` with `issue_time_value=None` (the test's degraded-clock case), and SQL `= NULL` never matches → writer returns "" snapshot_id even though INSERT succeeded → test asserts `row is not None` and fails.
+
+P2-B1's schema fix is correct and necessary; the remaining failure exposes a deeper writer-logic bug that needs `IS NULL` semantics or `lastrowid` use. Out of phase 2 scope; flagged for a separate writer-logic packet.
+
+### Final phase 2 regression posture
+
+- **77 antibody tests** across 7 phase 1 + phase 2 test files pass cleanly.
+- Phase 2 regression delta: 0 new failures attributable to phase 2 commits. The 5 pre-existing failures (riskguard, harvester, materialize_position keyword-arg, etc.) all reproduce identically on a pure `origin/main` checkout.
+
 End of phase 2 plan.
