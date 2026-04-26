@@ -321,8 +321,12 @@ def day0_n_mc() -> int:
     return int(settings["day0"]["n_mc"])
 
 
-def day0_obs_dominates_threshold() -> float:
-    return float(settings["day0"]["obs_dominates_threshold"])
+# Slice P4-1 (PR #19 phase 4 cleanup, 2026-04-26): day0_obs_dominates_
+# threshold() removed — its only caller was Day0Signal.obs_dominates()
+# legacy boolean interface, also removed in this slice. The continuous
+# replacement (observation_weight() at day0_signal.py:215) does not use
+# this threshold. settings.json's `day0.obs_dominates_threshold` key is
+# now dead; operator may remove on next config refresh.
 
 
 def ensemble_instrument_noise(unit: str) -> float:
