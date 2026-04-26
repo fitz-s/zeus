@@ -210,6 +210,28 @@ invariants:
       tests:
         - tests/test_p0_hardening.py::TestR3RuntimePostureBlocksEntry::test_cycle_runner_posture_gate_blocks_with_reason
         - tests/test_p0_hardening.py::test_runtime_posture_yaml_present
+  - id: INV-29
+    zones: [K2_runtime]
+    statement: VenueCommand and IdempotencyKey are frozen dataclasses; CommandState,
+      CommandEventType, and IntentKind are closed string enums; their string values
+      must match the venue_commands schema state column and venue_command_events
+      event_type column without drift.
+    why: A drifting type surface breaks the command journal's grammar guarantees.
+      Frozen types at the kernel boundary let all callers (executor, repo, recovery,
+      reconciliation) trust the same definitions. Catching drift at test time
+      prevents the kind of silent translation loss flagged in Fitz Constraint #2.
+    enforced_by:
+      tests:
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_is_frozen
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_state_must_be_enum
+        - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_intent_kind_must_be_enum
+        - tests/test_command_bus_types.py::TestIdempotencyKeyDeterministic::test_same_inputs_produce_same_key
+        - tests/test_command_bus_types.py::TestIdempotencyKeyDeterministic::test_key_stable_across_separate_processes
+        - tests/test_command_bus_types.py::TestEnumsAreClosed::test_command_state_grammar_is_closed
+        - tests/test_command_bus_types.py::TestEnumsAreClosed::test_command_event_type_grammar_is_closed
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_state_keys_are_valid_command_states
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_transitions_event_keys_are_valid_command_events
+        - tests/test_command_bus_types.py::TestRepoTypeAlignment::test_inflight_states_match_repo_unresolved_filter
   - id: INV-27
     zones: [K2_runtime]
     statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
