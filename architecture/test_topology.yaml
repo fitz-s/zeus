@@ -187,6 +187,21 @@ categories:
     - tests/test_settlements_authority_trigger.py
     - tests/test_settlements_verified_row_integrity.py
 
+    # PR #19 fix-plan packet (Phase 1+2+3+4 antibody tests, 2026-04-26).
+    # All carry standard `# Created:` + `# Last reused/audited:` +
+    # `# Authority basis:` headers per project rule → trusted classification.
+    - tests/test_authority_strict_learning.py
+    - tests/test_calibration_manager_low_fallback_regression.py
+    - tests/test_calibration_pairs_v2_metric_linter.py
+    - tests/test_calibration_store_metric_required.py
+    - tests/test_calibration_v2_fallback_alerting.py
+    - tests/test_ensemble_snapshots_bias_corrected_schema.py
+    - tests/test_evaluator_metric_normalizer_failclosed.py
+    - tests/test_execution_intent_typed_slippage.py
+    - tests/test_lifecycle_terminal_predicate.py
+    - tests/test_monitor_refresh_ci_fallback.py
+    - tests/test_position_metric_resolver.py
+
   useful_regression:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
