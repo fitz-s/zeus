@@ -60,6 +60,7 @@ test_trust_policy:
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_obs_v2_physical_bounds.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_reader_gate.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}

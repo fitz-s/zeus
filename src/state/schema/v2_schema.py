@@ -257,6 +257,12 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         # observation_instants_v2
         # Architect refinement: running_min column for low-track obs support
         # ----------------------------------------------------------------
+        # B4 (2026-04-26): physical-bounds CHECK on temp columns. Applies to
+        # NEW DBs only — SQLite ALTER cannot add CHECK retroactively (db.py
+        # comment at L330-333 same pattern). Writer-level validation in
+        # observation_instants_v2_writer._validate() is the load-bearing
+        # antibody for legacy DBs. Bounds: -90/60 °C inclusive, -130/140 °F
+        # inclusive. NULL passes through (fields are nullable per schema).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS observation_instants_v2 (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,6 +292,17 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                     CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED', 'ICAO_STATION_NATIVE')),
                 data_version TEXT NOT NULL DEFAULT 'v1',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                CHECK (
+                    (temp_unit = 'C' AND
+                        (temp_current IS NULL OR temp_current BETWEEN -90 AND 60) AND
+                        (running_max  IS NULL OR running_max  BETWEEN -90 AND 60) AND
+                        (running_min  IS NULL OR running_min  BETWEEN -90 AND 60))
+                    OR
+                    (temp_unit = 'F' AND
+                        (temp_current IS NULL OR temp_current BETWEEN -130 AND 140) AND
+                        (running_max  IS NULL OR running_max  BETWEEN -130 AND 140) AND
+                        (running_min  IS NULL OR running_min  BETWEEN -130 AND 140))
+                ),
                 UNIQUE(city, source, utc_timestamp)
             )
         """)

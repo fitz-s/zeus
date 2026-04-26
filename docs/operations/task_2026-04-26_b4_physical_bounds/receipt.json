@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "packet": "task_2026-04-26_b4_physical_bounds",
+  "status": "closed",
+  "branch": "claude/live-readiness-completion-2026-04-26",
+  "worktree": "/Users/leofitz/.openclaw/workspace-venus/zeus-live-readiness-2026-04-26",
+  "parent_packet": "task_2026-04-26_live_readiness_completion",
+  "k_decision": "K1+K3.B4-physical-bounds",
+  "closed_at_utc": "2026-04-26",
+  "commits": [
+    {
+      "sha": "cfa5c0e",
+      "stage": "RED",
+      "summary": "Slice B4 RED — obs_v2 physical-bounds antibody"
+    }
+  ],
+  "green_commit_pending": "follows this receipt",
+  "antibody_test": "tests/test_obs_v2_physical_bounds.py",
+  "antibody_test_count": 10,
+  "antibody_test_pass_rate": "10/10",
+  "regression_panel": {
+    "scope": [
+      "tests/test_obs_v2_writer.py",
+      "tests/test_obs_v2_reader_gate.py",
+      "tests/test_obs_v2_dst_missing_hour_flag.py",
+      "tests/test_architecture_contracts.py",
+      "tests/test_live_safety_invariants.py",
+      "tests/test_cross_module_invariants.py"
+    ],
+    "baseline_failures": 5,
+    "post_green_failures": 5,
+    "delta_new_failures": 0,
+    "preexisting_failures": [
+      "test_live_safety_invariants (4 day0/chain reds)",
+      "test_cross_module_invariants::test_structural_linter_gate (T3.4 upstream-K4)"
+    ]
+  },
+  "files_touched": [
+    "src/data/observation_instants_v2_writer.py",
+    "src/state/schema/v2_schema.py",
+    "tests/test_obs_v2_physical_bounds.py",
+    "architecture/test_topology.yaml"
+  ],
+  "out_of_scope_respected": true,
+  "lifecycle_headers_present": true,
+  "bounds_chosen": {
+    "celsius": [-90.0, 60.0],
+    "fahrenheit": [-130.0, 140.0],
+    "rationale": "Lower covers Vostok 1983 record (-89.2°C) with 0.8° margin; upper covers Death Valley extreme (54.4°C verified, 56.7°C disputed) with 3.3° margin. Catches Warsaw 88°C class of poison-data failure (workbook N1.8). Inclusive (BETWEEN semantic in CHECK matches >= / <= in writer).",
+    "expansion_policy": "Operator escalation required via packet — do not silently widen if a sensor genuinely reports beyond range. The point is to make poison-data UNCONSTRUCTABLE."
+  },
+  "schema_check_scope": "NEW DBs only — SQLite ALTER cannot retroactively add CHECK constraints (db.py:330-333 same limitation). Writer-level _validate is the load-bearing antibody for all DBs (legacy + new).",
+  "production_path_integration_test": {
+    "name": "test_insert_rows_integration_path_rejects_out_of_bounds",
+    "exercises": "Build ObsV2Row with temp_current=88.0 + call insert_rows() on :memory: DB. Constructor's __post_init__ validates first; insert_rows never sees a bad row. Pins that validation sits BEFORE the SQL boundary, not inside it.",
+    "applies_con_nyx_pattern_lesson": "G6 MAJOR #1 — string-grep + literal-arg tests are insufficient; must exercise production composition path."
+  },
+  "followups_owed": [
+    {
+      "id": "B4-source-binding",
+      "summary": "Per-city source-binding test (the OTHER half of workbook B4): verify each settlement row's settlement_source matches the (city, target_date) → source mapping in docs/operations/current_source_validity.md.",
+      "estimated_hours": 1.5,
+      "gating": "current_source_validity.md format must stabilize first (currently a prose surface; would need a structured section to parse)"
+    }
+  ],
+  "lore_extracted": false,
+  "lore_extraction_recommendation": "If a future Zeus market expands beyond Earth-surface temperature (e.g., upper-atmosphere balloon data), bounds will need re-thinking. Until then, bounds are stable; lore card not needed."
+}
