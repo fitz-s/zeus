@@ -179,6 +179,7 @@ class ForecastRow:
     authority_tier: str
     rebuild_run_id: Optional[str] = None
     data_source_version: Optional[str] = None
+    availability_provenance: Optional[str] = None  # F11 antibody: must be set, writer raises on None
 
 
 def _rows_from_payload(
@@ -224,6 +225,9 @@ def _rows_from_payload(
                 target_date = str(raw_time)[:10]
                 by_key.setdefault((target_date, lead, source), []).append(float(value))
 
+    from datetime import datetime, timezone
+    from src.data.dissemination_schedules import derive_availability
+
     rows: list[ForecastRow] = []
     covered_days: dict[tuple[str, str], int] = {}  # (source, target_date) → row count
     for (target_date, lead, source), temps in sorted(by_key.items()):
@@ -234,12 +238,18 @@ def _rows_from_payload(
         low = min(temps)
         if _validate_forecast_temps(high, low, city.settlement_unit):
             continue
+        # F11 antibody: derive forecast_issue_time + availability_provenance from
+        # source-specific dissemination schedule. Open-Meteo Previous Runs does not
+        # expose per-run issue times in payload; we assume 00 UTC base (the run
+        # with longest forecast horizon, typically returned by previous_runs).
+        base_time = datetime.combine(basis, datetime.min.time(), tzinfo=timezone.utc)
+        issue_time, provenance = derive_availability(source, base_time, lead)
         rows.append(ForecastRow(
             city=city.name,
             target_date=target_date,
             source=source,
             forecast_basis_date=basis.isoformat(),
-            forecast_issue_time=None,
+            forecast_issue_time=issue_time.isoformat(),
             lead_days=lead,
             lead_time_hours=float(lead * 24),
             forecast_high=high,
@@ -253,6 +263,7 @@ def _rows_from_payload(
             authority_tier=source_spec.authority_tier,
             rebuild_run_id=rebuild_run_id,
             data_source_version=data_source_version,
+            availability_provenance=provenance.value,
         ))
         covered_days[(source, target_date)] = covered_days.get((source, target_date), 0) + 1
     return rows, covered_days
@@ -268,14 +279,24 @@ INSERT OR IGNORE INTO forecasts (
     city, target_date, source, forecast_basis_date, forecast_issue_time,
     lead_days, lead_time_hours, forecast_high, forecast_low, temp_unit,
     retrieved_at, imported_at, source_id, raw_payload_hash, captured_at,
-    authority_tier, rebuild_run_id, data_source_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    authority_tier, rebuild_run_id, data_source_version,
+    availability_provenance
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
 def _insert_rows(conn, rows: list[ForecastRow]) -> int:
     if not rows:
         return 0
+    # F11 antibody (Q4): writer rejects rows missing availability_provenance.
+    # Wrong code becomes unwritable rather than silently producing untyped rows.
+    for r in rows:
+        if r.availability_provenance is None or r.forecast_issue_time is None:
+            raise ValueError(
+                f"ForecastRow rejected: must carry availability_provenance + "
+                f"forecast_issue_time (F11 antibody); city={r.city} "
+                f"source={r.source} target={r.target_date} lead={r.lead_days}"
+            )
     before = conn.total_changes
     conn.executemany(_INSERT_SQL, [
         (
@@ -285,6 +306,7 @@ def _insert_rows(conn, rows: list[ForecastRow]) -> int:
             r.retrieved_at, r.imported_at, r.source_id,
             r.raw_payload_hash, r.captured_at, r.authority_tier,
             r.rebuild_run_id, r.data_source_version,
+            r.availability_provenance,
         )
         for r in rows
     ])

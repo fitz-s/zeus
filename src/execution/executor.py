@@ -642,6 +642,8 @@ def execute_exit_order(
     from src.state.venue_command_repo import insert_command, append_event, get_command
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
 
+    _assert_cutover_allows_submit(IntentKind.EXIT)
+
     current_price = intent.current_price
     best_bid = intent.best_bid
     # T5.b 2026-04-23: replace bare 0.01 magic with TickSize typed
@@ -709,7 +711,6 @@ def execute_exit_order(
             idempotency_key=intent.idempotency_key,
         )
 
-    _assert_cutover_allows_submit(IntentKind.EXIT)
     _assert_risk_allocator_allows_exit_submit()
 
     # -----------------------------------------------------------------------

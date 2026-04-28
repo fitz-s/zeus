@@ -107,6 +107,15 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-26_ultimate_plan/` | packet evidence | R3 ultimate implementation packet for Zeus CLOB V2 live-money execution and dominance infrastructure; phase cards, boot notes, work records, reviews, and M3 user-channel ingest evidence live under `r3/` |
 | `task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | packet evidence | R3 Z0 packet-local live-money invariant summary for CLOB V2; not a durable authority doc |
 | `task_2026-04-28_contamination_remediation/` | packet evidence | Codex drift self-audit and contamination remediation packet; temporary evidence only, not live-deploy authority |
+| `task_2026-04-28_weighted_platt_precision_weight_rfc/` | packet evidence | Weighted Platt precision-weight RFC packet preserved as evidence |
+| `task_2026-04-28_tigge_training_preflight/` | packet evidence | TIGGE training preflight packet preserved as evidence; no external fetch/live training authorization by merge alone |
+| `task_2026-04-28_settlements_physical_quantity_migration/` | packet evidence | Settlements physical_quantity migration packet preserved as evidence; no new DB mutation authorized by merge alone |
+| `task_2026-04-28_settlements_low_backfill/` | packet evidence | LOW settlements backfill packet preserved as evidence; no new DB mutation authorized by merge alone |
+| `task_2026-04-28_obs_provenance_preflight/` | packet evidence | Observation provenance preflight packet; apply-capable scripts require explicit operator approval and do not authorize live/prod DB mutation by presence alone |
+| `task_2026-04-28_wu_observations_empty_provenance_triage/` | packet evidence | WU observations empty-provenance triage packet preserved as evidence |
+| `task_2026-04-28_f11_forecast_issue_time/` | packet evidence | Forecast issue_time hindsight-antibody packet, apply runbook, and consumer audit evidence |
+| `task_2026-04-27_harness_debate/` | packet evidence | Harness debate packet evidence and implementation errata preserved from worktree merge |
+| `task_2026-04-27_backtest_first_principles_review/` | packet evidence | Backtest first-principles review packet preserved from worktree merge; planning/evidence only, not live authority |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |
 

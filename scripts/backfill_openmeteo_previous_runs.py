@@ -24,7 +24,6 @@ import math
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -100,24 +99,23 @@ def _validate_forecast_temps(
     return None
 
 
-@dataclass(frozen=True)
-class ForecastBackfillRow:
-    city: str
-    target_date: str
-    source: str
-    forecast_basis_date: str
-    forecast_issue_time: str | None
-    lead_days: int
-    lead_time_hours: float
-    forecast_high: float
-    forecast_low: float
-    temp_unit: str
-    retrieved_at: str
-    imported_at: str
-    source_id: str
-    raw_payload_hash: str
-    captured_at: str
-    authority_tier: str
+# F11 (2026-04-28) + R3 (origin/plan-pre5 merge): the local
+# ForecastBackfillRow dataclass + _INSERT_SQL duplicated
+# src.data.forecasts_append.ForecastRow + _insert_rows AND bypassed
+# the F11 antibody (NULL availability_provenance / forecast_issue_time
+# would have been silently inserted). This script now imports the
+# canonical ForecastRow + writer from forecasts_append, so backfill
+# rows carry typed F11 provenance + R3 source_id/payload_hash/captured_at/
+# authority_tier identically to the live ingest path. Path A duplication
+# eliminated.
+from src.data.dissemination_schedules import (
+    UnknownSourceError,
+    derive_availability,
+)
+from src.data.forecasts_append import (
+    ForecastRow,
+    _insert_rows as _canonical_insert_rows,
+)
 
 
 def _hourly_variable_for_lead(lead_days: int) -> str:
@@ -200,7 +198,7 @@ def _rows_from_payload(
     models: tuple[str, ...],
     retrieved_at: str,
     imported_at: str,
-) -> tuple[list[ForecastBackfillRow], Counter]:
+) -> tuple[list[ForecastRow], Counter]:
     hourly = payload.get("hourly") or {}
     times = hourly.get("time") or []
     counters: Counter = Counter()
@@ -231,7 +229,7 @@ def _rows_from_payload(
                 target_date = str(raw_time)[:10]
                 by_date.setdefault((target_date, lead, source), []).append(float(value))
 
-    rows: list[ForecastBackfillRow] = []
+    rows: list[ForecastRow] = []
     for (target_date, lead, source), temps in sorted(by_date.items()):
         source_spec = get_source(source)
         target = date.fromisoformat(target_date)
@@ -246,13 +244,26 @@ def _rows_from_payload(
                 city.name, target_date, lead, source, high, low, city.settlement_unit, reason,
             )
             continue
+        # F11 antibody (2026-04-28): derive issue_time + provenance from the
+        # source-specific dissemination schedule. Unregistered sources fail
+        # gracefully (skip + counter) rather than aborting the whole backfill.
+        base_time = datetime.combine(basis, datetime.min.time(), tzinfo=timezone.utc)
+        try:
+            issue_time, provenance = derive_availability(source, base_time, lead)
+        except UnknownSourceError:
+            counters[f"rejected_unregistered_source_{source}"] += 1
+            logger.warning(
+                "forecast skipped (unregistered source for F11): %s %s lead=%d src=%s",
+                city.name, target_date, lead, source,
+            )
+            continue
         rows.append(
-            ForecastBackfillRow(
+            ForecastRow(
                 city=city.name,
                 target_date=target_date,
                 source=source,
                 forecast_basis_date=basis.isoformat(),
-                forecast_issue_time=None,
+                forecast_issue_time=issue_time.isoformat(),
                 lead_days=lead,
                 lead_time_hours=float(lead * 24),
                 forecast_high=high,
@@ -264,60 +275,24 @@ def _rows_from_payload(
                 raw_payload_hash=payload_hash,
                 captured_at=retrieved_at,
                 authority_tier=source_spec.authority_tier,
+                rebuild_run_id=None,
+                data_source_version=None,
+                availability_provenance=provenance.value,
             )
         )
     return rows, counters
 
 
-def _insert_rows(conn, rows: list[ForecastBackfillRow]) -> int:
-    if not rows:
-        return 0
-    before = conn.total_changes
-    conn.executemany(
-        """
-        INSERT OR IGNORE INTO forecasts (
-            city,
-            target_date,
-            source,
-            forecast_basis_date,
-            forecast_issue_time,
-            lead_days,
-            lead_time_hours,
-            forecast_high,
-            forecast_low,
-            temp_unit,
-            retrieved_at,
-            imported_at,
-            source_id,
-            raw_payload_hash,
-            captured_at,
-            authority_tier
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                row.city,
-                row.target_date,
-                row.source,
-                row.forecast_basis_date,
-                row.forecast_issue_time,
-                row.lead_days,
-                row.lead_time_hours,
-                row.forecast_high,
-                row.forecast_low,
-                row.temp_unit,
-                row.retrieved_at,
-                row.imported_at,
-                row.source_id,
-                row.raw_payload_hash,
-                row.captured_at,
-                row.authority_tier,
-            )
-            for row in rows
-        ],
-    )
-    return conn.total_changes - before
+def _insert_rows(conn, rows: list[ForecastRow]) -> int:
+    """Delegate to the canonical F11+R3-aware writer in src.data.forecasts_append.
+
+    This eliminates the prior duplicate writer that bypassed the F11 antibody
+    (NULL availability_provenance / forecast_issue_time would have been
+    silently inserted) and the R3 source/payload/capture/authority_tier fields.
+    Now any caller of this script gets the same fail-fast contract as the
+    live cron path.
+    """
+    return _canonical_insert_rows(conn, rows)
 
 
 def _resolve_cities(names: list[str] | None, *, only_missing_forecast_skill: bool) -> list[City]:

@@ -136,6 +136,20 @@ package_defaults:
     authority_role: strategy_math
     gates:
     - pytest -q tests/test_market_analysis.py tests/test_fdr.py tests/test_kelly.py
+  src/backtest:
+    zone: K3_extension
+    authority_role: backtest_diagnostic
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    gates:
+    - pytest -q tests/test_backtest_purpose_contract.py
+    note: |
+      Typed backtest purpose contracts (SKILL/ECONOMICS/DIAGNOSTIC) and
+      decision-time truth provenance. Does NOT carry promotion authority.
+      ECONOMICS purpose is tombstoned until market_events_v2 + parity gates
+      pass; SKILL/DIAGNOSTIC are runnable today. Design at
+      docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
   src/observability:
     zone: K2_runtime
     authority_role: derived_operator_read_model
@@ -679,6 +693,13 @@ files:
     why: Appends live forecast-history rows and coverage for post-backfill freshness; R3 F1 stamps registry source_id/raw_payload_hash/captured_at/authority_tier on new rows.
     downstream:
     - src/main.py
+  src/data/dissemination_schedules.py:
+    zone: K2_runtime
+    authority_role: forecast_dissemination_registry
+    why: Per-source (ECMWF/GFS/ICON/UKMO/OpenMeteo) deterministic base→available_at function and provenance tier; F11 antibody for forecast_issue_time NULL rows.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
   src/data/hole_scanner.py:
     zone: K2_runtime
     authority_role: data_hole_scanner
@@ -1257,6 +1278,47 @@ files:
     why: Represents selection family for statistical testing.
     downstream:
     - src/engine/evaluator.py
+  src/backtest/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks src/backtest as importable package.
+  src/backtest/purpose.py:
+    zone: K3_extension
+    authority_role: backtest_purpose_contract
+    why: Typed BacktestPurpose / Sizing / Selection / PurposeContract contracts (D1+D3 antibodies).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/decision_time_truth.py:
+    zone: K3_extension
+    authority_role: decision_time_provenance_contract
+    why: AvailabilityProvenance enum + per-purpose hindsight-leakage gate (D4 antibody, INV-06 enforcement).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/economics.py:
+    zone: K3_extension
+    authority_role: backtest_economics_tombstone
+    why: ECONOMICS purpose tombstone — refuses to run until market_events_v2 + parity contracts unblock.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/skill.py:
+    zone: K3_extension
+    authority_role: backtest_skill_orchestrator
+    why: Purpose-typed wrapper around src.engine.replay.run_wu_settlement_sweep enforcing purpose=SKILL contract.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - src/engine/replay.py
+  src/backtest/training_eligibility.py:
+    zone: K3_extension
+    authority_role: training_eligibility_filter
+    why: Per-purpose (SKILL/ECONOMICS) eligibility predicates + parameterless SQL fragments for filtering forecasts by availability_provenance (F11.5 antibody).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
   src/strategy/benchmark_suite.py:
     zone: K3_extension
     authority_role: strategy_benchmark_gate

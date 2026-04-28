@@ -111,8 +111,18 @@ def run_etl(*, dry_run: bool = False) -> dict:
     # path selects forecast_high only, so the JOIN must restrict settlements
     # to HIGH rows or a future LOW settlement would spuriously match and
     # corrupt the forecast_skill row.
+    # F11.5-migrate (2026-04-28): SKILL eligibility filter wired into the
+    # forecasts side of the JOIN. availability_provenance IS NULL clause
+    # tolerates pre-F11 legacy DBs; post-F11 backfilled rows are filtered
+    # to SKILL-eligible tier (RECONSTRUCTED rows excluded — they would
+    # corrupt forecast skill scoring with heuristic timestamps).
+    from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
+    # Qualify the column reference with the `f` alias since we're inside a JOIN.
+    skill_filter_qualified = SKILL_ELIGIBLE_SQL.replace(
+        "availability_provenance", "f.availability_provenance"
+    )
     rows = conn.execute(
-        """
+        f"""
         SELECT
             f.city, f.target_date, f.source, f.forecast_basis_date,
             f.forecast_issue_time, f.lead_days, f.forecast_high, f.temp_unit,
@@ -125,6 +135,7 @@ def run_etl(*, dry_run: bool = False) -> dict:
         WHERE f.forecast_high IS NOT NULL
           AND f.lead_days IS NOT NULL
           AND s.settlement_value IS NOT NULL
+          AND (f.availability_provenance IS NULL OR {skill_filter_qualified})
         ORDER BY f.city, f.target_date, f.source, f.lead_days
         """
     ).fetchall()
