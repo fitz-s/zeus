@@ -19,7 +19,7 @@ Methodology: `docs/methodology/adversarial_debate_for_project_evaluation.md` (th
 |---|---|---|---|---|---|
 | Boot (re-cast) | _boot_proponent (18KB) | _boot_opponent (14KB/129L) | _boot_critic (13KB/210L) | standby | COMPLETE 04:25-04:27Z |
 | R1 opening | R1_opening (220L; STAGE-GATED SURGICAL ~33-50h) | R1_opening (~280L; STAGE-GATED REVERT ~65-105h) | n/a (gates verdict) | n/a | COMPLETE 04:35Z |
-| R2 rebuttal | R2_rebuttal (29KB / 04:41Z; 5 concessions to opponent's 4-line cluster + 2 logical hits on opponent's revert plan + HOLD on per-hunk-audit ROI) | PENDING (not on disk) | n/a | n/a | IN_PROGRESS (proponent done) |
+| R2 rebuttal | R2_rebuttal (29KB / 04:41Z; SYNTHESIZED MIDDLE ~53-92h; 10 concessions / 8 holds / 3 unresolvable) | R2_rebuttal (22KB / 05:06Z; SYNTHESIZED MIDDLE ~50-75h; 10 concessions / 8 holds / 3 unresolvable; TIER-1 expanded to 4 commits per proponent's own §0; +DB cleanup explicit) | n/a | n/a | COMPLETE (both R2 LOCKED 04:41-05:06Z) |
 | Final verdict | — | — | gates | — | not_started |
 | Post-verdict implementation | — | — | gates | — | not_started |
 

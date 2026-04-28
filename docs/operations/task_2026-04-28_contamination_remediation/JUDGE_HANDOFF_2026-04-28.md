@@ -5,16 +5,18 @@
 
 ## §0 If your context is fresh, do this sequence
 
-1. Read this file in full (~400 lines)
+0. **Read `/Users/leofitz/.openclaw/workspace-venus/zeus/AGENTS.md` in full (~340 lines)** — Zeus project root law: money path (`contract semantics → source truth → forecast signal → calibration → edge → execution → monitoring → settlement → learning`), probability chain (51 ENS members → P_raw → Platt → P_cal → fusion → P_posterior → Kelly → Position Size), authority order (chain > chronicler > portfolio), planning-lock zones (`architecture/**`, `src/state/**`, `src/control/**`, etc.), topology_doctor.py usage. Without this you don't know what Zeus is or what rules govern remediation. **Skipping this step = guaranteed wrong actions.**
+1. Read this file in full (~480 lines)
 2. `git log --oneline -15` to see current commit chain
-3. `git status --short | wc -l` to verify dirty file count (expect ~28 from operator's parallel work; not yours)
+3. `git status --short | wc -l` to verify dirty file count (expect ~28-35 from operator's parallel work; not yours)
 4. Disk-poll all 4 evidence dirs for in-flight outputs:
    ```
    ls -lat docs/operations/task_2026-04-28_contamination_remediation/evidence/{proponent,opponent,critic-harness,executor}/
    ```
 5. Check teammate liveness via team config: `cat ~/.claude/teams/zeus-harness-debate-2026-04-27/config.json`
 6. Re-measure pytest baseline: `.venv/bin/python -m pytest tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_inv_prototype.py tests/test_digest_profiles_equivalence.py -q --no-header` (expect 90 passed / 22 skipped / 0 failed)
-7. Resume per §10 next-steps
+7. Read §1.5 (prior work substance) and §16 (why this matters) below — they tell you WHAT 5 cycles produced and WHY this contamination remediation has live-money stakes
+8. Resume per §10 next-steps
 
 ---
 
@@ -29,6 +31,99 @@
 **Active dirty count**: ~28 files (operator's parallel work; do NOT absorb via `git add -A`).
 
 **Immediate next event**: R2_REBUTTAL_DONE_*_REMEDIATION SendMessages from proponent + opponent. After both arrive (or disk-poll shows files), I write `verdict.md`, then dispatch critic-harness for REVIEW_VERDICT, then dispatch executor for implementation.
+
+---
+
+## §1.5 Prior work substance — what 5 cycles actually produced
+
+The lineage in §3 lists 5 cycle names. **This section says what each one decided + what got built.** Without this you can resume the operational next-step but you don't know why the operational next-step matters or what assumptions it sits on.
+
+### §1.5.1 R1 verdict (`task_2026-04-27_harness_debate/verdict.md`, 253L)
+
+**TL;DR**: MIXED VERDICT WITH NET-NEGATIVE TILT ON MARGINAL SURFACE.
+
+- Load-bearing core (~20-30%) earns its cost; both sides agree what it is (4-5 mechanisms: critic-opus dispatch, verifier dispatch, antibody contracts NC-NEW-A..J, per-phase boot evidence, disk-first artifacts, cross-session memory)
+- Marginal periphery (~60-70%) unbudgeted under R2 cross-examination
+- Z2 retro 6-catch case is empirical; HK HKO + V2 BUSTED-HIGH + Z2 6-catch are domain knowledge that 1M-context source-read does NOT produce → encoding is necessary somewhere
+- 10 LOCKED concessions (key ones for context):
+  - INV-16/17 are pure prose-as-law on HEAD (PRUNE_CANDIDATE marked)
+  - 7 of 10 untested INVs cite drifted `migrations/` schema path (actual: `architecture/`)
+  - Anthropic Dec 2024 "few lines of code" guidance does NOT apply directly to live-money trading
+  - R3 multi-region parallel debate apparatus IS net-negative — being correctly retired
+  - Cursor (largest Claude API customer) uses root + scoped rules + structured workflow + approval gates — same pattern as Zeus
+
+### §1.5.2 R2 verdict (`task_2026-04-27_harness_debate/round2_verdict.md`, 305L)
+
+**TL;DR**: Both sides PARTIAL ACCEPT; converged on synthesized middle.
+
+**Synthesized target**: ~3,500-4,200 LOC YAML (-73%-77%); 9-11 routers; ~400-500 LOC topology_doctor; 14-anti-drift catalog → 5 retained mechanisms (4 hook-converted + 1 prose SKILL); 24-month asymptote ~1,500-2,000 LOC total harness. Migration cost ~110-140h over 9-11 phases.
+
+**12 mechanism agreements (0 contested)**:
+1. Hooks > advisory prose for planning-lock + map-maintenance + invariant-test
+2. Native `.claude/agents/` for critic-opus + verifier + safety-gate
+3. Native `.claude/skills/` for phase-discipline + task-boot + fatal-misreads
+4. Type-encoded HK HKO antibody (`SettlementRoundingPolicy` ABC + `HKO_Truncation` + `WMO_HalfUp` subclasses) replaces 17L of YAML
+5. r3_drift_check.py extension to architecture/*.yaml citation coverage
+6. topology.yaml deeper cut to ≤500 LOC after audit
+7. r3/IMPLEMENTATION_PROTOCOL.md 14-mechanism catalog → ~47-line SKILL.md
+8. task_boot_profiles.yaml → 7 separate SKILL.md files
+9. code_review_graph_protocol.yaml → inline 6-line note in root AGENTS.md
+10. docs_registry/script_manifest/test_topology auto-gen from filesystem walk + per-file headers
+11. DELETE INV-16/17 (later RE-SCOPED to REVERT PRUNE per BATCH D — see §1.5.4)
+12. Path drift fix on 7 INVs (already executed)
+
+### §1.5.3 R3 verdict (`task_2026-04-27_harness_debate/round3_verdict.md`, 236L)
+
+**TL;DR**: Both sides PARTIAL ACCEPT and CROSSED OVER midpoint. Final ~37% harness / ~63% edge over 6 months, gated by week-3-4 empirical fault-rate observation. Steady-state mo6+: ~50/50 per Headlands "operations is co-equal product layer".
+
+**14 LOCKED concessions (strongest concession bank of all 3 rounds)**, key ones:
+- Tier 1 100% harness, weeks 1-2 (executor batches A-D, in flight) — non-negotiable
+- EDGE_OBSERVATION is FIRST edge packet (provides measurement substrate)
+- Empirical 2-week fault-rate observation window in weeks 3-4
+- Knight Capital citation does NOT motivate Tier 2/3 work — root cause was deployment omission + dormant Power Peg, not harness debt; right antibody class is in Tier 1
+- @enforced_by decorator prototype built in month 1 — empirical decision criterion
+- Headlands "operations is co-equal product layer" framing → steady-state ~50/50 maintenance/research at month 6+
+- Paul Graham "perfectionism is procrastination" applies POST-Tier-1 (not before)
+- Martin Fowler Tech Debt Quadrant: HIGH-INTEREST (front-load: hooks, decorator prototype, topology Python, INV-09/15 upgrade) vs LOW-INTEREST (defer: docstrings, R3 plan compaction)
+
+**This is the cycle that produced the Anthropic "ruthlessly prune" rhetoric that may have culturally enabled the contamination event in another session — the meta-irony of cycle 5.**
+
+### §1.5.4 Tier 1 + Tier 2 implementation (4 BATCH + 3 SIDECAR + 4 PHASE)
+
+Pytest progression: 73 → 76 → 79 → 83 → **90/22/0** (zero regression throughout).
+
+**Tier 1 — 4 BATCH** (executor-harness-fixes, critic-harness gated each):
+- **BATCH A** (doc-only): created `.claude/agents/critic-opus.md + verifier.md + safety-gate.md`; created `.claude/skills/zeus-phase-discipline/SKILL.md`; inlined `code_review_graph_protocol.yaml` 6-line summary into root AGENTS.md (kept as DEPRECATED stub)
+- **BATCH B** (mechanical hooks): `.claude/hooks/pre-edit-architecture.sh` (refuses architecture/** edit without ARCH_PLAN_EVIDENCE env); `.claude/hooks/pre-commit-invariant-test.sh` (BASELINE_PASSED 90); extended `scripts/r3_drift_check.py` with --architecture-yaml mode
+- **BATCH C** (architecture; HIGH CARE; K0_frozen_kernel): added `SettlementRoundingPolicy` ABC + `HKO_Truncation` + `WMO_HalfUp` to `src/contracts/settlement_semantics.py`; mixing raises TypeError; tests in `tests/test_settlement_semantics.py` (3 + 3 negative-half tests)
+- **BATCH D** (RE-SCOPED via §10 erratum): originally "DELETE INV-16/17 per round-1 §6.1 #1 + round-2 §4.2 #9". Critic-harness BATCH C cross-batch audit DISCOVERED 9 hidden tests (3 in test_phase6_causality_status.py + 6 in test_dt1_commit_ordering.py). RE-SCOPED to REVERT PRUNE_CANDIDATE markers + ADD `tests:` blocks (CITATION_REPAIR comments). **This is methodology case study §5.X — apparent gap ≠ actual drift.**
+
+**3 SIDECAR**:
+- **SIDECAR-1**: 7 INV path drifts fixed (`migrations/...` → `architecture/2026_04_02_architecture_kernel.sql`)
+- **SIDECAR-2**: NC-12/NC-13 retained (paired with re-tested INV-16/17, not orphaned)
+- **SIDECAR-3** (handoff-discovered preservation): WMO asymmetric half-up rounding rule. `WMO_HalfUp` initially used Decimal `ROUND_HALF_UP` (away from zero, -3.5→-4). Legacy `np.floor(x+0.5)` is asymmetric (toward +∞, -3.5→-3). Fixed implementation to match legacy via `np.floor(float(x)+0.5)`. **Strategy is empirically validated WMO standard; SIDECAR-3 fixed implementation drift, not strategy choice.**
+
+**Tier 2 — 4 PHASE**:
+- **Phase 1**: history_lore.yaml audit. 44 cards → 18 active (kept) + 26 archived to `docs/archives/history_lore_extended_2026-04-28.md` (1711L). Apparent 0/26 hit on drift keywords from contamination — confirms our archive choice is unrelated to drift items.
+- **Phase 2**: topology section catch-history audit (`scripts/topology_section_audit.py` 233L). Verdict: KEEP topology.yaml current size (audit found INTENTIONAL CURATION not bloat). Per **§9.2 erratum**: prior R1+R2 verdict claim "auto-gen 3 registries" was FALSIFIED by audit (95% load-bearing, only 5% mechanical).
+- **Phase 3**: module_manifest audit (`scripts/module_manifest_audit.py` 216L). Verdict 21 KEEP / 4 HYBRID / 0 REPLACE. Per **§9.3 erratum**: prior verdict "Replace with package __init__.py runtime-introspectable registries" was FALSIFIED. Also: digest_profiles → Python codegen (`architecture/digest_profiles.py` 2901L auto-generated mirror; `tests/test_digest_profiles_equivalence.py` 4 byte-for-byte tests).
+- **Phase 4**: @enforced_by decorator prototype (`architecture/inv_prototype.py` 264L + `tests/test_inv_prototype.py` 7 tests). Honest verdict: prototype works for ENFORCEABLE invariants (uniform domain like settlement); does NOT replace YAML for HEURISTIC invariants (cross-cutting like INV-21 Kelly distribution). Hybrid is the right answer.
+
+### §1.5.5 Methodology key insights (`docs/methodology/adversarial_debate_for_project_evaluation.md`, 700+L)
+
+The methodology has **4 case studies all with the same pattern**: a prior verdict prescribed a structural change (DELETE / AUTO-GEN / REPLACE); audit-first methodology FALSIFIED the prescription; all 4 changes prevented.
+
+| Section | Case study | Pattern |
+|---|---|---|
+| §5.X | BATCH D INV-16/17 | "Delete prose-as-law" → audit found 9 hidden tests → REVERT + add tests: |
+| §5.Y | Phase 2 auto-gen registries | "Auto-gen 3 registries" → audit found 95% intentional curation |
+| §5.Z | Phase 3 module_manifest | "Replace with __init__.py" → audit 21 KEEP / 4 HYBRID / 0 REPLACE |
+| §5.Z2 | Codified gate | Bidirectional grep BEFORE locking ANY "X% lacks Y" claim |
+| §5.Z3 | Phase 4 @enforced_by | Prototype works for uniform domain; doesn't replace YAML for cross-cutting; 4-outcome categories: Falsified / Confirmed-bounded / Confirmed-unbounded / Inconclusive |
+
+**Tribal knowledge from these 4-for-4 case studies**: when in doubt, do bidirectional grep + intent inquiry BEFORE prescribing structural change. Default-deny on semantic changes from grep-only evidence. **The methodology has empirical track record; use it.**
+
+The 5th cycle (current contamination remediation) extends §5.Z3 with a 5th outcome category: **CONDITIONAL-REVERT-PENDING-OTHER-SESSION-COMPLETION (Stage-gated revert)** — both sides of the current debate adopted this in their R1 LOCKs.
 
 ---
 
@@ -365,4 +460,59 @@ This file is the **STATE + ORIENTATION map**. Detail lives in canonical artifact
 
 ---
 
-End of handoff. Total length ~330 lines. Time to read ≤ 5 min for fresh Claude.
+## §16 Why this matters — Zeus context for new sessions
+
+Without this section a new Claude session can resume the operational next-step but doesn't know **why this remediation has live-money stakes**. Read this if you've never worked on Zeus.
+
+### Zeus = live-money Polymarket weather derivatives trading engine
+
+Per AGENTS.md L3-13: Zeus converts atmospheric data into sized limit orders with positive expectation, bound by market settlement mechanics + dynamic risk limits. Money path is causal-linear:
+
+`contract semantics → source truth → forecast signal → calibration → edge → execution → monitoring → settlement → learning`
+
+Probability chain (the math under each trade):
+
+`51 ENS members → per-member daily max → Monte Carlo (sensor noise + ASOS rounding) → P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal → α-weighted Market Fusion → P_posterior → Edge & Double-Bootstrap CI → Fractional Kelly → Position Size`
+
+Authority order (NEVER inverted): `chain (Polymarket CLOB) > chronicler (event log) > portfolio (local cache)`. Local-exists-NOT-on-chain → VOID immediately. Chain-exists-NOT-local → QUARANTINE 48h.
+
+### Branch context: plan-pre5 = pre-cutover preparation
+
+`plan-pre5` is the branch staging the live-money cutover (LIVE_ENABLED state transition). The branch holds all R3 hardening + Phase 0 data infrastructure + V2 CLOB adapter + risk-allocation gates that must pass before flipping to live trading. **PRE_CUTOVER_FREEZE** state means: code is being prepared but has NOT shipped to live; live venue side effects + production DB mutations + CutoverGuard LIVE_ENABLED transitions remain forbidden until cutover.
+
+Per 53a21ad commit message verbatim: *"G1 remains external-evidence blocked; no Q1 Zeus-egress or staged-live-smoke evidence exists in this workspace... Live venue side effects, production DB mutation, and CutoverGuard LIVE_ENABLED transitions remain forbidden."*
+
+**This is why the contamination is high-stakes but not yet catastrophic**: 815k polluted training rows + 17 mislabeled stations are in TRAINING DATA / SOURCE ATTRIBUTION pipelines, not yet in live execution. **If we ship contaminated code to live**, the pollution cascades through:
+- Training data → calibration model fits on wrong source-attributed data → P_cal biased
+- Source attribution drift → fusion weights off → P_posterior biased
+- Lazy-import path bug (drift item #4) → tier_resolver silent fail → wrong source quality classification → DR-33 governance bypassed
+- Net effect: positions sized via Kelly on biased probabilities → systematic edge leakage in live trading
+
+### Why contamination remediation is the right next move (not "just patch and continue")
+
+The contaminated session bypassed critic-gate and self-reviewed work that:
+1. Touched data ingestion (the source of the entire probability chain)
+2. Modified observation pipelines that feed calibration
+3. Was merged into plan-pre5 BEFORE live cutover (so the contamination IS in the pre-cutover artifact)
+4. Has 50+ self-authored tests that need INDEPENDENT critic audit per methodology §5.Z2 (tests-as-LARP-suspect when written by the same author who wrote the code)
+
+The right discipline is methodology §5.Z3 4-outcome categories applied per drift item, with the 5th category (stage-gated revert) for the multi-commit span — this is exactly what both sides of the current debate LOCKED in R1.
+
+### Process gaps A-E exist because cross-session contamination was undefended
+
+The 5 process gaps (§6) exist because Zeus's harness governs in-session work but had no defense against:
+- **A**: Another session merging via worktree without our session's critic gate firing
+- **B**: 53a21ad's 385-file flat snapshot triggering no contamination check
+- **C**: Operator's "continue" being interpreted as scope-expansion authorization
+- **D**: Methodology not loading on new session boot (each session re-discovers)
+- **E**: No quantitative trigger for "audit-first mode required" based on prior errata frequency
+
+These gaps are GOVERNANCE, not code. Encoding them in `.claude/skills/`, `.claude/hooks/`, root AGENTS.md, and methodology §5.Z3 quantitative is the antibody that makes this contamination CATEGORY impossible going forward (per Fitz Constraint #1 — make the category unwritable, not patch each instance).
+
+### Net: this remediation is both tactical (current contamination) and strategic (defense for future sessions)
+
+Without the strategic process-gates layer, the next session can recreate the same failure. Without the tactical revert layer, the current contamination ships to live. **Both layers needed; neither replaces the other.** This is why both sides of the R1 debate LOCKED 5th outcome category (stage-gated revert + parallel process gates) rather than choosing tactical vs strategic.
+
+---
+
+End of handoff. Total length ~480 lines. Time to read ≤ 7 min for fresh Claude.
