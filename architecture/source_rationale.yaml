@@ -1074,6 +1074,13 @@ files:
     - NO_WRITE_PATH
     downstream:
     - src/engine/replay.py
+  src/backtest/training_eligibility.py:
+    zone: K3_extension
+    authority_role: training_eligibility_filter
+    why: Per-purpose (SKILL/ECONOMICS) eligibility predicates + parameterless SQL fragments for filtering forecasts by availability_provenance (F11.5 antibody).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
   src/state/AGENTS.md:
     zone: docs
     authority_role: registry
