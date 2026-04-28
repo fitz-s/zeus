@@ -21,8 +21,8 @@ Methodology: `docs/methodology/adversarial_debate_for_project_evaluation.md` (th
 | R1 opening | R1_opening (220L; STAGE-GATED SURGICAL ~33-50h) | R1_opening (~280L; STAGE-GATED REVERT ~65-105h) | n/a (gates verdict) | n/a | COMPLETE 04:35Z |
 | R2 rebuttal | R2_rebuttal (29KB / 04:41Z; SYNTHESIZED MIDDLE ~53-92h; 10 concessions / 8 holds / 3 unresolvable) | R2_rebuttal (22KB / 05:06Z; SYNTHESIZED MIDDLE ~50-75h; 10 concessions / 8 holds / 3 unresolvable; TIER-1 expanded to 4 commits per proponent's own §0; +DB cleanup explicit) | n/a | n/a | COMPLETE (both R2 LOCKED 04:41-05:06Z) |
 | Final verdict | — | — | gates | — | COMPLETE 09:15Z (verdict.md ~340L; STAGE-GATED REVERT synthesized middle ~70-100h; opponent stance wins 4 bounded items; commit-revert mechanic from proponent) |
-| Critic gate verdict | — | — | REVIEW_VERDICT pending | — | dispatched |
-| Post-verdict implementation | — | — | gates | — | not_started (awaits critic APPROVE + operator authorization for Group B) |
+| Critic gate verdict | — | — | APPROVE-WITH-CAVEATS 05:21Z (5 caveats; 0 BLOCK; DRIFT-V1 MED + NUANCE-V2 LOW fixed in §11; NUANCE-V1/V3/V4 tracked-forward) | — | COMPLETE |
+| Post-verdict implementation | — | — | Stage 4 plan ready (STAGE4_PROCESS_GATES_AE_PLAN.md) | — | judge can start Stage 4 (Group A); Group B (Stages 1+3+5) awaits operator authorization |
 
 ## Proponent R2 headline (for handoff)
 
