@@ -49,13 +49,14 @@ fi
 
 REPO_ROOT="/Users/leofitz/.openclaw/workspace-venus/zeus"
 PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
-# TEST_FILES widened in BATCH C to include the 3 new settlement-semantics
-# relationship tests (HKO+WMO type-encoded antibody). Per dispatch OP-FOLLOWUP-1
-# baseline bumped 73 → 76 (73 from test_architecture_contracts + 3 from
-# test_settlement_semantics). SIDECAR-3 added 3 more negative-half regression
-# tests for C4 fix (76 → 79).
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py"
-BASELINE_PASSED=79
+# Baseline progression history:
+#   BATCH C (settlement_semantics): 73 → 76 (+3 HKO/WMO type-encoded)
+#   SIDECAR-3 (negative-half): 76 → 79
+#   Tier 2 Phase 3 (digest_profiles equivalence): 79 → 83 (+4)
+#   Tier 2 Phase 4 (@enforced_by prototype): 83 → 90 (+7)
+#   EDGE_OBSERVATION BATCH 1 (realized-edge per strategy_key): 90 → 96 (+6)
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py"
+BASELINE_PASSED=96
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
