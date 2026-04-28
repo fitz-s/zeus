@@ -1,0 +1,87 @@
+id: M5
+phase: M
+title: Exchange reconciliation sweep — bulk diff exchange truth vs journal
+purpose: |
+  Reconciles open orders + trades + positions enumerated from venue
+  against local journal. Creates exchange_reconcile_findings; never
+  inserts new commands for exchange-only state. Closes Apr26 F-006.
+authority_basis:
+  - V2.1 §M5
+  - R2 mid-05.yaml EXCHANGE_RECONCILE_SWEEP
+  - INV-31 (cycle-start scan for unresolved states; reconciliation does not block cycle on errors)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 + M1 + M2 + M3 + M4 land
+deliverables:
+  new_modules:
+    - path: src/execution/exchange_reconcile.py
+      summary: Sweep module + findings writer.
+      surface: |
+        @dataclass(frozen=True)
+        class ReconcileFinding:
+            finding_id: str  # UUID
+            kind: Literal[
+                "exchange_ghost_order",   # at venue, not in journal
+                "local_orphan_order",     # in journal RESTING, not at venue
+                "unrecorded_trade",       # at venue, no local trade_fact
+                "position_drift",         # exchange position != journal-derived
+                "heartbeat_suspected_cancel",  # local RESTING after heartbeat loss
+                "cutover_wipe",           # post-cutover orphans
+            ]
+            subject_id: str  # order_id, trade_id, position_id, etc.
+            evidence_json: str
+            recorded_at: datetime
+
+        def run_reconcile_sweep(
+            adapter: PolymarketV2Adapter,
+            conn: sqlite3.Connection,
+            *,
+            context: Literal["periodic","ws_gap","heartbeat_loss","cutover","operator"]
+        ) -> list[ReconcileFinding]: ...
+  new_tables:
+    - sql: |
+        CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
+          finding_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'exchange_ghost_order','local_orphan_order','unrecorded_trade',
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+          )),
+          subject_id TEXT NOT NULL,
+          context TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          resolution TEXT,
+          resolved_by TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_findings_unresolved ON exchange_reconcile_findings (resolved_at) WHERE resolved_at IS NULL;
+acceptance_tests:
+  - tests/test_exchange_reconcile.py::test_open_order_at_exchange_absent_locally_becomes_finding_not_command
+  - tests/test_exchange_reconcile.py::test_local_RESTING_absent_at_exchange_with_no_trade_marks_canceled_or_wiped_or_suspect
+  - tests/test_exchange_reconcile.py::test_trade_at_exchange_missing_locally_emits_trade_fact_if_order_linkable_else_finding
+  - tests/test_exchange_reconcile.py::test_sweep_idempotent_across_repeated_cycles
+  - tests/test_exchange_reconcile.py::test_sweep_does_not_create_new_venue_commands_rows
+    | NC-NEW-A boundary preserved
+  - tests/test_exchange_reconcile.py::test_position_drift_finding_distinguishes_legitimate_from_real
+    | exchange position vs journal-derived position diff; 1-cycle suppression for newly-FILLED commands
+  - tests/test_exchange_reconcile.py::test_heartbeat_suspected_cancel_finding_emitted_after_heartbeat_loss
+  - tests/test_exchange_reconcile.py::test_cutover_wipe_findings_emitted_in_POST_CUTOVER_RECONCILE_state
+  - tests/test_exchange_reconcile.py::test_get_trades_sdk_method_used_when_available_else_position_diff_fallback
+  - tests/test_exchange_reconcile.py::test_findings_actuator_loop_resolves_findings_via_operator_decision
+    | follow-up actuator loop (R2 multi-review architect §GAPS:5 fix); findings → operator review queue, not silent observability
+operator_decision_required:
+  - gate_id: findings-resolution-policy
+    blocking: no (findings accumulate; resolution is operator policy)
+    artifact: docs/operations/findings_resolution_policy.md (TBD)
+    runtime_gate: none (engineering proceeds; operator sets resolution criteria post-deploy)
+depends_on: [Z0..Z4, U1, U2, M1, M2, M3, M4]
+estimated_h: 18
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [mid-05]
+  v2_1_phases: [M5]
+new_invariants_or_NCs:
+  - INV-NEW-K: "M5 sweep is read-only against venue + journal; never INSERTs into venue_commands. Findings table is the only write surface."
+notes:
+  - F-006 closure (reconciliation position-level → execution-level) depends on this slice.
+  - Findings actuator loop closes the R2 multi-review architect's "antibody-without-actuator" liability.

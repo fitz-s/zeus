@@ -121,16 +121,31 @@ misreads:
     correction: >
       Hong Kong is an explicit current caution path. Current truth must route
       through fresh audit evidence and HKO-specific proof before changing
-      source, settlement, hourly, or monitoring behavior.
+      source, settlement, hourly, or monitoring behavior. Per round2_verdict.md
+      §1.1 #4 + §4.1 #4, the rounding-policy half of this antibody is now
+      additionally type-encoded (see type_encoded_at) so that the wrong rounding
+      for the wrong city is unconstructable at compile/import time, not only
+      documented here.
     proof_files:
       - docs/operations/current_source_validity.md
       - docs/operations/known_gaps.md
       - config/cities.json
+    # TYPE_ENCODED 2026-04-28 per round2_verdict.md §1.1 #4 + §4.1 #4: the
+    # rounding-policy mismatch sub-case (HKO_Truncation vs WMO_HalfUp on the
+    # wrong city) is now a TypeError at the settle_market boundary. The YAML
+    # row is RETAINED (not deleted) because the broader audit-evidence and
+    # source-validity caution paths remain prose-bearing. Per Fitz Constraint
+    # #1 (make the category impossible) the type guard is the load-bearing
+    # antibody for the sub-case it covers; this row continues to govern the
+    # source/audit caution that is not type-expressible.
+    type_encoded_at: src/contracts/settlement_semantics.py:HKO_Truncation
     invalidation_condition: >
       Only a fresh Hong Kong audit receipt may change this caution status or
       route around HKO-specific evidence.
     tests:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
+      - tests/test_settlement_semantics.py::test_hko_policy_required_for_hong_kong
+      - tests/test_settlement_semantics.py::test_hko_policy_invalid_for_non_hong_kong
     task_classes: [source_routing, settlement_semantics, hourly_observation_ingest]
 
   - id: code_review_graph_answers_where_not_what_settles

@@ -54,11 +54,13 @@ Calibration is mathematically flexible but semantically brittle. It cannot rescu
 | `decision_group.py` | Point-in-time grouping and independence discipline. |
 | `metric_specs.py` | Metric identity and feature-contract anchor. |
 | `drift.py / blocked_oos.py / effective_sample_size.py` | Health/robustness layer. |
+| `retrain_trigger.py` | R3 F2 operator-gated retrain/promotion wiring; CONFIRMED-only corpus and frozen-replay PASS before promotion. |
 
 ## 10. Relevant tests
 - tests/test_calibration_manager.py
 - tests/test_calibration_quality.py
 - tests/test_calibration_unification.py
+- tests/test_calibration_retrain.py
 - tests/test_drift.py
 - tests/test_bayesian_sigma_evaluation.py
 - tests/test_bootstrap_symmetry.py

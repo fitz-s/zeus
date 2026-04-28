@@ -1,5 +1,8 @@
 # Created: 2026-04-23
 # Last reused/audited: 2026-04-23
+# Lifecycle: created=2026-04-23; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Protect forecasts writer/schema alignment across fresh and legacy DBs.
+# Reuse: Run before changing forecasts table columns or src/data/forecasts_append.py inserts.
 # Authority basis: REOPEN-1 (data-readiness hardening tail / REOPEN proposals,
 # recorded in docs/operations/task_2026-04-23_midstream_remediation/receipt.json
 # after critic-opus forensic-audit triage 2026-04-23). Closes the
@@ -8,16 +11,18 @@
 
 """Structural alignment antibody for the `forecasts` table.
 
-Three guarantees:
+Four guarantees:
 
 1. **Fresh-DB path**: `init_schema()` on a blank connection yields a
-   `forecasts` table that contains `rebuild_run_id` + `data_source_version`.
+   `forecasts` table that contains writer provenance columns.
 2. **Legacy-DB path**: a pre-existing `forecasts` table that predates the
    new columns has them added by `init_schema()` via its ALTER TABLE loop.
 3. **Writer/schema alignment**: every column mentioned in the writer's
    `INSERT OR IGNORE INTO forecasts` statement at
    `src/data/forecasts_append.py` must be present after `init_schema()`
    runs. Catches future writer drift without requiring a live DB.
+4. **R3 F1 provenance**: source_id/raw_payload_hash/captured_at/authority_tier
+   stay present on fresh, legacy, and writer paths.
 
 The failure mode this antibody prevents is the exact one reported by
 `state/scheduler_jobs_health.json::k2_forecasts_daily`:
@@ -38,6 +43,12 @@ from src.state.db import init_schema
 
 ZEUS_ROOT = Path(__file__).resolve().parents[1]
 FORECASTS_APPEND = ZEUS_ROOT / "src" / "data" / "forecasts_append.py"
+F1_PROVENANCE_COLUMNS = {
+    "source_id",
+    "raw_payload_hash",
+    "captured_at",
+    "authority_tier",
+}
 
 
 def _forecasts_columns(conn: sqlite3.Connection) -> set[str]:
@@ -56,6 +67,7 @@ def test_fresh_db_forecasts_has_rebuild_run_id_and_data_source_version():
         assert "data_source_version" in cols, (
             f"fresh DB forecasts table missing data_source_version (columns: {sorted(cols)})"
         )
+        assert F1_PROVENANCE_COLUMNS <= cols
     finally:
         conn.close()
 
@@ -93,6 +105,7 @@ def test_legacy_db_forecasts_is_migrated_by_alter_path():
         pre_cols = _forecasts_columns(conn)
         assert "rebuild_run_id" not in pre_cols
         assert "data_source_version" not in pre_cols
+        assert pre_cols.isdisjoint(F1_PROVENANCE_COLUMNS)
 
         init_schema(conn)
 
@@ -103,6 +116,10 @@ def test_legacy_db_forecasts_is_migrated_by_alter_path():
         )
         assert "data_source_version" in post_cols, (
             "ALTER TABLE path did NOT add data_source_version on legacy-schema DB"
+        )
+        assert F1_PROVENANCE_COLUMNS <= post_cols, (
+            "ALTER TABLE path did NOT add R3 F1 forecast provenance columns: "
+            f"{sorted(F1_PROVENANCE_COLUMNS - post_cols)}"
         )
     finally:
         conn.close()
@@ -176,6 +193,13 @@ def test_writer_insert_columns_include_rebuild_run_id_sanity_check():
     writer_cols = _extract_insert_columns(writer_source)
     assert "rebuild_run_id" in writer_cols
     assert "data_source_version" in writer_cols
+
+
+def test_writer_insert_columns_include_f1_provenance_sanity_check():
+    """R3 F1: new forecast writes must carry source registry provenance."""
+    writer_source = FORECASTS_APPEND.read_text()
+    writer_cols = _extract_insert_columns(writer_source)
+    assert F1_PROVENANCE_COLUMNS <= writer_cols
 
 
 if __name__ == "__main__":

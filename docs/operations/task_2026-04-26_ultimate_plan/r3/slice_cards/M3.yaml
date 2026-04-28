@@ -1,0 +1,71 @@
+id: M3
+phase: M
+title: User WebSocket ingest + REST fallback (PolymarketUserChannelIngestor)
+purpose: |
+  Real-time user events are first-class venue truth; REST is fallback +
+  reconciliation. Closes Apr26 axis-45 (User WebSocket / FAIL/S1) and
+  axis-24. Replaces R2 mid-07 decision-slice with explicit WS path.
+authority_basis:
+  - V2.1 §M3
+  - evidence/multi_review/V2_1_STRUCTURAL_DIFF.md (mid-07 reframed as WS-first with REST fallback)
+  - R2 mid-07.yaml (WS_OR_POLL_SUFFICIENCY decision slice)
+  - py-clob-client-v2 SDK WebSocket surface (verify in Z2 reference_excerpts)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 + M1 + M2 land
+deliverables:
+  new_modules:
+    - path: src/ingest/polymarket_user_channel.py
+      summary: WS ingestor + gap detection + REST backfill trigger.
+      surface: |
+        class PolymarketUserChannelIngestor:
+            def __init__(self, adapter: PolymarketV2Adapter, condition_ids: list[str], api_key: str) -> None: ...
+            async def start(self) -> None: ...
+            async def stop(self) -> None: ...
+            def status(self) -> WSStatus: ...
+
+        @dataclass
+        class WSStatus:
+            connected: bool
+            last_message_at: Optional[datetime]
+            consecutive_gaps: int
+            subscription_state: Literal["AUTHED","SUBSCRIBED","DISCONNECTED","AUTH_FAILED","MARKET_MISMATCH"]
+
+        # On message: parse → append_order_fact / append_trade_fact via U2 surface
+        # On gap: emit gap event + trigger M5 reconcile sweep
+  extended_modules:
+    - file: src/main.py
+      change: spawn PolymarketUserChannelIngestor as background task; integrate health into cycle_summary
+    - file: src/engine/cycle_runner.py
+      change: pre-cycle check WS gap status; if gap >threshold, force M5 reconcile before any new submit
+acceptance_tests:
+  - tests/test_user_channel_ingest.py::test_ws_message_parsed_to_order_fact
+  - tests/test_user_channel_ingest.py::test_ws_message_parsed_to_trade_fact
+  - tests/test_user_channel_ingest.py::test_MATCHED_event_does_not_final_close_lot
+    | MATCHED trade_fact event creates OPTIMISTIC_EXPOSURE position_lot; does NOT transition to CONFIRMED_EXPOSURE
+  - tests/test_user_channel_ingest.py::test_CONFIRMED_event_finalizes_trade_and_permits_canonical_pnl
+  - tests/test_user_channel_ingest.py::test_FAILED_after_MATCHED_quarantines_or_reverses_optimistic_projection
+  - tests/test_user_channel_ingest.py::test_websocket_disconnect_triggers_REST_backfill_sweep
+  - tests/test_user_channel_ingest.py::test_stale_last_message_triggers_gap_event
+  - tests/test_user_channel_ingest.py::test_subscription_auth_failure_blocks_new_submit
+  - tests/test_user_channel_ingest.py::test_market_subscription_mismatch_blocks_for_that_market_only
+  - tests/test_user_channel_ingest.py::test_ws_path_emits_equivalent_command_events_when_enabled
+    | when WS active, append_order_fact / append_trade_fact are populated from WS messages with source='WS_USER'; identical schema to REST path (paper/live parity by construction)
+  - tests/test_p0_live_money_safety.py::test_resubscribe_recovery
+    | simulated daemon restart mid-cycle; on restart, command_recovery + WS resubscribe backfills missed PARTIAL_FILL_OBSERVED + FILL_CONFIRMED events; no duplicate fills counted
+operator_decision_required:
+  - gate_id: WS-credential-provisioning
+    blocking: WS-only path; REST fallback works without
+    artifact: API credentials provisioned per Polymarket V2 docs
+    runtime_gate: read api_key from secrets store; raises WSAuthMissing if absent at start
+depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2, M1, M2]
+estimated_h: 16
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [mid-07]
+  v2_1_phases: [M3]
+new_invariants_or_NCs:
+  - INV-NEW-H: "WS gap detected → block new submit + force M5 sweep before unblocking. WS recovery does NOT bypass reconcile."
+notes:
+  - WS path is the LIVE path for real-time fill ingestion. REST polling sweep (M5) is the reconciliation safety net.
+  - axis-31 paper/live parity closure depends on M3 + T1 producing identical event schema.

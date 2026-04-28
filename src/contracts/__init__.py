@@ -15,7 +15,13 @@ from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.expiring_assumption import ExpiringAssumption
 from src.contracts.edge_context import EdgeContext
 from src.contracts.epistemic_context import EpistemicContext
+from src.contracts.fx_classification import FXClassification, FXClassificationPending
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.contracts.executable_market_snapshot_v2 import (
+    ExecutableMarketSnapshotV2,
+    MarketSnapshotError,
+    StaleMarketSnapshotError,
+)
 
 __all__ = [
     "Direction",
@@ -31,5 +37,10 @@ __all__ = [
     "ExpiringAssumption",
     "EdgeContext",
     "EpistemicContext",
+    "FXClassification",
+    "FXClassificationPending",
     "SettlementSemantics",
+    "ExecutableMarketSnapshotV2",
+    "MarketSnapshotError",
+    "StaleMarketSnapshotError",
 ]

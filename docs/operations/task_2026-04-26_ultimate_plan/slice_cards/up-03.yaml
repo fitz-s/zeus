@@ -1,0 +1,28 @@
+id: up-03
+title: NET_NEW ExecutableMarketSnapshot table + pre-trade-gate (Apr26 design language)
+authority_basis:
+  - apr26_findings_routing.yaml:F-007 → PROPOSED_DISCOVERY_CLOB_SNAPSHOT (line 109-114)
+  - Apr26 review §3 / Part 2 midstream (line 32 cycle sequencing — discovery/evaluation/monitor/harvest)
+  - polymarket_truth_contract.yaml (up-01) defines authority_tier enum used by snapshot rows
+  - INV-26 (runtime_posture gate pattern — model for pre-trade gate)
+file_line:
+  - src/state/db.py:813 (existing venue_commands schema — gate hooks in at insert_command boundary)
+  - src/state/venue_command_repo.py:152-238 (insert_command — extend to require ExecutableMarketSnapshot row before INSERT)
+  - src/engine/cycle_runner.py (discovery cycle — emits snapshots; need to find exact insertion seam at Layer 3)
+  - src/engine/evaluator.py (consumes snapshots — gate enforces "no command without fresh snapshot")
+antibody_test:
+  - tests/test_executable_market_snapshot.py::test_snapshot_row_required_before_command (INSERT venue_commands raises if no fresh snapshot)
+  - tests/test_executable_market_snapshot.py::test_freshness_window_enforced (snapshot older than window → IntegrityError or app-level rejection)
+  - tests/test_executable_market_snapshot.py::test_authority_tier_chain_required_for_command (GAMMA/DATA-tier snapshots cannot anchor a command)
+  - tests/test_executable_market_snapshot.py::test_gamma_open_neq_clob_tradable_caught (synthetic Gamma=open + CLOB=closed → command rejected)
+  - tests/test_relationship_snapshot_to_command.py::test_snapshot_command_decision_chain_invariant (Fitz #2 cross-module test)
+depends_on: [up-01]
+estimated_h: 8
+risk: medium
+critic_gate: critic-opus
+notes:
+  - '"no command without fresh snapshot" is the freshness antibody; up-02 is the identity-tier antibody. Complementary.'
+  - 'Schema add: NEW TABLE executable_market_snapshots (snapshot_id PK, market_id, condition_id, yes_token_id, no_token_id, authority_tier, chain_resolved_at, raw_clob_snapshot_jsonb, fee_rate_bps, tick_size, min_order_size, neg_risk, captured_at, freshness_window_seconds, **collateral_token TEXT CHECK (''pUSD'',''USDC'')**).'
+  - '**R2L2 Gate enforcement**: Python single-insertion-point in `venue_command_repo.insert_command` (NOT SQL FK/trigger — freshness depends on now() unreachable in CHECK). Pre-insert raise StaleMarketSnapshotError if snapshot_fk IS NULL OR captured_at < now() - freshness_window OR authority_tier != ''CHAIN''. See up-07 for the gate slice.'
+  - '**NC-NEW-B (mint with up-03)**: executable_market_snapshots is APPEND-ONLY. Old snapshots aged via freshness window check, never DELETE''d.'
+  - critic-opus gate because (a) new table introduces query-pattern impact on hot path, (b) freshness window is a tuning knob with operator implications.

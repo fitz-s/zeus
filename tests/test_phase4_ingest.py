@@ -295,6 +295,8 @@ class TestIngestJsonFileIntegration:
             "nearest_grid_lon": -74.0,
             "nearest_grid_distance_km": 5.2,
             "training_allowed": True,
+            "causality_status": "OK",
+            "causality": {"status": "OK"},
             "members": [{"member": i, "value_native_unit": 22.0 + i * 0.1} for i in range(51)],
         }
         path = tmp_path / "extracted.json"

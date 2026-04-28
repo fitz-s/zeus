@@ -28,6 +28,8 @@ Engine code does not outrank law, but because it sequences everything it can des
 ### Canonical truth surfaces
 - `docs/authority/zeus_current_architecture.md` money path and feed-role matrix
 - `src/engine/cycle_runner.py`, `evaluator.py`, `monitor_refresh.py`, `replay.py`
+- `src/control/heartbeat_supervisor.py` status, surfaced by cycle summary for R3 live-money readiness
+- `src/risk_allocator/governor.py` refreshed at cycle start for R3 A2 allocation/kill-switch state
 - `architecture/invariants.yaml` lifecycle and risk-actuation rules
 - `docs/operations/current_state.md` only for active packet routing, never for runtime semantics
 
@@ -52,11 +54,11 @@ Engine code does not outrank law, but because it sequences everything it can des
 ## 9. Source files and their roles
 | File / surface | Role |
 |---|---|
-| `cycle_runner.py` | Top orchestration hub; one of the highest-blast-radius files in the repo. |
+| `cycle_runner.py` | Top orchestration hub; one of the highest-blast-radius files in the repo. R3 A2 refreshes the PortfolioGovernor at cycle start so monitoring/exit/entry submit paths see current kill-switch state. |
 | `evaluator.py` | Turns signal/calibration/market context into action candidates. |
 | `monitor_refresh.py` | Day0 and runtime refresh logic; source/monitor semantics are fragile here. |
 | `replay.py` | Historical/replay path that must not silently diverge from live semantics. |
-| `cycle_runtime.py / lifecycle_events.py` | Runtime state and event sequencing. |
+| `cycle_runtime.py / lifecycle_events.py` | Runtime state and event sequencing. R3 A2 threads candidate event/date/cluster allocation metadata into `ExecutionIntent`. |
 | `time_context.py / discovery_mode.py / process_lock.py` | Mode/time/locking scaffolding that can still break semantics if wrong. |
 
 ## 10. Relevant tests
@@ -66,17 +68,22 @@ Engine code does not outrank law, but because it sequences everything it can des
 - tests/test_cross_module_invariants.py
 - tests/test_cross_module_relationships.py
 - tests/test_bug100_k1_k2_structural.py
+- tests/test_risk_allocator.py
 
 ## 11. Invariants
 - Engine sequencing must not collapse settlement, monitoring, and execution into one truth plane.
 - Exit intent is not economic closure; settlement is not exit.
 - Risk and control must alter runtime behavior, not merely annotate logs.
+- Heartbeat health is a runtime control input: when unhealthy it must appear in cycle summary and block new resting-entry placement before discovery can reach execution.
+- PortfolioGovernor state is a runtime control input: it must refresh before monitor/exit/entry phases can submit and must be visible in cycle summary.
+- RED force-exit uses `cycle_runner._execute_force_exit_sweep` as the sole proxy for durable `red_force_exit_proxy` CANCEL command emission; RiskGuard remains policy/observability and does not write venue commands.
 - Replay path may differ in I/O, not in semantic law.
 
 ## 12. Negative constraints
 - Do not make the engine infer settlement/source law from whichever endpoint currently answers.
 - Do not let monitor-refresh data silently become settlement truth.
 - Do not patch around state/risk/execution boundaries by adding orchestration shortcuts.
+- Do not add additional RED durable-command writers outside `_execute_force_exit_sweep`.
 - Do not let replay-only assumptions leak into live runtime.
 
 ## 13. Known failure modes
@@ -84,6 +91,7 @@ Engine code does not outrank law, but because it sequences everything it can des
 - Day0 monitoring uses the wrong source or stale current fact and misses risk events.
 - Replay diverges from live semantics and produces false confidence.
 - Process-lock or mode branching causes duplicate/partial cycles.
+- Heartbeat health is logged but not wired into entry-block reasons, creating advisory-only live-money protection.
 
 ## 14. Historical failures and lessons
 - [Archive evidence] `docs/archives/findings/exit_failure_analysis.md` shows that correct signal plus wrong exit/runtime behavior still loses money.
@@ -97,6 +105,8 @@ Engine code does not outrank law, but because it sequences everything it can des
 
 ## 16. Likely modification routes
 - Cycle orchestration change: review state, riskguard, execution, observability together.
+- Heartbeat summary change: review `src/control/heartbeat_supervisor.py`, executor submit gates, and status-summary output together.
+- PortfolioGovernor/allocation sequencing change: review `src/risk_allocator/governor.py`, executor submit gates, and cycle summary together.
 - Day0/monitor path change: review current source validity, city truth contract, and data module first.
 - Replay change: prove semantic parity with live path.
 

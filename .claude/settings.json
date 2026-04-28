@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-edit-architecture.sh",
+            "description": "Block edits to architecture/** without ARCH_PLAN_EVIDENCE env (round2_verdict.md §4.1 #5)"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-commit-invariant-test.sh",
+            "description": "Run pytest test_architecture_contracts.py before any `git commit` and block on regressions vs LIVE baseline 73/22/0 (round2_verdict.md §4.1 #5)"
+          }
+        ]
+      }
+    ]
+  }
+}

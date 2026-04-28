@@ -16,12 +16,14 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `reality_contracts/economic.yaml` | External assumption contract: economic/market assumptions |
 | `reality_contracts/data.yaml` | External assumption contract: data source availability and behavior |
 | `data_availability_exceptions.yaml` | K2 hole_scanner whitelist: per-model retro-start dates, publication lag, onboarding floor, fill policy |
+| `risk_caps.yaml` | R3 A2 engineering defaults for RiskAllocator/PortfolioGovernor capacity, drawdown, heartbeat/WS-gap, reconciliation, unknown-side-effect, and maker/taker thresholds |
 
 ## Rules
 
 - `settings.json` is the source for tunable runtime parameters. Other config files have scoped authority for cities, generated data bounds/correlation, provenance, and reality contracts.
 - Reality contracts (INV-11) define what Zeus assumes about external systems — when assumptions break, contracts flag it
 - Changes to `provenance_registry.yaml` require tracing to source literature/data
+- `risk_caps.yaml` defaults must remain sane when absent; operator tuning is separate from engineering closeout and must not itself authorize live deployment.
 
 ## cities.json — routine check discipline (ROUTINE CHECK NEEDED)
 

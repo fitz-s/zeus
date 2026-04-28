@@ -103,7 +103,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation package; phase evidence lives under `phases/` and includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
 | `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, `scope.yaml` schema, and tooling_runtime test category |
 | `task_2026-04-26_live_readiness_completion/` | packet evidence | Live-readiness completion planning packet (K=4 antibodies for 11 open B/G/U/N items); implementation lands in `claude/live-readiness-completion-2026-04-26` worktree |
-| `task_2026-04-26_polymarket_clob_v2_migration/` | packet evidence | Polymarket CLOB V1→V2 migration packet (scoping; Phase 0 operator investigation gates Phase 1; no code change yet); contains `v2_system_impact_report.md`, `plan.md`, `zeus_touchpoint_inventory.md`, `open_questions.md` |
+| `task_2026-04-26_polymarket_clob_v2_migration/` | packet evidence | Polymarket CLOB V1→V2 migration packet; now supporting R3 Z0 source-of-truth correction and later R3 CLOB V2 phases |
+| `task_2026-04-26_ultimate_plan/` | packet evidence | R3 ultimate implementation packet for Zeus CLOB V2 live-money execution and dominance infrastructure; phase cards, boot notes, work records, reviews, and M3 user-channel ingest evidence live under `r3/` |
+| `task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | packet evidence | R3 Z0 packet-local live-money invariant summary for CLOB V2; not a durable authority doc |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |
 

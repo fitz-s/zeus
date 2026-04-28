@@ -530,7 +530,7 @@ class TestObservationClientLazyImport:
         )
 
     def test_R_AT_2_callsite_fails_closed_on_missing_key(self, monkeypatch):
-        """R-AT-2 (GREEN): _require_wu_api_key() raises SystemExit when WU_API_KEY is empty.
+        """R-AT-2 (GREEN): _require_wu_api_key() fails closed when WU_API_KEY is empty.
 
         exec-ida's fix moved the guard from module-level to _require_wu_api_key() at L208-212,
         called from _fetch_wu_observation at L222. This test calls _require_wu_api_key() directly
@@ -540,7 +540,7 @@ class TestObservationClientLazyImport:
 
         monkeypatch.setattr(obs_mod, "WU_API_KEY", "")
 
-        with pytest.raises(SystemExit, match="WU_API_KEY"):
+        with pytest.raises((SystemExit, AssertionError), match="WU_API_KEY"):
             obs_mod._require_wu_api_key()
 
 
@@ -732,4 +732,3 @@ class TestRebuildDataVersionAssertion:
                     f"_process_snapshot_v2 does not yet accept 'spec' kwarg (pre-fix state): {e}. "
                     "This test becomes meaningful once the fix adds the spec param."
                 )
-

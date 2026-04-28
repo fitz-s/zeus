@@ -2,7 +2,7 @@
 
 Created: 2026-04-26
 Authority basis: this packet's `v2_system_impact_report.md` + `plan.md`
-Status: scoping (no code change yet)
+Status: R3 Z0 active; source code remains gated by R3 phase cards
 Critic owner: critic-opus (zeus-midstream-critic) OR surrogate code-reviewer@opus
 
 ## Default entry point
@@ -24,6 +24,7 @@ Read in this order:
 | `plan.md` | execution plan | Phase + slice plan with allowed_files + acceptance |
 | `zeus_touchpoint_inventory.md` | reference | Grep-verified Zeus CLOB integration points |
 | `open_questions.md` | decision tracker | Operator-owned questions blocking phase advancement |
+| `polymarket_live_money_contract.md` | contract evidence | Packet-local R3 Z0 live-money invariant summary; not a new docs authority plane |
 | `work_log.md` | running log | Per-slice closure record |
 | `evidence/` | evidence dir | Operator-collected proofs (probes, inquiries, SDK diffs) |
 | `receipt.json` | receipt | Slice closure receipt (created when first slice ships) |

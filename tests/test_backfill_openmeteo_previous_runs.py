@@ -1,3 +1,9 @@
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-27
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Protect Open-Meteo previous-runs backfill aggregation and forecasts writes.
+# Reuse: Run before changing previous-runs source mapping, forecasts schema, or onboarding forecast backfill.
+# Authority basis: R3 F1 forecast provenance wiring + historical backfill packet.
 from __future__ import annotations
 
 from pathlib import Path
@@ -53,6 +59,10 @@ def test_rows_from_previous_runs_payload_aggregates_daily_highs_by_lead():
     assert by_key[("2024-01-03", 2)].forecast_basis_date == "2024-01-01"
     assert by_key[("2024-01-04", 2)].forecast_high == 22.0
     assert by_key[("2024-01-04", 2)].forecast_low == 22.0
+    assert by_key[("2024-01-03", 1)].source_id == "openmeteo_previous_runs"
+    assert by_key[("2024-01-03", 1)].raw_payload_hash
+    assert by_key[("2024-01-03", 1)].captured_at == "2026-04-11T00:00:00+00:00"
+    assert by_key[("2024-01-03", 1)].authority_tier == "FORECAST"
 
 
 def test_rows_from_previous_runs_payload_preserves_model_source():
@@ -126,6 +136,10 @@ def test_run_backfill_writes_forecasts_idempotently(tmp_path, monkeypatch):
     assert row["forecast_high"] == 21.5
     assert row["forecast_low"] == 18.0
     assert row["temp_unit"] == "C"
+    assert row["source_id"] == backfill.SOURCE
+    assert row["raw_payload_hash"]
+    assert row["captured_at"]
+    assert row["authority_tier"] == "FORECAST"
 
 
 def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill():

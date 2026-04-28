@@ -194,7 +194,11 @@ class MarketAnalysis:
         shared helper `apply_settlement_rounding` in settlement_semantics to
         consolidate with Day0Signal._settle. No behavior change.
         """
-        return apply_settlement_rounding(values, self._round_fn, self._precision)
+        return apply_settlement_rounding(
+            values,
+            getattr(self, "_round_fn", None),
+            getattr(self, "_precision", 1.0),
+        )
 
     def _bootstrap_bin(
         self, bin_idx: int, n: int

@@ -1,0 +1,74 @@
+id: T1
+phase: T
+title: Paper/live parity FakePolymarketVenue — same adapter contract, simulated failure modes
+purpose: |
+  Force paper to fail the same way live fails. FakePolymarketVenue
+  implements PolymarketV2Adapter interface; supports failure injection;
+  produces identical event schema as live adapter. Replaces R2 mid-08.
+authority_basis:
+  - V2.1 §T1
+  - Apr26 review F-012 (tests prove happy paths, not live-money safety) + axis-31 (paper/live parity) + axis-49 (failure-mode test suite)
+  - R2 mid-08.yaml (FAILURE_INJECTION_SUITE) — extended with full adapter parity
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 + M1..M5 + R1 land
+deliverables:
+  new_modules:
+    - path: tests/fakes/polymarket_v2.py
+      summary: |
+        FakePolymarketVenue implementing PolymarketV2Adapter interface.
+        Internal state: orderbook engine, trade generator, settlement clock,
+        chain mock (tx_hash + confirmation lag), failure-injection knobs.
+      surface: |
+        class FakePolymarketVenue:  # implements PolymarketV2Adapter Protocol
+            def __init__(self, *, ledger: FakeCollateralLedger, clock: FakeClock) -> None: ...
+            # Adapter interface (mirrors src/venue/polymarket_v2_adapter.py exactly)
+            ...
+            # Failure injection
+            def inject(self, mode: FailureMode, **params) -> None: ...
+            def heartbeat_miss_window(self, seconds: int) -> None: ...
+            def open_order_wipe(self) -> None: ...
+            def cancel_not_canceled(self, order_id: str) -> None: ...
+            def force_partial_fill(self, order_id: str, partial_size: int) -> None: ...
+            def MATCHED_then_FAILED_chain(self, order_id: str) -> None: ...
+
+        class FailureMode(str, Enum):
+            TIMEOUT_AFTER_POST = "timeout_after_post"
+            PARTIAL_RESPONSE = "partial_response"
+            NETWORK_JITTER = "network_jitter"
+            ORACLE_CONFLICT = "oracle_conflict"
+            RESTART_MID_CYCLE = "restart_mid_cycle"
+            HEARTBEAT_MISS = "heartbeat_miss"
+            OPEN_ORDER_WIPE = "open_order_wipe"
+            CANCEL_NOT_CANCELED = "cancel_not_canceled"
+            ORDER_TICK_REJECTION = "order_tick_rejection"
+            ORDER_MIN_SIZE_REJECTION = "order_min_size_rejection"
+            INSUFFICIENT_PUSD = "insufficient_pusd"
+            INSUFFICIENT_TOKEN_BALANCE = "insufficient_token_balance"
+    - path: tests/conftest.py
+      change: add `fake_venue` fixture + `failure_injector` fixture
+acceptance_tests:
+  - tests/integration/test_p0_live_money_safety.py::test_duplicate_submit_idempotency
+  - tests/integration/test_p0_live_money_safety.py::test_rapid_sequential_partial_fills
+  - tests/integration/test_p0_live_money_safety.py::test_red_cancel_all_behavioral
+  - tests/integration/test_p0_live_money_safety.py::test_market_close_while_resting
+  - tests/integration/test_p0_live_money_safety.py::test_resubscribe_recovery
+  - tests/integration/test_p0_live_money_safety.py::test_heartbeat_miss_auto_cancel_and_reconcile
+  - tests/integration/test_p0_live_money_safety.py::test_cutover_wipe_simulation_reconciles
+  - tests/integration/test_p0_live_money_safety.py::test_pusd_insufficient_blocks_buy
+  - tests/integration/test_p0_live_money_safety.py::test_token_insufficient_blocks_sell
+  - tests/integration/test_p0_live_money_safety.py::test_MATCHED_then_FAILED_chain_rolls_back_optimistic_exposure
+  - tests/integration/test_p0_live_money_safety.py::test_paper_and_live_produce_identical_journal_event_shapes
+    | run identical scenario against fake venue + (mock-injected) live adapter; assert event row schemas match
+operator_decision_required: []
+depends_on: [Z0..Z4, U1, U2, M1, M2, M3, M4, M5, R1]
+estimated_h: 22
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [mid-08]
+  v2_1_phases: [T1]
+new_invariants_or_NCs:
+  - INV-NEW-M: "Paper-mode runs go through the SAME PolymarketV2Adapter Protocol; FakePolymarketVenue and live adapter produce schema-identical events. Backtests can replay fake venue facts to regenerate the same portfolio projections."
+notes:
+  - This card is the immune-system slice for live-money safety. Without it, all the V2/Z3/Z4/M-series antibodies are isolated assertions; T1 lets us replay full P0 scenarios.
+  - axis-31 paper/live parity closure depends on FakePolymarketVenue mirroring the LIVE adapter EXACTLY.

@@ -64,6 +64,7 @@ file_naming:
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher
         investigate_ecmwf_bias.py: established diagnostic report name
+        live_readiness_check.py: R3 G1 readiness gate name fixed by operator-facing live-readiness packet contract; script remains read-only and operator-gated
         live_smoke_test.py: established runtime smoke entrypoint
         nuke_rebuild_projections.py: established repair command name; dangerous and packet-gated
         onboard_cities.py: established ETL/operator onboarding entrypoint
@@ -73,6 +74,7 @@ file_naming:
         post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
         resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
         profit_validation_replay.py: established diagnostic report command
+        r3_drift_check.py: R3 packet drift shim name fixed by existing packet/runbook references; read-only validation utility.
         refit_platt.py: established repair command name
         refit_platt_v2.py: established repair command name (metric-aware v2 variant landed Phase 7A)
         replay_parity.py: established diagnostic command

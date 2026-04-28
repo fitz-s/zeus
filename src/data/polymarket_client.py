@@ -8,7 +8,8 @@ import json
 import logging
 import os
 import subprocess
-from typing import Optional
+import warnings
+from typing import Any, Optional
 
 import httpx
 
@@ -61,25 +62,37 @@ class PolymarketClient:
 
     def __init__(self):
         self._clob_client = None
+        self._v2_adapter = None
 
     def _ensure_client(self):
-        """Lazy init: connect to CLOB only on first real I/O."""
-        if self._clob_client is not None:
-            return
-        from py_clob_client.client import ClobClient
+        """Deprecated compatibility alias for the V2 adapter boundary."""
+        warnings.warn(
+            "PolymarketClient._ensure_client() is deprecated; live venue I/O routes "
+            "through src.venue.polymarket_v2_adapter.PolymarketV2Adapter.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._ensure_v2_adapter()
+
+    def _ensure_v2_adapter(self):
+        """Lazy init: connect live CLOB I/O through the strict V2 adapter."""
+        adapter = getattr(self, "_v2_adapter", None)
+        if adapter is not None:
+            return adapter
+
+        from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST, PolymarketV2Adapter
 
         creds = _resolve_credentials()
-        self._clob_client = ClobClient(
-            host=CLOB_BASE,
-            key=creds["private_key"],
-            chain_id=137,
-            signature_type=2,
-            funder=creds["funder_address"],
+        adapter = PolymarketV2Adapter(
+            host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+            funder_address=creds["funder_address"],
+            signer_key=creds["private_key"],
+            chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+            api_creds=creds.get("api_creds"),
         )
-        self._clob_client.set_api_creds(
-            self._clob_client.create_or_derive_api_creds()
-        )
-        logger.info("Polymarket CLOB client initialized (live mode)")
+        self._v2_adapter = adapter
+        logger.info("Polymarket CLOB V2 adapter initialized (live mode)")
+        return adapter
 
     def v2_preflight(self) -> None:
         """Verify V2 endpoint reachability before any order placement (INV-25).
@@ -96,16 +109,30 @@ class PolymarketClient:
         INV-25: When this method raises, _live_order must return a rejected
         OrderResult without calling place_limit_order.
         """
-        self._ensure_client()
-        if not hasattr(self._clob_client, "get_ok"):
-            raise V2PreflightError(
-                "SDK lacks get_ok preflight method; preflight cannot verify endpoint identity. "
-                "Upgrade py-clob-client to >= 0.34 to satisfy INV-25."
+        legacy_client = getattr(self, "_clob_client", None)
+        if legacy_client is not None and getattr(self, "_v2_adapter", None) is None:
+            warnings.warn(
+                "Injected legacy CLOB client preflight is deprecated and retained "
+                "only for compatibility tests; live preflight uses PolymarketV2Adapter.",
+                DeprecationWarning,
+                stacklevel=2,
             )
-        try:
-            self._clob_client.get_ok()
-        except Exception as exc:
-            raise V2PreflightError(f"V2 endpoint preflight failed: {exc!r}") from exc
+            if not hasattr(legacy_client, "get_ok"):
+                raise V2PreflightError(
+                    "SDK lacks get_ok preflight method; preflight cannot verify endpoint identity. "
+                    "Use py-clob-client-v2 through PolymarketV2Adapter to satisfy INV-25."
+                )
+            try:
+                legacy_client.get_ok()
+            except Exception as exc:
+                raise V2PreflightError(f"V2 endpoint preflight failed: {exc!r}") from exc
+            return
+
+        result = self._ensure_v2_adapter().preflight()
+        if not result.ok:
+            raise V2PreflightError(
+                f"{result.error_code or 'V2_PREFLIGHT_FAILED'}: {result.message}"
+            )
 
     def get_orderbook(self, token_id: str) -> dict:
         """Fetch orderbook for a token. Public endpoint, no auth.
@@ -169,6 +196,7 @@ class PolymarketClient:
         price: float,
         size: float,
         side: str,
+        order_type: str = "GTC",
     ) -> Optional[dict]:
         """Place a limit order. Spec §6.4: limit orders ONLY.
 
@@ -177,26 +205,59 @@ class PolymarketClient:
             price: limit price [0.01, 0.99]
             size: number of shares
             side: "BUY" or "SELL"
+            order_type: concrete CLOB limit-order type ("GTC", "FOK", "FAK", ...)
 
         Returns: order result dict or None on failure
         """
-        from py_clob_client.clob_types import OrderArgs
-        from py_clob_client.order_builder.constants import BUY, SELL
-
-        _SIDE_MAP = {"BUY": BUY, "SELL": SELL}
-        if side not in _SIDE_MAP:
+        if side not in {"BUY", "SELL"}:
             raise ValueError(f"place_limit_order requires side='BUY' or 'SELL', got {side!r}")
-        side_const = _SIDE_MAP[side]
-        order_args = OrderArgs(
-            price=price, size=size, side=side_const, token_id=token_id
+
+        warnings.warn(
+            "PolymarketClient.place_limit_order() is a compatibility wrapper; "
+            "live placement routes through PolymarketV2Adapter.",
+            DeprecationWarning,
+            stacklevel=2,
         )
 
-        self._ensure_client()
-        signed = self._clob_client.create_order(order_args)
-        result = self._clob_client.post_order(signed)
+        try:
+            adapter = self._ensure_v2_adapter()
+            preflight = adapter.preflight()
+        except Exception as exc:
+            # M2: this compatibility wrapper lazily initializes credentials /
+            # adapter and runs a preflight before adapter.submit_limit_order().
+            # Failures here are before the venue submit side-effect boundary,
+            # so executor should receive a typed rejection payload rather than
+            # misclassifying the exception as SUBMIT_UNKNOWN_SIDE_EFFECT.
+            return {
+                "success": False,
+                "status": "rejected",
+                "errorCode": "V2_PREFLIGHT_EXCEPTION",
+                "errorMessage": str(exc),
+            }
+        if not preflight.ok:
+            return {
+                "success": False,
+                "status": "rejected",
+                "errorCode": preflight.error_code or "V2_PREFLIGHT_FAILED",
+                "errorMessage": preflight.message,
+            }
 
-        logger.info("Order placed: %s %s @ %.3f x %.1f → %s",
-                     side, token_id[:12], price, size, result.get("status"))
+        submit = adapter.submit_limit_order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            order_type=order_type,
+        )
+        result = _legacy_order_result_from_submit(submit)
+        logger.info(
+            "V2 order submit result: %s %s @ %.3f x %.1f → %s",
+            side,
+            token_id[:12],
+            price,
+            size,
+            result.get("status"),
+        )
         return result
 
     def get_order(self, order_id: str) -> Optional[dict]:
@@ -211,9 +272,8 @@ class PolymarketClient:
         recovery loop catches and logs them so a single bad lookup does not
         kill the loop.
         """
-        self._ensure_client()
         try:
-            result = self._clob_client.get_order(order_id)
+            state = self._ensure_v2_adapter().get_order(order_id)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -225,48 +285,42 @@ class PolymarketClient:
                 return None
             raise
 
-        if result is None:
-            return None
-
-        # Normalize to stable shape if SDK returns a non-dict (e.g. a model obj).
-        if not isinstance(result, dict):
-            try:
-                result = dict(result)
-            except (TypeError, ValueError):
-                result = {"orderID": order_id, "status": str(result)}
+        result = dict(state.raw)
 
         # Guarantee the two load-bearing keys downstream code reads.
         if "orderID" not in result:
-            result.setdefault("orderID", result.get("id") or result.get("order_id") or order_id)
+            result.setdefault("orderID", state.order_id or result.get("id") or result.get("order_id") or order_id)
         if "status" not in result:
-            result.setdefault("status", result.get("state") or result.get("order_status") or "UNKNOWN")
+            result.setdefault("status", state.status or result.get("state") or result.get("order_status") or "UNKNOWN")
 
         return result
 
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
-        self._ensure_client()
-        result = self._clob_client.cancel(order_id)
-        logger.info("Order cancelled: %s → %s", order_id, result.get("status"))
-        return result
+        from src.control.cutover_guard import CutoverPending, gate_for_intent
+        from src.execution.command_bus import IntentKind
+
+        decision = gate_for_intent(IntentKind.CANCEL)
+        if not decision.allow_cancel:
+            raise CutoverPending(decision.block_reason or decision.state.value)
+        result = self._ensure_v2_adapter().cancel(order_id)
+        payload = {
+            "orderID": result.order_id,
+            "status": result.status,
+            "errorCode": result.error_code,
+            "errorMessage": result.error_message,
+            "raw_response_json": result.raw_response_json,
+        }
+        logger.info("Order cancel result: %s → %s", order_id, result.status)
+        return payload
 
     def get_order_status(self, order_id: str) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
-        self._ensure_client()
         try:
-            if hasattr(self._clob_client, "get_order"):
-                result = self._clob_client.get_order(order_id)
-            elif hasattr(self._clob_client, "get_orders"):
-                orders = self._clob_client.get_orders()
-                result = next((o for o in orders if o.get("id") == order_id), None)
-            else:
-                logger.warning("Live client has no order-status method")
-                return {"status": "MISSING_METHOD"}
-                
+            result = self.get_order(order_id)
             if result is None:
                 return {"status": "NOT_FOUND"}
-                
-            logger.info("Order status: %s → %s", order_id, result.get("status") if result else "missing")
+            logger.info("Order status: %s → %s", order_id, result.get("status"))
             return result
         except Exception as exc:
             logger.warning("Order status fetch failed for %s: %s", order_id, exc)
@@ -274,17 +328,23 @@ class PolymarketClient:
 
     def get_open_orders(self) -> list[dict]:
         """Return all currently open exchange orders for the funded wallet."""
-        self._ensure_client()
-        try:
-            from py_clob_client.clob_types import OpenOrderParams
-
-            result = self._clob_client.get_orders(OpenOrderParams()) or []
-        except (ImportError, TypeError):
-            result = self._clob_client.get_orders() or []
-
-        if isinstance(result, dict):
-            result = result.get("data", []) or []
-        return list(result)
+        legacy_client = getattr(self, "_clob_client", None)
+        if legacy_client is not None and getattr(self, "_v2_adapter", None) is None:
+            warnings.warn(
+                "Injected legacy CLOB client get_open_orders is deprecated and retained "
+                "only for compatibility tests; live order queries use PolymarketV2Adapter.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return list(legacy_client.get_orders())
+        states = self._ensure_v2_adapter().get_open_orders()
+        result = []
+        for state in states:
+            raw = dict(state.raw)
+            raw.setdefault("orderID", state.order_id)
+            raw.setdefault("status", state.status)
+            result.append(raw)
+        return result
 
     def get_positions_from_api(self) -> Optional[list[dict]]:
         """Fetch authoritative live positions from Polymarket's data API."""
@@ -342,13 +402,22 @@ class PolymarketClient:
         return positions
 
     def get_balance(self) -> float:
-        """Get USDC balance."""
-        self._ensure_client()
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-        resp = self._clob_client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        """Get pUSD balance through the Z4 CollateralLedger."""
+        warnings.warn(
+            "PolymarketClient.get_balance() is a compatibility wrapper; "
+            "live balance queries route through CollateralLedger.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        return int(resp["balance"]) / 1e6
+        from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+        from src.state.db import get_trade_connection_with_world
+
+        conn = get_trade_connection_with_world()
+        ledger = CollateralLedger(conn)
+        snapshot = ledger.refresh(self._ensure_v2_adapter())
+        conn.commit()
+        configure_global_ledger(ledger)
+        return snapshot.pusd_balance_micro / 1_000_000
 
     def redeem(self, condition_id: str) -> Optional[dict]:
         """Redeem winning shares for USDC after settlement.
@@ -356,11 +425,42 @@ class PolymarketClient:
         Not urgent (USDC stays claimable indefinitely) but without it,
         winning capital sits on-chain instead of being available for new trades.
         """
-        self._ensure_client()
-        try:
-            result = self._clob_client.redeem(condition_id)
-            logger.info("Redeemed condition %s → %s", condition_id, result)
-            return result
-        except Exception as exc:
-            logger.warning("Redeem failed for condition %s: %s", condition_id, exc)
-            return None
+        warnings.warn(
+            "PolymarketClient.redeem() is a compatibility wrapper; "
+            "redeem attempts route through PolymarketV2Adapter when supported.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from src.state.collateral_ledger import require_pusd_redemption_allowed
+
+        require_pusd_redemption_allowed()
+        logger.warning(
+            "Redeem deferred for condition %s: R1 settlement command ledger is not implemented",
+            condition_id,
+        )
+        return {
+            "success": False,
+            "errorCode": "REDEEM_DEFERRED_TO_R1",
+            "errorMessage": "R1 settlement command ledger must own pUSD redemption side effects",
+            "condition_id": condition_id,
+        }
+
+
+def _legacy_order_result_from_submit(submit: Any) -> dict:
+    envelope = submit.envelope
+    payload = {
+        "success": submit.status == "accepted",
+        "status": submit.status,
+        "errorCode": submit.error_code,
+        "errorMessage": submit.error_message,
+        "_venue_submission_envelope": envelope.to_dict(),
+    }
+    if envelope.order_id:
+        payload.update(
+            {
+                "orderID": envelope.order_id,
+                "orderId": envelope.order_id,
+                "id": envelope.order_id,
+            }
+        )
+    return payload

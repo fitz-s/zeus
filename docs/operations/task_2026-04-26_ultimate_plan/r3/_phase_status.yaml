@@ -1,0 +1,291 @@
+# R3 Phase Status Tracker
+#
+# Updated by:
+# - Phase agents on entry: status -> IN_PROGRESS
+# - CI on merge: status -> COMPLETE
+# - Critic on review: critic_review field
+#
+# Cold-start agents read this FIRST to identify which phase to start.
+
+head_anchor: 874e00cc0244135f49708682cab434b4d151d25d
+last_drift_check: 2026-04-28  # YYYY-MM-DD; updated by scripts/r3_drift_check.py
+
+phases:
+  Z0:
+    title: Plan-lock + source-of-truth rewrite
+    status: COMPLETE
+    estimated_h: 4
+    depends_on: []
+    started_at: 2026-04-27T02:45:00Z
+    completed_at: 2026-04-27T02:50:32Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Feynman + verifier Heisenberg; post-close third-party critic Popper + verifier Einstein"
+    invariants_added: []
+
+  Z1:
+    title: CutoverGuard runtime state machine
+    status: COMPLETE
+    estimated_h: 12
+    depends_on: [Z0]
+    started_at: 2026-04-27T03:05:00Z
+    completed_at: 2026-04-27T03:32:19Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Gauss + verifier Kant after Copernicus revision; post-close third-party critic Linnaeus + verifier Faraday"
+    invariants_added: [INV-NEW-A]
+
+  Z2:
+    title: V2 strict adapter + VenueSubmissionEnvelope
+    status: COMPLETE
+    estimated_h: 18
+    depends_on: [Z0, Z1]
+    started_at: 2026-04-27T03:37:29Z
+    completed_at: 2026-04-27T04:25:53Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Darwin + verifier Volta after Arendt/Descartes blocker fixes; post-close third-party critic Confucius + verifier Wegener"
+    invariants_added: [NC-NEW-G, INV-NEW-B]
+
+  Z3:
+    title: HeartbeatSupervisor MANDATORY
+    status: COMPLETE
+    estimated_h: 12
+    depends_on: [Z0, Z1, Z2]
+    started_at: 2026-04-27T05:20:00Z
+    completed_at: 2026-04-27T05:52:00Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Nietzsche + verifier Lorentz; post-close critic Bernoulli approved after B047 scheduler wrapper fix + verifier Cicero PASS"
+    invariants_added: [INV-NEW-C, NC-NEW-F]
+
+  Z4:
+    title: CollateralLedger
+    status: COMPLETE
+    estimated_h: 22
+    depends_on: [Z0, Z1, Z2]
+    started_at: 2026-04-27T05:37:07Z
+    completed_at: 2026-04-27T07:06:03Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Ptolemy + verifier Dirac after James post-close terminal-release atomicity blocker repair; second post-close critic Leibniz + verifier Herschel PASS; U1 unfrozen"
+    invariants_added: [NC-NEW-K, INV-NEW-D]
+
+  U1:
+    title: ExecutableMarketSnapshotV2
+    status: COMPLETE
+    estimated_h: 14
+    depends_on: [Z0, Z1, Z2, Z3, Z4]
+    started_at: 2026-04-27T07:12:00Z
+    completed_at: 2026-04-27T07:57:19Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Epicurus + verifier Erdos; post-close critic Hypatia PASS; verifier Boole PASS after Nash procedural artifact/state blocker remediation; U2 unfrozen"
+    invariants_added: [NC-NEW-B, INV-NEW-E]
+
+  U2:
+    title: 5-projection raw provenance schema
+    status: COMPLETE
+    estimated_h: 28
+    depends_on: [Z0, Z1, Z2, Z3, Z4, U1]
+    started_at: 2026-04-27T08:20:00Z
+    completed_at: 2026-04-27T09:14:14Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Godel + verifier Lagrange after Tesla envelope-shape blocker remediation; post-close third-party critic Ampere + verifier Beauvoir PASS; M1 unfrozen"
+    invariants_added: [NC-NEW-A, NC-NEW-H, NC-NEW-I, INV-NEW-F]
+
+  M1:
+    title: Lifecycle grammar + cycle_runner-as-proxy
+    status: COMPLETE
+    estimated_h: 14
+    depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2]
+    started_at: 2026-04-27T09:47:01Z
+    completed_at: 2026-04-27T11:59:06Z
+    gate_edge_at: 2026-04-27T10:05:00Z
+    gate_resolution_started_at: 2026-04-27T11:45:00Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    blocking_operator_gate: ~
+    critic_review: "APPROVE: initial M1 at-gate critic Parfit + verifier Singer PASS; INV-29 amendment pre-close critic Huygens + verifier Laplace PASS; post-close critic Planck + verifier Pasteur PASS; M2 unfrozen"
+    invariants_added: [NC-NEW-D, NC-NEW-E]
+
+  M2:
+    title: SUBMIT_UNKNOWN_SIDE_EFFECT semantics
+    status: COMPLETE
+    estimated_h: 10
+    depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2, M1]
+    started_at: 2026-04-27T12:05:00Z
+    completed_at: 2026-04-27T12:55:57Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Fermat + verifier Curie; post-close third-party critic Socrates + verifier Volta the 2nd PASS; M3 unfrozen"
+    invariants_added: [INV-NEW-G]
+
+  M3:
+    title: User-channel WS ingest + REST fallback
+    status: COMPLETE
+    estimated_h: 16
+    depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2, M1, M2]
+    started_at: 2026-04-27T18:00:03Z
+    completed_at: 2026-04-27T18:18:44Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Pascal the 2nd + verifier Descartes the 2nd PASS after stale/mismatch/maker-order blocker remediation; post-close third-party critic Aquinas the 2nd APPROVE + verifier Gibbs the 2nd PASS; M4 unfrozen"
+    invariants_added: [INV-NEW-H]
+
+  M4:
+    title: Cancel/replace + exit safety
+    status: COMPLETE
+    estimated_h: 12
+    depends_on: [U1, U2, M1, M2, M3]
+    started_at: 2026-04-27T18:55:00Z
+    completed_at: 2026-04-27T19:05:28Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: initial pre-close critic Laplace the 2nd BLOCK on released-row mutex CAS; remediation added compare-and-swap regression; final pre-close critic Noether the 2nd PASS + verifier Socrates the 2nd PASS; post-close critic Chandrasekhar the 2nd APPROVE + verifier Halley the 2nd PASS after procedural artifact/status rerun; M5/R1 unfrozen"
+    invariants_added: [INV-NEW-I, INV-NEW-J]
+
+  M5:
+    title: Exchange reconciliation sweep
+    status: COMPLETE
+    estimated_h: 18
+    depends_on: [U1, U2, M1, M2, M3, M4]
+    started_at: 2026-04-27T19:24:14Z
+    completed_at: 2026-04-27T19:44:01Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Dewey the 2nd BLOCK + Archimedes the 2nd BLOCK remediated; final critic Rawls the 2nd APPROVE + verifier Linnaeus the 2nd PASS; post-close critic Huygens the 2nd BLOCK on explicit fresh=false remediated; final post-close critic Lorentz the 2nd APPROVE + verifier Pasteur the 2nd PASS; R1 unfrozen, T1 remains blocked by R1"
+    invariants_added: [INV-NEW-K]
+
+  R1:
+    title: Settlement / redeem command ledger
+    status: COMPLETE
+    estimated_h: 12
+    depends_on: [U1, U2, M1, M2, M3, M4]
+    started_at: 2026-04-27T20:13:40Z
+    completed_at: 2026-04-27T20:24:00Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    blocking_operator_gate: Q-FX-1 (inherited from Z4)
+    critic_review: "APPROVE: pre-close critic Mencius the 2nd APPROVE + verifier Hume the 2nd PASS; post-close critic Fermat the 2nd APPROVE + verifier Zeno the 2nd PASS; T1 unfrozen"
+    invariants_added: [INV-NEW-L]
+
+  T1:
+    title: FakePolymarketVenue (paper/live parity)
+    status: COMPLETE
+    estimated_h: 22
+    depends_on: [U1, U2, M1, M2, M3, M4, M5, R1]
+    started_at: 2026-04-27T20:49:00Z
+    completed_at: 2026-04-27T21:03:24Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: initial pre-close critic Lagrange the 2nd BLOCK on inert RESTART_MID_CYCLE; remediation added restart/recovery boundary and regression; final pre-close critic Hegel the 2nd APPROVE + verifier Hubble the 2nd PASS; post-close critic Wegener the 2nd APPROVE + verifier Jason the 2nd PASS; A1 unfrozen"
+    invariants_added: [INV-NEW-M]
+
+  F1:
+    title: Forecast source registry
+    status: COMPLETE
+    estimated_h: 12
+    depends_on: [U1, U2]
+    started_at: 2026-04-27T10:15:08Z
+    completed_at: 2026-04-27T10:26:14Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Bohr + verifier Sartre PASS; post-close critic Halley + verifier Schrodinger PASS; F2/F3 unfrozen while M2 remains behind INV-29"
+    invariants_added: [INV-NEW-N]
+
+  F2:
+    title: Calibration retrain loop wiring
+    status: COMPLETE
+    estimated_h: 14
+    depends_on: [U1, U2, F1]
+    started_at: 2026-04-27T11:20:13Z
+    completed_at: 2026-04-27T11:35:12Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    blocking_operator_gate: Calibration-retrain go-live
+    critic_review: "APPROVE: pre-close critic Noether + verifier Pauli PASS after active platt_models_v2 replacement and receipt-wide navigation remediations; post-close critic Meitner + verifier Carson PASS after Hubble stale-artifact procedural block"
+    invariants_added: [INV-NEW-O, INV-NEW-P]
+
+  F3:
+    title: TIGGE ingest stub (gated dormant)
+    status: COMPLETE
+    estimated_h: 6
+    depends_on: [F1]
+    started_at: 2026-04-27T10:48:28Z
+    completed_at: 2026-04-27T11:05:00Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    blocking_operator_gate: TIGGE-ingest go-live
+    critic_review: "APPROVE: pre-close critic Jason + verifier Banach PASS; post-close critic Aquinas + verifier Newton PASS; F2 may freeze next while M2 remains behind INV-29"
+    invariants_added: [NC-NEW-J]
+
+  A1:
+    title: StrategyBenchmarkSuite + promotion gate
+    status: COMPLETE
+    estimated_h: 30
+    depends_on: [U1, U2, M1, M2, M3, M4, M5, R1, T1, F1]
+    started_at: 2026-04-27T21:32:00Z
+    completed_at: 2026-04-27T21:47:00Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: pre-close critic Ohm the 2nd APPROVE + verifier Harvey the 2nd PASS; post-close critic Carson the 2nd APPROVE + verifier Maxwell the 2nd PASS; A2 unfrozen"
+    invariants_added: [INV-NEW-Q]
+
+  A2:
+    title: RiskAllocator + PortfolioGovernor + kill switch
+    status: COMPLETE
+    estimated_h: 22
+    depends_on: [U1, U2, M1, M2, M3, M4, M5, R1, T1, F1, A1]
+    started_at: 2026-04-27T22:05:00Z
+    completed_at: 2026-04-27T22:42:40Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    critic_review: "APPROVE: initial pre-close critic Epicurus the 2nd BLOCK remediated; second critic Galileo the 2nd BLOCK on inert maker/taker order type remediated; final pre-close critic Euclid the 2nd APPROVE + verifier Ampere the 2nd PASS; post-close critic Parfit the 2nd APPROVE + verifier Godel the 2nd PASS; G1 unfrozen for phase entry only"
+    invariants_added: [INV-NEW-R]
+
+  G1:
+    title: 17 live readiness gates + staged smoke
+    status: IN_PROGRESS
+    estimated_h: 14
+    depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2, M1, M2, M3, M4, M5, R1, T1, F1, F2, F3, A1, A2]
+    started_at: 2026-04-27T23:01:06Z
+    author: codex
+    branch: plan-pre5
+    commit: ~
+    blocking_operator_gate: live-money-deploy-go (17/17 PASS + smoke)
+    critic_review: "ENGINEERING APPROVE/PASS but LIVE NO-GO: pre-close critic Mill the 2nd APPROVE + verifier Tesla the 2nd PASS; post-verification critic/security/verifier found and hardened non-operator seams; phase close/live-ready still BLOCKED by missing Q1 Zeus-egress and staged-live-smoke evidence plus full-suite triage; keep IN_PROGRESS until real evidence passes."
+    invariants_added: [INV-NEW-S]
+
+# Ready-to-start phases (computed: status=PENDING + all depends_on COMPLETE,
+# then manually held during required post-close third-party review gates)
+ready_to_start: []  # G1 is in progress; live deployment remains operator-gated
+
+# Wave windows for multi-review (open after the named phase completes)
+multi_review_windows:
+  wave_a: after Z4 lands
+  wave_b: after M5 lands
+  wave_c: after T1 lands
+  wave_d: after F3 lands
+  wave_e: after A2 lands
+  wave_f: after G1 lands (LIVE deploy gate)

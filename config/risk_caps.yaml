@@ -1,0 +1,17 @@
+# Created: 2026-04-27
+# Last reused/audited: 2026-04-27
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+# R3 A2 engineering defaults. Operators may tune these later; absence of this
+# file still loads sane defaults in src/risk_allocator/governor.py.
+max_per_market_micro: 250000000
+max_per_event_micro: 500000000
+max_per_resolution_window_micro:
+  default: 750000000
+max_drawdown_pct: 10.0
+max_correlated_exposure_micro: 1000000000
+unknown_side_effect_limit: 0
+reconcile_finding_limit: 0
+ws_gap_seconds_limit: 15
+optimistic_exposure_weight: 0.5
+taker_min_depth_micro: 50000000
+maker_deadline_seconds: 1800

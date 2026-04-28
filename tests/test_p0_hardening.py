@@ -319,23 +319,102 @@ class TestR2V2PreflightBlocksPlacement:
         yield c
         c.close()
 
-    def _make_intent(self):
+    def _ensure_executable_snapshot(self, conn, *, token_id: str) -> dict:
+        """Persist the U1 snapshot required before venue-command persistence."""
+        from datetime import datetime, timedelta, timezone
+        from decimal import Decimal
+
+        from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+        from src.state.snapshot_repo import insert_snapshot
+
+        now = datetime(2026, 4, 27, tzinfo=timezone.utc)
+        snapshot_id = f"p0-r2-snap-{token_id[-8:]}"
+        insert_snapshot(
+            conn,
+            ExecutableMarketSnapshotV2(
+                snapshot_id=snapshot_id,
+                gamma_market_id="gamma-p0-r2",
+                event_id="event-p0-r2",
+                event_slug="event-p0-r2",
+                condition_id="condition-p0-r2",
+                question_id="question-p0-r2",
+                yes_token_id=token_id,
+                no_token_id=f"{token_id}-no",
+                selected_outcome_token_id=token_id,
+                outcome_label="YES",
+                enable_orderbook=True,
+                active=True,
+                closed=False,
+                accepting_orders=True,
+                market_start_at=None,
+                market_end_at=None,
+                market_close_at=None,
+                sports_start_at=None,
+                min_tick_size=Decimal("0.01"),
+                min_order_size=Decimal("0.01"),
+                fee_details={},
+                token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+                rfqe=None,
+                neg_risk=False,
+                orderbook_top_bid=Decimal("0.49"),
+                orderbook_top_ask=Decimal("0.51"),
+                orderbook_depth_jsonb="{}",
+                raw_gamma_payload_hash="a" * 64,
+                raw_clob_market_info_hash="b" * 64,
+                raw_orderbook_hash="c" * 64,
+                authority_tier="CLOB",
+                captured_at=now,
+                freshness_deadline=now + timedelta(days=365),
+            ),
+        )
+        return {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_min_tick_size": Decimal("0.01"),
+            "executable_snapshot_min_order_size": Decimal("0.01"),
+            "executable_snapshot_neg_risk": False,
+        }
+
+    def _make_intent(self, conn):
         """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
         from src.contracts.execution_intent import ExecutionIntent
         from src.contracts import Direction
+        from src.contracts.slippage_bps import SlippageBps
 
+        token_id = "tok-0000000000000000000000000000000000000001"
+        snapshot_kwargs = self._ensure_executable_snapshot(conn, token_id=token_id)
         return ExecutionIntent(
             direction=Direction("buy_yes"),
             target_size_usd=10.0,
             limit_price=0.55,
             toxicity_budget=0.05,
-            max_slippage=0.02,
+            max_slippage=SlippageBps(200.0, "adverse"),
             is_sandbox=False,
             market_id="mkt-test",
-            token_id="tok-0000000000000000000000000000000000000001",
+            token_id=token_id,
             timeout_seconds=3600,
             decision_edge=0.05,
+            **snapshot_kwargs,
         )
+
+    def _bypass_unrelated_submit_guards(self):
+        """Patch post-P0 live-submit guards that are outside the INV-25 seam.
+
+        These relationship tests prove only that V2 preflight blocks (or permits)
+        the SDK placement seam.  Cutover, allocator, heartbeat, websocket-gap, and
+        collateral gates are covered by their own suites and would otherwise mask
+        the preflight relationship being asserted here.
+        """
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch("src.execution.executor._assert_cutover_allows_submit", return_value=None))
+        stack.enter_context(patch("src.execution.executor._assert_risk_allocator_allows_submit", return_value=None))
+        stack.enter_context(patch("src.execution.executor._select_risk_allocator_order_type", return_value="GTC"))
+        stack.enter_context(patch("src.execution.executor._assert_heartbeat_allows_submit", return_value=None))
+        stack.enter_context(patch("src.execution.executor._assert_ws_gap_allows_submit", return_value=None))
+        stack.enter_context(patch("src.execution.executor._assert_collateral_allows_buy", return_value=None))
+        stack.enter_context(patch("src.execution.executor._reserve_collateral_for_buy", return_value=None))
+        return stack
 
     def test_v2_preflight_blocks_placement(self, _mem_conn):
         """Mocked v2_preflight raises V2PreflightError; _live_order returns rejected
@@ -351,9 +430,9 @@ class TestR2V2PreflightBlocksPlacement:
         from src.data.polymarket_client import V2PreflightError
         from src.execution.executor import _live_order
 
-        intent = self._make_intent()
+        intent = self._make_intent(_mem_conn)
 
-        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        with self._bypass_unrelated_submit_guards(), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
             mock_instance.v2_preflight.side_effect = V2PreflightError("endpoint unreachable")
@@ -387,9 +466,9 @@ class TestR2V2PreflightBlocksPlacement:
         """
         from src.execution.executor import _live_order
 
-        intent = self._make_intent()
+        intent = self._make_intent(_mem_conn)
 
-        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+        with self._bypass_unrelated_submit_guards(), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
             # Inject a mock SDK client that DOES expose get_ok (positive case).

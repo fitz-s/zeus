@@ -22,11 +22,14 @@ regardless of mathematical correctness.
 | `daily_obs_append.py` | Settlement-adjacent daily observation writer | CRITICAL — settlement truth enters here |
 | `observation_client.py` | Current observation chain (Day0 monitoring) | HIGH — Day0 truth source |
 | `tier_resolver.py` | Source-tier routing (which provider for which role) | HIGH — wrong tier = wrong truth plane |
+| `forecast_source_registry.py` | Forecast-source registry + operator gates | HIGH — source activation/provenance |
+| `forecast_ingest_protocol.py` | Typed forecast bundle protocol | MEDIUM |
+| `tigge_client.py` | TIGGE ingest stub; construction allowed, fetch operator-gated/dormant | HIGH — source activation seam |
 | `hourly_instants_append.py` | Legacy hourly observation path | HIGH — extrema preservation |
 | `observation_instants_v2_writer.py` | V2 hourly write contract | HIGH — version/source tagging |
 | `forecasts_append.py` | Forecast write family (TIGGE ENS) | HIGH — signal source |
 | `market_scanner.py` | Venue discovery path (Polymarket markets) | MEDIUM |
-| `polymarket_client.py` | Market data client (book, prices) | MEDIUM |
+| `polymarket_client.py` | Market data client and legacy compatibility wrapper; live V2 placement delegates to `src/venue/polymarket_v2_adapter.py` | HIGH — compatibility seam during R3 |
 
 ## Domain rules
 

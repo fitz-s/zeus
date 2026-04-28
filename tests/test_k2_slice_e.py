@@ -1,3 +1,9 @@
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: K2 order and price safety regressions including V2 adapter side validation.
+# Reuse: Run when PolymarketClient order placement, fee math, or Kelly safety changes.
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-27
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 """K2 Slice E: Order & Price Safety — fail-close tests.
 
 Bug #46: place_limit_order must reject invalid side values
@@ -37,23 +43,41 @@ class TestPlaceLimitOrderSideValidation:
 
     def test_valid_sides_accepted(self):
         """BUY and SELL must pass validation (mock the rest)."""
-        from unittest.mock import MagicMock, patch
+        from types import SimpleNamespace
 
         from src.data.polymarket_client import PolymarketClient
+        from src.venue.polymarket_v2_adapter import PreflightResult
 
-        client = PolymarketClient.__new__(PolymarketClient)
-        client._clob_client = MagicMock()
-        client._clob_client.create_order.return_value = MagicMock()
-        client._clob_client.post_order.return_value = {"status": "ok"}
+        class FakeEnvelope:
+            order_id = "ord-valid-side"
+
+            def to_dict(self):
+                return {"sdk_package": "py-clob-client-v2", "order_id": self.order_id}
+
+        class FakeAdapter:
+            def preflight(self):
+                return PreflightResult(ok=True)
+
+            def submit_limit_order(self, **_kwargs):
+                return SimpleNamespace(
+                    status="accepted",
+                    error_code=None,
+                    error_message=None,
+                    envelope=FakeEnvelope(),
+                )
+
+        client = PolymarketClient()
+        client._v2_adapter = FakeAdapter()
 
         # Should not raise
         for side in ["BUY", "SELL"]:
-            result = client.place_limit_order(
-                token_id="abc123",
-                price=0.50,
-                size=10.0,
-                side=side,
-            )
+            with pytest.warns(DeprecationWarning, match="compatibility wrapper"):
+                result = client.place_limit_order(
+                    token_id="abc123",
+                    price=0.50,
+                    size=10.0,
+                    side=side,
+                )
             assert result is not None
 
 

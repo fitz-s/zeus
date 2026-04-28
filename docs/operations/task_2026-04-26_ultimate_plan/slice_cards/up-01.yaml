@@ -1,0 +1,33 @@
+id: up-01
+title: NET_NEW polymarket_truth_contract.yaml (Layer 0 truth-contract manifest)
+authority_basis:
+  - architecture/city_truth_contract.yaml:1-118 (canonical mirror — 4 source roles, evidence_classes, caution_flags, forbidden_inferences)
+  - apr26_findings_routing.yaml:F-007/F-008/F-009/F-010 cluster
+  - Apr26 review §9 design language (snapshot+gate semantics)
+  - Fitz Constraint #1 (K=1 root from which F-007/F-008/F-009/F-010 cascade down)
+file_line:
+  - 'architecture/city_truth_contract.yaml:30-118 (mirror schema: source_roles, contract_fields, caution_flags, forbidden_inferences, evidence_classes)'
+  - architecture/invariants.yaml:178-310 (must register new INV citing this manifest)
+  - src/contracts/order_semantics.py (NEW — created in up-02 — consumes this manifest)
+antibody_test:
+  - tests/test_polymarket_truth_contract.py::test_yaml_round_trips_required_sections (caution_flags, forbidden_inferences, evidence_classes, contract_fields, authority_tiers all parse)
+  - tests/test_polymarket_truth_contract.py::test_forbidden_inferences_includes_known_traps (Gamma_open_neq_CLOB_tradable, signature_type_2_neq_all_wallets, Data_API_quote_neq_CLOB_book, fee_rate_bps_eventually_consistent, discovery_axis_inverts_finality_on_Gamma_Chain_edge)
+  - 'tests/test_polymarket_truth_contract.py::test_authority_tiers_three_axes (R2L2 Attack-L2-1: finality_order, discovery_order, realtime_order; intra-axis transitivity required, cross-axis disagreements expected by design)'
+  - tests/test_polymarket_truth_contract.py::test_freshness_class_required_per_role (every role declares freshness_class)
+  - tests/test_polymarket_truth_contract.py::test_collateral_tokens_enumerated (pUSD + USDC per Q-NEW-1 RESOLVED-DIVERGENT — NOT just USDC marketing label)
+depends_on: []
+estimated_h: 4
+risk: low
+critic_gate: standard
+notes:
+  - Pure manifest — no schema mutation, no live code change.
+  - K=1 root per Fitz Constraint #1 — once this exists every per-market exception (negRisk, GTD, FOK, signature_type) has a structured home.
+  - Naming mirrors city_truth_contract.yaml exactly to preserve the mental model.
+  - 'Authority status: stable_schema_not_current_truth_table; current per-market truth lives in NEW docs/operations/current_polymarket_validity.md (separate concern).'
+  - |
+    **R2L2 Attack-L2-1**: authority_tiers is a 3-tuple (NOT a single linear list). Three axes:
+      finality_order: [Chain, CLOB-book, Data-API, Gamma, local-cache]
+      discovery_order: [Gamma, Chain]  (Gamma defines markets BEFORE chain settles them)
+      realtime_order: [CLOB-book, Data-API, Chain, Gamma]
+    Intra-axis transitivity required; cross-axis disagreement expected by design.
+  - 'collateral_tokens enum encoded: [''pUSD'',''USDC''] per Q-NEW-1 (eth_call symbol() on `0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB` → "pUSD"/"Polymarket USD").'

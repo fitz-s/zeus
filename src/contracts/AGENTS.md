@@ -19,6 +19,8 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 | `edge_context.py` | Edge provenance (source, confidence, costs) | HIGH — INV-12 enforcement |
 | `epistemic_context.py` | Cross-layer uncertainty context | HIGH |
 | `execution_intent.py` | Entry/exit intent typing | HIGH |
+| `venue_submission_envelope.py` | Polymarket V2 submission provenance envelope | HIGH — live venue provenance contract |
+| `fx_classification.py` | Operator-selected pUSD/USDC.e accounting enum gate | HIGH — no stringly redemption accounting |
 | `alpha_decision.py` | Alpha target declaration | MEDIUM |
 | `decision_evidence.py` | Decision evidence bundles | MEDIUM |
 | `provenance_registry.py` | INV-13 constant registration | HIGH — cascade safety |
@@ -36,6 +38,7 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 
 - `assert_settlement_value()` MUST gate every DB write of a settlement value — no exceptions
 - Price direction matters: buy_yes prices and buy_no prices are semantically different — always use typed wrappers
+- `FXClassification` enum values are the only accepted redemption/accounting gate values; raw strings must be rejected.
 - Contracts are **frozen dataclasses** — immutability is intentional
 - This is K0 (kernel) — changes here require planning lock and packet discipline
 

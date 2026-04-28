@@ -1,0 +1,77 @@
+id: M4
+phase: M
+title: Cancel/replace + exit safety — mutex per (position, token) + typed cancel parser
+purpose: |
+  Prevent duplicate exit sells and unsafe cancel/replace loops. Exit
+  preflight consumes Z4 CollateralLedger token reservations, NOT pUSD.
+authority_basis:
+  - V2.1 §M4
+  - Apr26 review F-005 (cancel failure not first-class)
+  - R2 mid-03 CANCEL_FAILED + CANCEL_REPLACE_BLOCKED events (M1 already mints)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 + M1 + M2 + M3 land
+deliverables:
+  new_modules:
+    - path: src/execution/exit_safety.py
+      summary: Mutex + cancel parser + replacement gate.
+      surface: |
+        class ExitMutex:
+            def acquire(self, position_id: int, token_id: str, command_id: str) -> bool: ...
+            def release(self, position_id: int, token_id: str, command_id: str) -> None: ...
+
+        @dataclass
+        class CancelOutcome:
+            status: Literal["CANCELED","NOT_CANCELED","UNKNOWN"]
+            reason: Optional[str]
+            raw_response: dict
+
+        def parse_cancel_response(raw: dict) -> CancelOutcome: ...
+
+        def can_submit_replacement_sell(position_id: int, token_id: str) -> tuple[bool, Optional[str]]:
+            # returns (allowed, block_reason)
+            # blocked if prior sell command is in {SUBMITTING, ACKED, RESTING, CANCEL_REQUESTED, CANCEL_UNKNOWN}
+            ...
+  new_tables:
+    - sql: |
+        CREATE TABLE IF NOT EXISTS exit_mutex_holdings (
+          mutex_key TEXT PRIMARY KEY,  -- f"{position_id}:{token_id}"
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id),
+          acquired_at TEXT NOT NULL,
+          released_at TEXT
+        );
+  extended_modules:
+    - file: src/execution/exit_triggers.py
+      function: schedule_exit
+      change: |
+        Pre-submit:
+        1. ledger.sell_preflight(intent) → fails-closed if no token balance/reservation
+        2. exit_mutex.acquire(position, token, command_id) → fails if held
+        3. emit cancel command if existing sell needs replacement
+        Cancel response handler:
+        4. parse_cancel_response → CANCEL_CONFIRMED / CANCEL_FAILED / CANCEL_UNKNOWN
+        5. if CANCEL_UNKNOWN: blocks replacement until M5 sweep proves outcome
+acceptance_tests:
+  - tests/test_exit_safety.py::test_cancel_canceled_array_success_creates_CANCEL_CONFIRMED
+  - tests/test_exit_safety.py::test_cancel_not_canceled_dict_creates_CANCEL_FAILED_or_REVIEW_REQUIRED
+  - tests/test_exit_safety.py::test_cancel_network_timeout_creates_CANCEL_UNKNOWN
+  - tests/test_exit_safety.py::test_CANCEL_UNKNOWN_blocks_replacement
+  - tests/test_exit_safety.py::test_partial_fill_plus_cancel_remainder_updates_remaining_shares
+  - tests/test_exit_safety.py::test_two_exit_requests_for_same_position_collapse_into_one_durable_chain
+  - tests/test_exit_safety.py::test_exit_preflight_uses_token_balance_not_pusd
+    | high pUSD, zero CTF balance, attempt exit → CollateralInsufficient (Z4 antibody)
+  - tests/test_exit_safety.py::test_mutex_held_blocks_concurrent_exit
+  - tests/test_exit_safety.py::test_mutex_released_on_cancel_confirmed_or_filled_or_expired
+operator_decision_required: []
+depends_on: [Z0..Z4, U1, U2, M1, M2, M3]
+estimated_h: 12
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [mid-03 CANCEL_FAILED, mid-04 PARTIAL]
+  v2_1_phases: [M4]
+new_invariants_or_NCs:
+  - INV-NEW-I: "Replacement sell BLOCKED until prior sell reaches CANCEL_CONFIRMED, FILLED+CONFIRMED, EXPIRED, or proven absent by reconciliation."
+  - INV-NEW-J: "Exit mutex per (position_id, token_id) is single-holder; concurrent acquire blocked."
+notes:
+  - F-005 (cancel failure not modeled dangerous) closure depends on this slice.
+  - parse_cancel_response is the typed-outcome surface for Apr26 §F-005 fix.

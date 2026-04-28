@@ -2,7 +2,7 @@
 
 Pins the 5 critic-identified blockers so they cannot silently regress.
 
-Fix 1: _wu_daily_dispatch passes City objects, not city name strings
+Fix 1: current daily-observation scheduler routes through canonical daily_tick
 Fix 2: backfill computes is_missing_local_hour via _is_missing_local_hour
 Fix 3: backfill local_time is target_date at peak hour, not fetch_utc.astimezone
 Fix 4: backfill has --dry-run flag
@@ -19,13 +19,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def test_main_wu_daily_dispatch_passes_city_objects_not_names():
-    """_wu_daily_dispatch must convert city names to City objects before calling collect_daily_highs."""
+    """Live daily-observation scheduling must route through canonical daily_tick."""
     from src import main
-    source = inspect.getsource(main._wu_daily_dispatch)
+    source = inspect.getsource(main._k2_daily_obs_tick)
     # Old broken call used city_names= kwarg which does not exist on collect_daily_highs
-    assert "city_names=" not in source, "_wu_daily_dispatch still uses broken city_names= kwarg"
-    # Must now use cities= kwarg (passing City objects)
-    assert "cities=" in source, "_wu_daily_dispatch must pass cities= kwarg to collect_daily_highs"
+    assert "city_names=" not in source, "_k2_daily_obs_tick still uses broken city_names= kwarg"
+    assert "daily_tick" in source, "_k2_daily_obs_tick must call the canonical daily_tick path"
 
 
 # ---------------------------------------------------------------------------

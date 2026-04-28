@@ -48,6 +48,7 @@ from typing import Iterable, Optional
 import yaml
 
 from src.config import City, cities as ALL_CITIES, cities_by_name
+from src.data.forecast_source_registry import forecast_table_source_ids
 from src.state.data_coverage import (
     CoverageReason,
     CoverageStatus,
@@ -76,13 +77,7 @@ SOURCES_BY_TABLE: dict[DataTable, tuple[str, ...]] = {
     DataTable.OBSERVATIONS: ("wu_icao_history", "hko_daily_api"),
     DataTable.OBSERVATION_INSTANTS: ("openmeteo_archive_hourly",),
     DataTable.SOLAR_DAILY: ("openmeteo_archive_solar",),
-    DataTable.FORECASTS: (
-        "openmeteo_previous_runs",
-        "gfs_previous_runs",
-        "ecmwf_previous_runs",
-        "icon_previous_runs",
-        "ukmo_previous_runs",
-    ),
+    DataTable.FORECASTS: forecast_table_source_ids(),
 }
 
 

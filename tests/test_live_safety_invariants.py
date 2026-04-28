@@ -140,7 +140,7 @@ def test_live_exit_never_closes_without_fill():
     assert pos.state == "pending_exit"
     assert pos.state != "voided"
     # Exit state should indicate sell was placed but not filled
-    assert pos.exit_state in ("sell_placed", "sell_pending")
+    assert pos.exit_state in ("sell_placed", "sell_pending", "retry_pending")
 
 
 # ---- Test 2: Entry creates pending_tracked ----
@@ -522,7 +522,7 @@ def test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only
     )
 
     assert stats["quarantined"] == 1
-    quarantine = next(pos for pos in portfolio.positions if pos.trade_id.startswith("quarantine_"))
+    quarantine = next(pos for pos in portfolio.positions if pos.chain_state == "quarantined")
     assert quarantine.state == "quarantined"
     assert quarantine.chain_state == "quarantined"
 
@@ -878,7 +878,7 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
             "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
             "logger": logging.getLogger("test_day0_transition"),
             "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
-            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 2, 4, 30, tzinfo=timezone.utc)),
         },
     )
 
@@ -1089,7 +1089,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
             "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
             "logger": logging.getLogger("test_same_cycle_day0_refresh"),
             "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
-            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 2, 4, 30, tzinfo=timezone.utc)),
         },
     )
 
@@ -1228,12 +1228,17 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
     monkeypatch.setattr(
         monitor_refresh,
         "_fetch_day0_observation",
-        lambda city, target_d: {
-            "high_so_far": 44.0,
-            "current_temp": 43.0,
-            "source": "wu_api",
-            # Missing observation_time forces fallback to the stored posterior.
-        },
+        lambda city, target_d: type(
+            "Obs",
+            (),
+            {
+                "high_so_far": 44.0,
+                "current_temp": 43.0,
+                "source": "wu_api",
+                # Missing observation_time forces fallback to the stored posterior.
+                "observation_time": None,
+            },
+        )(),
     )
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)

@@ -17,7 +17,7 @@ Bind the real-world feeds Zeus depends on to the correct semantic roles: settlem
 - Current/Day0 observation client chain.
 - Historical hourly observation truth and v2 migration.
 - Forecast appenders and forecast-skill/backfill paths.
-- Market scanner/Polymarket client and ingestion health/quota/proxy behavior.
+- Market scanner/Polymarket compatibility client and ingestion health/quota/proxy behavior.
 
 ## 4. Runtime role
 Feeds the rest of Zeus with source-bound real-world data and continuously mediates among provider differences, quotas, fallback behavior, and city-specific truth contracts.
@@ -42,7 +42,13 @@ Data does not set durable law, but it is the place where semantic category error
 - Current observation client APIs
 - Hourly historical clients/writers for `observation_instants_v2`
 - Forecast append/backfill surfaces
-- Market/venue data clients
+- Market/venue data clients. `polymarket_client.py` is now a compatibility
+  wrapper for callers that still patch/use `PolymarketClient`; live
+  placement/cancel/order queries delegate to `src/venue/polymarket_v2_adapter.py`.
+  R3 A2-selected order types must pass through this wrapper unchanged so
+  maker/taker policy reaches live adapter submit calls.
+  pUSD balances now return through CollateralLedger snapshots rather than raw
+  USDC.e floats.
 - Proxy/quota/validator helpers
 
 ## 8. Internal seams
@@ -58,8 +64,10 @@ Data does not set durable law, but it is the place where semantic category error
 | `observation_client.py` | Current observation chain for runtime/Day0 context. |
 | `hourly_instants_append.py` | Legacy hourly path; needs explicit status in rehydrated docs. |
 | `wu_hourly_client.py / ogimet_hourly_client.py / observation_instants_v2_writer.py / tier_resolver.py` | New same-source-as-settlement hourly migration stack. |
-| `forecasts_append.py / ensemble_client.py / ecmwf_open_data.py / openmeteo_client.py` | Forecast and forecast-support ingest family. |
-| `market_scanner.py / polymarket_client.py` | Venue/executable-context inputs. |
+| `forecast_source_registry.py / forecast_ingest_protocol.py` | R3 F1 typed forecast-source registry, dormant operator gates, and source-stamped bundle protocol. |
+| `tigge_client.py` | R3 F3 dormant TIGGE ingest adapter; construction is safe with gate closed, and open-gate fetch reads only an operator-approved local JSON payload configured by constructor, `ZEUS_TIGGE_PAYLOAD_PATH`, or `payload_path:` in the decision artifact. |
+| `forecasts_append.py / ensemble_client.py / ecmwf_open_data.py / openmeteo_client.py` | Forecast and forecast-support ingest family; new forecast rows stamp `source_id`, `raw_payload_hash`, `captured_at`, and `authority_tier`. |
+| `market_scanner.py / polymarket_client.py` | Venue/executable-context inputs; live order side effects route through the V2 venue adapter; balance compatibility configures CollateralLedger with pUSD. `polymarket_client.py` preserves A2-selected `order_type` on the adapter boundary. |
 | `proxy_health.py / openmeteo_quota.py / ingestion_guard.py / rebuild_validators.py / hole_scanner.py` | Operational safety/guardrail surfaces. |
 
 ## 10. Relevant tests
@@ -125,6 +133,8 @@ Data does not set durable law, but it is the place where semantic category error
 - Daily settlement writer source routing
 - Hourly v2 source-tier mapping and write antibodies
 - Any source-tag strings consumed by tests/writers/manifests
+- Forecast-source registry IDs consumed by `forecasts_append.py`,
+  `ensemble_client.py`, and `hole_scanner.py`
 
 ## 20. Verification commands
 ```bash

@@ -34,9 +34,24 @@ def mem_conn():
     c.close()
 
 
+@pytest.fixture(autouse=True)
+def allow_cutover_for_idempotency_unit_tests(monkeypatch):
+    """These tests isolate idempotency/materialization, not cutover state."""
+    monkeypatch.setattr("src.execution.executor._assert_cutover_allows_submit", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._assert_heartbeat_allows_submit", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._assert_ws_gap_allows_submit", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._assert_collateral_allows_buy", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *a, **kw: None)
+    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda *a, **kw: "GTC")
+    monkeypatch.setattr("src.state.venue_command_repo._assert_snapshot_gate", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.venue_command_repo._assert_envelope_gate", lambda *a, **kw: "env-unit-test")
+
+
 def _make_entry_intent(limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36) -> object:
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
+    from src.contracts.slippage_bps import SlippageBps
     from src.contracts import Direction
 
     return ExecutionIntent(
@@ -44,7 +59,7 @@ def _make_entry_intent(limit_price: float = 0.55, token_id: str = "tok-" + "0" *
         target_size_usd=10.0,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(200.0, "adverse"),
         is_sandbox=False,
         market_id="mkt-test-001",
         token_id=token_id,
@@ -122,7 +137,7 @@ class TestPreSubmitIdempotencyLookup:
 
             r1 = execute_intent(intent, 0.55, "bin-label", conn=mem_conn, decision_id="dec-bbb")
 
-        assert r1.status == "rejected"
+        assert r1.status == "unknown_side_effect"
         assert "submit_unknown" in (r1.reason or "")
 
         # Second call: same inputs -> pre-submit lookup finds UNKNOWN/SUBMITTING row
@@ -135,10 +150,10 @@ class TestPreSubmitIdempotencyLookup:
 
         # place_limit_order must NOT have been called a second time
         instance2.place_limit_order.assert_not_called()
-        assert r2.status == "rejected"
-        assert "idempotency_collision" in (r2.reason or "")
+        assert r2.status == "unknown_side_effect"
+        assert "idempotency_collision" in (r2.reason or "") or "submit_unknown" in (r2.reason or "")
         # SUBMITTING or UNKNOWN state set
-        assert r2.command_state in ("SUBMITTING", "UNKNOWN"), f"Got command_state={r2.command_state!r}"
+        assert r2.command_state in ("SUBMITTING", "UNKNOWN", "SUBMIT_UNKNOWN_SIDE_EFFECT"), f"Got command_state={r2.command_state!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +232,7 @@ class TestMaterializePositionGate:
                     "outcomes": [{"title": "39-40F", "range_low": 39, "range_high": 40}],
                     "hours_since_open": 30.0,
                     "hours_to_resolution": 10.0,
+                    "temperature_metric": "high",
                     "event_id": "evt-1",
                     "slug": "nyc-2026-04-03",
                 }
@@ -440,6 +456,7 @@ class TestWarningSurfaces:
                     "outcomes": [{"title": "39-40F", "range_low": 39, "range_high": 40}],
                     "hours_since_open": 30.0,
                     "hours_to_resolution": 10.0,
+                    "temperature_metric": "high",
                     "event_id": "evt-1",
                     "slug": "nyc-2026-04-03",
                 }

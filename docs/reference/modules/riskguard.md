@@ -40,6 +40,9 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 - Policy resolution/emission APIs
 - Metric computation helpers
 - Alert/notification helpers
+- R3 A2 allocation governor APIs in `src/risk_allocator/governor.py`:
+  `CapPolicy`, `GovernorState`, `RiskAllocator.can_allocate()`,
+  `maker_or_taker()`, `reduce_only_mode_active()`, and `PortfolioGovernor`.
 
 ## 8. Internal seams
 - Metric collection vs policy resolution
@@ -55,18 +58,49 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 | `risk_level.py` | Level taxonomy and ordering. |
 | `metrics.py` | Source metrics and decision-support calculations. |
 | `discord_alerts.py` | Human-visible symptom layer; must stay downstream. |
+| `../risk_allocator/governor.py` | R3 A2 blocking capital allocator/governor: reads current `position_lots`, unresolved submit-unknown side effects, open exchange reconcile findings, heartbeat/WS health, and drawdown evidence to deny new risk or force reduce-only/no-trade modes before executor submission. |
+
+### R3 A2 risk allocator / portfolio governor
+
+`src/risk_allocator/` is a K1 governance adjunct to RiskGuard. It is intentionally
+blocking and read-only:
+
+- `position_lots` is the exposure truth input. Latest append-only lot state per
+  position is read; the allocator never repairs, inserts, updates, or deletes
+  lots.
+- OPTIMISTIC and CONFIRMED exposure remain separate. CONFIRMED exposure counts
+  at full capacity weight; OPTIMISTIC exposure counts at
+  `CapPolicy.optimistic_exposure_weight`.
+- Per-market, per-event, per-resolution-window, and correlated-exposure caps
+  deny allocation with structured reasons.
+- Kill switch reasons include manual operator halt, heartbeat lost, WS-gap
+  threshold breach, unresolved submit-unknown count, unresolved exchange
+  reconciliation finding count, and drawdown threshold.
+- Maker/taker selection is behavior-changing: shallow books, near-resolution
+  windows, or heartbeat states that only allow non-resting orders select `FOK`
+  for executor submission; healthy/deep/far-from-close paths may rest as `GTC`.
+- Executor integration consults the process-wide allocator before command
+  persistence or SDK contact. If no global governor state has been configured,
+  the seam defaults to allow so isolated tests and non-live utility seams remain
+  inert until cycle startup refreshes the governor.
+- Cycle summaries include `portfolio_governor` for operator visibility, but the
+  denial path is behavioral: `AllocationDenied` blocks submission.
 
 ## 10. Relevant tests
 - tests/test_authority_gate.py
 - tests/test_auto_pause_entries.py
 - tests/test_bug100_k1_k2_structural.py
 - tests/test_cross_module_invariants.py
+- tests/test_risk_allocator.py
 
 ## 11. Invariants
 - Risk must change evaluator/sizing/execution behavior.
 - `strategy_key` remains the only governance key; risk metadata must not become a competing key.
 - Alerting is not proof of risk actuation.
 - Risk decisions must remain inspectable in canonical truth surfaces.
+- R3 A2 kill switches and cap denials must block executor submission, not only
+  annotate reports.
+- R3 A2 allocation must preserve OPTIMISTIC vs CONFIRMED capacity accounting.
 
 ## 12. Negative constraints
 - Do not add a risk level that only changes UI or logs.
@@ -94,6 +128,8 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 ## 17. Planning-lock triggers
 - Any change to risk levels, policy grammar, or how risk affects runtime behavior.
 - Any work that changes strategy-aware gating or auto-pause semantics.
+- Any change that makes `RiskAllocator` advisory-only, changes the
+  `position_lots` read contract, or bypasses executor pre-submit gating.
 
 ## 18. Common false assumptions
 - Riskguard can be evaluated from alerts alone.
@@ -109,6 +145,7 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 ```bash
 pytest -q tests/test_authority_gate.py tests/test_auto_pause_entries.py tests/test_bug100_k1_k2_structural.py
 pytest -q tests/test_cross_module_invariants.py
+pytest -q -p no:cacheprovider tests/test_risk_allocator.py
 python -m py_compile src/riskguard/*.py
 ```
 

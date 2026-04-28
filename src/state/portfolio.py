@@ -1410,8 +1410,17 @@ def add_position(state: PortfolioState, pos: Position) -> None:
         existing_tid = existing.token_id if existing.direction == "buy_yes" else existing.no_token_id
         if tid and existing_tid == tid and existing.direction == pos.direction:
             # Append-only virtual ledger projection
-            logger.info("DEDUP/LEDGER: appending duplicate %s %s fill into existing %s %s",
-                           pos.direction, pos.bin_label, existing.trade_id, existing.state)
+            logger.warning(
+                "DEDUP/LEDGER: appending duplicate %s %s fill into existing %s %s; "
+                "entry context from new position is preserved only inside nested_fills "
+                "(entered_at=%s entry_price=%.4f)",
+                pos.direction,
+                pos.bin_label,
+                existing.trade_id,
+                existing.state,
+                pos.entered_at,
+                pos.entry_price,
+            )
             existing.nested_fills.append(pos)
             existing.size_usd += pos.size_usd
             existing.shares += pos.effective_shares

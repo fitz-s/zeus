@@ -1,0 +1,52 @@
+id: mid-08
+title: FAILURE_INJECTION_SUITE — deterministic fake CLOB + failure-injection harness + 5 P0 behavioral tests (Apr26 §F-012 + axis-31 + axis-49 closure)
+authority_basis:
+  - Apr26 forensic review §3 F-012 (Tests prove happy paths, not live-money safety)
+  - Apr26 forensic review §6 axis-31 (paper/live parity — FAIL, S1)
+  - Apr26 forensic review §6 axis-49 (failure-mode test suite — confidence "very high")
+  - Apr26 forensic review §13 (P0 test list — 17 named P0 tests; ≥5 currently unowned per multi-review)
+  - evidence/multi_review/critic_report.md TOP_5_ATTACKS §2 (deterministic fake CLOB + failure injection + restart simulation absent)
+  - evidence/multi_review/trading_correctness_report.md LIVE_MONEY_SAFETY_GAPS (5 named edge cases without slice owners)
+file_line:
+  new_emission_seam:
+    - tests/conftest.py (EXTEND — add fake_clob fixture)
+    - tests/fakes/clob.py (NEW — deterministic fake CLOB client with failure-injection knobs)
+    - 'tests/fakes/failure_modes.py (NEW — taxonomy: timeout, partial_response, network_jitter, oracle_conflict, restart_mid_cycle)'
+    - tests/integration/test_p0_live_money_safety.py (NEW — 5+ P0 behavioral tests)
+  unowned_p0_tests_to_mint:
+    - test_duplicate_submit_idempotency  # under timeout-retry, exchange-side de-dup
+    - test_rapid_sequential_partial_fills  # 3 fills <1s, trade_id de-dup, monotonic filled_size
+    - test_red_cancel_all_behavioral  # actual SDK cancel_all called, not just exit_reason set
+    - test_market_close_while_resting  # CLOSED_MARKET_UNKNOWN event emission + position quarantine
+    - test_ws_or_polling_resubscribe_recovery  # restart mid-cycle, replay missed events, no double-fill
+antibody_test:
+  - |
+    tests/integration/test_p0_live_money_safety.py::test_duplicate_submit_idempotency
+    asserts: under simulated timeout (failure_modes.timeout_after_post), retry uses cached idempotency_key AND venue_command_repo returns existing row (NC-19 enforced); no duplicate venue order observed in fake CLOB ledger
+  - |
+    tests/integration/test_p0_live_money_safety.py::test_rapid_sequential_partial_fills
+    asserts: fake CLOB emits 3 PARTIAL_FILL_OBSERVED events <1s with unique trade_ids; venue_command_repo de-dups by trade_id; filled_size monotonic non-decreasing; final state PARTIAL → FILLED transition correct
+  - |
+    tests/integration/test_p0_live_money_safety.py::test_red_cancel_all_behavioral
+    asserts: when riskguard sets RED, mid-01 emits CANCEL command via venue_command_repo for EACH open order (not just exit_reason); fake CLOB observes cancel_order calls; no live order remains open after sweep
+  - |
+    tests/integration/test_p0_live_money_safety.py::test_market_close_while_resting
+    asserts: when fake CLOB returns market_status="closed" while a venue_command is in PARTIAL state, CLOSED_MARKET_UNKNOWN event emitted; position quarantined per chain_reconciliation; no further submit attempts
+  - |
+    tests/integration/test_p0_live_money_safety.py::test_resubscribe_recovery
+    asserts: simulated daemon restart mid-cycle; on restart, command_recovery + (mid-07 ws_or_poll) backfills missed PARTIAL_FILL_OBSERVED + FILL_CONFIRMED events; no duplicate fills counted; reconciliation_run records replayed event count
+  - architecture/test_topology.yaml registry entry added (5 new P0 tests + 2 new fixture modules)
+depends_on:
+  - mid-03  # CANCEL_FAILED + CLOSED_MARKET_UNKNOWN events must be defined first
+  - mid-04  # PARTIAL_FILL_OBSERVED payload schema must exist
+  - mid-06  # uses C1.5 relationship-test conftest infrastructure
+  - mid-07  # WS-or-polling decision must be locked before resubscribe-recovery test can be written
+estimated_h: 18
+risk: high  # 5 distinct integration-grade tests + 2 new fixture modules; surface area large
+critic_gate: critic-opus
+notes:
+  - 'Deterministic fake CLOB requires: state machine (place_order → resting → partial → filled), settlement clock (markets close at fixed time), failure-injection knobs (timeout, jitter, partial_response, oracle_conflict).'
+  - Apr26 axis-31 (paper/live parity) closure depends on fake CLOB matching real V2 SDK shape exactly — antibody from down-03 (V2 SDK contract antibody) is the upstream contract.
+  - This is the immune-system slice for live-money safety. Without it, X2's "0 F-012 violators" is scoped only to slice cards in scope, not to Apr26 §13 P0 list. Multi-review scientist + critic both flagged this gap.
+  - Co-locate with tests/test_topology.yaml registry update; topology_doctor.py --planning-lock returns ok=true.
+  - Estimated h is honest median (5 P0 tests × ~2h each + fake_clob 6h + failure_modes 2h = ~18h).

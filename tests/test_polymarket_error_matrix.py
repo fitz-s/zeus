@@ -6,6 +6,8 @@ and exit_lifecycle converts that into a retry (not a silent close).
 """
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 import httpx
@@ -34,6 +36,14 @@ def _mem_conn(monkeypatch):
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.execution.executor._assert_cutover_allows_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+    monkeypatch.setattr("src.execution.executor._assert_heartbeat_allows_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._assert_ws_gap_allows_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._assert_collateral_allows_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.exit_lifecycle.check_sell_collateral", lambda *args, **kwargs: (True, ""))
     yield mem
     mem.close()
 
@@ -59,6 +69,70 @@ class _FakeHttpResponse:
 def _make_poly_exc(status_code: int, body: dict = None):
     from py_clob_client.exceptions import PolyApiException
     return PolyApiException(resp=_FakeHttpResponse(status_code, body or {}))
+
+
+def _ensure_snapshot(conn, *, token_id: str) -> dict:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    now = datetime(2026, 4, 27, tzinfo=timezone.utc)
+    snapshot_id = f"err-matrix-snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is None:
+        insert_snapshot(
+            conn,
+            ExecutableMarketSnapshotV2(
+                snapshot_id=snapshot_id,
+                gamma_market_id="gamma-error-matrix",
+                event_id="event-error-matrix",
+                event_slug="event-error-matrix",
+                condition_id="condition-error-matrix",
+                question_id="question-error-matrix",
+                yes_token_id=token_id,
+                no_token_id=f"{token_id}-no",
+                selected_outcome_token_id=token_id,
+                outcome_label="YES",
+                enable_orderbook=True,
+                active=True,
+                closed=False,
+                accepting_orders=True,
+                market_start_at=None,
+                market_end_at=None,
+                market_close_at=None,
+                sports_start_at=None,
+                min_tick_size=Decimal("0.01"),
+                min_order_size=Decimal("0.01"),
+                fee_details={},
+                token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+                rfqe=None,
+                neg_risk=False,
+                orderbook_top_bid=Decimal("0.39"),
+                orderbook_top_ask=Decimal("0.41"),
+                orderbook_depth_jsonb="{}",
+                raw_gamma_payload_hash="a" * 64,
+                raw_clob_market_info_hash="b" * 64,
+                raw_orderbook_hash="c" * 64,
+                authority_tier="CLOB",
+                captured_at=now,
+                freshness_deadline=now + timedelta(days=365),
+            ),
+        )
+    return {
+        "executable_snapshot_id": snapshot_id,
+        "executable_snapshot_min_tick_size": Decimal("0.01"),
+        "executable_snapshot_min_order_size": Decimal("0.01"),
+        "executable_snapshot_neg_risk": False,
+    }
+
+
+def _make_exit_order_intent(conn, *, trade_id: str, token_id: str, shares: float, current_price: float, best_bid: float):
+    return create_exit_order_intent(
+        trade_id=trade_id,
+        token_id=token_id,
+        shares=shares,
+        current_price=current_price,
+        best_bid=best_bid,
+        **_ensure_snapshot(conn, token_id=token_id),
+    )
 
 
 def _base_position(**kwargs):
@@ -98,9 +172,9 @@ def _base_exit_context(**kwargs):
 # ---------------------------------------------------------------------------
 
 class TestExecuteExitOrderErrorMatrix:
-    """Executor rejects gracefully on any CLOB error — no exception propagation."""
+    """Executor records post-submit errors as unknown side effects — no exception propagation."""
 
-    def _run(self, exc, monkeypatch):
+    def _run(self, exc, monkeypatch, _mem_conn):
         class _BrokenClient:
             def __init__(self):
                 pass
@@ -109,38 +183,37 @@ class TestExecuteExitOrderErrorMatrix:
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _BrokenClient)
 
-        return execute_exit_order(
-            create_exit_order_intent(
-                trade_id="trade-err",
-                token_id="yes-tok-1",
-                shares=10.0,
-                current_price=0.45,
-                best_bid=0.44,
-            )
-        )
+        return execute_exit_order(_make_exit_order_intent(
+            _mem_conn,
+            trade_id="trade-err",
+            token_id="yes-tok-1",
+            shares=10.0,
+            current_price=0.45,
+            best_bid=0.44,
+        ))
 
-    def test_429_rate_limit_returns_rejected(self, monkeypatch):
+    def test_429_rate_limit_returns_rejected(self, monkeypatch, _mem_conn):
         """429 rate-limit → OrderResult.status='rejected', reason contains status code."""
         exc = _make_poly_exc(429, {"error": "rate limited"})
-        result = self._run(exc, monkeypatch)
-        assert result.status == "rejected"
+        result = self._run(exc, monkeypatch, _mem_conn)
+        assert result.status == "unknown_side_effect"
         assert "429" in result.reason
 
-    def test_500_server_error_returns_rejected(self, monkeypatch):
+    def test_500_server_error_returns_rejected(self, monkeypatch, _mem_conn):
         """5xx server error → OrderResult.status='rejected'."""
         exc = _make_poly_exc(500, {"error": "internal server error"})
-        result = self._run(exc, monkeypatch)
-        assert result.status == "rejected"
+        result = self._run(exc, monkeypatch, _mem_conn)
+        assert result.status == "unknown_side_effect"
         assert "500" in result.reason
 
-    def test_503_unavailable_returns_rejected(self, monkeypatch):
+    def test_503_unavailable_returns_rejected(self, monkeypatch, _mem_conn):
         """503 unavailable → OrderResult.status='rejected'."""
         exc = _make_poly_exc(503, {"error": "service unavailable"})
-        result = self._run(exc, monkeypatch)
-        assert result.status == "rejected"
+        result = self._run(exc, monkeypatch, _mem_conn)
+        assert result.status == "unknown_side_effect"
         assert "503" in result.reason
 
-    def test_timeout_returns_rejected(self, monkeypatch):
+    def test_timeout_returns_rejected(self, monkeypatch, _mem_conn):
         """httpx timeout → OrderResult.status='rejected', reason captures the error."""
         exc = httpx.TimeoutException("connect timeout")
 
@@ -150,19 +223,18 @@ class TestExecuteExitOrderErrorMatrix:
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _TimeoutClient)
 
-        result = execute_exit_order(
-            create_exit_order_intent(
-                trade_id="trade-timeout",
-                token_id="yes-tok-2",
-                shares=5.0,
-                current_price=0.50,
-                best_bid=0.49,
-            )
-        )
-        assert result.status == "rejected"
+        result = execute_exit_order(_make_exit_order_intent(
+            _mem_conn,
+            trade_id="trade-timeout",
+            token_id="yes-tok-2",
+            shares=5.0,
+            current_price=0.50,
+            best_bid=0.49,
+        ))
+        assert result.status == "unknown_side_effect"
         assert result.reason  # non-empty
 
-    def test_network_error_returns_rejected(self, monkeypatch):
+    def test_network_error_returns_rejected(self, monkeypatch, _mem_conn):
         """Generic network error → rejected, no exception escapes executor boundary."""
         class _BrokenClient:
             def __init__(self): pass
@@ -170,16 +242,15 @@ class TestExecuteExitOrderErrorMatrix:
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _BrokenClient)
 
-        result = execute_exit_order(
-            create_exit_order_intent(
-                trade_id="trade-net",
-                token_id="yes-tok-3",
-                shares=8.0,
-                current_price=0.42,
-                best_bid=0.41,
-            )
-        )
-        assert result.status == "rejected"
+        result = execute_exit_order(_make_exit_order_intent(
+            _mem_conn,
+            trade_id="trade-net",
+            token_id="yes-tok-3",
+            shares=8.0,
+            current_price=0.42,
+            best_bid=0.41,
+        ))
+        assert result.status == "unknown_side_effect"
         assert result.reason
 
 

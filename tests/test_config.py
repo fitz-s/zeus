@@ -373,6 +373,9 @@ def test_settlement_semantics_matches_city_metadata():
 
         if city.settlement_source_type == "wu_icao":
             assert sem.resolution_source == f"WU_{city.wu_station}"
+        elif city.settlement_source_type == "hko":
+            assert sem.resolution_source == "HKO_HQ"
+            assert sem.rounding_rule == "oracle_truncate"
         else:
             # Non-WU sources use source_type prefix
             assert sem.resolution_source == f"{city.settlement_source_type}_{city.wu_station}"

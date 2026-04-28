@@ -1906,7 +1906,13 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             # Downstream (rebuild_calibration_pairs*) filters by temperature_metric column
             # to route to the correct settlement semantics. Do NOT use members_json without
             # checking temperature_metric first.
-            json.dumps(ens.member_extrema.tolist()),
+            json.dumps(
+                (
+                    ens.member_extrema
+                    if isinstance(getattr(ens, "member_extrema", None), np.ndarray)
+                    else ens.member_maxes
+                ).tolist()
+            ),
             ens.spread_float(),
             int(ens.is_bimodal()),
             ens_result["model"],

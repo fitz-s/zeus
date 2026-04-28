@@ -51,7 +51,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 ## 9. Source files and their roles
 | File / surface | Role |
 |---|---|
-| `db.py` | Canonical write API and high-blast-radius state anchor. |
+| `db.py` | Canonical write API and high-blast-radius state anchor, including R3 M5 `exchange_reconcile_findings` and R3 R1 `settlement_commands` schema. |
 | `ledger.py` | Append-only economic/lifecycle event substrate. |
 | `projection.py` | Deterministic fold/rebuild layer. |
 | `lifecycle_manager.py` | Legal transition enforcement. |
@@ -59,6 +59,8 @@ This is the strongest code truth surface after executable tests. Delivery law al
 | `chain_reconciliation.py / chain_state.py` | Bridge between on-chain/CLOB truth and local records. |
 | `portfolio.py / portfolio_loader_policy.py` | Read model and load policy for live holdings. |
 | `canonical_write.py / chronicler.py / truth_files.py` | Write discipline, chronicle, and derived compatibility surfaces. |
+| `collateral_ledger.py` | Z4 pUSD/CTF collateral snapshots and reservations; fail-closed pre-submit truth. |
+| `venue_command_repo.py` | Durable venue command/event journal plus R3 U2 raw provenance projections (`venue_submission_envelopes`, order facts, trade facts, position lots, provenance envelope events). R3 M1 keeps command-side transitions grammar-additive and leaves order/trade facts in U2. R3 M2 adds economic-intent duplicate lookup for unresolved `SUBMIT_UNKNOWN_SIDE_EFFECT` commands and persists acked `venue_order_id` from append-event payloads. |
 
 ## 10. Relevant tests
 - tests/test_db.py
@@ -68,12 +70,25 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - tests/test_b070_control_overrides_history_v2.py
 - tests/test_chronicle_dedup.py
 - tests/test_cross_module_invariants.py
+- tests/test_collateral_ledger.py
+- tests/test_executable_market_snapshot_v2.py
+- tests/test_provenance_5_projections.py
+- tests/test_command_grammar_amendment.py
+- tests/test_riskguard_red_durable_cmd.py
+- tests/test_unknown_side_effect.py
+- tests/test_exchange_reconcile.py
+- tests/test_settlement_commands.py
 
 ## 11. Invariants
 - Append event before projection; never let derived JSON outrank canonical DB/event truth.
 - Unknown chain status is not the same as known-empty chain status.
 - Lifecycle phases are enum-backed and bounded by law, not arbitrary strings.
 - Void/quarantine/admin-close are not ordinary holding states.
+- pUSD buy collateral and CTF sell inventory are distinct state truths; neither substitutes for the other.
+- Terminal venue command states must release collateral reservations in the same append-event transaction.
+- A post-side-effect submit exception is not semantic rejection; it blocks duplicate submits until recovery proves venue state or records safe-replay permission.
+- RED force-exit durable CANCEL proxy commands are emitted only through `cycle_runner._execute_force_exit_sweep`; RiskGuard does not write venue commands directly.
+- Settlement/redeem command failure is not lifecycle settlement; only canonical settlement paths may terminalize positions.
 
 ## 12. Negative constraints
 - No signal, strategy, or UI code may write lifecycle state directly.
@@ -99,6 +114,9 @@ This is the strongest code truth surface after executable tests. Delivery law al
 
 ## 16. Likely modification routes
 - Schema or truth-contract change: law + schema + tests + migration proof in one packet.
+- R3 F1 forecast provenance columns (`source_id`, `raw_payload_hash`,
+  `captured_at`, `authority_tier`) are additive legacy-safe columns on
+  `forecasts`; new writes populate them, while legacy rows may remain nullable.
 - Projection-only change: prove append/projection parity and rebuild determinism.
 - Chain/CLOB reconciliation change: test unknown/known-empty/synced states explicitly.
 

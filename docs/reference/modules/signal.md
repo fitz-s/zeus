@@ -45,6 +45,10 @@ Mathematically dense but still downstream of contracts/source law. It must prese
 - Raw probability generation vs diurnal/day0 feature augmentation
 - Day0 high vs Day0 low causality families
 - Historical hourly features vs live same-day monitor context
+- Forecast-source activation/provenance lives upstream in
+  `src/data/forecast_source_registry.py` and `ensemble_client.py`; the
+  Monte Carlo core consumes already-fetched member arrays and must not perform
+  source gating itself.
 
 ## 9. Source files and their roles
 | File / surface | Role |

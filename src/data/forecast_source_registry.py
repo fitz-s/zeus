@@ -1,0 +1,251 @@
+# Created: 2026-04-27
+# Last reused/audited: 2026-04-27
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/F1.yaml
+"""Forecast source registry and operator gate checks for R3 F1.
+
+The registry is forecast-source plumbing. It is not settlement-source
+authority, does not activate new upstream ingest, and does not retrain
+calibration. Experimental sources stay dormant until both operator evidence
+and a runtime env flag are present.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Literal
+
+from src.data.forecast_ingest_protocol import ForecastAuthorityTier, ForecastIngestProtocol
+from src.data.tigge_client import TIGGEIngest
+
+
+ForecastSourceTier = Literal["primary", "secondary", "experimental", "disabled"]
+ForecastSourceKind = Literal["forecast_table", "live_ensemble", "experimental_ingest"]
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+class SourceNotEnabled(RuntimeError):
+    """Raised when a forecast source is disabled or operator-gated closed."""
+
+
+@dataclass(frozen=True)
+class ForecastSourceSpec:
+    """Typed registry row for a forecast source."""
+
+    source_id: str
+    tier: ForecastSourceTier
+    kind: ForecastSourceKind
+    authority_tier: ForecastAuthorityTier = "FORECAST"
+    ingest_class: type[ForecastIngestProtocol] | None = None
+    requires_api_key: bool = False
+    requires_operator_decision: bool = False
+    operator_decision_artifact: str | None = None
+    env_flag_name: str | None = None
+    enabled_by_default: bool = True
+    model_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source_id:
+            raise ValueError("ForecastSourceSpec.source_id is required")
+        if self.tier == "disabled" and self.enabled_by_default:
+            raise ValueError("disabled forecast sources cannot be enabled_by_default")
+        if self.requires_operator_decision and not (
+            self.operator_decision_artifact and self.env_flag_name
+        ):
+            raise ValueError(
+                "operator-gated forecast sources require artifact pattern and env flag"
+            )
+
+
+OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
+    "best_match": "openmeteo_previous_runs",
+    "gfs_global": "gfs_previous_runs",
+    "ecmwf_ifs025": "ecmwf_previous_runs",
+    "icon_global": "icon_previous_runs",
+    "ukmo_global_deterministic_10km": "ukmo_previous_runs",
+}
+
+ENSEMBLE_MODEL_SOURCE_MAP: dict[str, str] = {
+    "ecmwf_ifs025": "openmeteo_ensemble_ecmwf_ifs025",
+    "gfs025": "openmeteo_ensemble_gfs025",
+    "gfs": "openmeteo_ensemble_gfs025",
+    "tigge": "tigge",
+}
+
+_TIGGE_OPERATOR_ARTIFACT = (
+    "docs/operations/task_2026-04-26_ultimate_plan/**/"
+    "evidence/tigge_ingest_decision_*.md"
+)
+
+SOURCES: dict[str, ForecastSourceSpec] = {
+    "openmeteo_previous_runs": ForecastSourceSpec(
+        source_id="openmeteo_previous_runs",
+        tier="primary",
+        kind="forecast_table",
+        model_name="best_match",
+    ),
+    "gfs_previous_runs": ForecastSourceSpec(
+        source_id="gfs_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="gfs_global",
+    ),
+    "ecmwf_previous_runs": ForecastSourceSpec(
+        source_id="ecmwf_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="ecmwf_ifs025",
+    ),
+    "icon_previous_runs": ForecastSourceSpec(
+        source_id="icon_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="icon_global",
+    ),
+    "ukmo_previous_runs": ForecastSourceSpec(
+        source_id="ukmo_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="ukmo_global_deterministic_10km",
+    ),
+    "openmeteo_ensemble_ecmwf_ifs025": ForecastSourceSpec(
+        source_id="openmeteo_ensemble_ecmwf_ifs025",
+        tier="primary",
+        kind="live_ensemble",
+        model_name="ecmwf_ifs025",
+    ),
+    "openmeteo_ensemble_gfs025": ForecastSourceSpec(
+        source_id="openmeteo_ensemble_gfs025",
+        tier="secondary",
+        kind="live_ensemble",
+        model_name="gfs025",
+    ),
+    "tigge": ForecastSourceSpec(
+        source_id="tigge",
+        tier="experimental",
+        kind="experimental_ingest",
+        ingest_class=TIGGEIngest,
+        requires_api_key=True,
+        requires_operator_decision=True,
+        operator_decision_artifact=_TIGGE_OPERATOR_ARTIFACT,
+        env_flag_name="ZEUS_TIGGE_INGEST_ENABLED",
+        enabled_by_default=False,
+    ),
+}
+
+
+def stable_payload_hash(payload: object) -> str:
+    """Return a deterministic sha256 digest for raw forecast payloads."""
+
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def get_source(
+    source_id: str,
+    *,
+    sources: Mapping[str, ForecastSourceSpec] | None = None,
+) -> ForecastSourceSpec:
+    registry = sources or SOURCES
+    try:
+        return registry[source_id]
+    except KeyError as exc:
+        raise SourceNotEnabled(f"forecast source {source_id!r} is not registered") from exc
+
+
+def forecast_table_source_ids(
+    *,
+    sources: Mapping[str, ForecastSourceSpec] | None = None,
+) -> tuple[str, ...]:
+    registry = sources or SOURCES
+    return tuple(
+        source.source_id
+        for source in registry.values()
+        if source.kind == "forecast_table" and source.tier != "disabled"
+    )
+
+
+def source_id_for_previous_runs_model(model: str) -> str:
+    try:
+        return OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP[model]
+    except KeyError as exc:
+        raise SourceNotEnabled(f"Open-Meteo previous-runs model {model!r} is not registered") from exc
+
+
+def source_id_for_ensemble_model(model: str | None) -> str:
+    key = str(model or "ecmwf_ifs025").strip().lower()
+    return ENSEMBLE_MODEL_SOURCE_MAP.get(key, key)
+
+
+def _env_enabled(flag_name: str, environ: Mapping[str, str]) -> bool:
+    return str(environ.get(flag_name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _operator_artifact_present(pattern: str, *, root: Path) -> bool:
+    return any(root.glob(pattern))
+
+
+def is_source_enabled(
+    source_id: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    sources: Mapping[str, ForecastSourceSpec] | None = None,
+) -> bool:
+    spec = get_source(source_id, sources=sources)
+    if spec.tier == "disabled" or not spec.enabled_by_default:
+        if not spec.requires_operator_decision:
+            return False
+    if not spec.requires_operator_decision:
+        return spec.enabled_by_default and spec.tier != "disabled"
+
+    env = environ or os.environ
+    base = root or PROJECT_ROOT
+    assert spec.env_flag_name is not None
+    assert spec.operator_decision_artifact is not None
+    return _env_enabled(spec.env_flag_name, env) and _operator_artifact_present(
+        spec.operator_decision_artifact,
+        root=base,
+    )
+
+
+def gate_source(
+    source_id: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    sources: Mapping[str, ForecastSourceSpec] | None = None,
+) -> ForecastSourceSpec:
+    """Return enabled source spec or raise SourceNotEnabled."""
+
+    spec = get_source(source_id, sources=sources)
+    if not is_source_enabled(source_id, environ=environ, root=root, sources=sources):
+        raise SourceNotEnabled(
+            f"forecast source {source_id!r} is disabled or operator-gated closed"
+        )
+    return spec
+
+
+def active_sources(
+    *,
+    environ: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    sources: Mapping[str, ForecastSourceSpec] | None = None,
+) -> list[ForecastSourceSpec]:
+    """Return forecast sources whose static/runtime gates are open."""
+
+    registry = sources or SOURCES
+    return [
+        source
+        for source in registry.values()
+        if is_source_enabled(
+            source.source_id,
+            environ=environ,
+            root=root,
+            sources=registry,
+        )
+    ]

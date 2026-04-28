@@ -1,5 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
+# Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -9,6 +11,8 @@ Uses in-memory DB; mocks PolymarketClient.get_order.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,6 +45,7 @@ def mock_client():
 
 # 32 hex chars — satisfies IdempotencyKey length validation.
 _DEFAULT_IDEM_KEY = "a" * 32
+_NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
 
 
 def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
@@ -54,9 +59,18 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         import hashlib
         # Build a unique 32-hex key per command_id so duplicate inserts don't collide.
         idempotency_key = hashlib.md5(command_id.encode()).hexdigest()
+    snapshot_id = _ensure_snapshot(conn, token_id=token_id)
     insert_command(
         conn,
         command_id=command_id,
+        snapshot_id=snapshot_id,
+        envelope_id=_ensure_envelope(
+            conn,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+        ),
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -69,6 +83,114 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         created_at=created_at,
     )
     return command_id
+
+
+def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot_id = snapshot_id or f"snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.51"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
+
+
+def _ensure_envelope(
+    conn,
+    *,
+    token_id: str,
+    envelope_id: str | None = None,
+    side: str = "BUY",
+    price: float | Decimal = 0.5,
+    size: float | Decimal = 10.0,
+) -> str:
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    price_dec = Decimal(str(price))
+    size_dec = Decimal(str(size))
+    envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
+    if conn.execute(
+        "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone():
+        return envelope_id
+    insert_submission_envelope(
+        conn,
+        VenueSubmissionEnvelope(
+            sdk_package="py-clob-client-v2",
+            sdk_version="test",
+            host="https://clob-v2.polymarket.com",
+            chain_id=137,
+            funder_address="0xfunder",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            side=side,
+            price=price_dec,
+            size=size_dec,
+            order_type="GTC",
+            post_only=False,
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            neg_risk=False,
+            fee_details={},
+            canonical_pre_sign_payload_hash="d" * 64,
+            signed_order=None,
+            signed_order_hash=None,
+            raw_request_hash="e" * 64,
+            raw_response_json=None,
+            order_id=None,
+            trade_ids=(),
+            transaction_hashes=(),
+            error_code=None,
+            error_message=None,
+            captured_at=_NOW.isoformat(),
+        ),
+        envelope_id=envelope_id,
+    )
+    return envelope_id
 
 
 def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):

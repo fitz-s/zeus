@@ -43,6 +43,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from src.config import City, cities as ALL_CITIES
+from src.data.forecast_source_registry import (
+    OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP,
+    get_source,
+    source_id_for_previous_runs_model,
+    stable_payload_hash,
+)
 from src.state.data_coverage import (
     CoverageReason,
     DataTable,
@@ -74,13 +80,7 @@ from src.data.openmeteo_client import PREVIOUS_RUNS_URL, fetch as openmeteo_fetc
 #: Internal Open-Meteo model name → canonical `forecasts.source` value.
 #: Must stay aligned with scripts/backfill_openmeteo_previous_runs.py —
 #: any drift here silently fragments per-model calibration buckets.
-MODEL_SOURCE_MAP: dict[str, str] = {
-    "best_match": "openmeteo_previous_runs",
-    "gfs_global": "gfs_previous_runs",
-    "ecmwf_ifs025": "ecmwf_previous_runs",
-    "icon_global": "icon_previous_runs",
-    "ukmo_global_deterministic_10km": "ukmo_previous_runs",
-}
+MODEL_SOURCE_MAP: dict[str, str] = dict(OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP)
 DEFAULT_MODELS: tuple[str, ...] = tuple(MODEL_SOURCE_MAP)
 DEFAULT_LEADS: tuple[int, ...] = tuple(range(1, 8))
 DEFAULT_CHUNK_DAYS = 90
@@ -173,6 +173,10 @@ class ForecastRow:
     temp_unit: str
     retrieved_at: str
     imported_at: str
+    source_id: str
+    raw_payload_hash: str
+    captured_at: str
+    authority_tier: str
     rebuild_run_id: Optional[str] = None
     data_source_version: Optional[str] = None
     availability_provenance: Optional[str] = None  # F11 antibody: must be set, writer raises on None
@@ -201,9 +205,10 @@ def _rows_from_payload(
     if not times:
         return [], {}
 
+    payload_hash = stable_payload_hash(payload)
     by_key: dict[tuple[str, int, str], list[float]] = {}
     for model in models:
-        source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+        source = source_id_for_previous_runs_model(model)
         for lead in leads:
             base_variable = _hourly_variable_for_lead(lead)
             variable = f"{base_variable}_{model}"
@@ -226,6 +231,7 @@ def _rows_from_payload(
     rows: list[ForecastRow] = []
     covered_days: dict[tuple[str, str], int] = {}  # (source, target_date) → row count
     for (target_date, lead, source), temps in sorted(by_key.items()):
+        source_spec = get_source(source)
         target = date.fromisoformat(target_date)
         basis = target - timedelta(days=lead)
         high = max(temps)
@@ -251,6 +257,10 @@ def _rows_from_payload(
             temp_unit=city.settlement_unit,
             retrieved_at=retrieved_at,
             imported_at=imported_at,
+            source_id=source_spec.source_id,
+            raw_payload_hash=payload_hash,
+            captured_at=retrieved_at,
+            authority_tier=source_spec.authority_tier,
             rebuild_run_id=rebuild_run_id,
             data_source_version=data_source_version,
             availability_provenance=provenance.value,
@@ -268,9 +278,10 @@ _INSERT_SQL = """
 INSERT OR IGNORE INTO forecasts (
     city, target_date, source, forecast_basis_date, forecast_issue_time,
     lead_days, lead_time_hours, forecast_high, forecast_low, temp_unit,
-    retrieved_at, imported_at, rebuild_run_id, data_source_version,
+    retrieved_at, imported_at, source_id, raw_payload_hash, captured_at,
+    authority_tier, rebuild_run_id, data_source_version,
     availability_provenance
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -292,7 +303,8 @@ def _insert_rows(conn, rows: list[ForecastRow]) -> int:
             r.city, r.target_date, r.source, r.forecast_basis_date,
             r.forecast_issue_time, r.lead_days, r.lead_time_hours,
             r.forecast_high, r.forecast_low, r.temp_unit,
-            r.retrieved_at, r.imported_at,
+            r.retrieved_at, r.imported_at, r.source_id,
+            r.raw_payload_hash, r.captured_at, r.authority_tier,
             r.rebuild_run_id, r.data_source_version,
             r.availability_provenance,
         )
@@ -340,7 +352,7 @@ def append_forecasts_window(
     # _static_whitelist_reason. Config is module-level cached.
     cfg = _get_exceptions_config()
     for model in models:
-        source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+        source = source_id_for_previous_runs_model(model)
         retro_start = cfg.model_retro_starts.get(source)
         if retro_start is None:
             continue
@@ -363,7 +375,7 @@ def append_forecasts_window(
     conn.commit()
 
     current = max(start_date, min(
-        cfg.model_retro_starts.get(MODEL_SOURCE_MAP[m], start_date)
+        cfg.model_retro_starts.get(source_id_for_previous_runs_model(m), start_date)
         for m in models
     ))
     if current > end_date:
@@ -384,7 +396,7 @@ def append_forecasts_window(
             )
             # Mark every (source, target_date) in the chunk FAILED.
             for model in models:
-                source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+                source = source_id_for_previous_runs_model(model)
                 d = current
                 while d <= chunk_end:
                     record_failed(

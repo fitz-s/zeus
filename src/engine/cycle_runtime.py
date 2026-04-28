@@ -1306,6 +1306,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         market_id=d.tokens["market_id"],
                         token_id=d.tokens["token_id"],
                         no_token_id=d.tokens["no_token_id"],
+                        event_id=(
+                            candidate.event_id
+                            or candidate.slug
+                            or f"{city.name}:{candidate.target_date}"
+                        ),
+                        resolution_window=candidate.target_date,
+                        correlation_key=(
+                            f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
+                        ),
                     )
                     # P1.S5: thread decision_id from d.decision_id so the
                     # executor can use a stable upstream ID for idempotency.

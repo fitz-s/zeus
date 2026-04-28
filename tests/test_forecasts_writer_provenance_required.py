@@ -18,16 +18,19 @@ from src.data.forecasts_append import ForecastRow, _insert_rows
 
 def _make_test_table(conn: sqlite3.Connection) -> None:
     """In-memory schema mirrors src/state/db.py's forecasts CREATE TABLE
-    (relevant subset for the writer). UNIQUE matches production exactly so
-    relationship antibodies catch cross-environment drift."""
+    (relevant subset for the writer) post the plan-pre5 R3 + F11 merge.
+    UNIQUE matches production exactly so relationship antibodies catch
+    cross-environment drift."""
     conn.execute("""
         CREATE TABLE forecasts (
             id INTEGER PRIMARY KEY,
             city TEXT, target_date TEXT, source TEXT, forecast_basis_date TEXT,
             forecast_issue_time TEXT, lead_days INTEGER, lead_time_hours REAL,
             forecast_high REAL, forecast_low REAL, temp_unit TEXT,
-            retrieved_at TEXT, imported_at TEXT, rebuild_run_id TEXT,
-            data_source_version TEXT, availability_provenance TEXT,
+            retrieved_at TEXT, imported_at TEXT,
+            source_id TEXT, raw_payload_hash TEXT, captured_at TEXT, authority_tier TEXT,
+            rebuild_run_id TEXT, data_source_version TEXT,
+            availability_provenance TEXT,
             UNIQUE (city, target_date, source, forecast_basis_date)
         )
     """)
@@ -43,6 +46,10 @@ def db():
 
 
 def _good_row(**overrides) -> ForecastRow:
+    """Factory for ForecastRow with both F11 (availability_provenance) and
+    R3 (source_id, raw_payload_hash, captured_at, authority_tier) fields
+    populated. Values are realistic-shaped but not pulled from the live
+    forecast_source_registry (this is an in-memory antibody test)."""
     defaults = dict(
         city="NYC",
         target_date="2026-04-30",
@@ -56,6 +63,10 @@ def _good_row(**overrides) -> ForecastRow:
         temp_unit="F",
         retrieved_at="2026-04-28T13:00:00+00:00",
         imported_at="2026-04-28T13:00:00+00:00",
+        source_id="ecmwf_previous_runs",
+        raw_payload_hash="0" * 64,
+        captured_at="2026-04-28T13:00:00+00:00",
+        authority_tier="non_promotion",
         rebuild_run_id="test_run",
         data_source_version=None,
         availability_provenance="derived_dissemination",
@@ -143,11 +154,13 @@ def test_rows_from_payload_stamps_provenance_for_canonical_sources():
 
 
 def test_rows_from_payload_raises_on_unregistered_source():
-    """An ad-hoc model name that falls through MODEL_SOURCE_MAP to the
-    `openmeteo_{model}` synthetic source MUST raise UnknownSourceError —
-    fail-fast forces explicit registration in dissemination_schedules.py."""
+    """An ad-hoc model name not registered in either the R3 forecast_source_registry
+    or the F11 dissemination_schedules MUST raise — fail-fast forces explicit
+    registration. Post plan-pre5 merge, registration is gated at the R3 layer
+    first (SourceNotEnabled), then F11 (UnknownSourceError)."""
     from src.config import cities_by_name
     from src.data.dissemination_schedules import UnknownSourceError
+    from src.data.forecast_source_registry import SourceNotEnabled
     from src.data.forecasts_append import _rows_from_payload, _hourly_variable_for_lead
 
     city = next(iter(cities_by_name.values()))
@@ -158,7 +171,7 @@ def test_rows_from_payload_raises_on_unregistered_source():
             f"{base_var}_some_new_model": [11.0, 12.0],
         }
     }
-    with pytest.raises(UnknownSourceError):
+    with pytest.raises((UnknownSourceError, SourceNotEnabled)):
         _rows_from_payload(
             city,
             payload,

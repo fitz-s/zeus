@@ -93,7 +93,7 @@ def _insert_position_current(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, '', '', '', '', '', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', '', '', '', ?)
+        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', '', '', ?)
         """,
         (
             position_id,

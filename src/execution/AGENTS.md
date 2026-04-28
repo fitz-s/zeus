@@ -17,18 +17,22 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 | `exit_triggers.py` | 8-layer churn defense for exit decisions | HIGH — prevents false exits |
 | `exit_lifecycle.py` | Exit lifecycle management | HIGH — state transitions |
 | `fill_tracker.py` | Order fill tracking and timeout | MEDIUM |
-| `collateral.py` | Collateral computation | MEDIUM |
+| `collateral.py` | Compatibility sell-collateral facade over CollateralLedger | HIGH — fail-closed live exits |
+| `wrap_unwrap_commands.py` | Durable USDC.e↔pUSD command state | HIGH — no live chain side effects in Z4 |
+| `settlement_commands.py` | Durable settlement/redeem command ledger | HIGH — Q-FX-1 gated, crash-recoverable tx hash anchor |
 | `harvester.py` | Settlement harvesting | MEDIUM |
 
 ## Domain rules
 
 - **Limit orders ONLY** — never market orders. Zeus always provides liquidity on entry
+- Live Polymarket V2 placement must route through `src/venue/polymarket_v2_adapter.py` and preserve venue-command pre-side-effect persistence.
 - Mode-based timeouts: Opening Hunt 4h, Update Reaction 1h, Day0 15min
 - Share quantization: BUY rounds UP, SELL rounds DOWN (0.01 increments)
 - Whale toxicity: cancel on adjacent bin sweeps (legacy predecessor lesson)
 - Dynamic limit: if within 5% of best ask, jump to ask for guaranteed fill
 - Live/backtest/shadow separation is explicit; execution code must not reintroduce paper/live split paths
 - All probabilities in exit triggers are in NATIVE space of position direction (buy_yes→P(YES), buy_no→P(NO))
+- Settlement redemption side effects flow through `settlement_commands.py`; do not call adapter redeem paths directly from harvester or collateral code.
 
 ## Common mistakes
 

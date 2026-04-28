@@ -26,6 +26,8 @@ K1 governance surface. Control is allowed to change runtime behavior, but only t
 ## 6. Read/write surfaces and canonical truth
 ### Canonical truth surfaces
 - `src/control/control_plane.py` and `gate_decision.py`
+- `src/control/heartbeat_supervisor.py` for R3 venue-heartbeat fail-closed gating
+- `src/control/ws_gap_guard.py` for R3 M3 authenticated user-channel gap submit gating
 - `docs/authority/zeus_change_control_constitution.md` K1 governance rules
 - `docs/authority/zeus_current_delivery.md` planning-lock and always-human-gated sections for control semantics
 
@@ -46,17 +48,25 @@ K1 governance surface. Control is allowed to change runtime behavior, but only t
 | File / surface | Role |
 |---|---|
 | `control_plane.py` | Main durable control surface. Must stay narrow and typed. |
+| `cutover_guard.py` | Runtime cutover state machine that blocks venue side effects until operator-enabled. |
+| `heartbeat_supervisor.py` | Venue heartbeat state observer and fail-closed resting-order gate. Reuses `auto_pause_failclosed.tombstone`; it is not a second control truth surface. |
+| `ws_gap_guard.py` | User-channel WebSocket gap state observer. Blocks new submit and records that future M5 reconciliation evidence is required before full unblock. |
 | `gate_decision.py` | Resolved gate object used by runtime/evaluator. |
 
 ## 10. Relevant tests
 - tests/test_b070_control_overrides_history_v2.py
 - tests/test_authority_gate.py
+- tests/test_cutover_guard.py
+- tests/test_heartbeat_supervisor.py
+- tests/test_user_channel_ingest.py
 - tests/test_bug100_k1_k2_structural.py
 
 ## 11. Invariants
 - Control semantics must be durable, typed, and replayable.
 - Control may change runtime behavior, but may not silently mutate law or schema.
 - Control must not compete with `strategy_key` as a governance center.
+- GTC/GTD live resting orders must not submit unless the venue heartbeat is HEALTHY; FOK/FAK immediate-only orders are the only heartbeat-exempt order types.
+- New venue submits must not proceed when the authenticated user-channel WS is disconnected/stale/auth-failed/mismatched; M3 may mark M5 reconcile required but must not implement M5 recovery.
 
 ## 12. Negative constraints
 - No hidden in-memory override dicts as long-lived truth.
@@ -66,17 +76,20 @@ K1 governance surface. Control is allowed to change runtime behavior, but only t
 - Control intent exists but is not durably recorded.
 - Control state becomes stale/shadowed across tables or files.
 - Gate decisions appear in status surfaces without actual runtime consumption.
+- A heartbeat failure writes a separate tombstone or only logs an alert instead of activating the fail-closed auto-pause path.
 
 ## 14. Historical failures and lessons
 - [Archive evidence] Control/history migration work in legacy packets showed why append-only override history is safer than mutable in-place control surfaces.
 
 ## 15. Code graph high-impact nodes
 - `src/control/control_plane.py` — bridge between human/operator side and runtime internals.
+- `src/control/heartbeat_supervisor.py` — bridge between venue-heartbeat health and execution gating.
 - `src/control/gate_decision.py` — lightweight but semantically critical hub.
 
 ## 16. Likely modification routes
 - New control command: specify storage, runtime consumer, absent-capability behavior, and rollback.
 - Gate semantic change: review riskguard, engine, and state together.
+- Heartbeat gate change: review execution submit seams, `src/main.py` scheduler wiring, and the single-tombstone invariant together.
 
 ## 17. Planning-lock triggers
 - Any control-plane semantic change or gate-decision grammar change.

@@ -1,3 +1,9 @@
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Mock live execution happy/error path coverage with R3 cutover guard opt-outs.
+# Reuse: Run when _live_order side effects, ACK semantics, or mock CLOB behavior changes.
+# Created: 2026-04-27
+# Last reused/audited: 2026-04-27
+# Authority basis: R3 Z1 cutover guard audit; pre-existing live execution mock tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tier 5.1 u2014 Live execution mock test.
 
 Mock Polymarket CLOB, run _live_order through happy path + error modes.
@@ -8,10 +14,15 @@ submitting. Tests that call _live_order without an explicit conn use the
 `_mem_conn` autouse fixture to supply an in-memory DB with schema.
 """
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from unittest.mock import MagicMock, patch
 from src.execution.executor import _live_order, OrderResult
+
+_TEST_CONN = None
+_NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
@@ -29,22 +40,86 @@ def _mem_conn(monkeypatch):
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
+    global _TEST_CONN
+    _TEST_CONN = mem
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
     yield mem
+    _TEST_CONN = None
     mem.close()
 
 
 def _make_intent(**overrides):
     """Minimal ExecutionIntent for testing."""
+    token_id = overrides.get("token_id", "tok_" + "a" * 60)
+    snapshot_id = _ensure_snapshot(_TEST_CONN, token_id=token_id)
     defaults = {
         "direction": MagicMock(value="BUY"),
-        "token_id": "tok_" + "a" * 60,
+        "token_id": token_id,
         "limit_price": 0.45,
         "market_id": "mkt_test",
         "timeout_seconds": 30,
+        "executable_snapshot_id": snapshot_id,
+        "executable_snapshot_min_tick_size": Decimal("0.01"),
+        "executable_snapshot_min_order_size": Decimal("0.01"),
+        "executable_snapshot_neg_risk": False,
     }
     defaults.update(overrides)
     return MagicMock(**defaults)
+
+
+def _ensure_snapshot(conn, *, token_id: str) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    assert conn is not None
+    snapshot_id = f"snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.44"),
+            orderbook_top_ask=Decimal("0.46"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
 
 
 class TestLiveOrderHappyPath:
@@ -108,7 +183,8 @@ class TestLiveOrderErrorModes:
 
         result = _live_order("trade-4", _make_intent(), shares=10.0)
 
-        assert result.status == "rejected"
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
         assert "CLOB down" in result.reason
 
     def test_discord_alert_failure_does_not_block_order(self, monkeypatch):

@@ -61,9 +61,9 @@ class TestProvenanceRegistryDegraded:
 
 
 class TestBiasCorrectionStatus:
-    """_apply_bias_correction must return (array, applied_bool)."""
+    """_apply_bias_correction returns status or fails closed on DB faults."""
 
-    def test_correction_failure_returns_false(self):
+    def test_correction_database_fault_raises(self):
         from src.signal.ensemble_signal import EnsembleSignal
 
         maxes = np.array([30.0, 31.0, 32.0])
@@ -75,11 +75,8 @@ class TestBiasCorrectionStatus:
                     wraps=EnsembleSignal._apply_bias_correction):
             # Force exception by patching the DB import
             with patch.dict("sys.modules", {"src.state.db": None}):
-                result, applied = EnsembleSignal._apply_bias_correction(
-                    maxes, city, date(2026, 7, 15)
-                )
-                assert not applied
-                np.testing.assert_array_equal(result, maxes)
+                with pytest.raises(ModuleNotFoundError):
+                    EnsembleSignal._apply_bias_correction(maxes, city, date(2026, 7, 15))
 
     def test_correction_success_returns_true(self):
         from src.signal.ensemble_signal import EnsembleSignal

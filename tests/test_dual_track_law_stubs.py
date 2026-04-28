@@ -14,14 +14,14 @@ import pytest
 
 
 # NC-11 / INV-14
-def test_no_daily_low_on_legacy_table():
-    """NC-11: No writing of daily-low rows on legacy (non-v2) tables.
+def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
+    """Settlements require explicit metric identity and unique city/date/metric.
 
     Verifies:
     1. apply_v2_schema creates the v2 tables in a fresh :memory: DB.
-    2. The legacy settlements table still has UNIQUE(city, target_date) —
-       not UNIQUE(city, target_date, temperature_metric) — so daily-low
-       writes to the legacy table would violate NC-11 (caught at call sites).
+    2. Missing temperature_metric is rejected.
+    3. Duplicate high rows for one city/date are rejected, while a low row for
+       the same city/date remains representable under the dual-track spine.
     """
     import sqlite3
     from src.state.schema.v2_schema import apply_v2_schema
@@ -45,23 +45,44 @@ def test_no_daily_low_on_legacy_table():
     ]:
         assert v2_table in tables, f"v2 table {v2_table!r} must exist after init_schema"
 
-    # Legacy settlements UNIQUE must still be (city, target_date) — single-metric
-    # A second row with same city+date but different temperature_metric must FAIL,
-    # proving that legacy table enforces the old single-metric constraint.
-    conn.execute(
-        "INSERT INTO settlements (city, target_date, authority) VALUES ('NYC', '2026-04-16', 'UNVERIFIED')"
-    )
-    try:
+    with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO settlements (city, target_date, authority) VALUES ('NYC', '2026-04-16', 'UNVERIFIED')"
+            "INSERT INTO settlements (city, target_date, authority) "
+            "VALUES ('NYC', '2026-04-16', 'UNVERIFIED')"
         )
-        # If we reach here the UNIQUE didn't fire — that's a schema regression
-        assert False, (
-            "Legacy settlements table accepted a duplicate (city, target_date) row; "
-            "UNIQUE(city, target_date) constraint appears to be missing (NC-11 schema regression)"
+
+    conn.execute(
+        """
+        INSERT INTO settlements
+        (city, target_date, authority, temperature_metric,
+         physical_quantity, observation_field, data_version)
+        VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp',
+                'tigge_mx2t6_local_calendar_day_max_v1')
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO settlements
+            (city, target_date, authority, temperature_metric,
+             physical_quantity, observation_field, data_version)
+            VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'high',
+                    'mx2t6_local_calendar_day_max', 'high_temp',
+                    'tigge_mx2t6_local_calendar_day_max_v1')
+            """
         )
-    except sqlite3.IntegrityError:
-        pass  # Expected: legacy table enforces single-metric uniqueness
+
+    conn.execute(
+        """
+        INSERT INTO settlements
+        (city, target_date, authority, temperature_metric,
+         physical_quantity, observation_field, data_version)
+        VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'low',
+                'mn2t6_local_calendar_day_min', 'low_temp',
+                'tigge_mn2t6_local_calendar_day_min_v1')
+        """
+    )
 
 
 # NC-12 / INV-16

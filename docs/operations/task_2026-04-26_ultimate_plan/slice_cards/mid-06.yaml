@@ -1,0 +1,73 @@
+id: mid-06
+title: §8.3 ↔ INV-29 compatibility map + C1.5 cross-module relationship tests (F-012)
+authority_basis:
+  - architecture/invariants.yaml INV-29 (closed-grammar invariant — compat map artifact required by amendment)
+  - Apr26 review §8.3 (17 listed transitions; opponent-mid audit shows 4 already-exist + 11 missing)
+  - Apr26 review §3 F-012 (tests prove happy paths only; live-money failure modes uncovered)
+  - PR#19 §11 deferred — heavy integration test bucket (C1) carrying executor↔CLOB boundary; this slice EXTENDS C1 to cover cross-module relationship boundaries
+  - Memory L20 (grep-gate before contract lock) + L22 (executor-before-critic coordination) + Fitz Constraint #1 (relationship tests verify cross-MODULE invariants, not function-level outputs)
+file_line:
+  current_state:
+    - docs/operations/task_2026-04-26_ultimate_plan/evidence/apr26_findings_routing.yaml:148-280  # 17 §8.3 transitions enumerated with bucket: NET_NEW or existing-slice routing
+    - src/state/venue_command_repo.py:42-84  # _TRANSITIONS table (28 legal pairs; ground truth for compat map)
+    - src/execution/command_bus.py:44-76  # CommandState + CommandEventType closed enums
+    - tests/test_command_bus_types.py:268  # test_inflight_states_match_repo_unresolved_filter (existing round-trip antibody)
+    - tests/test_executor_command_split.py  # current C1 coverage (executor↔CLOB boundary; happy-path-with-fakes per F-012)
+    - src/state/lifecycle_manager.py  # materialize_position downstream consumer of venue_commands state
+    - src/state/chain_reconciliation.py  # position-side reconcile (downstream consumer)
+    - src/engine/cycle_runner.py:60-102  # RED→cancel boundary (relationship test target)
+  audit_evidence:
+    - "opponent-mid §8.3 audit summary: 4 ALREADY EXIST (REVIEW_REQUIRED, PARTIALLY_FILLED, REMAINING_CANCEL_REQUESTED, RECONCILED_BY_POSITION); 2 typing-only refinements; 11 genuinely NET_NEW reduce to K2+K3+K4 in mid-03 + K5 in mid-05"
+    - "F-012 RESIDUAL: existing executor tests prove happy paths only with deterministic fakes; no cross-module relationship test for materialize_position↔trade_fill, RED↔cancel-emission, or command_recovery↔chain_reconciliation"
+deliverables:
+  doc_artifact:
+    - path: docs/architecture/section_8_3_inv_29_compat_map.md (NEW)
+    - schema: |
+        Each row maps one §8.3 transition →
+        { status: already-exists | payload-typing | new-event-only | new-state-and-event,
+          source_state(s): [list],
+          target_state: name,
+          event_type: name,
+          payload_schema_delta: {fields...} | null,
+          owning_slice: mid-NN,
+          file_line_anchor: src/.../path.py:LL }
+  relationship_tests:
+    new_file: tests/test_cross_module_relationship_executor_state.py (NEW)
+antibody_test:
+  new_file_or_extend: tests/test_cross_module_relationship_executor_state.py (NEW)
+  assertions:
+    # F-012 cross-module assertions per Fitz Constraint #1: "verify what property must SURVIVE when Module A's output flows into Module B"
+    - test_materialize_position_only_after_durable_ack  # executor → command_bus → cycle_runtime: position row exists ⟺ venue_commands.state ∈ {ACKED, PARTIAL, FILLED}; never on SUBMITTING/UNKNOWN (INV-32 cross-module form)
+    - test_red_cancel_emission_creates_durable_command_row  # riskguard → command_bus: RED detection in cycle N → venue_commands row state=SUBMITTING (intent_kind=CANCEL) in same process; not 2-cycle latency (validates mid-01)
+    - test_partial_fill_payload_consumed_by_lifecycle_manager  # command_recovery → lifecycle_manager: PARTIAL_FILL_OBSERVED.payload.filled_size flows into pos.shares without numeric drift
+    - test_command_recovery_writes_journal_eu_chain_reconciliation_reads_position  # INV-31 + INV-32 + chain_reconciliation: each writes its own canonical authority; never cross-writes (mutual exclusion preserved)
+    - test_cancel_failed_terminal_does_not_re_enter_recovery  # mid-03 amendment: CANCEL_FAILED state never appears in IN_FLIGHT_STATES; recovery loop skips it
+    - test_signed_order_hash_present_for_every_acked_command  # mid-02 binding: every command in state=ACKED has non-null signed_order_hash; SDK exception path (SUBMIT_UNKNOWN) is the only exempt case
+    - test_compat_map_complete_for_all_17_section_8_3_transitions  # docs/architecture/section_8_3_inv_29_compat_map.md MUST contain all 17 entries; pytest reads doc and asserts coverage
+    - test_inflight_states_match_repo_unresolved_filter_remains_green  # extends existing antibody at tests/test_command_bus_types.py:268 — must stay green after mid-03 amendment
+  closes_invariants: [F-012 (cross-module relationship tests), INV-29 (compat-map artifact)]
+depends_on:
+  - mid-01  # RED→cancel emission boundary tested
+  - mid-02  # signed_order_hash binding tested
+  - mid-03  # CANCEL_FAILED + amended grammar tested
+  - mid-04  # PARTIAL_FILL payload consumed by lifecycle_manager tested
+  - mid-05  # EXCH_RECON↔INV-31 mutual-exclusion tested
+estimated_h: 8-12
+risk:
+  - "DEPENDS ON ALL OTHER MID SLICES: mid-06 is the last to land; if any of mid-01..05 changes contract during implementation, mid-06 tests need re-anchoring"
+  - "TEST BRITTLENESS: cross-module relationship tests touch 4-5 modules each; if any module evolves naming, tests break first. Mitigation: use stable public-API symbols, not internal helpers"
+  - "FAKE-CLOB AT SCALE: deterministic fake CLOB needs to drive all relationship boundaries. Investment in tests/conftest.py or tests/fakes/clob.py recommended"
+  - "COMPAT-MAP DOC ROT: docs/architecture/section_8_3_inv_29_compat_map.md must be regenerated if mid-03 grammar changes; add CI check that compat-map doc references valid current enum members"
+critic_gate:
+  - test_compat_map_complete_for_all_17_section_8_3_transitions MUST be active (not skipped); failure indicates doc gaps
+  - all 17 §8.3 transitions MUST appear in compat map with explicit status field; "TBD" or empty rows fail the slice
+  - relationship tests MUST be DELETION-RESISTANT — removing any one of mid-01..05 implementation logic must cause at least one mid-06 test to fail; otherwise tests are too weak
+  - L20 grep-gate: every file:line in compat map MUST be grep-verified within 10 min before contract lock
+  - L22 critic check: critic verifies no relationship test passes against a mocked-everything implementation (must touch real code paths)
+  - critic verifies pytest-collected count for tests/test_cross_module_relationship_executor_state.py >= 7 (one per assertion above)
+notes:
+  - "Per Fitz Constraint #1: relationship tests verify CROSS-MODULE invariants. Function tests verify per-module behavior. mid-06 tests are relationship tests; they MUST fail when the relationship breaks even if individual modules pass their function tests."
+  - "Per Memory L20: file:line citations in compat-map MUST be grep-verified before contract lock (10-min window); line-refs rot faster than prose"
+  - "Per Memory L22: mid-06 tests are the cross-cutting safety net for the executor-before-critic coordination fault; they catch regressions that local critic-review misses"
+  - "C1.5 framing: this is the EXTENSION to PR#19 §11 deferred C1 — not a replacement. C1 covers executor↔CLOB happy-path; C1.5 covers cross-module relationships."
+  - "Out-of-scope: settlement K6 relationship tests (REDEEM_REQUESTED → harvester → calibration_pairs) — Down region owns"

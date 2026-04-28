@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-27
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Backfill Open-Meteo previous-runs forecast rows into forecasts.
+# Reuse: Run only through packet-approved ETL/backfill workflows; dry-run first for live DB work.
+# Authority basis: R3 F1 forecast provenance wiring + historical forecast backfill packet.
 """Backfill city forecast history from Open-Meteo Previous Runs.
 
 This is the dynamic-city forecast-history lane. It writes raw forecast rows to
@@ -28,6 +34,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import httpx
 
 from src.config import City, cities, cities_by_name
+from src.data.forecast_source_registry import (
+    get_source,
+    source_id_for_previous_runs_model,
+    stable_payload_hash,
+)
 from src.state.db import get_world_connection, init_schema
 
 logger = logging.getLogger(__name__)
@@ -89,11 +100,15 @@ def _validate_forecast_temps(
     return None
 
 
-# F11 (2026-04-28): the local ForecastBackfillRow dataclass + _INSERT_SQL
-# duplicated src.data.forecasts_append.ForecastRow + _insert_rows AND bypassed
-# the F11 antibody (rejected NULL availability_provenance / forecast_issue_time).
-# This script now imports the canonical writer + ForecastRow from forecasts_append
-# so backfill rows carry typed provenance just like the live ingest path.
+# F11 (2026-04-28) + R3 (origin/plan-pre5 merge): the local
+# ForecastBackfillRow dataclass + _INSERT_SQL duplicated
+# src.data.forecasts_append.ForecastRow + _insert_rows AND bypassed
+# the F11 antibody (NULL availability_provenance / forecast_issue_time
+# would have been silently inserted). This script now imports the
+# canonical ForecastRow + writer from forecasts_append, so backfill
+# rows carry typed F11 provenance + R3 source_id/payload_hash/captured_at/
+# authority_tier identically to the live ingest path. Path A duplication
+# eliminated.
 from src.data.dissemination_schedules import (
     UnknownSourceError,
     derive_availability,
@@ -192,9 +207,10 @@ def _rows_from_payload(
         counters["missing_time"] += 1
         return [], counters
 
+    payload_hash = stable_payload_hash(payload)
     by_date: dict[tuple[str, int, str], list[float]] = {}
     for model in models:
-        source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+        source = source_id_for_previous_runs_model(model)
         for lead in leads:
             base_variable = _hourly_variable_for_lead(lead)
             variable = f"{base_variable}_{model}"
@@ -216,6 +232,7 @@ def _rows_from_payload(
 
     rows: list[ForecastRow] = []
     for (target_date, lead, source), temps in sorted(by_date.items()):
+        source_spec = get_source(source)
         target = date.fromisoformat(target_date)
         basis = target - timedelta(days=lead)
         high = max(temps)
@@ -255,6 +272,10 @@ def _rows_from_payload(
                 temp_unit=city.settlement_unit,
                 retrieved_at=retrieved_at,
                 imported_at=imported_at,
+                source_id=source_spec.source_id,
+                raw_payload_hash=payload_hash,
+                captured_at=retrieved_at,
+                authority_tier=source_spec.authority_tier,
                 rebuild_run_id=None,
                 data_source_version=None,
                 availability_provenance=provenance.value,
@@ -264,12 +285,13 @@ def _rows_from_payload(
 
 
 def _insert_rows(conn, rows: list[ForecastRow]) -> int:
-    """Delegate to the canonical F11-aware writer in src.data.forecasts_append.
+    """Delegate to the canonical F11+R3-aware writer in src.data.forecasts_append.
 
     This eliminates the prior duplicate writer that bypassed the F11 antibody
     (NULL availability_provenance / forecast_issue_time would have been
-    silently inserted). Now any caller of this script gets the same fail-fast
-    contract as the live cron path.
+    silently inserted) and the R3 source/payload/capture/authority_tier fields.
+    Now any caller of this script gets the same fail-fast contract as the
+    live cron path.
     """
     return _canonical_insert_rows(conn, rows)
 

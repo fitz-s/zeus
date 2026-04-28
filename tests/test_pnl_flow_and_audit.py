@@ -189,7 +189,7 @@ def _insert_position_current_row(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, '', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+        ) VALUES (?, ?, ?, 'm-test', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
         """,
         (
             position_id,
@@ -1268,13 +1268,13 @@ def test_inv_pause_entries_survives_control_state_refresh(monkeypatch, tmp_path)
     assert processed == ["pause_entries"]
     assert control_plane_module.is_entries_paused() is True
     assert control_plane_module.get_entries_pause_source() == "manual_command"
-    assert control_plane_module.get_entries_pause_reason() is None
+    assert control_plane_module.get_entries_pause_reason() == "control_plane:pause_entries"
 
     control_plane_module.clear_control_state()
 
     assert control_plane_module.is_entries_paused() is True
     assert control_plane_module.get_entries_pause_source() == "manual_command"
-    assert control_plane_module.get_entries_pause_reason() is None
+    assert control_plane_module.get_entries_pause_reason() == "control_plane:pause_entries"
     row = get_connection(db_path).execute(
         "SELECT value, issued_by, reason, precedence FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
     ).fetchone()
@@ -1309,7 +1309,7 @@ def test_inv_pause_entries_source_is_manual_for_custom_issuer(monkeypatch, tmp_p
     assert processed == ["pause_entries"]
     assert control_plane_module.is_entries_paused() is True
     assert control_plane_module.get_entries_pause_source() == "manual_command"
-    assert control_plane_module.get_entries_pause_reason() is None
+    assert control_plane_module.get_entries_pause_reason() == "operator requested pause"
     row = get_connection(db_path).execute(
         "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
     ).fetchone()
@@ -1342,7 +1342,7 @@ def test_inv_pause_entries_source_ignores_manual_note_that_looks_auto(monkeypatc
     assert processed == ["pause_entries"]
     assert control_plane_module.is_entries_paused() is True
     assert control_plane_module.get_entries_pause_source() == "manual_command"
-    assert control_plane_module.get_entries_pause_reason() is None
+    assert control_plane_module.get_entries_pause_reason() == "auto_pause:manual-note"
     row = get_connection(db_path).execute(
         "SELECT issued_by, reason FROM control_overrides WHERE override_id = 'control_plane:global:entries_paused'"
     ).fetchone()
@@ -1425,6 +1425,7 @@ def test_inv_supervisor_command_matches_real_control_plane_contract():
         strategy="opening_inertia",
         enabled=False,
         env="test",
+        timestamp="2026-04-27T00:00:00+00:00",
     )
     assert cmd.command == "set_strategy_gate"
     assert cmd.strategy == "opening_inertia"
@@ -1687,6 +1688,15 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
         target_date=future_target,
         outcomes=[
             {
+                "title": "38°F or lower",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes0",
+                "no_token_id": "no0",
+                "market_id": "m0",
+                "price": 0.05,
+            },
+            {
                 "title": "39-40°F",
                 "range_low": 39,
                 "range_high": 40,
@@ -1727,9 +1737,11 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -1748,7 +1760,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -1858,6 +1870,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -1869,9 +1882,11 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -1889,7 +1904,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -1978,6 +1993,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -1989,9 +2005,11 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2009,7 +2027,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2094,6 +2112,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -2105,9 +2124,11 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2125,7 +2146,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2218,6 +2239,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -2229,9 +2251,11 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2249,7 +2273,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2357,6 +2381,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -2368,9 +2393,11 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2388,7 +2415,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2435,6 +2462,8 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -2484,6 +2513,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -2495,9 +2525,11 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2515,7 +2547,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2562,6 +2594,8 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -2598,6 +2632,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.05},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35},
             {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.33},
             {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.32},
@@ -2609,10 +2644,12 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
             self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
-            return np.array([0.60, 0.25, 0.15])
+            return np.array([0.05, 0.60, 0.20, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -2630,7 +2667,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.12,
                 ci_lower=0.05,
@@ -2677,6 +2714,8 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -2922,11 +2961,11 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     conn.execute("""
         INSERT INTO position_current
         (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
-         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, ("rt-settle-auth", "economically_closed", "center_buy",
            "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
-           "m6", "center_buy", 10.0, 25.0, 10.0, 0.40))
+           "m6", "center_buy", 10.0, 25.0, 10.0, 0.40, "F"))
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,
@@ -3514,11 +3553,11 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     conn.execute("""
         INSERT INTO position_current
         (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
-         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, ("trade-durable-preferred", "economically_closed", "center_buy",
            "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
-           "m1", "center_buy", 10.0, 10.0, 10.0, 0.40))
+           "m1", "center_buy", 10.0, 10.0, 10.0, 0.40, "F"))
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,

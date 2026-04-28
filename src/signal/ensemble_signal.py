@@ -407,8 +407,11 @@ class EnsembleSignal:
 
         Returns: np.ndarray shape (n_bins,), sums to 1.0
         """
+        member_extrema = getattr(self, "member_extrema", None)
+        if not isinstance(member_extrema, np.ndarray):
+            member_extrema = getattr(self, "member_maxes")
         return p_raw_vector_from_maxes(
-            self.member_extrema,
+            member_extrema,
             self.city,
             self.settlement_semantics,
             bins,
