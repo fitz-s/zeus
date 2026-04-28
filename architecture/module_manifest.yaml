@@ -2,7 +2,17 @@ schema_version: 1
 metadata:
   created: "2026-04-23"
   owner_packet: "authority rehydration P0 scaffold"
-  source_plan: "docs/operations/task_2026-04-23_authority_rehydration/plan.md"
+  # SIDECAR-1 2026-04-28: source_plan reference repaired. The cited path
+  # docs/operations/task_2026-04-23_authority_rehydration/plan.md is GONE on
+  # HEAD (caught by scripts/r3_drift_check.py --architecture-yaml in BATCH B).
+  # The closest descendent is
+  # docs/operations/zeus_topology_system_deep_evaluation_package_2026-04-24/repair_blueprints/p2_module_book_rehydration.md
+  # which inherited the rehydration design from the original P0 scaffold plan;
+  # the original plan was archived/sunset without leaving a forwarding stub.
+  # Marking source_plan as ARCHIVED to preserve provenance; downstream tooling
+  # should treat module_manifest.yaml as self-contained (per its purpose: line).
+  source_plan: ARCHIVED  # was: docs/operations/task_2026-04-23_authority_rehydration/plan.md
+  source_plan_descendent: docs/operations/zeus_topology_system_deep_evaluation_package_2026-04-24/repair_blueprints/p2_module_book_rehydration.md
   purpose: >
     Machine registry for dense module books, scoped module routers, and
     module-level law/current-fact/test dependencies. This manifest routes the
@@ -30,12 +40,18 @@ modules:
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
       - src/state/chain_reconciliation.py
+      - src/state/collateral_ledger.py
+      - src/state/snapshot_repo.py
+      - src/state/venue_command_repo.py
       - src/state/ledger.py
       - src/state/projection.py
     public_entry_files:
       - src/state/db.py
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
+      - src/state/collateral_ledger.py
+      - src/state/snapshot_repo.py
+      - src/state/venue_command_repo.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
@@ -50,6 +66,14 @@ modules:
       - tests/test_b070_control_overrides_history_v2.py
       - tests/test_chronicle_dedup.py
       - tests/test_cross_module_invariants.py
+      - tests/test_collateral_ledger.py
+      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_command_bus_types.py
+      - tests/test_command_grammar_amendment.py
+      - tests/test_riskguard_red_durable_cmd.py
+      - tests/test_command_recovery.py
+      - tests/test_venue_command_repo.py
+      - tests/test_provenance_5_projections.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:
@@ -62,6 +86,7 @@ modules:
     authority_role: orchestration_runtime
     high_risk_files:
       - src/engine/cycle_runner.py
+      - src/engine/cycle_runtime.py
       - src/engine/evaluator.py
       - src/engine/monitor_refresh.py
       - src/engine/replay.py
@@ -83,6 +108,8 @@ modules:
       - tests/test_cross_module_invariants.py
       - tests/test_cross_module_relationships.py
       - tests/test_bug100_k1_k2_structural.py
+      - tests/test_riskguard_red_durable_cmd.py
+      - tests/test_risk_allocator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   data:
@@ -100,14 +127,22 @@ modules:
       - src/data/hourly_instants_append.py
       - src/data/observation_instants_v2_writer.py
       - src/data/tier_resolver.py
+      - src/data/forecast_source_registry.py
+      - src/data/forecast_ingest_protocol.py
+      - src/data/tigge_client.py
       - src/data/forecasts_append.py
       - src/data/market_scanner.py
+      - src/data/polymarket_client.py
     public_entry_files:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py
       - src/data/observation_client.py
+      - src/data/forecast_source_registry.py
+      - src/data/forecast_ingest_protocol.py
+      - src/data/tigge_client.py
       - src/data/forecasts_append.py
       - src/data/market_scanner.py
+      - src/data/polymarket_client.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/city_truth_contract.yaml
@@ -121,11 +156,14 @@ modules:
       - tests/test_ensemble_client.py
       - tests/test_backfill_openmeteo_previous_runs.py
       - tests/test_etl_forecasts_v2_from_legacy.py
+      - tests/test_forecast_source_registry.py
+      - tests/test_tigge_ingest.py
       - tests/test_backfill_scripts_match_live_config.py
       - tests/test_tier_resolver.py
       - tests/test_obs_v2_writer.py
       - tests/test_hk_rejects_vhhh_source.py
       - tests/test_hourly_clients_parse.py
+      - tests/test_v2_adapter.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   execution:
@@ -138,13 +176,26 @@ modules:
     authority_role: live_execution
     high_risk_files:
       - src/execution/executor.py
+      - src/execution/exchange_reconcile.py
+      - src/execution/settlement_commands.py
       - src/execution/exit_triggers.py
       - src/execution/exit_lifecycle.py
+      - src/execution/exit_safety.py
       - src/execution/harvester.py
+      - src/execution/collateral.py
+      - src/execution/wrap_unwrap_commands.py
+      - src/execution/command_bus.py
+      - src/execution/exit_safety.py
     public_entry_files:
       - src/execution/executor.py
+      - src/execution/exchange_reconcile.py
+      - src/execution/settlement_commands.py
       - src/execution/exit_triggers.py
       - src/execution/harvester.py
+      - src/execution/collateral.py
+      - src/execution/wrap_unwrap_commands.py
+      - src/execution/command_bus.py
+      - src/execution/exit_safety.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -155,8 +206,71 @@ modules:
       - tests/test_exit_authority.py
       - tests/test_entry_exit_symmetry.py
       - tests/test_live_safety_invariants.py
+      - tests/test_collateral_ledger.py
+      - tests/test_command_grammar_amendment.py
+      - tests/test_command_bus_types.py
+      - tests/test_exit_safety.py
+      - tests/test_exchange_reconcile.py
+      - tests/test_settlement_commands.py
+      - tests/test_risk_allocator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  venue:
+    path: src/venue
+    scoped_agents: src/venue/AGENTS.md
+    module_book: docs/reference/modules/venue.md
+    priority: r3_z2
+    maturity: provisional
+    zone: source
+    authority_role: live_venue_adapter
+    high_risk_files:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+      - src/data/polymarket_client.py
+      - src/execution/executor.py
+    public_entry_files:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
+    current_fact_dependencies:
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/py_clob_client_v2_surface_2026-04-27.md
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
+    required_tests:
+      - tests/test_v2_adapter.py
+      - tests/test_fake_polymarket_venue.py
+      - tests/integration/test_p0_live_money_safety.py
+      - tests/test_executor_command_split.py
+      - tests/test_neg_risk_passthrough.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: packet_owned
+  ingest:
+    path: src/ingest
+    scoped_agents: src/ingest/AGENTS.md
+    module_book: docs/reference/modules/ingest.md
+    priority: r3_m3
+    maturity: provisional
+    zone: source
+    authority_role: runtime_event_ingest
+    high_risk_files:
+      - src/ingest/polymarket_user_channel.py
+      - src/control/ws_gap_guard.py
+      - src/state/venue_command_repo.py
+    public_entry_files:
+      - src/ingest/polymarket_user_channel.py
+    law_dependencies:
+      - architecture/invariants.yaml
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
+    current_fact_dependencies:
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/polymarket_user_ws_2026-04-27.md
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
+    required_tests:
+      - tests/test_user_channel_ingest.py
+      - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: packet_owned
   signal:
     path: src/signal
     scoped_agents: src/signal/AGENTS.md
@@ -201,7 +315,9 @@ modules:
       - src/calibration/platt.py
       - src/calibration/manager.py
       - src/calibration/store.py
+      - src/calibration/retrain_trigger.py
       - src/calibration/effective_sample_size.py
+      - src/calibration/retrain_trigger.py
     public_entry_files:
       - src/calibration/platt.py
       - src/calibration/manager.py
@@ -216,6 +332,7 @@ modules:
       - tests/test_calibration_manager.py
       - tests/test_calibration_bins_canonical.py
       - tests/test_calibration_unification.py
+      - tests/test_calibration_retrain.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   strategy:
@@ -232,10 +349,14 @@ modules:
       - src/strategy/kelly.py
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
+      - src/strategy/benchmark_suite.py
     public_entry_files:
       - src/strategy/market_analysis.py
       - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
+      - src/strategy/benchmark_suite.py
+      - src/strategy/data_lake.py
+      - src/strategy/candidates/__init__.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -273,6 +394,32 @@ modules:
       - tests/test_live_safety_invariants.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  risk_allocator:
+    path: src/risk_allocator
+    scoped_agents: src/risk_allocator/AGENTS.md
+    module_book: docs/reference/modules/riskguard.md
+    priority: r3_a2
+    maturity: provisional
+    zone: source
+    authority_role: capital_allocation_governor
+    high_risk_files:
+      - src/risk_allocator/governor.py
+      - src/execution/executor.py
+      - src/engine/cycle_runner.py
+    public_entry_files:
+      - src/risk_allocator/governor.py
+      - src/risk_allocator/__init__.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/invariants.yaml
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+    current_fact_dependencies: []
+    required_tests:
+      - tests/test_risk_allocator.py
+      - tests/test_executor.py
+      - tests/test_heartbeat_supervisor.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: r3_a2_new
   contracts:
     path: src/contracts
     scoped_agents: src/contracts/AGENTS.md
@@ -285,21 +432,33 @@ modules:
       - src/contracts/settlement_semantics.py
       - src/contracts/calibration_bins.py
       - src/contracts/execution_price.py
+      - src/contracts/execution_intent.py
+      - src/contracts/executable_market_snapshot_v2.py
+      - src/contracts/venue_submission_envelope.py
+      - src/contracts/fx_classification.py
       - src/contracts/provenance_registry.py
       - src/contracts/reality_contract.py
     public_entry_files:
       - src/contracts/settlement_semantics.py
       - src/contracts/calibration_bins.py
+      - src/contracts/executable_market_snapshot_v2.py
+      - src/contracts/venue_submission_envelope.py
+      - src/contracts/fx_classification.py
       - src/contracts/semantic_types.py
+      - src/contracts/execution_intent.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
     current_fact_dependencies: []
     required_tests:
+      - tests/test_v2_adapter.py
       - tests/test_instrument_invariants.py
       - tests/test_execution_price.py
       - tests/test_calibration_bins_canonical.py
       - tests/test_reality_contracts.py
+      - tests/test_collateral_ledger.py
+      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_risk_allocator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   control:
@@ -312,15 +471,24 @@ modules:
     authority_role: operator_control
     high_risk_files:
       - src/control/control_plane.py
+      - src/control/cutover_guard.py
+      - src/control/heartbeat_supervisor.py
+      - src/control/ws_gap_guard.py
       - src/control/gate_decision.py
     public_entry_files:
       - src/control/control_plane.py
+      - src/control/cutover_guard.py
+      - src/control/heartbeat_supervisor.py
+      - src/control/ws_gap_guard.py
       - src/control/gate_decision.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
     current_fact_dependencies: []
     required_tests:
+      - tests/test_cutover_guard.py
+      - tests/test_heartbeat_supervisor.py
+      - tests/test_user_channel_ingest.py
       - tests/test_gate_decision.py
       - tests/test_runtime_guards.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED

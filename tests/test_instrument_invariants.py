@@ -150,6 +150,7 @@ def test_day0_observation_weight_increases_monotonically():
     """
     import numpy as np
     from src.signal.day0_signal import Day0Signal
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
     members = np.full(51, 20.0)
     hours_sequence = [12.0, 8.0, 6.0, 4.0, 2.0, 1.0, 0.5]
@@ -162,6 +163,7 @@ def test_day0_observation_weight_increases_monotonically():
             member_maxes_remaining=members,
             unit="C",
             diurnal_peak_confidence=0.0,
+            temperature_metric=HIGH_LOCALDAY_MAX,
         )
         weights.append(sig.observation_weight())
 
@@ -180,6 +182,7 @@ def test_day0_post_peak_sigma_is_continuous():
     from datetime import datetime, timezone
     from src.signal.day0_signal import Day0Signal
     from src.signal.ensemble_signal import sigma_instrument
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
     members = np.full(51, 20.0)
     base = sigma_instrument("C").value
@@ -202,6 +205,7 @@ def test_day0_post_peak_sigma_is_continuous():
             observation_source="wu",  # trusted source
             observation_time=obs_time,
             current_utc_timestamp=current_utc,
+            temperature_metric=HIGH_LOCALDAY_MAX,
         )
         sigmas.append(sig._sigma)
 

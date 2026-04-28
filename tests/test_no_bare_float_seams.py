@@ -77,7 +77,7 @@ class TestExecutionPriceConstruction:
 
 class TestVigTreatmentSeam:
     def test_compute_posterior_rejects_zero_market_vector(self):
-        with pytest.raises(ValueError, match="cannot compute vig"):
+        with pytest.raises(ValueError, match="sum <= 0"):
             compute_posterior(
                 np.array([0.6, 0.4]),
                 np.array([0.0, 0.0]),

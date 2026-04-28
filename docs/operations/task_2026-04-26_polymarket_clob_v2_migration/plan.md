@@ -12,7 +12,7 @@ Critic owner: critic-opus (zeus-midstream-critic team) OR surrogate code-reviewe
 
 ### Goal
 
-Migrate Zeus's Polymarket CLOB integration from V1 (`clob.polymarket.com`, `py-clob-client`, USDC.e collateral) to V2 (`clob-v2.polymarket.com`, `py-clob-client-v2`, pUSD collateral, mandatory 10s heartbeat) without losing the existing typed-contract / fail-closure / cycle-architecture investments.
+Status: **V2_ACTIVE_P0 under R3** (2026-04-27 Z0). Migrate Zeus's Polymarket CLOB integration from V1 (`clob.polymarket.com`, `py-clob-client`, USDC.e collateral) to V2 (`clob-v2.polymarket.com`, `py-clob-client-v2`, pUSD collateral) without losing typed-contract, fail-closure, provenance, reconciliation, and cycle-architecture investments. The exact heartbeat cadence is evidence-gated by Q-HB; R3 still treats heartbeat supervision as mandatory for live resting-order risk correctness.
 
 ### Out of scope (anti-goals)
 
@@ -20,6 +20,18 @@ Migrate Zeus's Polymarket CLOB integration from V1 (`clob.polymarket.com`, `py-c
 - Polymarket account / KYC / pUSD funding operations. Tracked as Phase 0 prerequisites; executed by operator outside this packet.
 - Any non-Polymarket venue work.
 - Changes to settlement schema, INV-14 spine, observation_instants_v2, calibration tables. The CLOB V2 boundary is upstream of all of those — this packet does not alter them.
+
+### R3 source-of-truth pointer
+
+This original packet remains the CLOB V2 migration evidence packet, but implementation authority now routes through the R3 lifecycle plan:
+
+- R3 entry: `docs/operations/task_2026-04-26_ultimate_plan/r3/R3_README.md`
+- R3 implementation plan: `docs/operations/task_2026-04-26_ultimate_plan/r3/ULTIMATE_PLAN_R3.md`
+- First active phase: `docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z0.yaml`
+- Corrected impact report: `v2_system_impact_report.md`
+- Packet-local live-money contract: `polymarket_live_money_contract.md`
+
+The older Phase 1-4 sections below are retained as historical packet context. Where they conflict with R3 phase cards, R3 wins.
 
 ### Allowed files (broad envelope; phase scopes refine)
 
@@ -39,7 +51,7 @@ Migrate Zeus's Polymarket CLOB integration from V1 (`clob.polymarket.com`, `py-c
 
 ### Freeze point
 
-No code change is authorized until Phase 0 evidence files Q1, Q2, Q3 land in `evidence/`. Phase 2 requires Q5 (pUSD bridge) and Q6 (V1 EOL) evidence. Phase 3 cutover requires all Phase 0 questions answered plus Phase 1 + Phase 2 closure.
+No source-code change is authorized by this original packet body. Z0 is doc/test-only. R3 implementation phases authorize later source changes one phase at a time after drift check, topology navigation, operator-gate review, acceptance tests, and critic/verifier review. Q1-zeus-egress, Q-HB, Q-FX-1, CLOB V2 cutover, calibration retrain, TIGGE ingest, and G1 live deploy remain fail-closed operator gates.
 
 ### Critic owner
 
@@ -47,15 +59,19 @@ critic-opus on zeus-midstream-critic team is the durable critic. If unavailable 
 
 ---
 
+## Legacy Phase 1-4 plan body — superseded by R3
+
+The sections below are retained as historical packet context only. They do not authorize implementation when they conflict with R3 phase cards or the corrected `v2_system_impact_report.md`. In particular, exact heartbeat cadence and exact `delayed` status spellings remain evidence-gated; R3 owns implementation through Z/U/M/R/T/F/A/G phase cards.
+
 ## 2. Decision framework
 
 ### Three paradigm shifts (K << N)
 
 | Paradigm | V1 | V2 | Phase touchpoint |
 |---|---|---|---|
-| A. Transport | request/response, no liveness contract | persistent session + 10s mandatory heartbeat | Phase 1 (clob_protocol) + Phase 2 (heartbeat coroutine) |
+| A. Transport | request/response, no liveness contract | supervised resting-order health; exact heartbeat cadence is Q-HB evidence-gated | Superseded by R3 Z1/Z2/Z3 |
 | B. Collateral | USDC.e | pUSD | Phase 0 (bridge inquiry) + Phase 2 (redemption swap) |
-| C. State machine | live → matched/cancelled | live → delayed → matched/cancelled + server-side cancel | Phase 2 (fill_tracker delayed branch) |
+| C. State machine | live → matched/cancelled | expanded/unknown venue states must be typed and fail-closed; exact transitional spellings require current SDK/API citation | Superseded by R3 U2/M1-M5 |
 
 ### Five-layer model (matches `v2_system_impact_report.md` §6 grouping)
 
@@ -240,14 +256,14 @@ Medium-risk, sequential, requires Phase 1 + Phase 0 Q5/Q6 answers. **This is whe
 
 ### 5.2 Slices
 
-#### 2.A — `delayed` status branch in fill_tracker
+#### 2.A — Legacy transitional-status branch in fill_tracker (superseded by R3 M2/M3)
 
 - Allowed files: `src/execution/fill_tracker.py`, `tests/test_fill_tracker_delayed_status.py` (NEW)
 - Action:
-  - Define `TRANSITIONAL_STATUSES = frozenset({"DELAYED", "ORDER_DELAYED"})`
-  - Add a wall-clock timeout policy: if a position has been in `delayed` for > N seconds (config-driven, default 60), treat as `UNFILLED_ORDER` and call `_mark_entry_voided`
-  - Update `_normalize_status` to map V2 `delayed` payloads
-- Acceptance: ≥6 test cases: delayed→matched transition does not void, delayed→cancelled transition voids, delayed→delayed for >timeout voids, delayed→delayed within timeout waits, normalize tolerates `delayed` / `ORDER_DELAYED` / `delaying_order_error`, no regression on V1 status set
+  - Legacy placeholder: define a transitional-status set only from source-cited venue payloads; do not hard-code historical candidate strings without fresh evidence.
+  - R3 replacement: unknown or transitional venue states must be journaled as typed facts and reconciled; no exact status string is active without source evidence.
+  - R3 replacement: `_normalize_status` changes require source-cited payload examples and M2/M3 acceptance tests.
+- Acceptance: superseded by R3 M2/M3 antibodies; no test may assert historical candidate spellings without current SDK/API citation.
 - Risk: medium — capital-leak vector if mishandled
 - Critic gate: full review + heartbeat-failure-injection test (A2 from §6.4)
 
@@ -354,7 +370,7 @@ High-risk. Real V2 traffic. Requires Phase 2 closed AND real fundable account.
 #### 3.B — Telemetry for dual-run observation
 
 - Allowed files: `src/data/polymarket_client.py` (add metric emit), `state/clob_protocol_telemetry.json` (NEW operational artifact)
-- Action: emit per-call metrics: protocol version, latency, error class, delayed-status-rate. Daily rollup file written to state/.
+- Action: emit per-call metrics: protocol version, latency, error class, unknown-or-transitional-status-rate. Daily rollup file written to state/.
 - Acceptance: file populated after one cycle; visible to `verify_truth_surfaces.py` if registered
 - Risk: low
 - Critic gate: standard
@@ -378,7 +394,7 @@ High-risk. Real V2 traffic. Requires Phase 2 closed AND real fundable account.
 #### 3.E — Post-cutover stability review
 
 - Owner: critic-opus
-- Action: read `evidence/cutover_log_<date>.md`; assess heartbeat stability, fill rate, fee-vs-prediction match, delayed-status incidence
+- Action: read `evidence/cutover_log_<date>.md`; assess heartbeat stability, fill rate, fee-vs-prediction match, unknown/transitional-status incidence
 - Verdict file: `evidence/phase3_critic_verdict.md`
 - Acceptance: critic confirms stable (or recommends rollback)
 
@@ -485,7 +501,7 @@ Every slice in every phase follows the protocol below (anchored in memory rules 
 | pUSD bridge path remains undocumented | 0/2 | medium | high | escalate via 0.D; if blocked >4 weeks, file with Polymarket BD contact |
 | V2 SDK has bugs (GA only 2 weeks old at packet creation) | 2/3 | medium | medium | dual-pin (1.G), test in V2 antibody (1.D) before runtime use; rollback path in 3.C |
 | Heartbeat coroutine introduces race with `_cycle_lock` | 2 | medium | high | thread-safe design in 2.B; A2 antibody injection test |
-| `delayed` state misclassification leaks capital | 2 | low (with 2.A) | high | wall-clock timeout in 2.A; A2 covers indirectly |
+| Unknown/transitional venue state misclassification leaks capital | R3 M2/M3 | medium until R3 lands | high | typed unknown-side-effect handling, venue facts, and reconciliation sweep |
 | pUSD ↔ USDC.e FX accounting surprise | 3 | medium | medium | document FX classification decision in 3.C runbook |
 | Co-tenant work touches `polymarket_client.py` during Phase 2 | 2 | low | medium | rebase per slice; isolate-and-restore pattern if needed |
 | V2 host probe (Q1) shows geofence | 0 | low | high | escalate to Polymarket support; pause packet |
@@ -503,7 +519,7 @@ See `open_questions.md`. Phase advancement gates reference question IDs.
 ## 12. References
 
 Within this packet:
-- `v2_system_impact_report.md` — V2 capability + Zeus impact analysis
+- `v2_system_impact_report.md` — corrected V2 capability + Zeus impact analysis; R3 source-of-truth supersedes legacy Phase 1-4 body
 - `zeus_touchpoint_inventory.md` — grep-verified file:line registry
 - `open_questions.md` — operator decision tracker
 - `work_log.md` — per-slice closure log

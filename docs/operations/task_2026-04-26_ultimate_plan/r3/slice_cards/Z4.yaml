@@ -1,0 +1,148 @@
+id: Z4
+phase: Z
+title: CollateralLedger — pUSD + CTF tokens + reservations + wrap/unwrap commands
+purpose: |
+  Replace R2 down-07's single balanceOf rewire with a full multi-asset
+  ledger. pUSD is BUY collateral; CTF outcome tokens are SELL inventory.
+  Reservations track open buy/sell orders so preflight blocks
+  double-commitment. Wrap/unwrap (USDC.e ↔ pUSD) are durable commands.
+authority_basis:
+  - V2.1 §Z4
+  - evidence/multi_review/V2_1_STRUCTURAL_DIFF.md §2.6 (CollateralLedger > balanceOf rewire)
+  - evidence/down/q_new_1_polygon_rpc_eth_call_2026-04-26_R3L3.md (pUSD distinct ERC-20)
+  - R2 down-07.yaml (8-row pUSD propagation matrix preserved)
+preconditions:
+  head: 874e00cc0244 + Z0 + Z1 + Z2 land + Q-NEW-1 RESOLVED-DIVERGENT (pUSD ERC-20 confirmed)
+deliverables:
+  new_modules:
+    - path: src/state/collateral_ledger.py
+      summary: |
+        CollateralLedger — single source of truth for pUSD balance, pUSD
+        allowance to Exchange, CTF token balance per outcome token, CTF
+        token allowance, reserved pUSD from open buys, reserved tokens
+        from open sells, legacy USDC.e balance + wrapping state.
+      surface: |
+        @dataclass(frozen=True)
+        class CollateralSnapshot:
+            pusd_balance_micro: int
+            pusd_allowance_micro: int
+            usdc_e_legacy_balance_micro: int
+            ctf_token_balances: dict[str, int]  # token_id → wei
+            ctf_token_allowances: dict[str, int]
+            reserved_pusd_for_buys_micro: int
+            reserved_tokens_for_sells: dict[str, int]
+            captured_at: datetime
+            authority_tier: Literal["CHAIN", "VENUE", "DEGRADED"]
+
+        class CollateralLedger:
+            def refresh(self, adapter: PolymarketV2Adapter) -> CollateralSnapshot: ...
+            def reserve_pusd_for_buy(self, command_id: str, micro: int) -> None: ...
+            def release_pusd_reservation(self, command_id: str) -> None: ...
+            def reserve_tokens_for_sell(self, command_id: str, token_id: str, size: int) -> None: ...
+            def release_token_reservation(self, command_id: str, token_id: str) -> None: ...
+            def buy_preflight(self, intent: ExecutionIntent) -> bool:
+                # available_pusd >= worst_case_spend + fees + reserve
+                ...
+            def sell_preflight(self, intent: ExecutionIntent) -> bool:
+                # token_balance - reserved_for_sells >= sell_size
+                # NEVER substitutes pUSD for token inventory
+                ...
+
+    - path: src/execution/wrap_unwrap_commands.py
+      summary: Durable command ledger for USDC.e ↔ pUSD wrap/unwrap.
+      surface: |
+        class WrapUnwrapState(str, Enum):
+            WRAP_REQUESTED = "WRAP_REQUESTED"
+            WRAP_TX_HASHED = "WRAP_TX_HASHED"
+            WRAP_CONFIRMED = "WRAP_CONFIRMED"
+            WRAP_FAILED = "WRAP_FAILED"
+            UNWRAP_REQUESTED = "UNWRAP_REQUESTED"
+            UNWRAP_TX_HASHED = "UNWRAP_TX_HASHED"
+            UNWRAP_CONFIRMED = "UNWRAP_CONFIRMED"
+            UNWRAP_FAILED = "UNWRAP_FAILED"
+
+        def request_wrap(amount_micro: int) -> str:  # returns command_id
+        def request_unwrap(amount_micro: int) -> str:
+        def reconcile_pending_wraps_against_chain(web3) -> None: ...
+  new_tables:
+    - sql: |
+        CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pusd_balance_micro INTEGER NOT NULL,
+          pusd_allowance_micro INTEGER NOT NULL,
+          usdc_e_legacy_balance_micro INTEGER NOT NULL,
+          ctf_token_balances_json TEXT NOT NULL,
+          ctf_token_allowances_json TEXT NOT NULL,
+          reserved_pusd_for_buys_micro INTEGER NOT NULL DEFAULT 0,
+          reserved_tokens_for_sells_json TEXT NOT NULL DEFAULT '{}',
+          captured_at TEXT NOT NULL,
+          authority_tier TEXT NOT NULL CHECK (authority_tier IN ('CHAIN','VENUE','DEGRADED')),
+          raw_balance_payload_hash TEXT
+        );
+    - sql: |
+        CREATE TABLE IF NOT EXISTS wrap_unwrap_commands (
+          command_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK (direction IN ('WRAP','UNWRAP')),
+          amount_micro INTEGER NOT NULL,
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          requested_at TEXT NOT NULL,
+          terminal_at TEXT,
+          error_payload TEXT
+        );
+    - sql: |
+        CREATE TABLE IF NOT EXISTS wrap_unwrap_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT NOT NULL REFERENCES wrap_unwrap_commands(command_id),
+          event_type TEXT NOT NULL,
+          payload_json TEXT,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+  extended_modules:
+    - file: src/execution/executor.py
+      function: execute_entry_order, execute_exit_order
+      change: pre-submit checks `ledger.buy_preflight(intent)` for buys, `ledger.sell_preflight(intent)` for sells; raises CollateralInsufficient with structured reason
+    - file: src/execution/harvester.py
+      function: redemption path
+      change: consult CollateralLedger; emit redemption commands via R1 settlement_commands ledger (NOT direct adapter call)
+    - file: src/data/polymarket_client.py
+      function: get_balance
+      change: deprecated; redirect to CollateralLedger.refresh().pusd_balance_micro / 1e6
+acceptance_tests:
+  - tests/test_collateral_ledger.py::test_buy_preflight_blocks_when_pusd_insufficient
+  - tests/test_collateral_ledger.py::test_sell_preflight_blocks_when_token_balance_insufficient
+  - tests/test_collateral_ledger.py::test_sell_preflight_does_NOT_substitute_pusd_for_tokens
+    | high pUSD balance, zero CTF balance, attempt sell → CollateralInsufficient raised; high pUSD does NOT excuse the sell
+  - tests/test_collateral_ledger.py::test_open_sell_reserves_tokens_blocks_duplicate_sell
+  - tests/test_collateral_ledger.py::test_release_reservation_on_cancel_or_fill
+  - tests/test_collateral_ledger.py::test_legacy_usdc_e_classified_separately_from_pusd
+  - tests/test_collateral_ledger.py::test_authority_tier_DEGRADED_when_chain_unreachable
+  - tests/test_collateral_ledger.py::test_wrap_command_lifecycle_atomic_states
+    | WRAP_REQUESTED → WRAP_TX_HASHED → WRAP_CONFIRMED transitions reach terminal; crash between any two states recoverable
+  - tests/test_collateral_ledger.py::test_unwrap_failed_does_not_decrement_pusd
+  - tests/test_collateral_ledger.py::test_pusd_redemption_blocks_until_q_fx_1_classified
+    | env-flag ZEUS_PUSD_FX_CLASSIFIED unset → redemption call raises FXClassificationPending (R2 down-07 ship-block preserved)
+  - tests/test_collateral_ledger.py::test_fx_classification_enum_required_at_redemption
+    | str literal "trading_pnl" raises TypeError; only FXClassification enum members accepted (R2 down-07 type-gate-supplement preserved)
+operator_decision_required:
+  - gate_id: Q-FX-1
+    blocking: yes (gates pUSD redemption flow only)
+    artifact: docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q_fx_1_classification_decision_2026-04-26.md
+    runtime_gate: env var ZEUS_PUSD_FX_CLASSIFIED + FXClassification enum value selected
+depends_on: [Z0, Z1, Z2]
+estimated_h: 22
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [down-07]
+  v2_1_phases: [Z4]
+new_invariants_or_NCs:
+  - NC-NEW-K: "buy_preflight ONLY consults pusd_balance + reserved_buys; sell_preflight ONLY consults ctf_token_balance + reserved_sells. Substitution is a structural error. Antibody: tests/test_collateral_ledger.py::test_sell_preflight_does_NOT_substitute_pusd_for_tokens"
+  - INV-NEW-D: "Reserved tokens for an open sell command MUST be released atomically when the command transitions to CANCELED, FILLED, or EXPIRED — never abandoned, never double-counted."
+notes:
+  - This card replaces R2 down-07 single-card balanceOf rewire with a multi-card sub-packet of equivalent scope.
+  - 8-row pUSD propagation matrix from R2 down-07 carries forward; new cards add reservation semantics + wrap/unwrap durability.
+  - Coordinate with Z2: PolymarketV2Adapter.get_balance() now returns CollateralSnapshot, not raw float.
+  - Coordinate with R1 (settlement_commands): redemption goes through R1, not directly through Z4.

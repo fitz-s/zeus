@@ -10,6 +10,12 @@ invariants:
       tests:
         - tests/test_architecture_contracts.py::test_negative_constraints_include_no_local_close
   - id: INV-02
+    # CITATION_REPAIR 2026-04-28: tests: block added per SIDECAR-2 audit. Tests
+    # already existed in tests/test_architecture_contracts.py (lifecycle phase
+    # kernel transitions verify that exit→settled and settled-as-terminal are
+    # distinct from the exit lifecycle); no test design needed, only YAML
+    # citation. Continues the pattern from BATCH D INV-16/17 schema-citation
+    # repair: enforcement is broader than the YAML field initially exposed.
     zones: [K0_frozen_kernel, K2_runtime]
     statement: Settlement is not exit.
     why: Exit execution and final market settlement are distinct lifecycle facts.
@@ -17,6 +23,9 @@ invariants:
       spec_sections: [3, P2]
       schema:
         - architecture/2026_04_02_architecture_kernel.sql
+      tests:
+        - tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds
+        - tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_rejects_illegal_fold
   - id: INV-03
     zones: [K0_frozen_kernel]
     statement: Canonical authority is append-first and projection-backed.
@@ -100,6 +109,13 @@ invariants:
       tests:
         - tests/test_dual_track_law_stubs.py::test_kelly_input_carries_distributional_info
   - id: INV-14
+    # CITATION_REPAIR 2026-04-28: tests: block added per SIDECAR-2 audit. Tests
+    # already existed in tests/test_canonical_position_current_schema_alignment.py
+    # (3 tests verifying temperature_metric is a canonical column at multiple
+    # layers) + tests/test_dual_track_law_stubs.py (settlements_metric_identity
+    # asserts non-null + unique-per-metric constraint). Continues the pattern
+    # from BATCH D INV-16/17 + INV-02: enforcement is broader than the YAML
+    # field initially exposed.
     zones: [K0_frozen_kernel, K2_runtime]
     statement: Every temperature-market family row in canonical tables must carry temperature_metric, physical_quantity, observation_field, and data_version.
     why: These four fields are row identity; without them, high and low truths share the same key space and conflate two distinct settlement facts.
@@ -108,6 +124,11 @@ invariants:
       negative_constraints: [NC-11, NC-12]
       schema:
         - architecture/2026_04_02_architecture_kernel.sql
+      tests:
+        - tests/test_canonical_position_current_schema_alignment.py::test_canonical_position_current_columns_includes_temperature_metric
+        - tests/test_canonical_position_current_schema_alignment.py::test_kernel_sql_position_current_declares_temperature_metric
+        - tests/test_canonical_position_current_schema_alignment.py::test_canonical_constants_match_kernel_sql_position_current_columns
+        - tests/test_dual_track_law_stubs.py::test_settlements_metric_identity_requires_non_null_and_unique_per_metric
   - id: INV-15
     zones: [K2_runtime]
     statement: Forecast rows lacking canonical cycle identity may serve runtime degrade paths but must not enter canonical training.
@@ -117,21 +138,32 @@ invariants:
       schema:
         - architecture/2026_04_02_architecture_kernel.sql
   - id: INV-16
-    # PRUNE_CANDIDATE 2026-04-28 (pure prose-as-law on HEAD: only spec_sections + negative_constraints, both prose pointers; no test, semgrep, schema, or script enforcement). See docs/operations/task_2026-04-27_harness_debate/verdict.md §6.1 — both debate sides agree this should be deleted, rewritten with concrete enforcement, or upgraded with transitive NC-12 verification test.
+    # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit (docs/operations/task_2026-04-27_harness_debate/evidence/critic-harness/batch_C_review_2026-04-28.md §INV-16 finding). The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 3 relationship tests for this invariant ALREADY EXIST in tests/test_phase6_causality_status.py (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"). The schema-citation gap was real; the enforcement gap was imaginary.
     zones: [K2_runtime]
     statement: Day0 low slots with causality_status != 'OK' must not route through historical Platt lookup; low Day0 uses nowcast path only.
     why: Causality preservation — routing a slot that is already partly historical through a forecast Platt model produces incorrect probability estimates.
     enforced_by:
       spec_sections: [15]
       negative_constraints: [NC-12]
+      tests:
+        - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_evaluator_has_causality_status_reject_gate_for_low_track
+        - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_causality_status_reject_is_distinct_from_observation_unavailable
+        - tests/test_phase6_causality_status.py::TestCausalityStatusRejectAxis::test_day0_observation_context_carries_causality_status
   - id: INV-17
-    # PRUNE_CANDIDATE 2026-04-28 (pure prose-as-law on HEAD: only spec_sections + negative_constraints, both prose pointers; no test, semgrep, schema, or script enforcement). See docs/operations/task_2026-04-27_harness_debate/verdict.md §6.1 — both debate sides agree this should be deleted, rewritten with concrete enforcement, or upgraded with transitive NC-13 verification test.
+    # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit. The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 6 relationship tests for this invariant ALREADY EXIST in tests/test_dt1_commit_ordering.py (file docstring: "Relationship tests for DT#1 / INV-17: DB authority writes commit BEFORE derived JSON exports fire"). The schema-citation gap was real; the enforcement gap was imaginary.
     zones: [K0_frozen_kernel, K2_runtime]
     statement: DB authority writes (event append + projection fold) must COMMIT before any derived JSON export is updated.
     why: On a mid-step crash the DB wins and JSON is rebuilt from projection; a JSON write that races the commit can leave exports ahead of authority, making recovery ambiguous.
     enforced_by:
       spec_sections: [16]
       negative_constraints: [NC-13]
+      tests:
+        - tests/test_dt1_commit_ordering.py::TestCommitThenExportHappyPath::test_commit_then_export_happy_path
+        - tests/test_dt1_commit_ordering.py::TestCommitThenExportHappyPath::test_commit_then_export_fires_all_json_exports_in_order
+        - tests/test_dt1_commit_ordering.py::TestCommitThenExportDbFailure::test_commit_then_export_db_failure_suppresses_json
+        - tests/test_dt1_commit_ordering.py::TestCommitThenExportJsonFailure::test_commit_then_export_json_failure_after_commit
+        - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_save_portfolio_persists_last_committed_artifact_id
+        - tests/test_dt1_commit_ordering.py::TestSavePortfolioRecoveryContract::test_load_portfolio_detects_stale_json_when_db_newer
   - id: INV-18
     zones: [K2_runtime]
     statement: Chain reconciliation state is three-valued — CHAIN_SYNCED / CHAIN_EMPTY / CHAIN_UNKNOWN — and void decisions require CHAIN_EMPTY.

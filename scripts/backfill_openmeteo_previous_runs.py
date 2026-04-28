@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Created: 2026-04-21
+# Last reused/audited: 2026-04-27
+# Lifecycle: created=2026-04-21; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Backfill Open-Meteo previous-runs forecast rows into forecasts.
+# Reuse: Run only through packet-approved ETL/backfill workflows; dry-run first for live DB work.
+# Authority basis: R3 F1 forecast provenance wiring + historical forecast backfill packet.
 """Backfill city forecast history from Open-Meteo Previous Runs.
 
 This is the dynamic-city forecast-history lane. It writes raw forecast rows to
@@ -28,6 +34,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import httpx
 
 from src.config import City, cities, cities_by_name
+from src.data.forecast_source_registry import (
+    get_source,
+    source_id_for_previous_runs_model,
+    stable_payload_hash,
+)
 from src.state.db import get_world_connection, init_schema
 
 logger = logging.getLogger(__name__)
@@ -103,6 +114,10 @@ class ForecastBackfillRow:
     temp_unit: str
     retrieved_at: str
     imported_at: str
+    source_id: str
+    raw_payload_hash: str
+    captured_at: str
+    authority_tier: str
 
 
 def _hourly_variable_for_lead(lead_days: int) -> str:
@@ -193,9 +208,10 @@ def _rows_from_payload(
         counters["missing_time"] += 1
         return [], counters
 
+    payload_hash = stable_payload_hash(payload)
     by_date: dict[tuple[str, int, str], list[float]] = {}
     for model in models:
-        source = MODEL_SOURCE_MAP.get(model, f"openmeteo_{model}")
+        source = source_id_for_previous_runs_model(model)
         for lead in leads:
             base_variable = _hourly_variable_for_lead(lead)
             variable = f"{base_variable}_{model}"
@@ -217,6 +233,7 @@ def _rows_from_payload(
 
     rows: list[ForecastBackfillRow] = []
     for (target_date, lead, source), temps in sorted(by_date.items()):
+        source_spec = get_source(source)
         target = date.fromisoformat(target_date)
         basis = target - timedelta(days=lead)
         high = max(temps)
@@ -243,6 +260,10 @@ def _rows_from_payload(
                 temp_unit=city.settlement_unit,
                 retrieved_at=retrieved_at,
                 imported_at=imported_at,
+                source_id=source_spec.source_id,
+                raw_payload_hash=payload_hash,
+                captured_at=retrieved_at,
+                authority_tier=source_spec.authority_tier,
             )
         )
     return rows, counters
@@ -266,9 +287,13 @@ def _insert_rows(conn, rows: list[ForecastBackfillRow]) -> int:
             forecast_low,
             temp_unit,
             retrieved_at,
-            imported_at
+            imported_at,
+            source_id,
+            raw_payload_hash,
+            captured_at,
+            authority_tier
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -284,6 +309,10 @@ def _insert_rows(conn, rows: list[ForecastBackfillRow]) -> int:
                 row.temp_unit,
                 row.retrieved_at,
                 row.imported_at,
+                row.source_id,
+                row.raw_payload_hash,
+                row.captured_at,
+                row.authority_tier,
             )
             for row in rows
         ],

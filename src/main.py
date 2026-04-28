@@ -369,6 +369,108 @@ def _write_heartbeat() -> None:
             os._exit(1)
 
 
+_venue_heartbeat_supervisor = None
+
+_user_channel_ingestor = None
+_user_channel_thread = None
+
+
+def _start_user_channel_ingestor_if_enabled() -> None:
+    """Start M3 Polymarket user-channel ingest in a daemon thread when enabled.
+
+    Disabled by default so M3 adds no live WebSocket side effect until an
+    operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
+    condition IDs plus L2 API credentials. If enabled but misconfigured, the
+    WS guard records an auth/config gap so new submits fail closed.
+    """
+    global _user_channel_ingestor, _user_channel_thread
+    if os.environ.get("ZEUS_USER_CHANNEL_WS_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    if _user_channel_thread is not None and _user_channel_thread.is_alive():
+        return
+    raw_markets = os.environ.get("POLYMARKET_USER_WS_CONDITION_IDS", "")
+    condition_ids = [m.strip() for m in raw_markets.split(",") if m.strip()]
+    if not condition_ids:
+        from src.control.ws_gap_guard import record_gap
+
+        record_gap("condition_ids_missing", subscription_state="MARKET_MISMATCH")
+        raise RuntimeError("POLYMARKET_USER_WS_CONDITION_IDS is required when ZEUS_USER_CHANNEL_WS_ENABLED=1")
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.control.ws_gap_guard import record_gap
+    from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor
+
+    adapter = PolymarketClient()._ensure_v2_adapter()
+    try:
+        _user_channel_ingestor = PolymarketUserChannelIngestor.from_env(adapter, condition_ids)
+    except Exception as exc:
+        record_gap(f"user_channel_start_failed:{type(exc).__name__}", subscription_state="AUTH_FAILED")
+        raise
+
+    def _runner() -> None:
+        import asyncio
+
+        try:
+            asyncio.run(_user_channel_ingestor.start())
+        except Exception as exc:
+            logger.error("M3 user-channel ingestor stopped: %s", exc, exc_info=True)
+
+    _user_channel_thread = threading.Thread(
+        target=_runner,
+        name="polymarket-user-channel",
+        daemon=True,
+    )
+    _user_channel_thread.start()
+    logger.info("M3 user-channel ingestor started for %d condition_ids", len(condition_ids))
+
+
+@_scheduler_job("venue_heartbeat")
+def _write_venue_heartbeat() -> None:
+    """Post the Polymarket venue heartbeat required for live resting orders."""
+    global _venue_heartbeat_supervisor
+    import asyncio
+
+    from src.control.heartbeat_supervisor import (
+        HeartbeatHealth,
+        HeartbeatSupervisor,
+        configure_global_supervisor,
+        heartbeat_cadence_seconds_from_env,
+    )
+
+    try:
+        if _venue_heartbeat_supervisor is None:
+            from src.data.polymarket_client import PolymarketClient
+
+            adapter = PolymarketClient()._ensure_v2_adapter()
+            _venue_heartbeat_supervisor = HeartbeatSupervisor(
+                adapter,
+                cadence_seconds=heartbeat_cadence_seconds_from_env(),
+            )
+            configure_global_supervisor(_venue_heartbeat_supervisor)
+    except Exception as exc:
+        if _venue_heartbeat_supervisor is None:
+            _venue_heartbeat_supervisor = HeartbeatSupervisor(
+                adapter=None,
+                cadence_seconds=heartbeat_cadence_seconds_from_env(),
+            )
+            configure_global_supervisor(_venue_heartbeat_supervisor)
+        _venue_heartbeat_supervisor.record_failure(exc)
+        logger.error("Venue heartbeat failed closed: %s", exc)
+        raise
+
+    try:
+        status = asyncio.run(_venue_heartbeat_supervisor.run_once())
+    except Exception as exc:
+        _venue_heartbeat_supervisor.record_failure(exc)
+        logger.error("Venue heartbeat failed closed: %s", exc)
+        raise
+    if status.health is not HeartbeatHealth.HEALTHY:
+        raise RuntimeError(
+            f"venue heartbeat unhealthy: health={status.health.value}; "
+            f"error={status.last_error or ''}"
+        )
+
+
 def _startup_wallet_check(clob=None):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
@@ -380,7 +482,7 @@ def _startup_wallet_check(clob=None):
         clob = PolymarketClient()
     try:
         balance = float(clob.get_balance())
-        logger.info("Startup wallet check: $%.2f USDC available", balance)
+        logger.info("Startup wallet check: $%.2f pUSD available", balance)
     except Exception as exc:
         logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
         sys.exit("FATAL: Cannot start \u2014 wallet unreachable. Fix credentials or network and restart.")
@@ -545,8 +647,9 @@ def main():
     # visible. See _assert_live_safe_strategies_or_exit() docstring above.
     _assert_live_safe_strategies_or_exit()
 
-    # P7: Fail-closed wallet gate u2014 must run before first cycle.
+    # P7: Fail-closed wallet gate — must run before first cycle.
     _startup_wallet_check()
+    _start_user_channel_ingestor_if_enabled()
 
     if once:
         run_single_cycle()
@@ -578,6 +681,15 @@ def main():
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
+    from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
+    scheduler.add_job(
+        _write_venue_heartbeat,
+        "interval",
+        seconds=heartbeat_cadence_seconds_from_env(),
+        id="venue_heartbeat",
+        max_instances=1,
+        coalesce=True,
+    )
     for time_str in discovery["ecmwf_open_data_times_utc"]:
         h, m = time_str.split(":")
         scheduler.add_job(

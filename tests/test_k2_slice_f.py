@@ -42,7 +42,7 @@ class TestRiskguardCapitalMetadata:
 
 
 class TestTrailingLossDegradation:
-    """Degraded trailing loss must be RED, not YELLOW."""
+    """Degraded trailing loss must not be treated as GREEN."""
 
     def test_degraded_status_returns_red(self):
         from src.riskguard.riskguard import _trailing_loss_snapshot, RiskLevel
@@ -62,7 +62,7 @@ class TestTrailingLossDegradation:
                 initial_bankroll=1000.0,
                 threshold_pct=0.10,
             )
-            assert result["level"] == RiskLevel.RED
+            assert result["level"] == RiskLevel.DATA_DEGRADED
             assert "degraded" in result["status"]
             assert result["degraded"] is True
 

@@ -39,6 +39,7 @@ test_trust_policy:
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -67,14 +68,19 @@ test_trust_policy:
     tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_etl_forecasts_v2_from_legacy.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-23"}
-    tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-04-27"}
+    tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
+    tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_k2_slice_e.py: {created: "2026-04-21", last_used: "2026-04-27"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
+    tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-23"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-17"}
@@ -97,14 +103,14 @@ test_trust_policy:
     tests/test_topology_doctor.py: {created: "2026-04-13", last_used: "2026-04-21"}
     tests/test_truth_surface_health.py: {created: "2026-04-07", last_used: "2026-04-25"}
     tests/test_digest_admission_policy.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_digest_profile_matching.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_digest_profile_matching.py: {created: "2026-04-25", last_used: "2026-04-27"}
     tests/test_digest_regression_false_positive.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_admission_kernel_hardening.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_decision_evidence_runtime_invocation.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_exit_evidence_audit.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_harvester_dr33_live_enablement.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_hold_value_exit_costs.py: {created: "2026-04-24", last_used: "2026-04-24"}
-    tests/test_neg_risk_passthrough.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_neg_risk_passthrough.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_parse_canonical_bin_label.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_realized_fill.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -113,6 +119,29 @@ test_trust_policy:
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
     tests/test_zpkt.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_executable_market_snapshot_v2.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-04-27"}
+    tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-04-27"}
+    tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
 
 categories:
@@ -135,6 +164,35 @@ categories:
     - tests/test_execution_price.py
     - tests/test_expiring_assumption.py
     - tests/test_fdr.py
+    - tests/test_cutover_guard.py
+    - tests/test_heartbeat_supervisor.py
+    - tests/test_v2_adapter.py
+    - tests/test_collateral_ledger.py
+    - tests/test_executable_market_snapshot_v2.py
+    - tests/test_provenance_5_projections.py
+    - tests/test_command_grammar_amendment.py
+    - tests/test_riskguard_red_durable_cmd.py
+    - tests/test_forecast_source_registry.py
+    - tests/test_tigge_ingest.py
+    - tests/test_command_bus_types.py
+    - tests/test_command_recovery.py
+    - tests/test_venue_command_repo.py
+    - tests/test_unknown_side_effect.py
+    - tests/test_user_channel_ingest.py
+    - tests/test_exit_safety.py
+    - tests/test_exchange_reconcile.py
+    - tests/test_settlement_commands.py
+    - tests/test_fake_polymarket_venue.py
+    - tests/test_strategy_benchmark.py
+    - tests/test_risk_allocator.py
+    - tests/test_live_readiness_gates.py
+    - tests/test_discovery_idempotency.py
+    - tests/test_hk_settlement_floor_rounding.py
+    - tests/test_ingest_isolation.py
+    - tests/test_live_safe_strategies.py
+    - tests/test_obs_v2_dst_missing_hour_flag.py
+    - tests/test_obs_v2_physical_bounds.py
+    - tests/test_p0_hardening.py
     - tests/test_gate_decision.py
     - tests/test_ingestion_guard.py
     - tests/test_k1_review_fixes.py
@@ -203,6 +261,8 @@ categories:
     - tests/test_decision_evidence_entry_emission.py
     - tests/test_decision_evidence_persistence.py
     - tests/test_decision_evidence_runtime_invocation.py
+    - tests/test_executor_command_split.py
+    - tests/test_executor_db_target.py
     - tests/test_executor_typed_boundary.py
     - tests/test_harvester_dr33_live_enablement.py
     - tests/test_no_deprecated_make_family_id_calls.py
@@ -238,6 +298,7 @@ categories:
     - tests/test_bug100_k1_k2_structural.py
     - tests/test_calibration_manager.py
     - tests/test_calibration_unification.py
+    - tests/test_calibration_retrain.py
     - tests/test_chronicle_dedup.py
     - tests/test_churn_defense.py
     - tests/test_cluster_collapse.py
@@ -336,6 +397,7 @@ categories:
   # protected), but they gate adoption of the packet workflow itself.
   tooling_runtime:
     - tests/test_zpkt.py
+    - tests/test_z0_plan_lock.py
     - tests/test_pscb_hook.py
 
   # Midstream guardian panel — the 15 test files whose invariant-protection
@@ -408,6 +470,16 @@ law_gate:
       - src/state/ledger.py
       - src/state/projection.py
       - src/state/db.py
+      - src/state/snapshot_repo.py
+  USER_CHANNEL_WS_INGEST:
+    tests:
+      - tests/test_user_channel_ingest.py
+    protects:
+      - src/ingest/polymarket_user_channel.py
+      - src/control/ws_gap_guard.py
+      - src/state/venue_command_repo.py
+      - src/execution/executor.py
+      - src/engine/cycle_runner.py
   LIVE_BACKTEST_SHADOW:
     tests:
       - tests/test_backtest_outcome_comparison.py
@@ -424,6 +496,28 @@ law_gate:
     protects:
       - src/contracts/semantic_types.py
       - src/control/gate_decision.py
+  STRATEGY_BENCHMARK_PROMOTION:
+    tests:
+      - tests/test_strategy_benchmark.py
+    protects:
+      - src/strategy/benchmark_suite.py
+      - src/strategy/data_lake.py
+      - src/strategy/candidates/__init__.py
+  RISK_ALLOCATOR_GOVERNOR:
+    tests:
+      - tests/test_risk_allocator.py
+    protects:
+      - src/risk_allocator/governor.py
+      - src/risk_allocator/__init__.py
+      - src/execution/executor.py
+      - src/engine/cycle_runner.py
+  LIVE_READINESS_GATES:
+    tests:
+      - tests/test_live_readiness_gates.py
+    protects:
+      - scripts/live_readiness_check.py
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
+      - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/G1.md
   UNIT_BIN_TOPOLOGY:
     tests:
       - tests/test_temperature.py
@@ -457,6 +551,34 @@ law_gate:
       - state/zeus_backtest.db
 
 high_sensitivity_skips:
+  tests/test_p0_hardening.py:
+    owner: execution-state-truth-p0
+    packet: task_2026-04-26_execution_state_truth_p0_hardening
+    reason: P0 hardening remains a core relationship antibody; its only skip is an explicitly deferred P2 RED command-emission slice, while P0 keeps the existing local-marking regression guard elsewhere.
+    skip_count: 1
+    reason_patterns:
+      - "R-5 (RED x command-emission) is a P2 slice; P0 keeps the existing local-marking regression guard elsewhere."
+    sunset: Replace the skipped R-5 placeholder with the P2 command-emission antibody when that slice lands.
+  tests/test_heartbeat_supervisor.py:
+    owner: r3-clob-v2-program
+    packet: R3.Z3 HeartbeatSupervisor
+    reason: Z3 heartbeat law tests intentionally skip downstream exchange reconciliation and fake-venue integration proofs that are owned by M5 and T1; Z3 locks the fail-closed heartbeat gate and single tombstone now.
+    skip_count: 4
+    reason_patterns:
+      - "M5 exchange reconciliation owns no-resubmit proof after heartbeat loss."
+      - "M5 exchange_reconcile_findings owns HEARTBEAT_CANCEL_SUSPECTED classification."
+      - "M5 lifecycle/quarantine truth alignment owns unquarantine-after-open-orders proof."
+      - "T1 fake venue integration harness owns forced 16s heartbeat-miss simulation."
+    sunset: Replace skipped placeholders with executable M5/T1 integration antibodies when those phases land.
+  tests/test_cutover_guard.py:
+    owner: r3-clob-v2-program
+    packet: R3.Z1 CutoverGuard
+    reason: R3 CutoverGuard law tests intentionally skip the later exchange wipe classification and full live-money cutover simulation because those are owned by M5/T1 follow-up phases, not the Z1 pre-submit gate.
+    skip_count: 2
+    reason_patterns:
+      - "M5 exchange reconciliation findings table owns cutover-wipe classification."
+      - "T1/G1 live-money integration harness owns full cutover-wipe simulation."
+    sunset: Replace the skips with executable M5/T1 reconciliation/integration antibodies when those phases implement cutover-wipe handling.
   tests/test_cross_module_invariants.py:
     owner: topology-program
     packet: Packet 5
@@ -491,6 +613,14 @@ high_sensitivity_skips:
     reason_patterns:
       - "PyYAML not installed"
     sunset: Remove once provenance registry dependency is always present in test env.
+  tests/test_pe_reconstruction_relationships.py:
+    owner: data-readiness-remediation
+    packet: task_2026-04-23_data_readiness_remediation
+    reason: P-E reconstruction relationship tests skip only when the external reconstruction plan artifact is absent from the current workspace.
+    skip_count: 1
+    reason_patterns:
+      - "PE reconstruction evidence plan not present"
+    sunset: Replace plan-file dependency with fixture-backed reconstruction rows or restore the evidence artifact.
   tests/test_wu_scheduler.py:
     owner: topology-program
     packet: Packet 6

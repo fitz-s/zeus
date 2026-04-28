@@ -21,8 +21,9 @@ machine manifests, tests, and executable source.
 - `zeus_math_spec.md` when math fact/spec context matters
 - `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
   book route
-- `modules/state.md`, `modules/engine.md`, and `modules/data.md` for the first
-  landed high-risk module books
+- `modules/state.md`, `modules/engine.md`, `modules/data.md`,
+  `modules/venue.md`/`modules/ingest.md`, `modules/execution.md`, and
+  `modules/riskguard.md` when routed by the active phase/module manifest
 
 Current data/source facts live under operations current-fact surfaces, not in
 this directory. Dated analytical/support snapshots live under the reports
@@ -57,6 +58,10 @@ which module reference matters.
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |
 | `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
 | `modules/data.md` | Dense source-routing / ingest / data-versioning module book |
+| `modules/venue.md` | Dense Polymarket V2 adapter / submission provenance module book |
+| `modules/ingest.md` | Dense user-channel ingest / U2 fact append bridge module book |
+| `modules/execution.md` | Dense live execution / command / exit / settlement and pre-submit gate module book |
+| `modules/riskguard.md` | Dense riskguard and R3 A2 risk-allocator/governor module book |
 | `modules/topology_system.md` | Dense topology-system reference for machine routing and manifest law |
 | `modules/docs_system.md` | Dense docs-system reference for trust layers and docs mesh maintenance |
 | `modules/code_review_graph.md` | Dense derived-context reference for graph boundaries |
@@ -74,5 +79,6 @@ which module reference matters.
   `docs/operations/current_source_validity.md` for current audited facts.
 - Do not treat module books as authority or current-fact surfaces; use them as
   dense orientation after the scoped router or `architecture/module_manifest.yaml`
-  tells you which module matters.
+  tells you which module matters. R3 Z1 registers `docs/reference/modules/control.md`
+  for the CutoverGuard control route; it remains reference-only, not authority.
 - Do not recreate a frozen support layer.

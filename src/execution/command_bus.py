@@ -7,8 +7,8 @@ Pure type contract. No I/O, no DB, no side effects. P1.S3 wires the executor
 to write through `src/state/venue_command_repo.py` using these types.
 
 Public surface:
-    CommandState           — enum, 11 closed states
-    CommandEventType       — enum, 11 closed event types
+    CommandState           — closed command-side state enum
+    CommandEventType       — closed command-side event enum
     IntentKind             — enum, 4 closed intent kinds
     IdempotencyKey         — frozen value object with deterministic factory
     VenueCommand           — frozen dataclass mirroring the venue_commands row
@@ -49,14 +49,20 @@ class CommandState(str, Enum):
     asserts the round-trip.
     """
     INTENT_CREATED = "INTENT_CREATED"
+    SNAPSHOT_BOUND = "SNAPSHOT_BOUND"
     SUBMITTING = "SUBMITTING"
+    SIGNED_PERSISTED = "SIGNED_PERSISTED"
+    POSTING = "POSTING"
+    POST_ACKED = "POST_ACKED"
     ACKED = "ACKED"
     UNKNOWN = "UNKNOWN"
+    SUBMIT_UNKNOWN_SIDE_EFFECT = "SUBMIT_UNKNOWN_SIDE_EFFECT"
     PARTIAL = "PARTIAL"
     FILLED = "FILLED"
     CANCEL_PENDING = "CANCEL_PENDING"
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
+    SUBMIT_REJECTED = "SUBMIT_REJECTED"
     REJECTED = "REJECTED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
@@ -64,14 +70,22 @@ class CommandState(str, Enum):
 class CommandEventType(str, Enum):
     """Closed grammar of venue_command_events.event_type values."""
     INTENT_CREATED = "INTENT_CREATED"
+    SNAPSHOT_BOUND = "SNAPSHOT_BOUND"
+    SIGNED_PERSISTED = "SIGNED_PERSISTED"
+    POSTING = "POSTING"
+    POST_ACKED = "POST_ACKED"
     SUBMIT_REQUESTED = "SUBMIT_REQUESTED"
     SUBMIT_ACKED = "SUBMIT_ACKED"
     SUBMIT_REJECTED = "SUBMIT_REJECTED"
     SUBMIT_UNKNOWN = "SUBMIT_UNKNOWN"
+    SUBMIT_TIMEOUT_UNKNOWN = "SUBMIT_TIMEOUT_UNKNOWN"
+    CLOSED_MARKET_UNKNOWN = "CLOSED_MARKET_UNKNOWN"
     PARTIAL_FILL_OBSERVED = "PARTIAL_FILL_OBSERVED"
     FILL_CONFIRMED = "FILL_CONFIRMED"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
     CANCEL_ACKED = "CANCEL_ACKED"
+    CANCEL_FAILED = "CANCEL_FAILED"
+    CANCEL_REPLACE_BLOCKED = "CANCEL_REPLACE_BLOCKED"
     EXPIRED = "EXPIRED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
@@ -91,7 +105,9 @@ class IntentKind(str, Enum):
 # venue state may differ from local intent; recovery must reconcile.
 IN_FLIGHT_STATES: frozenset[CommandState] = frozenset({
     CommandState.SUBMITTING,
+    CommandState.POSTING,
     CommandState.UNKNOWN,
+    CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT,
     CommandState.REVIEW_REQUIRED,
     CommandState.CANCEL_PENDING,
 })
@@ -99,6 +115,7 @@ IN_FLIGHT_STATES: frozenset[CommandState] = frozenset({
 # A command in any of these states will not move via fill/ack events; only
 # REVIEW_REQUIRED can re-enter the system from these.
 TERMINAL_STATES: frozenset[CommandState] = frozenset({
+    CommandState.SUBMIT_REJECTED,
     CommandState.FILLED,
     CommandState.CANCELLED,
     CommandState.EXPIRED,

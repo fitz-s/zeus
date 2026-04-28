@@ -1,0 +1,173 @@
+id: U2
+phase: U
+title: Raw provenance schema — 5 distinct projections (commands / order-facts / trade-facts / position-lots / settlement-commands)
+purpose: |
+  Stop compressing 5 distinct truth surfaces into one CommandState grammar.
+  Split into 5 projections per V2.1 §M1, each with its own state machine,
+  table, and event ledger. Every event has source + observed_at +
+  monotonic local sequence. Calibration training consumes CONFIRMED only
+  (NC-NEW-H matched-not-confirmed).
+authority_basis:
+  - V2.1 §M1 (5 projections) + V2.1 §U2 (raw payload provenance)
+  - evidence/multi_review/V2_1_STRUCTURAL_DIFF.md §2.2 + §2.3 + §2.7 (MATCHED ≠ CONFIRMED + OPTIMISTIC vs CONFIRMED + 5 projections)
+  - R2 up-04.yaml (15-col ALTER absorbed; new fields below extend it further)
+  - R2 mid-04.yaml PARTIAL_FILL_OBSERVED (carries forward, repointed at venue_trade_facts)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 land
+deliverables:
+  new_tables:
+    - sql: |
+        -- venue_commands: extends existing R2 up-04 schema with snapshot_id FK + envelope_id
+        ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT;  -- FK to venue_submission_envelopes
+        ALTER TABLE venue_commands ADD COLUMN snapshot_id TEXT;  -- FK to executable_market_snapshots
+        -- (R2 up-04 already adds: condition_id, outcome, signed_order_hash, payload_hash, signed_at_utc, etc.)
+
+        CREATE TABLE IF NOT EXISTS venue_submission_envelopes (
+          envelope_id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL DEFAULT 1,
+          sdk_package TEXT NOT NULL,
+          sdk_version TEXT NOT NULL,
+          host TEXT NOT NULL,
+          chain_id INTEGER NOT NULL,
+          funder_address TEXT NOT NULL,
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL,
+          yes_token_id TEXT NOT NULL,
+          no_token_id TEXT NOT NULL,
+          selected_outcome_token_id TEXT NOT NULL,
+          outcome_label TEXT NOT NULL CHECK (outcome_label IN ('YES','NO')),
+          order_type TEXT NOT NULL CHECK (order_type IN ('GTC','GTD','FOK','FAK')),
+          post_only INTEGER NOT NULL CHECK (post_only IN (0,1)),
+          tick_size TEXT NOT NULL,
+          min_order_size TEXT NOT NULL,
+          neg_risk INTEGER NOT NULL,
+          fee_details_json TEXT NOT NULL,
+          canonical_pre_sign_payload_hash TEXT NOT NULL,
+          signed_order_blob BLOB,
+          signed_order_hash TEXT,
+          raw_request_hash TEXT NOT NULL,
+          raw_response_json TEXT,
+          order_id TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          captured_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS venue_order_facts (
+          fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          venue_order_id TEXT NOT NULL,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id),
+          state TEXT NOT NULL CHECK (state IN (
+            'LIVE','RESTING','MATCHED','PARTIALLY_MATCHED',
+            'CANCEL_REQUESTED','CANCEL_CONFIRMED','CANCEL_UNKNOWN','CANCEL_FAILED',
+            'EXPIRED','VENUE_WIPED','HEARTBEAT_CANCEL_SUSPECTED'
+          )),
+          remaining_size TEXT,
+          matched_size TEXT,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          raw_payload_hash TEXT NOT NULL,
+          raw_payload_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_facts_command ON venue_order_facts (command_id, observed_at);
+        CREATE INDEX IF NOT EXISTS idx_order_facts_state ON venue_order_facts (state, observed_at);
+
+        CREATE TABLE IF NOT EXISTS venue_trade_facts (
+          trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trade_id TEXT NOT NULL UNIQUE,
+          venue_order_id TEXT NOT NULL,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id),
+          state TEXT NOT NULL CHECK (state IN ('MATCHED','MINED','CONFIRMED','RETRYING','FAILED')),
+          filled_size TEXT NOT NULL,
+          fill_price TEXT NOT NULL,
+          fee_paid_micro INTEGER,
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          raw_payload_hash TEXT NOT NULL,
+          raw_payload_json TEXT,
+          UNIQUE (trade_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_facts_command ON venue_trade_facts (command_id, observed_at);
+
+        CREATE TABLE IF NOT EXISTS position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER NOT NULL,  -- FK to existing positions table
+          state TEXT NOT NULL CHECK (state IN (
+            'OPTIMISTIC_EXPOSURE','CONFIRMED_EXPOSURE',
+            'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
+            'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED'
+          )),
+          shares INTEGER NOT NULL,
+          entry_price_avg TEXT NOT NULL,
+          exit_price_avg TEXT,
+          source_command_id TEXT REFERENCES venue_commands(command_id),
+          source_trade_fact_id INTEGER REFERENCES venue_trade_facts(trade_fact_id),
+          captured_at TEXT NOT NULL,
+          state_changed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_position_lots_state ON position_lots (state, position_id);
+
+        CREATE TABLE IF NOT EXISTS provenance_envelope_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_type TEXT NOT NULL CHECK (subject_type IN ('command','order','trade','lot','settlement','wrap_unwrap','heartbeat')),
+          subject_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          source TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);
+  extended_modules:
+    - file: src/state/venue_command_repo.py
+      change: |
+        - insert_command now requires envelope_id + snapshot_id parameters
+        - 'new repo functions: append_order_fact, append_trade_fact, append_position_lot'
+        - all writes go through this single repo (NC-NEW-A boundary preserved)
+acceptance_tests:
+  - tests/test_provenance_5_projections.py::test_command_insert_requires_envelope_and_snapshot
+  - tests/test_provenance_5_projections.py::test_order_facts_state_grammar_includes_RESTING_HEARTBEAT_CANCEL_SUSPECTED
+  - tests/test_provenance_5_projections.py::test_trade_facts_split_MATCHED_MINED_CONFIRMED_RETRYING_FAILED
+  - tests/test_provenance_5_projections.py::test_position_lots_optimistic_vs_confirmed_split
+  - |
+    tests/test_provenance_5_projections.py::test_calibration_training_filters_for_CONFIRMED_only
+    NC-NEW-H — SELECT * FROM venue_trade_facts WHERE state IN ('MATCHED','MINED') for calibration raises ValueError
+  - |
+    tests/test_provenance_5_projections.py::test_optimistic_exposure_rolled_back_on_FAILED_trade
+    trade_fact transitions MATCHED → FAILED → position_lot transitions OPTIMISTIC_EXPOSURE → quarantine
+  - |
+    tests/test_provenance_5_projections.py::test_full_provenance_chain_reconstructable
+    given a CONFIRMED position, walk: lot.source_trade_fact_id → trade.command_id → command.envelope_id → envelope.signed_order_hash → snapshot_id → raw payload hashes
+  - tests/test_provenance_5_projections.py::test_local_sequence_monotonic_per_subject
+  - tests/test_provenance_5_projections.py::test_source_field_required_on_every_event
+  - tests/test_provenance_5_projections.py::test_redeem_can_be_traced_to_tx_hash_and_chain_receipt
+operator_decision_required: []
+depends_on: [Z0, Z1, Z2, Z3, Z4, U1]
+estimated_h: 28
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [up-04, mid-02, mid-03, mid-04]
+  v2_1_phases: [U2, M1]
+new_invariants_or_NCs:
+  - NC-NEW-G: provenance pinned at VenueSubmissionEnvelope (already minted by Z2)
+  - NC-NEW-H: matched-not-confirmed — calibration training paths filter venue_trade_facts WHERE state = 'CONFIRMED' only.
+  - NC-NEW-I: optimistic-vs-confirmed-exposure — risk allocator separates capital deployed against OPTIMISTIC_EXPOSURE from CONFIRMED_EXPOSURE.
+  - INV-NEW-F: every fact in the 5 projections has source + observed_at + local_sequence; events from REST and WS_USER must reconcile by trade_id.
+notes:
+  - This is the schema backbone for all execution work. Everything downstream consumes these 5 projections.
+  - schema_version=1 in venue_submission_envelopes; bumping requires planning-lock (NC-NEW-A boundary).
+  - venue_commands keeps its existing CommandState grammar (R2 mid-03 amendment); venue_order_facts adds the order-side grammar; venue_trade_facts adds the trade-side grammar.
+  - The 5-projection split is the single biggest structural improvement R3 makes over R2.

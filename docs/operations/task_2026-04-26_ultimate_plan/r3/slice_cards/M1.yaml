@@ -1,0 +1,85 @@
+id: M1
+phase: M
+title: Lifecycle grammar — venue_commands states + transitions + event types (cycle_runner-as-proxy ownership)
+purpose: |
+  Define the COMMAND-side state grammar (venue_commands) cleanly, with
+  cycle_runner as the SOLE RED→durable-cmd authority surface (NC-NEW-D
+  function-scope). Trade and order grammars live in U2; this card owns
+  command grammar only.
+authority_basis:
+  - V2.1 §M1 command states list
+  - R2 mid-01.yaml (RED→durable-cmd; cycle_runner-as-proxy LOCKED in R2 multi-review)
+  - R2 mid-03.yaml (STATE_GRAMMAR_AMEND; INV-29 amendment scheduled)
+  - INV-29 (frozen dataclasses + closed-enum CommandState/CommandEventType grammar)
+  - INV-30 (persist before submit)
+  - INV-32 (position authority advances only after ACKED|PARTIAL|FILLED)
+  - NC-19 (idempotency-key check before discovery place)
+  - NC-NEW-D function-scope (R2 multi-review correction)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 land + INV-29 amendment commit + planning-lock receipt
+deliverables:
+  extended_modules:
+    - file: src/execution/command_bus.py
+      change: |
+        Extend CommandState enum with members per V2.1 list:
+        - INTENT_CREATED, SNAPSHOT_BOUND, SUBMITTING, SIGNED_PERSISTED,
+          POSTING, POST_ACKED, SUBMIT_REJECTED, SUBMIT_UNKNOWN_SIDE_EFFECT,
+          REVIEW_REQUIRED
+        Extend CommandEventType enum with: SNAPSHOT_BOUND, SIGNED_PERSISTED,
+        POSTING, POST_ACKED, SUBMIT_TIMEOUT_UNKNOWN, CLOSED_MARKET_UNKNOWN,
+        CANCEL_FAILED, CANCEL_REPLACE_BLOCKED.
+        Update _TRANSITIONS table in venue_command_repo.py per Apr26 §8.4
+        proposed state machine, validated against NC-NEW-E (RESTING is NOT
+        a CommandState; lives in venue_order_facts per U2).
+    - file: src/state/venue_command_repo.py
+      change: |
+        Update _TRANSITIONS to grammar-additive only. RESTING / matched
+        / fill states live in venue_order_facts + venue_trade_facts (U2).
+        NEVER add RESTING to CommandState (NC-NEW-E enforces).
+    - file: src/engine/cycle_runner.py
+      function: _execute_force_exit_sweep
+      change: |
+        After existing exit_reason="red_force_exit" sweep at line 359-373,
+        emit durable cancel commands via venue_command_repo.insert_command(
+          intent_kind=IntentKind.CANCEL, reason="red_force_exit_proxy", ...
+        ) for each affected position. This is the ONLY caller of
+        insert_command(IntentKind.CANCEL, ...) from cycle_runner.py
+        (NC-NEW-D function-scope antibody enforces).
+    - file: src/riskguard/riskguard.py
+      change: |
+        UNCHANGED — riskguard remains observability-only (sets
+        force_exit_review flag in risk_state). cycle_runner-as-proxy reads
+        the flag; riskguard does NOT directly call insert_command.
+acceptance_tests:
+  - tests/test_command_grammar_amendment.py::test_new_command_states_pass_grammar_check
+  - tests/test_command_grammar_amendment.py::test_new_event_types_pass_grammar_check
+  - tests/test_command_grammar_amendment.py::test_RESTING_not_added_to_CommandState_NC_NEW_E
+  - tests/test_command_grammar_amendment.py::test_inv_29_amendment_commit_referenced_in_pr
+    | semgrep `zeus-mid-03-requires-planning-lock-receipt` checks PR description for planning-lock receipt cite
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emits_cancel_command_within_same_cycle
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emit_grammar_bound_to_cancel_or_derisk_only
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emit_satisfies_inv_30_persist_before_sdk
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emit_satisfies_nc_19_idempotency_lookup
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emit_passes_through_command_recovery
+  - tests/test_riskguard_red_durable_cmd.py::test_red_emit_sole_caller_is_cycle_runner_force_exit_block
+    | NC-NEW-D function-scope antibody — only _execute_force_exit_sweep calls insert_command(IntentKind.CANCEL, reason='red_force_exit_proxy', ...) within cycle_runner.py
+  - tests/test_riskguard_red_durable_cmd.py::test_riskguard_does_NOT_call_insert_command_directly
+operator_decision_required:
+  - gate_id: INV-29 amendment + planning-lock receipt
+    blocking: yes (CI gate; PR cannot merge without receipt cite)
+    artifact: governance commit + planning-lock receipt
+    runtime_gate: semgrep `zeus-mid-03-requires-planning-lock-receipt` checks PR description
+depends_on: [Z0, Z1, Z2, Z3, Z4, U1, U2]
+estimated_h: 14
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [mid-01, mid-03]
+  v2_1_phases: [M1]
+new_invariants_or_NCs:
+  - NC-NEW-D preserved (function-scope): cycle_runner._execute_force_exit_sweep is the SOLE caller of insert_command(IntentKind.CANCEL, reason='red_force_exit_proxy', ...) within cycle_runner.py.
+  - NC-NEW-E preserved: RESTING is NOT a CommandState member; lives in venue_order_facts.state.
+notes:
+  - INV-29 closed-enum amendment is a planning-lock event. M1 PR cannot merge until governance commit lands AND planning-lock receipt is cited in the PR description.
+  - This card finalizes mid-01 + mid-03 from R2 with multi-review hardening.
+  - Trade/order/lot/settlement grammars live in U2 / R1 / their own slices.

@@ -1,0 +1,120 @@
+id: F3
+phase: F
+title: TIGGE ingest stub — registered, gated, dormant by default
+purpose: |
+  Land the TIGGE-specific ingest class as a stub registered in F1's
+  forecast_source_registry. Code path is built; external TIGGE HTTP/GRIB fetch
+  is not implemented in F3. Operator can flip switches without code change to
+  route a pre-approved local JSON TIGGE payload through the ensemble pipeline.
+authority_basis:
+  - User directive 2026-04-26: TIGGE-class data ingestion is operator-decision; wiring must be ready
+  - F1 forecast_source_registry pattern
+  - Existing ECMWF open data ingest at src/data/ecmwf_open_data.py (template for TIGGE)
+  - TIGGE archive specs (operator should capture in reference_excerpts/tigge_archive_access_<date>.md)
+preconditions:
+  head: 874e00cc0244 + F1 lands
+deliverables:
+  new_modules:
+    - path: src/data/tigge_client.py
+      summary: TIGGE ingest adapter. Implements ForecastIngestProtocol without external HTTP/GRIB I/O.
+      surface: |
+        class TIGGEIngest:
+            source_id = "tigge"
+            authority_tier = "FORECAST"
+
+            def __init__(
+                self,
+                api_key: Optional[str] = None,
+                *,
+                payload_path: str | Path | None = None,
+                payload_fetcher: PayloadFetcher | None = None,
+            ) -> None:
+                self._api_key = api_key
+                self._payload_path = payload_path
+                self._payload_fetcher = payload_fetcher
+                # construction allowed; fetch() gates before payload loading
+
+            def fetch(self, run_init_utc: datetime, lead_hours: list[int]) -> ForecastBundle:
+                if not _operator_gate_open():
+                    raise TIGGEIngestNotEnabled(
+                        "TIGGE ingest is operator-gated. "
+                        "Required: operator decision artifact at "
+                        "docs/operations/.../evidence/tigge_ingest_decision_<date>.md "
+                        "AND env var ZEUS_TIGGE_INGEST_ENABLED=1"
+                    )
+                # no external HTTP/GRIB in F3:
+                #   1. use injected packet-approved payload_fetcher, or
+                #   2. read local JSON from payload_path / ZEUS_TIGGE_PAYLOAD_PATH /
+                #      payload_path: in the operator decision artifact.
+                # Missing local payload raises TIGGEIngestFetchNotConfigured.
+                return ForecastBundle(...)
+
+            def health_check(self) -> ForecastSourceHealth: ...
+
+        def _operator_gate_open() -> bool:
+            artifact_present = _check_evidence_file_exists(
+                "docs/operations/task_2026-04-26_ultimate_plan/**/evidence/tigge_ingest_decision_*.md"
+            )
+            env_flag = os.environ.get("ZEUS_TIGGE_INGEST_ENABLED") == "1"
+            return artifact_present and env_flag
+
+  extended_modules:
+    - file: src/data/forecast_source_registry.py
+      change: |
+        Register TIGGEIngest in the SOURCES dict with tier='experimental',
+        requires_operator_decision=True, env_flag_name='ZEUS_TIGGE_INGEST_ENABLED'.
+    - file: src/data/ensemble_client.py
+      change: |
+        Route model='tigge' through the registered ForecastIngestProtocol
+        adapter instead of sending TIGGE to Open-Meteo; preserve existing cache
+        shape and provenance fields.
+    - file: docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/tigge_archive_access_<date>.md (NEW — operator captures)
+      content: |
+        Document TIGGE archive registration steps + API key location +
+        per-model variant tags + lead-time grid + GRIB parsing notes.
+        Captured offline so cold-start agent doesn't need network.
+acceptance_tests:
+  - tests/test_tigge_ingest.py::test_tigge_construction_allowed_when_gate_closed
+  - tests/test_tigge_ingest.py::test_tigge_fetch_raises_when_gate_closed
+    | NC-NEW-J — TIGGEIngest.fetch() raises TIGGEIngestNotEnabled with exact error message including operator artifact path + env flag name
+  - tests/test_tigge_ingest.py::test_tigge_fetch_succeeds_when_artifact_AND_env_flag_present
+    | mock evidence file presence + env flag; assert fetch returns ForecastBundle with source_id='tigge', authority_tier='FORECAST'
+  - tests/test_tigge_ingest.py::test_tigge_open_gate_without_payload_configuration_fails_closed
+    | open gate without an injected/local payload raises TIGGEIngestFetchNotConfigured
+  - tests/test_tigge_ingest.py::test_tigge_fetch_uses_operator_declared_payload_path_without_code_change
+    | local JSON payload path in the operator artifact returns a ForecastBundle without code change
+  - tests/test_tigge_ingest.py::test_tigge_fetch_uses_env_payload_path_as_switch_configuration
+    | ZEUS_TIGGE_PAYLOAD_PATH can provide the local JSON payload path
+  - tests/test_forecast_source_registry.py::test_tigge_gate_open_routes_through_ingest_not_openmeteo
+    | model='tigge' routes through TIGGEIngest and does not call Open-Meteo HTTP
+  - tests/test_tigge_ingest.py::test_tigge_registered_in_source_registry
+    | F1 registry SOURCES dict contains 'tigge' key with correct gate metadata
+  - tests/test_tigge_ingest.py::test_ensemble_signal_does_not_consume_TIGGE_when_gated
+    | F1 active_sources() excludes TIGGE when gate closed; ensemble_signal output is bit-identical with/without TIGGE class loaded
+operator_decision_required:
+  - gate_id: TIGGE-ingest-go-live
+    blocking: yes (TIGGE fetch path; rest of F1+F2 unblocked without)
+    artifact: docs/operations/task_2026-04-26_ultimate_plan/**/evidence/tigge_ingest_decision_*.md
+    runtime_gate: >-
+      env var ZEUS_TIGGE_INGEST_ENABLED=1 plus operator-approved local JSON
+      payload path via artifact `payload_path:` or ZEUS_TIGGE_PAYLOAD_PATH
+depends_on: [F1]
+estimated_h: 6
+risk: medium
+critic_gate: critic-opus
+links:
+  r2_cards: []
+  v2_1_phases: []  # net new for R3
+new_invariants_or_NCs:
+  - NC-NEW-J: TIGGEIngest.fetch() raises TIGGEIngestNotEnabled when operator gate is closed.
+notes:
+  - The local-ingest CODE PATH is built; ingest is dormant until operator flips both gates and points at a local payload.
+  - >-
+    When operator decides to enable TIGGE local ingest: (1) write an evidence
+    artifact matching docs/operations/task_2026-04-26_ultimate_plan/**/evidence/tigge_ingest_decision_*.md
+    with rationale + corpus scope + `payload_path: <json path>`, or set
+    ZEUS_TIGGE_PAYLOAD_PATH, (2) export ZEUS_TIGGE_INGEST_ENABLED=1 in daemon
+    environment, (3) restart daemon. F1 active_sources() picks up TIGGE on
+    restart and ensemble_client routes model='tigge' through TIGGEIngest.
+  - External TIGGE archive HTTP/GRIB fetch remains intentionally unimplemented; adding it requires a later operator/data-source packet with archive access, product tags, lead grid, and parser evidence.
+  - F2 calibration retrain may consume TIGGE-augmented corpus once operator supplies payloads and arms retraining; frozen-replay harness asserts no silent drift.

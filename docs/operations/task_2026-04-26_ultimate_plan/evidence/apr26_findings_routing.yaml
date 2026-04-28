@@ -1,0 +1,366 @@
+# apr26_findings_routing.yaml
+# Routing map: Zeus_Apr26_review.md findings → existing slices or NET_NEW proposals
+# Authority order: code/tests > architecture/invariants.yaml > docs/operations/current_state.md > Apr26 review
+# Generated: 2026-04-26
+
+summary:
+  total_findings: 31
+  by_bucket:
+    A1: 2
+    A2: 0
+    A3: 2
+    A4: 0
+    B1: 0
+    B2: 0
+    B3: 0
+    B4: 0
+    B5: 0
+    B6: 0
+    B7: 0
+    B8: 0
+    C1: 1
+    D0: 0
+    D1: 1
+    D2: 2
+    D3: 0
+    D4: 0
+    NET_NEW: 23
+  shipped_pre_HEAD_874e00c: []
+  net_new_count: 23
+  plan_coverage_pct: 25.8  # 8/31 routed to existing slices
+
+findings:
+
+  - id: F-001
+    title: External side effect occurs before durable command persist
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_ORDER_COMMAND_JOURNAL
+    rationale: >-
+      Core pre-live blocker: order_command table + COMMAND_PERSISTED event before signing/posting.
+      Not in CLOB V2 plan (which is a transport-level migration). Not in PR18 P2 deferred items.
+      Requires a new execution-journal slice.
+    file_line_in_review: 303
+    verification_status: heuristic
+
+  - id: F-002
+    title: Submit exceptions collapsed to semantic rejection (no SUBMIT_TIMEOUT_UNKNOWN)
+    severity: S0
+    bucket: A3
+    target_slice: A3
+    rationale: >-
+      A3 = SDK-404-typed: typed error classification at executor boundary.
+      Timeout-after-submit → UNKNOWN is the canonical A3 gap per PR18 P2 deferred.
+    file_line_in_review: 330
+    verification_status: heuristic
+
+  - id: F-003
+    title: No exchange-proven idempotency / client order identifier
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_ORDER_COMMAND_JOURNAL
+    rationale: >-
+      Durable command_id + client_order_id + signed order hash before post. Closely related to
+      F-001 and belongs in the same new execution-journal slice. Not covered by A3 (error typing)
+      or D-series (CLOB V2 transport).
+    file_line_in_review: 353
+    verification_status: heuristic
+
+  - id: F-004
+    title: Partial fill not a first-class state (no PARTIALLY_FILLED / filled_size / remaining_size)
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Full state machine with PARTIALLY_FILLED, RESTING, trade_fill table. D2 (fill_tracker
+      delayed branch) handles V2 DELAYED status but does not address partial fill tracking,
+      which is V1 and V2 shared gap. Net-new execution state machine slice needed.
+    file_line_in_review: 376
+    verification_status: heuristic
+
+  - id: F-005
+    title: Cancel failure is not a first-class lifecycle state
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      CANCEL_REQUESTED / CANCELLED / CANCEL_FAILED / REVIEW_REQUIRED are missing. Related to
+      F-004 (state machine) and F-006 (reconciliation). Not in D2 delayed branch. Belongs in
+      same new execution state machine slice.
+    file_line_in_review: 399
+    verification_status: heuristic
+
+  - id: F-006
+    title: Reconciliation is position-level only, not execution-level
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Exchange reconciliation service: open orders + order details + trades + positions vs journal.
+      chain_reconciliation.py covers position sync only. Requires a new reconciliation-loop slice
+      distinct from D2 (transport) and A1 (RED/command).
+    file_line_in_review: 420
+    verification_status: heuristic
+
+  - id: F-007
+    title: Gamma/Data/CLOB boundary is leaky — Gamma metadata can drive executable decisions
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_DISCOVERY_CLOB_SNAPSHOT
+    rationale: >-
+      ExecutableMarketSnapshot from CLOB only; no trade without fresh CLOB tradability check.
+      Not in CLOB V2 plan (that plan assumes market discovery is a separate concern). Net-new
+      discovery boundary slice.
+    file_line_in_review: 441
+    verification_status: heuristic
+
+  - id: F-008
+    title: YES/NO outcome-token identity not frozen at command level
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_ORDER_COMMAND_JOURNAL
+    rationale: >-
+      Command must include condition_id, outcome, token_id, no_token_id, clobTokenIds raw, and
+      invariant hash. Part of the durable command journal (F-001/F-003 cluster). Routed to same
+      proposed slice.
+    file_line_in_review: 462
+    verification_status: heuristic
+
+  - id: F-009
+    title: Tick/min-size/negRisk discipline delegated to SDK but not owned or tested
+    severity: S1
+    bucket: D1
+    target_slice: D1
+    rationale: >-
+      D1 = Phase 1 protocol+antibody: V2 SDK contract antibody (1.D) + neg_risk passthrough
+      mirror (1.E) + error matrix (1.F) directly address tick/min/negRisk at SDK boundary.
+      Preflight persisting these fields is a natural D1 antibody extension.
+    file_line_in_review: 483
+    verification_status: heuristic
+
+  - id: F-010
+    title: RED risk behavior authority-drifted — docs claim cancel+sweep, runtime does not
+    severity: S1
+    bucket: A1
+    target_slice: A1
+    rationale: >-
+      A1 = K4-RED→durable-cmd: the durable-command journal and RED immediate cancel-all are
+      the same deferred item from PR18. RED executor (cancel open orders, block entries,
+      reconcile unknowns) is the exact A1 gap.
+    file_line_in_review: 504
+    verification_status: heuristic
+
+  - id: F-011
+    title: CLOB order/trade raw payloads not preserved (unlike weather data)
+    severity: S2
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RAW_PAYLOAD_STORAGE
+    rationale: >-
+      Raw Gamma snapshot, CLOB orderbook snapshot with timestamp/hash, raw signed order,
+      raw post_order response, raw cancel/get_order/get_trades. D2 (infra) does not include
+      raw payload tables. Net-new storage slice mapping to §9 proposed tables.
+    file_line_in_review: 525
+    verification_status: heuristic
+
+  - id: F-012
+    title: Tests prove happy paths only — live-money failure modes uncovered
+    severity: S1
+    bucket: C1
+    target_slice: C1
+    rationale: >-
+      C1 = PR#19 fix-plan §11 residual: heavy integration/failure-mode test suite.
+      Deterministic fake CLOB with side-effect ledger, failure injection, restart simulation.
+      Directly maps to the C1 heavy integration test bucket.
+    file_line_in_review: 546
+    verification_status: heuristic
+
+  # §8.3 — 17 missing state transitions
+
+  - id: transition_COMMAND_PERSISTED
+    title: State transition COMMAND_PERSISTED missing before submit
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_ORDER_COMMAND_JOURNAL
+    rationale: >-
+      Pre-submit durable command record. Core of order_command journal slice.
+    file_line_in_review: 624
+
+  - id: transition_SIGNED_ORDER_PERSISTED
+    title: State transition SIGNED_ORDER_PERSISTED missing
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_ORDER_COMMAND_JOURNAL
+    rationale: >-
+      Signed EIP-712 order must be persisted before post_order is called.
+    file_line_in_review: 625
+
+  - id: transition_SUBMIT_TIMEOUT_UNKNOWN
+    title: State transition SUBMIT_TIMEOUT_UNKNOWN missing
+    severity: S0
+    bucket: A3
+    target_slice: A3
+    rationale: >-
+      A3 = SDK-404-typed: SUBMIT_TIMEOUT_UNKNOWN is the canonical typed exception missing.
+      Transport/timeout failure after post must not become semantic rejection.
+    file_line_in_review: 626
+
+  - id: transition_ACCEPTED_vs_RESTING
+    title: State transition ACCEPTED vs RESTING distinction missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Accepted GTC order rests; Zeus treats it as pending. State machine must separate
+      ACCEPTED from RESTING.
+    file_line_in_review: 627
+
+  - id: transition_PARTIALLY_FILLED
+    title: State transition PARTIALLY_FILLED missing
+    severity: S0
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Normal CLOB behavior; exposes wrong size/exposure. Belongs in execution state machine slice.
+    file_line_in_review: 628
+
+  - id: transition_REMAINING_CANCEL_REQUESTED
+    title: State transition REMAINING_CANCEL_REQUESTED missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Cancel of unfilled remainder after partial fill. Part of state machine slice.
+    file_line_in_review: 629
+
+  - id: transition_CANCEL_FAILED
+    title: State transition CANCEL_FAILED missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Cancel failure means order may still be live; CANCEL_FAILED must trigger reconciliation.
+    file_line_in_review: 630
+
+  - id: transition_CANCEL_REPLACE_BLOCKED
+    title: State transition CANCEL_REPLACE_BLOCKED missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_STATE_MACHINE
+    rationale: >-
+      Cancel-replace cannot proceed when prior cancel is unresolved. Part of state machine.
+    file_line_in_review: 631
+
+  - id: transition_CLOSED_MARKET_UNKNOWN
+    title: State transition CLOSED_MARKET_UNKNOWN missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_DISCOVERY_CLOB_SNAPSHOT
+    rationale: >-
+      Market closes between discovery and submit. Preflight CLOB market status check (F-007
+      cluster) produces this state. Routes to discovery snapshot slice.
+    file_line_in_review: 632
+
+  - id: transition_TRADE_CONFIRMED
+    title: State transition TRADE_CONFIRMED missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Trade confirmation from exchange (SDK get_trades / user WS). Belongs in reconciliation
+      loop slice which must distinguish fill from position update.
+    file_line_in_review: 633
+
+  - id: transition_POSITION_CONFIRMED_FROM_EXCHANGE
+    title: State transition POSITION_CONFIRMED_FROM_EXCHANGE missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Exchange position snapshot confirms local position. Reconciliation loop slice.
+    file_line_in_review: 634
+
+  - id: transition_RECONCILED_BY_OPEN_ORDERS
+    title: State transition RECONCILED_BY_OPEN_ORDERS missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Recovery of unknown-submit via open-orders query. Core reconciliation loop.
+    file_line_in_review: 635
+
+  - id: transition_RECONCILED_BY_TRADES
+    title: State transition RECONCILED_BY_TRADES missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Recovery of unknown-submit via trades query. Core reconciliation loop.
+    file_line_in_review: 636
+
+  - id: transition_RECONCILED_BY_POSITION
+    title: State transition RECONCILED_BY_POSITION missing
+    severity: S1
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RECONCILIATION_LOOP
+    rationale: >-
+      Recovery via Data API position snapshot when order/trade queries fail. Reconciliation loop.
+    file_line_in_review: 637
+
+  - id: transition_REVIEW_REQUIRED
+    title: State transition REVIEW_REQUIRED missing
+    severity: S1
+    bucket: A1
+    target_slice: A1
+    rationale: >-
+      A1 = K4-RED→durable-cmd: REVIEW_REQUIRED is the terminal state when reconciliation
+      cannot resolve an unknown submit. RED executor must produce this state.
+    file_line_in_review: 638
+
+  - id: transition_REDEEM_REQUESTED
+    title: State transition REDEEM_REQUESTED missing
+    severity: S1
+    bucket: D2
+    target_slice: D2
+    rationale: >-
+      D2 = Phase 2 infra: pUSD redemption path (slice 2.C) covers pUSD redemption lifecycle.
+      REDEEM_REQUESTED is a state within that redemption flow.
+    file_line_in_review: 639
+
+  - id: transition_REDEEMED
+    title: State transition REDEEMED missing
+    severity: S1
+    bucket: D2
+    target_slice: D2
+    rationale: >-
+      D2 = Phase 2 infra: pUSD redemption close state. Slice 2.C wires pUSD redemption branch;
+      REDEEMED is the success terminal for that path.
+    file_line_in_review: 640
+
+  # §8.5 — Proposed event schema (one row)
+
+  - id: schema_event_v1
+    title: Proposed production order event schema (raw_request/response/orderbook/trade/position + 8 timestamps + sdk_version + signature_type)
+    severity: "—"
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RAW_PAYLOAD_STORAGE
+    rationale: >-
+      Schema defines the order_event table columns. Raw payload fields + timestamp separation +
+      sdk_version + signature_type belong in the raw-payload-storage slice (same as F-011).
+      CLOB V2 plan (D0-D4) does not include this schema.
+    file_line_in_review: 670
+    verification_status: heuristic
+
+  # §9 — Data provenance audit (one row)
+
+  - id: provenance_audit
+    title: Trading data provenance audit — CLOB order/trade raw storage parity with weather subsystem
+    severity: "—"
+    bucket: NET_NEW
+    target_slice: PROPOSED_EXECUTION_RAW_PAYLOAD_STORAGE
+    rationale: >-
+      §9 identifies missing raw tables: gamma_market_snapshot, clob_market_snapshot, order_command,
+      order_event, trade_fill, exchange_position_snapshot, reconciliation_run,
+      settlement_source_snapshot. All map to the proposed raw-payload-storage slice.
+      Weather provenance subsystem is PASS; trading provenance is FAIL.
+    file_line_in_review: 737
+    verification_status: heuristic

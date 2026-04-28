@@ -15,7 +15,7 @@ Own the semantic objects and executable contract rules that make Zeus a discrete
 ## 3. Domain model
 - Settlement semantics: how a raw station reading becomes a contract-resolving integer.
 - Calibration bins: how discrete market bins are represented and validated.
-- Execution intent/evidence: typed objects that separate decision, price, provenance, and actuation.
+- Execution intent/evidence: typed objects that separate decision, allocation metadata, price, provenance, and actuation.
 - Reality contracts: executable checks that a runtime or integration still matches the semantic promises Zeus thinks it is making.
 
 ## 4. Runtime role
@@ -55,11 +55,12 @@ This module is the code-adapter for law already declared in `docs/authority/zeus
 | `calibration_bins.py` | Discrete-support geometry for training and market bins. |
 | `execution_price.py` | Normalizes executable price semantics for downstream execution. |
 | `decision_evidence.py` | Typed evidence objects that explain why a decision exists. |
-| `execution_intent.py` | Typed expression of what execution may do; critical boundary surface. |
+| `execution_intent.py` | Typed expression of what execution may do; critical boundary surface. R3 A2 adds `event_id`, `resolution_window`, and `correlation_key` so allocation caps are carried by production intents rather than dynamic test-only attributes. |
 | `reality_contract.py / reality_contracts_loader.py / reality_verifier.py` | Executable assertions that repo/runtime reality matches intended semantics. |
 | `semantic_types.py` | Semantic wrappers that reduce stringly-typed misuse. |
 | `edge_context.py / epistemic_context.py / alpha_decision.py` | Decision-context objects consumed by engine/strategy. |
 | `tail_treatment.py / vig_treatment.py / hold_value.py / exceptions.py` | Specialized semantic subroutines and failure channels. |
+| `fx_classification.py` | Z4 enum-only gate for operator-selected pUSD/USDC.e accounting classification. |
 
 ## 10. Relevant tests
 - tests/test_calibration_bins_canonical.py
@@ -67,12 +68,16 @@ This module is the code-adapter for law already declared in `docs/authority/zeus
 - tests/test_architecture_contracts.py
 - tests/test_backtest_settlement_value_outcome.py
 - tests/contracts/spec_validation_manifest.py (cross-module contract routing)
+- tests/test_collateral_ledger.py
+- tests/test_risk_allocator.py
 
 ## 11. Invariants
 - Settlement rounding must match WMO half-up / HKO-special semantics exactly; Python banker's rounding is forbidden.
 - Bin support must preserve exactly-one-bin-wins semantics; outer bins are part of contract reality, not UI sugar.
 - Metadata fields must not be mistaken for settlement outcomes.
 - High and low tracks cannot be collapsed into one semantic family.
+- pUSD/USDC.e redemption accounting classification must be an explicit `FXClassification` enum, never a raw string.
+- Allocation cap identity on `ExecutionIntent` must remain explicit and typed; do not make per-event/window/correlation caps infer from labels or test-only monkeypatches.
 
 ## 12. Negative constraints
 - Never use this package to smuggle new authority claims that are absent from law/tests.
@@ -118,10 +123,12 @@ This module is the code-adapter for law already declared in `docs/authority/zeus
 - Any rounding helper used by settlement or Monte Carlo simulation
 - Calibration-bin boundary semantics and support coverage
 - Reality-contract public interfaces without matching tests and manifest updates
+- `ExecutionIntent` allocation metadata consumed by `src/risk_allocator/governor.py`
 
 ## 20. Verification commands
 ```bash
 pytest -q tests/test_calibration_bins_canonical.py tests/test_execution_price.py tests/test_architecture_contracts.py
+pytest -q -p no:cacheprovider tests/test_risk_allocator.py
 pytest -q tests/test_backtest_settlement_value_outcome.py
 python scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence <packet-plan> --json
 ```

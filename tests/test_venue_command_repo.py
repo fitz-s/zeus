@@ -1,5 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
+# Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
 """Tests for src/state/venue_command_repo.py (P1.S1 — INV-28 / NC-18)."""
 from __future__ import annotations
@@ -8,11 +10,14 @@ import ast
 import glob
 import sqlite3
 import unittest.mock
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+_NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +42,18 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z"):
     from src.state.venue_command_repo import insert_command
+    snapshot_id = _ensure_snapshot(c, token_id=token_id)
     insert_command(
         c,
         command_id=command_id,
+        snapshot_id=snapshot_id,
+        envelope_id=_ensure_envelope(
+            c,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+        ),
         position_id=position_id,
         decision_id=decision_id,
         idempotency_key=idempotency_key,
@@ -51,6 +65,114 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
         price=price,
         created_at=created_at,
     )
+
+
+def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot_id = snapshot_id or f"snap-{token_id}"
+    if get_snapshot(c, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        c,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.51"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
+
+
+def _ensure_envelope(
+    c,
+    *,
+    token_id: str,
+    envelope_id: str | None = None,
+    side: str = "BUY",
+    price: float | Decimal = 0.5,
+    size: float | Decimal = 10.0,
+) -> str:
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    price_dec = Decimal(str(price))
+    size_dec = Decimal(str(size))
+    envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
+    if c.execute(
+        "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone():
+        return envelope_id
+    insert_submission_envelope(
+        c,
+        VenueSubmissionEnvelope(
+            sdk_package="py-clob-client-v2",
+            sdk_version="test",
+            host="https://clob-v2.polymarket.com",
+            chain_id=137,
+            funder_address="0xfunder",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            side=side,
+            price=price_dec,
+            size=size_dec,
+            order_type="GTC",
+            post_only=False,
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            neg_risk=False,
+            fee_details={},
+            canonical_pre_sign_payload_hash="d" * 64,
+            signed_order=None,
+            signed_order_hash=None,
+            raw_request_hash="e" * 64,
+            raw_response_json=None,
+            order_id=None,
+            trade_ids=(),
+            transaction_hashes=(),
+            error_code=None,
+            error_message=None,
+            captured_at=_NOW.isoformat(),
+        ),
+        envelope_id=envelope_id,
+    )
+    return envelope_id
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +209,12 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
         conn.commit()
 
         with pytest.raises(Exception):
+            snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
             insert_command(
                 conn,
                 command_id="cmd-fail",
+                snapshot_id=snapshot_id,
+                envelope_id=_ensure_envelope(conn, token_id="tok-001", price=0.5, size=10.0),
                 position_id="pos-001",
                 decision_id="dec-001",
                 idempotency_key="idem-fail",
@@ -193,12 +318,11 @@ class TestAppendEventStateTransitionIsGrammarChecked:
     # --- illegal transitions ---
 
     @pytest.mark.parametrize("from_state,event_type,setup_events", [
-        # From INTENT_CREATED: only SUBMIT_REQUESTED and REVIEW_REQUIRED are legal
+        # From INTENT_CREATED: submit/cancel/provenance-boundary/review events are legal
         ("INTENT_CREATED", "SUBMIT_ACKED", []),
         ("INTENT_CREATED", "SUBMIT_REJECTED", []),
         ("INTENT_CREATED", "SUBMIT_UNKNOWN", []),
         ("INTENT_CREATED", "FILL_CONFIRMED", []),
-        ("INTENT_CREATED", "CANCEL_REQUESTED", []),
         ("INTENT_CREATED", "CANCEL_ACKED", []),
         ("INTENT_CREATED", "EXPIRED", []),
         ("INTENT_CREATED", "PARTIAL_FILL_OBSERVED", []),
@@ -256,9 +380,12 @@ class TestIdempotencyKeyUniquenessEnforced:
         _insert(conn, command_id="cmd-001", idempotency_key="same-key")
 
         with pytest.raises(sqlite3.IntegrityError):
+            snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
             insert_command(
                 conn,
                 command_id="cmd-002",
+                snapshot_id=snapshot_id,
+                envelope_id=_ensure_envelope(conn, token_id="tok-001", price=0.6, size=5.0),
                 position_id="pos-002",
                 decision_id="dec-002",
                 idempotency_key="same-key",  # same key
@@ -274,9 +401,18 @@ class TestIdempotencyKeyUniquenessEnforced:
     def test_different_keys_succeed(self, conn):
         from src.state.venue_command_repo import insert_command, get_command
         _insert(conn, command_id="cmd-001", idempotency_key="key-A")
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-001")
         insert_command(
             conn,
             command_id="cmd-002",
+            snapshot_id=snapshot_id,
+            envelope_id=_ensure_envelope(
+                conn,
+                token_id="tok-001",
+                side="SELL",
+                price=0.6,
+                size=5.0,
+            ),
             position_id="pos-002",
             decision_id="dec-002",
             idempotency_key="key-B",
@@ -550,9 +686,12 @@ class TestSavepointComposability:
         from src.state.venue_command_repo import insert_command
 
         conn.execute("SAVEPOINT outer_test")
+        snapshot_id = _ensure_snapshot(conn, token_id="t1")
         insert_command(
             conn,
             command_id="cmp-001",
+            snapshot_id=snapshot_id,
+            envelope_id=_ensure_envelope(conn, token_id="t1", price=0.5, size=10.0),
             position_id="pos-1",
             decision_id="dec-1",
             idempotency_key="idem-cmp-001",

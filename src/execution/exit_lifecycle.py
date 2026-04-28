@@ -129,6 +129,10 @@ def place_sell_order(
     shares: float,
     current_price: float,
     best_bid: float | None = None,
+    executable_snapshot_id: str = "",
+    executable_snapshot_min_tick_size: str | None = None,
+    executable_snapshot_min_order_size: str | None = None,
+    executable_snapshot_neg_risk: bool | None = None,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -139,6 +143,10 @@ def place_sell_order(
             shares=shares,
             current_price=current_price,
             best_bid=best_bid,
+            executable_snapshot_id=executable_snapshot_id,
+            executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
+            executable_snapshot_min_order_size=executable_snapshot_min_order_size,
+            executable_snapshot_neg_risk=executable_snapshot_neg_risk,
         )
     )
 
@@ -388,7 +396,10 @@ def _execute_live_exit(
 
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
-        position.entry_price, position.effective_shares, clob,
+        position.entry_price,
+        position.effective_shares,
+        clob,
+        token_id=exit_intent.token_id,
     )
     if not can_sell:
         retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
@@ -411,13 +422,82 @@ def _execute_live_exit(
     current_market_price = exit_intent.current_market_price
     best_bid = exit_intent.best_bid
 
-    # Cancel stale sell order before retry
+    # Cancel stale sell order before retry.  M4: cancel uncertainty must not
+    # fail open into a replacement sell.  When a command row is available, route
+    # through the typed cancel parser so UNKNOWN becomes CANCEL_REPLACE_BLOCKED
+    # and future M5 reconciliation owns any unblock.
     if position.last_exit_order_id and position.exit_retry_count > 0:
-        try:
-            clob.cancel_order(position.last_exit_order_id)
-        except Exception as exc:
-            logger.warning("Stale sell cancel failed for %s: %s",
-                           position.trade_id, exc)
+        cancel_fn = getattr(clob, "cancel_order", None)
+        if not callable(cancel_fn):
+            retry_reason = f"{exit_context.exit_reason} [CANCEL_UNAVAILABLE]"
+            _mark_exit_retry(position, reason=retry_reason, error="cancel_order_unavailable")
+            if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error="cancel_order_unavailable",
+                )
+                log_exit_retry_event(conn, position, reason=retry_reason, error="cancel_order_unavailable")
+            return "exit_blocked: cancel_unavailable"
+        if conn is not None:
+            from src.execution.exit_safety import request_cancel_for_command
+
+            row = conn.execute(
+                """
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                   AND position_id = ?
+                   AND token_id = ?
+                   AND intent_kind = 'EXIT'
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (position.last_exit_order_id, position.trade_id, exit_intent.token_id),
+            ).fetchone()
+            if row is None:
+                retry_reason = f"{exit_context.exit_reason} [CANCEL_UNKNOWN: no_command_row]"
+                _mark_exit_retry(position, reason=retry_reason, error="cancel_command_row_missing")
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error="cancel_command_row_missing",
+                )
+                log_exit_retry_event(conn, position, reason=retry_reason, error="cancel_command_row_missing")
+                return "exit_blocked: cancel_unknown"
+            outcome = request_cancel_for_command(
+                conn,
+                str(row["command_id"]),
+                lambda order_id: cancel_fn(order_id),
+            )
+            if outcome.status != "CANCELED":
+                retry_reason = f"{exit_context.exit_reason} [CANCEL_{outcome.status}]"
+                _mark_exit_retry(position, reason=retry_reason, error=outcome.reason or outcome.status)
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error=outcome.reason or outcome.status,
+                )
+                log_exit_retry_event(conn, position, reason=retry_reason, error=outcome.reason or outcome.status)
+                return f"exit_blocked: cancel_{outcome.status.lower()}"
+        else:
+            from src.execution.exit_safety import parse_cancel_response
+
+            try:
+                outcome = parse_cancel_response(cancel_fn(position.last_exit_order_id))
+            except Exception as exc:
+                logger.warning("Stale sell cancel unknown for %s: %s", position.trade_id, exc)
+                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_UNKNOWN]", error=str(exc)[:500])
+                return "exit_blocked: cancel_unknown"
+            if outcome.status != "CANCELED":
+                _mark_exit_retry(position, reason=f"{exit_context.exit_reason} [CANCEL_{outcome.status}]", error=outcome.reason or outcome.status)
+                return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     # Determine the token to sell
     token_id = exit_intent.token_id
@@ -435,6 +515,7 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
+    snapshot_context = _latest_exit_snapshot_context(conn, token_id)
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
 
@@ -445,6 +526,7 @@ def _execute_live_exit(
             shares=position.effective_shares,
             current_price=current_market_price,
             best_bid=best_bid,
+            **snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
 
@@ -582,6 +664,57 @@ def _execute_live_exit(
             )
             log_exit_retry_event(conn, position, reason=retry_reason, error=retry_error)
         return f"sell_exception: {exc}"
+
+
+def _latest_exit_snapshot_context(
+    conn: sqlite3.Connection | None,
+    token_id: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return executor snapshot kwargs for the latest fresh snapshot by token.
+
+    M4 exit lifecycle is upstream of executor's U1 snapshot gate.  When a DB
+    connection is available, use the latest non-expired executable-market
+    snapshot for the token being sold so lifecycle exits cite the same CLOB
+    truth as direct executor exits.  Missing/failed lookup deliberately returns
+    an empty dict; executor then fails closed with the existing
+    ``executable_snapshot_gate`` rejection instead of bypassing U1.
+    """
+
+    if conn is None or not token_id:
+        return {}
+    now_s = (now or _utcnow()).isoformat()
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT snapshot_id, min_tick_size, min_order_size, neg_risk
+              FROM executable_market_snapshots
+             WHERE freshness_deadline >= ?
+               AND (
+                 selected_outcome_token_id = ?
+                 OR yes_token_id = ?
+                 OR no_token_id = ?
+               )
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (now_s, token_id, token_id, token_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.row_factory = saved
+    if row is None:
+        return {}
+    return {
+        "executable_snapshot_id": str(row["snapshot_id"]),
+        "executable_snapshot_min_tick_size": str(row["min_tick_size"]),
+        "executable_snapshot_min_order_size": str(row["min_order_size"]),
+        "executable_snapshot_neg_risk": bool(row["neg_risk"]),
+    }
 
 
 def check_pending_exits(

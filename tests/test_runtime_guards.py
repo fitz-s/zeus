@@ -602,6 +602,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         "hours_since_open": 12.0,
         "hours_to_resolution": 24.0,
         "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
+        "temperature_metric": "high",
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision(True), DummyDecision(False)])
     monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: object())
@@ -713,6 +714,7 @@ def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, cap
             "hours_since_open": 12.0,
             "hours_to_resolution": 24.0,
             "outcomes": [],
+            "temperature_metric": "high",
             "event_id": "evt-missing-decision",
             "slug": "evt-missing-decision",
         }],
@@ -773,9 +775,10 @@ def _trace_status_for_evaluator_decision(tmp_path, candidate):
 
 def _three_outcomes():
     return [
+        {"title": "38°F or lower", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
         {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
         {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
-        {"title": "43-44°F", "range_low": 43, "range_high": 44, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
+        {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3"},
     ]
 
 

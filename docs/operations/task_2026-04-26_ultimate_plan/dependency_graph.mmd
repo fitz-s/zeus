@@ -1,0 +1,86 @@
+flowchart LR
+    down-01["down-01<br/>?/4h/standard"]
+    style down-01 fill:#d9ffa3
+    down-02["down-02<br/>?/2h/standard"]
+    style down-02 fill:#d9ffa3
+    down-03["down-03<br/>?/2h/standard"]
+    style down-03 fill:#d9ffa3
+    down-04["down-04<br/>low/0.5h/standard"]
+    style down-04 fill:#d9ffa3
+    down-05["down-05<br/>low/2h/critic-opus"]
+    style down-05 fill:#d9ffa3
+    down-06["down-06<br/>medium/?h/critic-opus"]
+    style down-06 fill:#d9ffa3
+    down-07["down-07<br/>medium/6h/critic-opus"]
+    style down-07 fill:#d9ffa3
+    mid-01["mid-01<br/>?/6h/standard"]
+    style mid-01 fill:#ffd9a3
+    mid-02["mid-02<br/>?/12h/standard"]
+    style mid-02 fill:#ffd9a3
+    mid-03["mid-03<br/>?/12h/standard"]
+    style mid-03 fill:#ffd9a3
+    mid-04["mid-04<br/>?/6h/standard"]
+    style mid-04 fill:#ffd9a3
+    mid-05["mid-05<br/>?/14h/standard"]
+    style mid-05 fill:#ffd9a3
+    mid-06["mid-06<br/>?/8h/standard"]
+    style mid-06 fill:#ffd9a3
+    mid-07["mid-07<br/>medium/14h/critic-opus"]
+    style mid-07 fill:#ffd9a3
+    mid-08["mid-08<br/>high/18h/critic-opus"]
+    style mid-08 fill:#ffd9a3
+    up-01["up-01<br/>low/4h/standard"]
+    style up-01 fill:#a3d9ff
+    up-02["up-02<br/>low/6h/standard"]
+    style up-02 fill:#a3d9ff
+    up-03["up-03<br/>medium/8h/critic-opus"]
+    style up-03 fill:#a3d9ff
+    up-04["up-04<br/>medium/6h/critic-opus"]
+    style up-04 fill:#a3d9ff
+    up-05["up-05<br/>medium/8h/critic-opus"]
+    style up-05 fill:#a3d9ff
+    up-06["up-06<br/>medium/8h/critic-opus"]
+    style up-06 fill:#a3d9ff
+    up-07["up-07<br/>medium/6h/critic-opus"]
+    style up-07 fill:#a3d9ff
+    up-08["up-08<br/>medium/10h/critic-opus"]
+    style up-08 fill:#a3d9ff
+    down-02 --> down-01
+    down-03 --> down-01
+    up-04 --> down-01
+    down-02 --> down-03
+    down-02 --> down-05
+    down-02 --> down-06
+    down-01 --> down-07
+    down-02 --> down-07
+    mid-02 --> mid-01
+    mid-03 --> mid-01
+    up-04 --> mid-02
+    mid-03 --> mid-04
+    mid-03 --> mid-05
+    mid-01 --> mid-06
+    mid-02 --> mid-06
+    mid-03 --> mid-06
+    mid-04 --> mid-06
+    mid-05 --> mid-06
+    mid-03 --> mid-07
+    mid-04 --> mid-07
+    mid-05 --> mid-07
+    mid-03 --> mid-08
+    mid-04 --> mid-08
+    mid-06 --> mid-08
+    mid-07 --> mid-08
+    up-01 --> up-02
+    up-01 --> up-03
+    up-01 --> up-04
+    up-02 --> up-04
+    up-03 --> up-04
+    up-06 --> up-04
+    up-04 --> up-05
+    up-07 --> up-05
+    up-03 --> up-07
+    up-04 --> up-07
+    up-04 --> up-08
+    mid-02 --> up-08
+    mid-04 --> up-08
+    mid-01 --> up-08

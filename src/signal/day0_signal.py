@@ -138,7 +138,11 @@ class Day0Signal:
         shared helper `apply_settlement_rounding` in settlement_semantics to
         consolidate with MarketAnalysis._settle. No behavior change.
         """
-        return apply_settlement_rounding(values, self._round_fn, self._precision)
+        return apply_settlement_rounding(
+            values,
+            getattr(self, "_round_fn", None),
+            getattr(self, "_precision", 1.0),
+        )
 
     def p_vector(self, bins: list[Bin], n_mc: int | None = None, rng=None) -> np.ndarray:
         """Compute probability vector incorporating observation floor and diurnal data.

@@ -16,8 +16,12 @@ Closeout criteria covered:
 
 import sqlite3
 import src.control.control_plane as cp
+import src.control.heartbeat_supervisor as heartbeat_supervisor
+import src.control.ws_gap_guard as ws_gap_guard
 import src.engine.cycle_runner as cr
 import src.state.chain_reconciliation as cr_chain
+import src.risk_allocator as risk_allocator
+import src.runtime.posture as runtime_posture
 from src.engine.discovery_mode import DiscoveryMode
 from src.riskguard.risk_level import RiskLevel
 from src.state.db import apply_architecture_kernel_schema, get_connection
@@ -43,6 +47,19 @@ def _patch_cycle(monkeypatch):
     monkeypatch.setattr(cr, "is_entries_paused", lambda: False)
     monkeypatch.setattr(cr, "get_force_exit_review", lambda: False)
     monkeypatch.setattr(cr, "portfolio_heat_for_bankroll", lambda p, b: 0.0)
+    monkeypatch.setattr(cr.cutover_guard, "summary", lambda: {"state": "LIVE_ENABLED", "entry": {"allow_submit": True}})
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"health": "OK", "entry": {"allow_submit": True}})
+    monkeypatch.setattr(
+        ws_gap_guard,
+        "summary",
+        lambda: {"subscription_state": "SUBSCRIBED", "m5_reconcile_required": False, "entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr(runtime_posture, "read_runtime_posture", lambda: "NORMAL")
+    monkeypatch.setattr(
+        risk_allocator,
+        "refresh_global_allocator",
+        lambda *a, **kw: {"configured": True, "entry": {"allow_submit": True}},
+    )
     monkeypatch.setattr(cp, "process_commands", lambda: [])
     monkeypatch.setattr(
         cr, "_reconcile_pending_positions",
@@ -170,7 +187,7 @@ class TestAutoRauseEntries:
         call = upsert_calls[0]
         assert call["override_id"] == "control_plane:global:entries_paused"
         assert call["value"] == "true"
-        assert call["issued_by"] == "auto:auto_pause:ValueError"
+        assert call["issued_by"] == "system_auto_pause"
         assert call["reason"] == "auto_pause:ValueError"
 
     def test_pause_entries_db_failure_does_not_break_in_memory_pause(self, monkeypatch):
@@ -197,6 +214,7 @@ class TestAutoRauseEntries:
         apply_architecture_kernel_schema(conn)
         conn.close()
         monkeypatch.setattr(cp, "CONTROL_PATH", control_path)
+        monkeypatch.setattr(cp, "state_path", lambda name: tmp_path / name)
         monkeypatch.setattr(cp, "get_world_connection", lambda: get_connection(db_path))
         monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
 

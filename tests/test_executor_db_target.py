@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Ensure executor command writes target zeus_trades DB, not legacy zeus DB.
+# Reuse: Run when executor DB connection targeting or venue command schema changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-04-27
 # Authority basis: P1.S3 critic CRITICAL finding — DB target regression
 """Regression test: executor must write venue_commands to zeus_trades.db, not zeus.db.
 
@@ -11,40 +14,118 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+_NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
 
-def _make_entry_intent(limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36):
+
+@pytest.fixture(autouse=True)
+def _cutover_guard_live_enabled(monkeypatch):
+    """This file tests DB targeting, not cutover gating."""
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+
+
+def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot_id = snapshot_id or f"snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.56"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
+
+
+def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36):
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
     from src.contracts import Direction
+    from src.contracts.slippage_bps import SlippageBps
 
+    snapshot_id = f"snap-{token_id}"
+    if conn is not None:
+        _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     return ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=False,
         market_id="mkt-test-001",
         token_id=token_id,
         timeout_seconds=3600,
         decision_edge=0.05,
+        executable_snapshot_id=snapshot_id,
+        executable_snapshot_min_tick_size=Decimal("0.01"),
+        executable_snapshot_min_order_size=Decimal("0.01"),
+        executable_snapshot_neg_risk=False,
     )
 
 
-def _make_exit_intent(trade_id: str = "trd-dbtarget", token_id: str = "tok-" + "1" * 36):
+def _make_exit_intent(conn=None, trade_id: str = "trd-dbtarget", token_id: str = "tok-" + "1" * 36):
     """Build a minimal ExitOrderIntent."""
     from src.execution.executor import create_exit_order_intent
 
+    snapshot_id = f"snap-{token_id}"
+    if conn is not None:
+        _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     return create_exit_order_intent(
         trade_id=trade_id,
         token_id=token_id,
         shares=10.0,
         current_price=0.55,
+        executable_snapshot_id=snapshot_id,
+        executable_snapshot_min_tick_size=Decimal("0.01"),
+        executable_snapshot_min_order_size=Decimal("0.01"),
+        executable_snapshot_neg_risk=False,
     )
 
 
@@ -85,7 +166,8 @@ class TestExecutorDbTarget:
 
         from src.execution.executor import _live_order
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(trades_conn)
+        trades_conn.commit()
 
         mock_client = MagicMock()
         mock_client.v2_preflight.return_value = None
@@ -149,7 +231,8 @@ class TestExecutorDbTarget:
 
         from src.execution.executor import execute_exit_order
 
-        intent = _make_exit_intent()
+        intent = _make_exit_intent(trades_conn)
+        trades_conn.commit()
 
         mock_client = MagicMock()
         mock_client.place_limit_order.return_value = {"orderID": "ord-exit-dbtarget-001"}

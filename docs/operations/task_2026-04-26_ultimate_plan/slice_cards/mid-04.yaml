@@ -1,0 +1,52 @@
+id: mid-04
+title: A4.5b PARTIAL_FILL_OBSERVED emission in recovery + RESTING via venue_status discrimination (K3)
+authority_basis:
+  - architecture/invariants.yaml INV-31 (recovery loop reconciles unresolved states; this slice extends recovery to emit PARTIAL_FILL_OBSERVED on partial-fill detection)
+  - Apr26 review §3 F-004 (partial fill not first-class — no filled_size/remaining_size tracking)
+  - Apr26 review §8.3 transitions: PARTIALLY_FILLED (ALREADY EXISTS as enum/event but recovery lacks emission); ACCEPTED-vs-RESTING (NEW discrimination)
+  - opponent-mid §8.3 audit: PARTIAL_FILL_OBSERVED → PARTIAL transition exists at venue_command_repo.py lines 56,65,70 BUT command_recovery.py never EMITS this event from venue truth
+  - mid-03 STATE_GRAMMAR_AMEND lands payload schema for filled_size/remaining_size; this slice consumes that schema in recovery
+file_line:
+  current_state:
+    - src/execution/command_recovery.py:124-130  # client.get_order(venue_order_id) — single-row lookup
+    - src/execution/command_recovery.py:140-280  # resolution table — handles SUBMIT_ACKED/SUBMIT_REJECTED/EXPIRED but NO PARTIAL_FILL_OBSERVED emission path
+    - src/state/venue_command_repo.py:56  # ("ACKED", "PARTIAL_FILL_OBSERVED") → "PARTIAL" exists; recovery never triggers
+    - src/state/venue_command_repo.py:65  # ("UNKNOWN", "PARTIAL_FILL_OBSERVED") → "PARTIAL" exists; recovery never triggers
+    - src/state/venue_command_repo.py:70  # ("PARTIAL", "PARTIAL_FILL_OBSERVED") → "PARTIAL" exists; recovery never triggers
+    - src/data/polymarket_client.py:166-249  # place_limit_order, cancel; venue_status field shape TBD per V2 unified SDK
+  audit_evidence:
+    - "command_recovery currently determines outcome from venue_resp existence + a few status fields, but does NOT decompose partial-fill metrics (filled_size, remaining_size) from the venue response"
+    - "RESTING (book-resting) discrimination: V2 SDK venue_resp may carry status='resting' or similar; current code conflates RESTING into ACKED state without payload preservation"
+    - "If K3 final decision (R2) is enum-split, this slice ALSO adds CommandState.RESTING and adjusts _TRANSITIONS; if payload-discrimination, this slice only writes payload_json.venue_status='resting'"
+antibody_test:
+  new_file_or_extend: tests/test_recovery_partial_fill.py (NEW) + extend tests/test_command_recovery.py
+  assertions:
+    - test_recovery_emits_partial_fill_observed_when_venue_reports_partial  # mock client.get_order returns size_matched < size_original → recovery emits PARTIAL_FILL_OBSERVED with filled_size + remaining_size payload
+    - test_recovery_partial_fill_payload_carries_filled_size_remaining_size  # event payload_json schema validation
+    - test_recovery_partial_fill_idempotent  # multiple recovery cycles seeing same partial-fill state do NOT duplicate events; uses sequence_no monotonicity
+    - test_recovery_partial_fill_advances_partial_to_filled_when_size_matched_eq_size_original  # transitions to FILL_CONFIRMED → FILLED
+    - test_recovery_resting_discrimination_via_venue_status  # if venue_resp.status == 'resting', payload_json.venue_status='resting' written; ACKED state unchanged (payload-only) OR new CommandState.RESTING set (enum-split — depends on R2)
+    - test_partial_fill_does_not_re_emit_on_unchanged_filled_size  # recovery seeing filled_size unchanged from prior event does NOT emit duplicate PARTIAL_FILL_OBSERVED
+    - test_recovery_handles_v2_unified_sdk_venue_resp_shape  # SDK shape per Down WebFetch finding (V1+V2 unified client)
+  closes_invariants: [F-004 (partial fill first-class), INV-31 (recovery now emits partial-fill events, not just terminal resolution)]
+depends_on:
+  - mid-03  # PARTIAL_FILL_OBSERVED payload schema (filled_size, remaining_size) defined in mid-03 closed-law amendment
+blocks:
+  - mid-05  # EXCH_RECON consumes accurate filled_size/remaining_size for journal-diff
+estimated_h: 6-9
+risk:
+  - "VENUE-RESPONSE SHAPE DEPENDENCY (X1): V1 vs V2 SDK may differ on partial-fill metric field names (size_matched vs filled_quantity etc.). Per Down WebFetch (V2 unified client), interception at unified surface gives stable shape — but per-token V1/V2 resolution per signature-type means payload may still differ."
+  - "RESTING (K3) AMBIGUITY (R2 OPEN): proponent prefers payload-discrimination, opponent prefers enum split. This slice MUST commit one way; reverting later is a closed-law amendment again."
+  - "RECOVERY EMISSION IDEMPOTENCY: recovery loop runs every cycle; without sequence_no/filled_size dedup, a stable-partial-fill produces N duplicate PARTIAL_FILL_OBSERVED events per N cycles."
+  - "FILLED_SIZE MONOTONICITY: venue may report fills out-of-order during high-volume periods; payload schema must enforce monotonic non-decreasing filled_size or accept reordering with explicit comment."
+critic_gate:
+  - PARTIAL_FILL_OBSERVED emission MUST be idempotent under repeated recovery cycles (test_partial_fill_does_not_re_emit_on_unchanged_filled_size MUST be active)
+  - filled_size + remaining_size MUST equal venue_commands.size at all times (cross-row invariant)
+  - K3 RESTING decision MUST be committed in the slice (cite R2 audit doc); no "TBD" left in implementation
+  - L20 grep-gate: V2 SDK venue_resp shape MUST be cited from py-clob-client repo within 10 min of contract lock
+  - critic verifies no PARTIAL_FILL_OBSERVED event written to venue_command_events from outside command_recovery (single emission point)
+notes:
+  - "Cross-region: V2 unified SDK signing-surface seam (judge X1 verdict §29) — partial-fill metric field names depend on V2 surface stability"
+  - "Out-of-scope for this slice: trade_fill table (separate persistence; lives in C1.5 relationship test, mid-06)"
+  - "INV-32 materialize gate already handles PARTIAL state (line 70 _TRANSITIONS): pos.shares = filled_size; remaining_size open commands stay in PARTIAL until FILL_CONFIRMED or EXPIRED"
+  - "Memory L20 + L22 grep-gate: every file:line in this card MUST be re-verified before contract lock; line numbers may rot if mid-03 amendment lands first"

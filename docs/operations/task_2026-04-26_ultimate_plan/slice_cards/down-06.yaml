@@ -1,0 +1,64 @@
+id: down-06
+title: D2.B apscheduler-job-4 V2-heartbeat — CONDITIONAL slot, gated on Q-HB cadence cite
+authority_basis:
+  - docs/operations/task_2026-04-26_ultimate_plan/evidence/down/_context_boot_opponent.md §3.5 (heartbeat cadence UNSOURCED in V2 SDK; cite required to activate)
+  - docs/operations/task_2026-04-26_ultimate_plan/evidence/down/_context_boot_opponent.md §4.2 (apscheduler+os._exit race + asyncio-vs-BlockingScheduler architecture decision)
+  - py_clob_client_v2/client.py:245-251 post_heartbeat(heartbeat_id="") at /v1/heartbeats (literal /v1/, not /v2/)
+  - 'src/main.py:336-369 existing _write_heartbeat apscheduler job + _heartbeat_fails counter + os._exit(1) at line 369 (R2L2 cite-correction: was previously cited :367 in R1L1)'
+  - src/main.py:579 scheduler.add_job pattern (sibling-position for new V2-heartbeat job)
+  - architecture/invariants.yaml:196-204 INV-25 V2-preflight (worst-case fallback per race-spec (e))
+  - src/engine/cycle_runner.py:287 cleanup_orphan_open_orders (worst-case fallback per race-spec (e))
+file_line:
+  current_state:
+    - "no V2 heartbeat code on HEAD 874e00c (grep 'post_heartbeat|_clob_v2_heartbeat' src/ = 0 hits)"
+    - src/main.py:336-369 _write_heartbeat job (existing 60s cadence with 3-strike os._exit)
+    - src/main.py:579 scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat", ...)
+    - state/auto_pause_failclosed.tombstone (existing application-level kill switch)
+  zero-emission_evidence:
+    - "0 LOC until Q-HB returns positive cite. Slot is yaml-card-cost only. No premature implementation."
+  new_emission_seam (when activated):
+    - src/main.py:579 add `scheduler.add_job(_clob_v2_heartbeat_tick, "interval", seconds=N, id="clob_v2_heartbeat", ...)` sibling-position
+    - src/main.py near :340 add module-level `_clob_v2_heartbeat_fails = 0` counter
+    - 'src/main.py NEW function `_clob_v2_heartbeat_tick()` — calls clob.post_heartbeat(); on success resets counter to 0; on exception increments + atomic-tmp-then-replace tombstone-write with reason=f"clob_v2_heartbeat_failure_{utc_ts}"; does NOT call os._exit'
+    - 'src/engine/cycle_runner.py at the top of _run_mode (or cycle entry): pre-check tombstone with reason starting "clob_v2_heartbeat_failure_"; short-circuit cycle if present (log + return without lock acquire)'
+acceptance_criteria_when_activated:
+  - "(a) MUST be a `scheduler.add_job(...)` call at main.py:579 sibling to _write_heartbeat. NOT new threading. NOT asyncio (Zeus has zero asyncio per impact_report §4.2; BlockingScheduler-only)."
+  - "(b) Tombstone-write MUST use atomic tmp-then-replace pattern matching _write_heartbeat lines 350-352 (Path.write_text(json.dumps(...)) on tmp; tmp.replace(target))."
+  - "(c) V2-heartbeat tick on exception writes tombstone then RETURNS. Does NOT call os._exit. Existing _write_heartbeat 3-strike os._exit(1) is the daemon-fatal path; V2-heartbeat is fail-soft."
+  - "(d) Cycle entry (_run_mode at main.py:78 or earlier) reads tombstone BEFORE _cycle_lock.acquire. If reason starts with 'clob_v2_heartbeat_failure_', log + return without lock acquire or cycle body. Existing tombstone semantics extended."
+  - "(e) Race-coverage for worst-case (existing _write_heartbeat os._exit wins over V2-heartbeat tombstone-write): (i) os._exit fires only after 3 consecutive 60s strikes (180s minimum); (ii) on daemon restart, INV-25 V2-preflight (architecture/invariants.yaml:202-204) blocks new placement until V2 endpoint reachable; (iii) cleanup_orphan_open_orders at cycle_runner.py:287 catches process-death orphans. Window structurally closed by EXISTING mechanisms."
+antibody_test:
+  new_file_or_extend: tests/test_clob_v2_heartbeat_supervisor.py (NEW; only when activated)
+  assertions_when_activated:
+    - test_v2_heartbeat_writes_tombstone_on_clob_post_failure — mock clob.post_heartbeat to raise; assert state/auto_pause_failclosed.tombstone exists with reason starting "clob_v2_heartbeat_failure_"
+    - test_v2_heartbeat_does_NOT_call_os_exit — V2-heartbeat tick raising does NOT terminate the process; only sets _clob_v2_heartbeat_fails counter and writes tombstone
+    - test_cycle_entry_short_circuits_on_clob_heartbeat_tombstone — _run_mode reads tombstone with reason "clob_v2_heartbeat_failure_*" and returns without acquiring _cycle_lock
+    - test_atomic_tombstone_write — partial-fault simulation (kill mid-write) leaves no malformed tombstone
+  closes_invariants: [INV-25 V2-preflight remains canonical fallback; tombstone semantics extension]
+depends_on:
+  - down-02  # Q-HB inquiry must return positive cadence cite to activate this slice
+
+# Down R2L2 (2026-04-26 turn-3) — A4 SINGLE-FILE TWO-REASON-PREFIX INVARIANT:
+single_tombstone_invariant:
+  rule: "ONE physical tombstone file (state/auto_pause_failclosed.tombstone), TWO reason-prefix domains. V2-heartbeat NEVER writes daemon-heartbeat.json (existing _write_heartbeat owns that distinct file)."
+  files:
+    - "state_path('daemon-heartbeat.json') — existing, owned by _write_heartbeat (apscheduler 60s job, 3-strike os._exit at main.py:369)"
+    - "state/auto_pause_failclosed.tombstone — existing kill switch, holds two reason-prefix domains as a single-file dual-writer pattern"
+  reason_prefix_domains:
+    - "daemon_heartbeat_failure_* — pre-V2-heartbeat baseline reason prefix domain"
+    - "clob_v2_heartbeat_failure_* — written by NEW V2-heartbeat tick on clob.post_heartbeat failure (fail-soft, no os._exit)"
+  invariant: "Single-writer-per-reason-prefix; V2-heartbeat tick writes ONLY `clob_v2_heartbeat_failure_*` reason and NEVER touches daemon-heartbeat.json"
+  tests:
+    - "tests/test_clob_v2_heartbeat_supervisor.py::test_v2_heartbeat_writes_distinct_reason_prefix — mock V2 failure; assert reason.startswith('clob_v2_heartbeat_failure_') AND NOT 'daemon_heartbeat_failure_'"
+    - "tests/test_clob_v2_heartbeat_supervisor.py::test_v2_heartbeat_never_touches_daemon_heartbeat_json — mock V2 failure; assert daemon-heartbeat.json stat unchanged + auto_pause_failclosed.tombstone written with V2-prefixed reason"
+estimated_h_when_activated: 4
+estimated_h_pre_activation: 0
+risk: medium
+critic_gate: critic-opus (concurrency + atomic-write semantics)
+notes:
+  - This slice is a TRACKER SLOT until Q-HB returns positive. Until then, the yaml card exists; no code lands.
+  - 'Activation trigger: Polymarket support / Discord confirms a mandated heartbeat cadence rule (e.g. "10s missed → mass cancel"). Without that cite, this slice is permanently SKIP.'
+  - Race-spec (a)-(e) is BINDING when activated. The 180-second window between V2-heartbeat fail and existing 3-strike os._exit gives ample room for tombstone-write to complete.
+  - 'WHY a 4th apscheduler-job, NOT a new threading primitive: Zeus has zero asyncio code (impact_report §4.2 confirms; grep validates). main.py:19 uses BlockingScheduler. Adding a new threading model is an architectural shift this slice does NOT take. Sibling-job pattern reuses existing daemon supervisor.'
+  - 'WHY tombstone-write BEFORE os._exit: existing _heartbeat_fails 3-strike os._exit at main.py:367 BYPASSES Python finally/atexit and any sibling-job''s tombstone-flush. Race avoidance: V2-heartbeat owns its OWN counter and writes tombstone EAGERLY on fail, not lazily on N-th strike.'
+  - 'Activation likelihood: LOW. Polymarket has not surfaced a mandated cadence in any reachable surface. Slot is future-proofing without LOC cost.'

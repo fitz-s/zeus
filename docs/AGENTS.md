@@ -42,7 +42,9 @@ body or bundle.
 | `operations/known_gaps.md` | Active operational gap register |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
+| `reference/modules/ingest.md` | Dense ingest module book for R3 user-channel event-stream routing; reference, not authority |
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
+| `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | Packet-local R3 Z0 CLOB V2 live-money invariant summary; evidence, not authority |
 | `operations/task_2026-04-23_midstream_remediation/` | Midstream remediation package; phase evidence lives under `phases/` and routes through `operations/current_state.md` |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |

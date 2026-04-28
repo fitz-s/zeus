@@ -53,18 +53,10 @@ log "Sequential backfill PID $WAIT_PID has exited. Beginning fill-back."
 #
 # Expected duration: 30-60 min (only fetches missing dates, ~20-50 per city).
 #
-# Transition WU_API_KEY: the K2 security fix removed the hardcoded default
-# from source, so scripts/backfill_wu_daily_all.py now requires
-# WU_API_KEY as an environment variable. The value below is the one
-# that was already committed in git history before the hardening —
-# re-exporting it here is a TRANSITION measure so the already-queued
-# fillback still works. Task #62 tracks the proper rotation: (a) rotate
-# at weather.com, (b) update operator environment, (c) remove this
-# inline export.
-if [ -z "${WU_API_KEY:-}" ]; then
-    export WU_API_KEY="e1f10a1e78da46f5b10a1e78da96f525"
-    log "WU_API_KEY not in env — exporting legacy value for fillback transition (see task #62)"
-fi
+# WU calls require an operator-provided key. Do not embed transition keys in
+# active scripts; shell parameter expansion fails closed before any fetch.
+: "${WU_API_KEY:?WU_API_KEY must be set in the operator environment before running WU fillback}"
+export WU_API_KEY
 
 log "--- Step A: WU --all --missing-only ---"
 python scripts/backfill_wu_daily_all.py --all --missing-only --days 834 2>&1 | tee -a "$LOG"

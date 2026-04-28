@@ -1,6 +1,14 @@
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
+# Reuse: Run when executor order submission or portfolio save/load mechanics change.
+# Created: 2026-04-27
+# Last reused/audited: 2026-04-27
+# Authority basis: R3 Z1 cutover guard audit; pre-existing executor behavior tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tests for executor and portfolio."""
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -19,6 +27,9 @@ from src.state.portfolio import (
 )
 from src.types import Bin, BinEdge
 
+_TEST_CONN = None
+_NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
+
 
 @pytest.fixture(autouse=True)
 def _mem_conn(monkeypatch):
@@ -34,9 +45,77 @@ def _mem_conn(monkeypatch):
     mem.row_factory = sqlite3.Row
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
+    global _TEST_CONN
+    _TEST_CONN = mem
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
     yield mem
+    _TEST_CONN = None
     mem.close()
+
+
+def _snapshot_kwargs(token_id: str) -> dict:
+    snapshot_id = _ensure_snapshot(_TEST_CONN, token_id=token_id)
+    return {
+        "executable_snapshot_id": snapshot_id,
+        "executable_snapshot_min_tick_size": Decimal("0.01"),
+        "executable_snapshot_min_order_size": Decimal("0.01"),
+        "executable_snapshot_neg_risk": False,
+    }
+
+
+def _ensure_snapshot(conn, *, token_id: str) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    assert conn is not None
+    snapshot_id = f"snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.51"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
 
 
 class TestPortfolio:
@@ -139,6 +218,7 @@ class TestExecutor:
             market_id="m1",
             token_id="yes-token",
             no_token_id="no-token",
+            **_snapshot_kwargs("yes-token"),
         )
         result = execute_intent(intent, edge.vwmp, edge.bin.label)
 
@@ -170,12 +250,13 @@ class TestExecutor:
             def __init__(self):
                 pass
 
-            def place_limit_order(self, *, token_id, price, size, side):
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 captured.update(
                     token_id=token_id,
                     price=price,
                     size=size,
                     side=side,
+                    order_type=order_type,
                 )
                 return {"orderID": "sell-1", "status": "OPEN"}
 
@@ -188,6 +269,7 @@ class TestExecutor:
                 shares=12.349,
                 current_price=0.50,
                 best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
             )
         )
 
@@ -199,6 +281,7 @@ class TestExecutor:
             "price": pytest.approx(0.49),
             "size": pytest.approx(12.34),
             "side": "SELL",
+            "order_type": "GTC",
         }
 
     def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
@@ -206,7 +289,7 @@ class TestExecutor:
             def __init__(self):
                 pass
 
-            def place_limit_order(self, *, token_id, price, size, side):
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 return {"status": "OPEN"}
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
@@ -218,6 +301,7 @@ class TestExecutor:
                 shares=12.349,
                 current_price=0.50,
                 best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
             )
         )
 

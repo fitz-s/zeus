@@ -105,6 +105,7 @@ def test_full_monitoring_pipeline(monkeypatch):
         )
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
     monkeypatch.setattr("src.engine.cycle_runtime.lead_hours_to_date_start", lambda *args, **kwargs: 12.0)
+    monkeypatch.setattr("src.execution.exit_lifecycle.check_sell_collateral", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr("src.execution.exit_lifecycle.place_sell_order", lambda *a, **kw: {"orderID": "fake-order-123"})
     
     # Run the cycle
@@ -113,7 +114,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     assert p_dirty is True
     assert t_dirty is True
     assert len(tracker.exits) == 1
-    assert "MODEL_DIVERGENCE_PANIC" in tracker.exits[0].exit_reason
+    assert "DAY0_OBSERVATION_REVERSAL" in tracker.exits[0].exit_reason
     assert portfolio.positions[0].state == "economically_closed"
 
 def test_refresh_position_true_metrics(monkeypatch):

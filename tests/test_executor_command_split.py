@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Lock executor command split phase ordering and ACK invariants.
+# Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-04-27
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
@@ -9,9 +12,13 @@ See implementation_plan.md §P1.S3 for the full phase-order spec.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock, patch, call
 
 import pytest
+
+_NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -31,26 +38,154 @@ def mem_conn():
     c.close()
 
 
-def _make_entry_intent(limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36) -> object:
+@pytest.fixture(autouse=True)
+def _cutover_guard_live_enabled(monkeypatch):
+    """This file tests command-journal ordering, not cutover gating."""
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+
+
+def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot_id = snapshot_id or f"snap-{token_id}"
+    if get_snapshot(conn, snapshot_id) is not None:
+        return snapshot_id
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-test",
+            event_id="event-test",
+            event_slug="event-test",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_details={},
+            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.56"),
+            orderbook_depth_jsonb="{}",
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=_NOW,
+            freshness_deadline=_NOW + timedelta(days=365),
+        ),
+    )
+    return snapshot_id
+
+
+def _ensure_envelope(
+    conn,
+    *,
+    token_id: str,
+    envelope_id: str | None = None,
+    side: str = "BUY",
+    price: float | Decimal = Decimal("0.50"),
+    size: float | Decimal = Decimal("10"),
+) -> str:
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    price_dec = Decimal(str(price))
+    size_dec = Decimal(str(size))
+    envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
+    if conn.execute(
+        "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (envelope_id,),
+    ).fetchone():
+        return envelope_id
+    insert_submission_envelope(
+        conn,
+        VenueSubmissionEnvelope(
+            sdk_package="py-clob-client-v2",
+            sdk_version="test",
+            host="https://clob-v2.polymarket.com",
+            chain_id=137,
+            funder_address="0xfunder",
+            condition_id="condition-test",
+            question_id="question-test",
+            yes_token_id=token_id,
+            no_token_id=f"{token_id}-no",
+            selected_outcome_token_id=token_id,
+            outcome_label="YES",
+            side=side,
+            price=price_dec,
+            size=size_dec,
+            order_type="GTC",
+            post_only=False,
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            neg_risk=False,
+            fee_details={},
+            canonical_pre_sign_payload_hash="d" * 64,
+            signed_order=None,
+            signed_order_hash=None,
+            raw_request_hash="e" * 64,
+            raw_response_json=None,
+            order_id=None,
+            trade_ids=(),
+            transaction_hashes=(),
+            error_code=None,
+            error_message=None,
+            captured_at=_NOW.isoformat(),
+        ),
+        envelope_id=envelope_id,
+    )
+    return envelope_id
+
+
+def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36) -> object:
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
     from src.contracts import Direction
+    from src.contracts.slippage_bps import SlippageBps
 
+    snapshot_id = f"snap-{token_id}"
+    if conn is not None:
+        _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     return ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=0.02,
+        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
         is_sandbox=False,
         market_id="mkt-test-001",
         token_id=token_id,
         timeout_seconds=3600,
         decision_edge=0.05,
+        executable_snapshot_id=snapshot_id,
+        executable_snapshot_min_tick_size=Decimal("0.01"),
+        executable_snapshot_min_order_size=Decimal("0.01"),
+        executable_snapshot_neg_risk=False,
     )
 
 
 def _make_exit_intent(
+    conn=None,
     trade_id: str = "trd-exit-001",
     token_id: str = "tok-" + "1" * 36,
     shares: float = 10.0,
@@ -59,11 +194,18 @@ def _make_exit_intent(
     """Build a minimal ExitOrderIntent."""
     from src.execution.executor import create_exit_order_intent
 
+    snapshot_id = f"snap-{token_id}"
+    if conn is not None:
+        _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
     return create_exit_order_intent(
         trade_id=trade_id,
         token_id=token_id,
         shares=shares,
         current_price=current_price,
+        executable_snapshot_id=snapshot_id,
+        executable_snapshot_min_tick_size=Decimal("0.01"),
+        executable_snapshot_min_order_size=Decimal("0.01"),
+        executable_snapshot_neg_risk=False,
     )
 
 
@@ -93,7 +235,7 @@ class TestLiveOrderCommandSplit:
             call_log.append("insert_command")
             return _real_insert(*args, **kwargs)
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(mem_conn)
 
         with patch(
             "src.state.venue_command_repo.insert_command", side_effect=spy_insert
@@ -122,16 +264,17 @@ class TestLiveOrderCommandSplit:
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
 
-    def test_submit_unknown_writes_event_with_state_unknown(self, mem_conn):
+    def test_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill: place_limit_order raises RuntimeError.
 
-        The venue_commands row must reach state=UNKNOWN via a SUBMIT_UNKNOWN
-        event. The SUBMITTING row (created pre-submit) is the recovery anchor.
+        M2: once place_limit_order may have crossed the venue side-effect
+        boundary, the row must reach SUBMIT_UNKNOWN_SIDE_EFFECT via
+        SUBMIT_TIMEOUT_UNKNOWN. The row is the recovery anchor.
         """
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import find_unresolved_commands, list_events
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(mem_conn)
 
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
@@ -147,21 +290,22 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-002",
             )
 
-        # The OrderResult reflects the unknown outcome
-        assert result.status == "rejected", (
-            f"Expected status=rejected for SUBMIT_UNKNOWN, got {result.status!r}"
+        # The OrderResult reflects the unknown side-effect outcome.
+        assert result.status == "unknown_side_effect", (
+            f"Expected status=unknown_side_effect, got {result.status!r}"
         )
-        assert result.reason is not None and "submit_unknown" in result.reason, (
-            f"Expected reason to contain 'submit_unknown', got {result.reason!r}"
+        assert result.reason is not None and "submit_unknown_side_effect" in result.reason, (
+            f"Expected reason to contain 'submit_unknown_side_effect', got {result.reason!r}"
         )
+        assert result.command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
 
-        # The durable record must show state=UNKNOWN (recovery can resolve)
+        # The durable record must show SUBMIT_UNKNOWN_SIDE_EFFECT (recovery can resolve).
         unresolved = find_unresolved_commands(mem_conn)
         assert len(unresolved) == 1, (
-            f"Expected 1 unresolved command (UNKNOWN), found {len(unresolved)}: {unresolved}"
+            f"Expected 1 unresolved command (SUBMIT_UNKNOWN_SIDE_EFFECT), found {len(unresolved)}: {unresolved}"
         )
-        assert unresolved[0]["state"] == "UNKNOWN", (
-            f"Expected state=UNKNOWN in journal, got {unresolved[0]['state']!r}"
+        assert unresolved[0]["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT", (
+            f"Expected state=SUBMIT_UNKNOWN_SIDE_EFFECT in journal, got {unresolved[0]['state']!r}"
         )
 
         # Check the event chain
@@ -169,14 +313,14 @@ class TestLiveOrderCommandSplit:
         event_types = [e["event_type"] for e in events]
         assert "INTENT_CREATED" in event_types
         assert "SUBMIT_REQUESTED" in event_types
-        assert "SUBMIT_UNKNOWN" in event_types
+        assert "SUBMIT_TIMEOUT_UNKNOWN" in event_types
 
     def test_submit_rejected_writes_event_with_state_rejected(self, mem_conn):
         """place_limit_order returns None -> state=REJECTED."""
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(mem_conn)
         command_ids_seen: list[str] = []
 
         real_insert = None
@@ -211,12 +355,97 @@ class TestLiveOrderCommandSplit:
             f"Expected state=REJECTED after None return, got {cmd['state']!r}"
         )
 
+    def test_submit_missing_order_id_rejects_without_submit_acked(self, mem_conn):
+        """place_limit_order dict without order id -> REJECTED, not ACKED."""
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        intent = _make_entry_intent(mem_conn)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            mock_inst.place_limit_order.return_value = {"success": True, "status": "LIVE"}
+
+            result = _live_order(
+                trade_id="trd-missing-order-id",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-missing-order-id",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "missing_order_id"
+        cmd = get_command(mem_conn, command_ids_seen[0])
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
+        assert "SUBMIT_REJECTED" in event_types
+        assert "SUBMIT_ACKED" not in event_types
+
+    def test_submit_success_false_rejects_without_submit_acked(self, mem_conn):
+        """place_limit_order success=false -> REJECTED with venue error code."""
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        intent = _make_entry_intent(mem_conn)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            mock_inst.place_limit_order.return_value = {
+                "success": False,
+                "status": "rejected",
+                "errorCode": "INSUFFICIENT_BALANCE",
+                "errorMessage": "not enough funds",
+            }
+
+            result = _live_order(
+                trade_id="trd-success-false",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-success-false",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "INSUFFICIENT_BALANCE"
+        cmd = get_command(mem_conn, command_ids_seen[0])
+        assert cmd is not None
+        assert cmd["state"] == "REJECTED"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
+        assert "SUBMIT_REJECTED" in event_types
+        assert "SUBMIT_ACKED" not in event_types
+
     def test_submit_acked_writes_event_with_state_acked(self, mem_conn):
         """place_limit_order returns orderID -> state=ACKED, venue_order_id set."""
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(mem_conn)
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -261,7 +490,7 @@ class TestLiveOrderCommandSplit:
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command
 
-        intent = _make_entry_intent(token_id="tok-idem" + "0" * 33)
+        intent = _make_entry_intent(mem_conn, token_id="tok-idem" + "0" * 33)
 
         # Pre-insert a command with the key that _live_order will derive
         idem = IdempotencyKey.from_inputs(
@@ -275,6 +504,13 @@ class TestLiveOrderCommandSplit:
         insert_command(
             mem_conn,
             command_id="pre-existing-cmd",
+            snapshot_id=intent.executable_snapshot_id,
+            envelope_id=_ensure_envelope(
+                mem_conn,
+                token_id=intent.token_id,
+                price=intent.limit_price,
+                size=18.19,
+            ),
             position_id="trd-pre",
             decision_id="dec-collision",
             idempotency_key=idem.value,
@@ -321,7 +557,7 @@ class TestLiveOrderCommandSplit:
         from src.data.polymarket_client import V2PreflightError
         from src.state.venue_command_repo import get_command
 
-        intent = _make_entry_intent()
+        intent = _make_entry_intent(mem_conn)
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -372,7 +608,7 @@ class TestLiveOrderCommandSplit:
         from src.contracts import Direction
         import dataclasses
 
-        base_intent = _make_entry_intent()
+        base_intent = _make_entry_intent(mem_conn)
         nan_intent = dataclasses.replace(base_intent, limit_price=float("nan"))
 
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
@@ -420,7 +656,7 @@ class TestExitOrderCommandSplit:
             call_log.append("insert_command")
             return _real_insert(*args, **kwargs)
 
-        intent = _make_exit_intent()
+        intent = _make_exit_intent(mem_conn)
 
         with patch(
             "src.state.venue_command_repo.insert_command", side_effect=spy_insert
@@ -446,15 +682,16 @@ class TestExitOrderCommandSplit:
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
 
-    def test_exit_submit_unknown_writes_event_with_state_unknown(self, mem_conn):
+    def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.
 
-        state must reach UNKNOWN via SUBMIT_UNKNOWN event.
+        M2: state must reach SUBMIT_UNKNOWN_SIDE_EFFECT via
+        SUBMIT_TIMEOUT_UNKNOWN.
         """
         from src.execution.executor import execute_exit_order
         from src.state.venue_command_repo import find_unresolved_commands, list_events
 
-        intent = _make_exit_intent(trade_id="trd-exit-002")
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-002")
 
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
@@ -467,26 +704,27 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-002",
             )
 
-        assert result.status == "rejected"
-        assert result.reason is not None and "submit_unknown" in result.reason
+        assert result.status == "unknown_side_effect"
+        assert result.reason is not None and "submit_unknown_side_effect" in result.reason
+        assert result.command_state == "SUBMIT_UNKNOWN_SIDE_EFFECT"
 
         unresolved = find_unresolved_commands(mem_conn)
         assert len(unresolved) == 1, (
-            f"Expected 1 unresolved command (UNKNOWN exit), found {len(unresolved)}"
+            f"Expected 1 unresolved command (SUBMIT_UNKNOWN_SIDE_EFFECT exit), found {len(unresolved)}"
         )
-        assert unresolved[0]["state"] == "UNKNOWN"
+        assert unresolved[0]["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
         assert unresolved[0]["intent_kind"] == "EXIT"
 
         events = list_events(mem_conn, unresolved[0]["command_id"])
         event_types = [e["event_type"] for e in events]
-        assert "SUBMIT_UNKNOWN" in event_types
+        assert "SUBMIT_TIMEOUT_UNKNOWN" in event_types
 
     def test_exit_submit_rejected_writes_event_with_state_rejected(self, mem_conn):
         """place_limit_order returns None (exit path) -> state=REJECTED."""
         from src.execution.executor import execute_exit_order
         from src.state.venue_command_repo import get_command
 
-        intent = _make_exit_intent(trade_id="trd-exit-003")
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-003")
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -520,7 +758,7 @@ class TestExitOrderCommandSplit:
         from src.execution.executor import execute_exit_order
         from src.state.venue_command_repo import get_command
 
-        intent = _make_exit_intent(trade_id="trd-exit-004")
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-004")
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -573,9 +811,18 @@ class TestExitOrderCommandSplit:
             size=effective_shares,
             intent_kind=IntentKind.EXIT,
         )
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
         insert_command(
             mem_conn,
             command_id="pre-exit-cmd",
+            snapshot_id=snapshot_id,
+            envelope_id=_ensure_envelope(
+                mem_conn,
+                token_id=token_id,
+                side="SELL",
+                price=limit_price,
+                size=effective_shares,
+            ),
             position_id="trd-exit-pre",
             decision_id="dec-exit-collision",
             idempotency_key=idem.value,
@@ -627,7 +874,7 @@ class TestIdempotencyCollisionRetry:
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command, append_event
 
-        intent = _make_entry_intent(token_id="tok-coll-acked" + "0" * 27)
+        intent = _make_entry_intent(mem_conn, token_id="tok-coll-acked" + "0" * 27)
 
         # Pre-insert a command and advance it to ACKED state
         idem = IdempotencyKey.from_inputs(
@@ -641,6 +888,13 @@ class TestIdempotencyCollisionRetry:
         insert_command(
             mem_conn,
             command_id="pre-cmd-acked",
+            snapshot_id=intent.executable_snapshot_id,
+            envelope_id=_ensure_envelope(
+                mem_conn,
+                token_id=intent.token_id,
+                price=intent.limit_price,
+                size=18.19,
+            ),
             position_id="trd-pre-acked",
             decision_id="dec-coll-acked",
             idempotency_key=idem.value,
@@ -695,7 +949,7 @@ class TestIdempotencyCollisionRetry:
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command, append_event
 
-        intent = _make_entry_intent(token_id="tok-coll-filled" + "0" * 25)
+        intent = _make_entry_intent(mem_conn, token_id="tok-coll-filled" + "0" * 25)
 
         idem = IdempotencyKey.from_inputs(
             decision_id="dec-coll-filled",
@@ -708,6 +962,13 @@ class TestIdempotencyCollisionRetry:
         insert_command(
             mem_conn,
             command_id="pre-cmd-filled",
+            snapshot_id=intent.executable_snapshot_id,
+            envelope_id=_ensure_envelope(
+                mem_conn,
+                token_id=intent.token_id,
+                price=intent.limit_price,
+                size=18.19,
+            ),
             position_id="trd-pre-filled",
             decision_id="dec-coll-filled",
             idempotency_key=idem.value,
@@ -765,7 +1026,7 @@ class TestIdempotencyCollisionRetry:
         from src.execution.command_bus import IdempotencyKey, IntentKind
         from src.state.venue_command_repo import insert_command, append_event
 
-        intent = _make_entry_intent(token_id="tok-coll-rejected" + "0" * 23)
+        intent = _make_entry_intent(mem_conn, token_id="tok-coll-rejected" + "0" * 23)
 
         idem = IdempotencyKey.from_inputs(
             decision_id="dec-coll-rejected",
@@ -778,6 +1039,13 @@ class TestIdempotencyCollisionRetry:
         insert_command(
             mem_conn,
             command_id="pre-cmd-rejected",
+            snapshot_id=intent.executable_snapshot_id,
+            envelope_id=_ensure_envelope(
+                mem_conn,
+                token_id=intent.token_id,
+                price=intent.limit_price,
+                size=18.19,
+            ),
             position_id="trd-pre-rejected",
             decision_id="dec-coll-rejected",
             idempotency_key=idem.value,
@@ -833,7 +1101,7 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
     from src.execution.executor import _live_order
     import logging
 
-    intent = _make_entry_intent()
+    intent = _make_entry_intent(mem_conn)
 
     with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
         mock_inst = MagicMock()
@@ -869,7 +1137,7 @@ def test_v2_preflight_payload_shape(mem_conn):
     from src.data.polymarket_client import V2PreflightError
     from src.state.venue_command_repo import get_command, list_events
 
-    intent = _make_entry_intent()
+    intent = _make_entry_intent(mem_conn)
     command_ids_seen: list[str] = []
 
     import src.state.venue_command_repo as _repo

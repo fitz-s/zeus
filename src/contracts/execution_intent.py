@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from src.contracts.semantic_types import Direction
@@ -33,6 +34,19 @@ class ExecutionIntent:
     token_id: str
     timeout_seconds: int
     decision_edge: float = 0.0  # T5.a 2026-04-23: field was read at src/execution/executor.py:136,428 but missing from dataclass, latent TypeError on live entry; paired default maintains backward compatibility.
+    # U1: executable CLOB snapshot citation required by venue_command_repo
+    # before persistence/submission. Do not populate this from forecast
+    # decision_snapshot_id; it is market/execution truth, not model truth.
+    executable_snapshot_id: str = ""
+    executable_snapshot_min_tick_size: Decimal | str | None = None
+    executable_snapshot_min_order_size: Decimal | str | None = None
+    executable_snapshot_neg_risk: bool | None = None
+    # R3 A2 allocation metadata. These fields are intentionally typed on the
+    # production intent boundary so per-event / per-resolution-window /
+    # correlated-exposure caps do not depend on test-only dynamic attributes.
+    event_id: str = ""
+    resolution_window: str = "default"
+    correlation_key: str = ""
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -50,3 +64,9 @@ class ExecutionIntent:
                 f"(value={self.max_slippage!r}). Per P3.3 + P3-fix1, "
                 f"raw floats are no longer accepted at the boundary."
             )
+        normalized_event = str(self.event_id or self.market_id or "").strip()
+        normalized_window = str(self.resolution_window or "default").strip() or "default"
+        normalized_correlation = str(self.correlation_key or normalized_event or self.market_id or "").strip()
+        object.__setattr__(self, "event_id", normalized_event)
+        object.__setattr__(self, "resolution_window", normalized_window)
+        object.__setattr__(self, "correlation_key", normalized_correlation)

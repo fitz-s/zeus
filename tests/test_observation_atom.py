@@ -195,15 +195,21 @@ def test_atom_to_db_write_roundtrip(tmp_path):
         unit=atom.target_unit,
         station_id=atom.station_id,
         fetched_at=atom.fetch_utc.isoformat(),
-        # K1 additions
-        raw_value=atom.raw_value,
-        raw_unit=atom.raw_unit,
-        target_unit=atom.target_unit,
-        value_type=atom.value_type,
-        fetch_utc=atom.fetch_utc.isoformat(),
-        local_time=atom.local_time.isoformat() if hasattr(atom.local_time, 'isoformat') else str(atom.local_time),
-        collection_window_start_utc=atom.collection_window_start_utc.isoformat(),
-        collection_window_end_utc=atom.collection_window_end_utc.isoformat(),
+        # K1 additions: observations table stores per-field high/low provenance.
+        high_raw_value=atom.raw_value if atom.value_type == "high" else None,
+        high_raw_unit=atom.raw_unit if atom.value_type == "high" else None,
+        high_target_unit=atom.target_unit if atom.value_type == "high" else None,
+        low_raw_value=atom.raw_value if atom.value_type == "low" else None,
+        low_raw_unit=atom.raw_unit if atom.value_type == "low" else None,
+        low_target_unit=atom.target_unit if atom.value_type == "low" else None,
+        high_fetch_utc=atom.fetch_utc.isoformat() if atom.value_type == "high" else None,
+        high_local_time=(atom.local_time.isoformat() if hasattr(atom.local_time, 'isoformat') else str(atom.local_time)) if atom.value_type == "high" else None,
+        high_collection_window_start_utc=atom.collection_window_start_utc.isoformat() if atom.value_type == "high" else None,
+        high_collection_window_end_utc=atom.collection_window_end_utc.isoformat() if atom.value_type == "high" else None,
+        low_fetch_utc=atom.fetch_utc.isoformat() if atom.value_type == "low" else None,
+        low_local_time=(atom.local_time.isoformat() if hasattr(atom.local_time, 'isoformat') else str(atom.local_time)) if atom.value_type == "low" else None,
+        low_collection_window_start_utc=atom.collection_window_start_utc.isoformat() if atom.value_type == "low" else None,
+        low_collection_window_end_utc=atom.collection_window_end_utc.isoformat() if atom.value_type == "low" else None,
         timezone=atom.timezone,
         utc_offset_minutes=atom.utc_offset_minutes,
         dst_active=int(atom.dst_active),
@@ -215,7 +221,8 @@ def test_atom_to_db_write_roundtrip(tmp_path):
         rebuild_run_id=atom.rebuild_run_id,
         data_source_version=atom.data_source_version,
         authority=atom.authority,
-        provenance_metadata=json.dumps(atom.provenance_metadata),
+        high_provenance_metadata=json.dumps(atom.provenance_metadata) if atom.value_type == "high" else None,
+        low_provenance_metadata=json.dumps(atom.provenance_metadata) if atom.value_type == "low" else None,
     )
 
     placeholders = ", ".join(f":{k}" for k in row)
@@ -231,16 +238,16 @@ def test_atom_to_db_write_roundtrip(tmp_path):
     assert result is not None
 
     # Assert all K1-added columns round-trip
-    assert result["raw_value"] == atom.raw_value
-    assert result["raw_unit"] == atom.raw_unit
-    assert result["target_unit"] == atom.target_unit
-    assert result["value_type"] == atom.value_type
+    prefix = "high" if atom.value_type == "high" else "low"
+    assert result[f"{prefix}_raw_value"] == atom.raw_value
+    assert result[f"{prefix}_raw_unit"] == atom.raw_unit
+    assert result[f"{prefix}_target_unit"] == atom.target_unit
     assert result["authority"] == atom.authority
-    assert result["fetch_utc"] == atom.fetch_utc.isoformat()
-    assert result["local_time"] == atom.local_time.isoformat()
+    assert result[f"{prefix}_fetch_utc"] == atom.fetch_utc.isoformat()
+    assert result[f"{prefix}_local_time"] == atom.local_time.isoformat()
     assert result["station_id"] == atom.station_id
     assert result["rebuild_run_id"] == atom.rebuild_run_id
-    assert json.loads(result["provenance_metadata"]) == atom.provenance_metadata
+    assert json.loads(result[f"{prefix}_provenance_metadata"]) == atom.provenance_metadata
     assert result["hemisphere"] == atom.hemisphere
     assert result["season"] == atom.season
     assert result["month"] == atom.month

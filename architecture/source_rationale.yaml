@@ -11,8 +11,10 @@ hazard_badges:
   NO_WRITE_PATH: Must not write canonical truth.
   VENUS_CONTROL_ONLY: External writes must flow through Venus/control contracts.
   TRANSITIONAL_DO_NOT_DEEPEN: Transitional compatibility surface; do not deepen dependency.
+  SOURCE_TRUTH_PLANE_COLLAPSE: Source roles must not collapse settlement, Day0, hourly, and forecast truth planes.
   WMO_ROUNDING_LAW: Settlement-aligned values must use WMO half-up.
   ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
+  CALIBRATION_FAMILY_MIXING: Calibration rows must keep metric, cluster, season, source identity, and promotion evidence explicit.
 write_routes:
   canonical_position_write:
     owner: src/state/ledger.py
@@ -59,6 +61,12 @@ write_routes:
     tables:
     - decision_log
     guardrail: Decision artifacts are evidence/read-model facts, not lifecycle authority.
+  venue_command_write:
+    owner: src/state/venue_command_repo.py
+    tables:
+    - venue_commands
+    - venue_command_events
+    guardrail: Command event append and collateral reservation terminal-release must remain atomic.
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
@@ -88,6 +96,11 @@ package_defaults:
     authority_role: risk_policy_runtime
     gates:
     - pytest -q tests/test_riskguard.py tests/test_live_safety_invariants.py
+  src/risk_allocator:
+    zone: K1_governance
+    authority_role: capital_allocation_governor
+    gates:
+    - pytest -q -p no:cacheprovider tests/test_risk_allocator.py
   src/execution:
     zone: K2_runtime
     authority_role: live_execution_boundary
@@ -103,6 +116,11 @@ package_defaults:
     authority_role: external_data_boundary
     gates:
     - pytest -q tests/test_ensemble_client.py tests/test_observation_contract.py
+  src/ingest:
+    zone: K2_runtime
+    authority_role: external_event_ingest_boundary
+    gates:
+    - pytest -q -p no:cacheprovider tests/test_user_channel_ingest.py
   src/signal:
     zone: K3_extension
     authority_role: probability_signal
@@ -160,6 +178,7 @@ files:
     - src/calibration/effective_sample_size.py
     - src/calibration/manager.py
     - src/calibration/platt.py
+    - src/calibration/retrain_trigger.py
     - src/calibration/store.py
     - src/contracts/calibration_bins.py
     - src/control/control_plane.py
@@ -176,6 +195,7 @@ files:
     - src/data/rebuild_validators.py
     - src/data/solar_append.py
     - src/data/tier_resolver.py
+    - src/data/tigge_client.py
     - src/data/wu_scheduler.py
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
@@ -274,7 +294,18 @@ files:
   src/contracts/execution_intent.py:
     zone: K0_frozen_kernel
     authority_role: execution_intent_contract
-    why: Separates intent semantics from order mechanics.
+    why: Separates intent semantics from order mechanics; R3 A2 adds typed allocation metadata so per-event, per-resolution-window, and correlated-exposure caps are live-path data, not test-only dynamic attributes.
+    downstream:
+    - src/execution/executor.py
+    - src/risk_allocator/governor.py
+  src/contracts/executable_market_snapshot_v2.py:
+    zone: K0_frozen_kernel
+    authority_role: executable_market_snapshot_contract
+    why: R3 U1 immutable CLOB market truth contract and fail-closed freshness/tradability gate for venue command persistence.
+    downstream:
+    - src/state/snapshot_repo.py
+    - src/state/venue_command_repo.py
+    - src/execution/executor.py
   src/contracts/execution_price.py:
     zone: K0_frozen_kernel
     authority_role: typed_price_contract
@@ -283,6 +314,21 @@ files:
     - src/engine/evaluator.py
     - src/execution/executor.py
     - src/strategy/kelly.py
+  src/contracts/fx_classification.py:
+    zone: K0_frozen_kernel
+    authority_role: fx_classification_contract
+    why: R3 Z4 enum gate for operator-selected USDC.e ↔ pUSD PnL classification; rejects stringly-typed redemption accounting.
+    downstream:
+    - src/state/collateral_ledger.py
+    - src/execution/wrap_unwrap_commands.py
+  src/contracts/venue_submission_envelope.py:
+    zone: K0_frozen_kernel
+    authority_role: venue_submission_contract
+    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence instead of one SDK call shape.
+    downstream:
+    - src/venue/polymarket_v2_adapter.py
+    - src/execution/executor.py
+    - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/Z2.md
   src/contracts/expiring_assumption.py:
     zone: K0_frozen_kernel
     authority_role: assumption_contract
@@ -453,6 +499,42 @@ files:
     - src/engine/evaluator.py
     - src/observability/status_summary.py
     - src/riskguard/policy.py
+  src/control/cutover_guard.py:
+    zone: K1_governance
+    authority_role: cutover_runtime_guard
+    why: Runtime state machine that blocks live venue side effects unless the CLOB V2 cutover is explicitly LIVE_ENABLED.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - control_write
+    downstream:
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+  src/control/heartbeat_supervisor.py:
+    zone: K1_governance
+    authority_role: heartbeat_runtime_guard
+    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when heartbeat health is not HEALTHY and reuses the fail-closed auto-pause tombstone.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - control_write
+    downstream:
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+    - src/main.py
+  src/control/ws_gap_guard.py:
+    zone: K1_governance
+    authority_role: user_ws_submit_guard
+    why: R3 M3 user-channel gap guard that blocks new submits when authenticated WS truth is stale, disconnected, misconfigured, or mismatched and records that future M5 reconciliation evidence is required.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - control_write
+    downstream:
+    - src/ingest/polymarket_user_channel.py
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+    - src/main.py
   src/control/gate_decision.py:
     zone: K1_governance
     authority_role: gate_decision_contract
@@ -503,6 +585,27 @@ files:
     downstream:
     - src/engine/cycle_runner.py
     - src/observability/status_summary.py
+  src/risk_allocator/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: R3 A2 risk allocator package rules and file registry.
+  src/risk_allocator/__init__.py:
+    zone: K1_governance
+    authority_role: capital_allocation_api
+    why: R3 A2 public exports for blocking allocation, governor refresh, and read-only exposure helpers.
+    downstream:
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+  src/risk_allocator/governor.py:
+    zone: K1_governance
+    authority_role: capital_allocation_governor
+    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, drawdown, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+    - tests/test_risk_allocator.py
   src/data/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -525,6 +628,35 @@ files:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
+  src/data/forecast_ingest_protocol.py:
+    zone: K2_runtime
+    authority_role: forecast_ingest_protocol
+    why: R3 F1 typed protocol for source-stamped forecast bundles; K2 data seam, not K0 settlement/source authority.
+    downstream:
+    - src/data/forecast_source_registry.py
+    - future F2 calibration retrain loop
+    - future F3 TIGGE ingest stub
+  src/data/forecast_source_registry.py:
+    zone: K2_runtime
+    authority_role: forecast_source_registry
+    why: R3 F1 typed forecast-source registry and operator gate checks for dormant experimental sources.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/forecasts_append.py
+    - src/data/ensemble_client.py
+    - src/data/hole_scanner.py
+    - future F2 calibration retrain loop
+    - future F3 TIGGE ingest stub
+  src/data/tigge_client.py:
+    zone: K2_runtime
+    authority_role: dormant_forecast_ingest_stub
+    why: R3 F3 TIGGE ingest stub implementing ForecastIngestProtocol while keeping external TIGGE pulls dormant behind operator artifact + env flag.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/forecast_source_registry.py
+    - future F2 calibration retrain loop
   src/data/daily_obs_append.py:
     zone: K2_runtime
     authority_role: live_daily_observation_append
@@ -544,7 +676,7 @@ files:
   src/data/forecasts_append.py:
     zone: K2_runtime
     authority_role: live_forecast_append
-    why: Appends live forecast-history rows and coverage for post-backfill freshness.
+    why: Appends live forecast-history rows and coverage for post-backfill freshness; R3 F1 stamps registry source_id/raw_payload_hash/captured_at/authority_tier on new rows.
     downstream:
     - src/main.py
   src/data/hole_scanner.py:
@@ -606,7 +738,7 @@ files:
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
-    why: CLOB market data and order API boundary.
+    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
@@ -614,6 +746,42 @@ files:
     - src/execution/executor.py
     - src/execution/harvester.py
     - src/main.py
+  src/venue/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Venue package rules and file registry.
+  src/venue/__init__.py:
+    zone: K2_runtime
+    authority_role: package_marker
+    why: Marks the venue boundary namespace.
+  src/venue/polymarket_v2_adapter.py:
+    zone: K2_runtime
+    authority_role: v2_venue_adapter
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope before SDK contact and anchors T1 paper/live parity fakes.
+    downstream:
+    - src/execution/executor.py
+    - src/data/polymarket_client.py
+    - tests/test_v2_adapter.py
+    - tests/test_fake_polymarket_venue.py
+    - tests/integration/test_p0_live_money_safety.py
+  src/ingest/AGENTS.md:
+    zone: docs
+    authority_role: registry
+    why: Ingest package rules and file registry for external venue/user event streams.
+  src/ingest/polymarket_user_channel.py:
+    zone: K2_runtime
+    authority_role: user_channel_ingest
+    why: R3 M3 authenticated Polymarket user WebSocket ingestor; normalizes order/trade messages into U2 append-only venue facts and emits gap status without owning M5 reconciliation.
+    hazards:
+    - TRANSITIONAL_DO_NOT_DEEPEN
+    write_routes:
+    - venue_command_write
+    downstream:
+    - src/state/venue_command_repo.py
+    - src/control/ws_gap_guard.py
+    - src/execution/executor.py
+    - src/engine/cycle_runner.py
+    - tests/test_user_channel_ingest.py
   src/data/proxy_health.py:
     zone: K2_runtime
     authority_role: proxy_health_boundary
@@ -686,7 +854,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority.
+    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -755,15 +923,63 @@ files:
     why: Computes collateral requirements for order sizing/execution.
     downstream:
     - src/execution/exit_lifecycle.py
+  src/execution/wrap_unwrap_commands.py:
+    zone: K2_runtime
+    authority_role: wrap_unwrap_command_model
+    why: R3 Z4 durable command/state model for USDC.e ↔ pUSD wrap/unwrap lifecycle; no live chain submission authority.
+    downstream:
+    - src/state/collateral_ledger.py
+    - src/execution/harvester.py
+  src/execution/command_bus.py:
+    zone: K2_runtime
+    authority_role: venue_command_grammar
+    why: Closed enum/dataclass contract for durable venue command states, event types, intent kinds, and deterministic idempotency keys.
+    downstream:
+    - src/state/venue_command_repo.py
+    - src/execution/command_recovery.py
+    - src/execution/executor.py
+  src/execution/command_recovery.py:
+    zone: K2_runtime
+    authority_role: venue_command_recovery
+    why: Scans unresolved durable venue commands and appends recovery events without bypassing command grammar.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/state/venue_command_repo.py
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places live CLOB limit orders; real-money boundary.
+    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact and persists/submits the selected maker/taker order type.
     write_routes:
     - canonical_position_write
     downstream:
     - src/engine/cycle_runner.py
     - src/execution/exit_lifecycle.py
+  src/execution/exchange_reconcile.py:
+    zone: K2_runtime
+    authority_role: exchange_reconciliation_sweep
+    why: R3 M5 read-only venue-vs-journal reconciliation sweep; writes exchange_reconcile_findings and linkable missing trade facts without inserting venue_commands or performing live venue side effects.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/execution/exit_safety.py
+    - src/execution/exit_lifecycle.py
+    - src/state/venue_command_repo.py
+    - src/control/heartbeat_supervisor.py
+    - src/control/cutover_guard.py
+  src/execution/settlement_commands.py:
+    zone: K2_runtime
+    authority_role: settlement_redeem_command_model
+    why: R3 R1 durable settlement/redeem command ledger; models redemption lifecycle and tx-hash crash recovery without authorizing live redeem side effects.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - settlement_write
+    downstream:
+    - src/execution/harvester.py
+    - src/state/db.py
+    - future T1 fake venue parity
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime
@@ -771,6 +987,18 @@ files:
     downstream:
     - src/engine/cycle_runtime.py
     - src/execution/harvester.py
+  src/execution/exit_safety.py:
+    zone: K2_runtime
+    authority_role: exit_cancel_replace_safety
+    why: R3 M4 mutex, typed cancel-outcome parsing, and replacement-sell gating for live exit safety without widening command grammar or M5 reconciliation.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - canonical_position_write
+    downstream:
+    - src/execution/executor.py
+    - src/execution/exit_lifecycle.py
+    - src/state/venue_command_repo.py
   src/execution/exit_triggers.py:
     zone: K2_runtime
     authority_role: exit_decision_runtime
@@ -924,6 +1152,16 @@ files:
     zone: K3_extension
     authority_role: metric_spec_catalog
     why: Defines per-metric calibration identities so high/low families cannot silently share the wrong calibration surface.
+  src/calibration/retrain_trigger.py:
+    zone: K3_extension
+    authority_role: operator_gated_calibration_retrain_trigger
+    why: R3 F2 operator-gated calibration retrain/promotion wiring; consumes CONFIRMED trade facts only and requires frozen-replay PASS before promotion.
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    downstream:
+    - src/calibration/store.py
+    - src/calibration/manager.py
+    - src/engine/evaluator.py
   src/calibration/platt.py:
     zone: K3_extension
     authority_role: platt_model_math
@@ -1019,6 +1257,63 @@ files:
     why: Represents selection family for statistical testing.
     downstream:
     - src/engine/evaluator.py
+  src/strategy/benchmark_suite.py:
+    zone: K3_extension
+    authority_role: strategy_benchmark_gate
+    why: R3 A1 replay/paper/live-shadow benchmark metrics and promotion gate; computes evidence-only StrategyMetrics and blocks live promotion unless replay+paper+shadow pass.
+    downstream:
+    - src/strategy/data_lake.py
+    - src/strategy/candidates/__init__.py
+    - tests/test_strategy_benchmark.py
+  src/strategy/data_lake.py:
+    zone: K3_extension
+    authority_role: replay_corpus_accessor
+    why: R3 A1 read-only replay corpus accessor for StrategyBenchmarkSuite; in-memory deterministic seam only, no external fetch authority.
+    downstream:
+    - src/strategy/benchmark_suite.py
+    - tests/test_strategy_benchmark.py
+  src/strategy/candidates/__init__.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_registry_stub
+    why: R3 A1 strategy candidate stub registry; advertises identities for benchmarking without executable alpha or live promotion authority.
+    downstream:
+    - tests/test_strategy_benchmark.py
+  src/strategy/candidates/weather_event_arbitrage.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/stale_quote_detector.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/resolution_window_maker.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/neg_risk_basket.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/cross_market_correlation_hedge.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/liquidity_provision_with_heartbeat.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
+    downstream:
+    - src/strategy/candidates/__init__.py
   src/state/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1048,6 +1343,30 @@ files:
     why: Typed three-state chain truth helpers that preserve unknown vs empty semantics during reconciliation.
     downstream:
     - src/state/chain_reconciliation.py
+  src/state/collateral_ledger.py:
+    zone: K2_runtime
+    authority_role: collateral_runtime_truth
+    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory and blocks double commitment.
+    downstream:
+    - src/execution/executor.py
+    - src/execution/harvester.py
+    - src/data/polymarket_client.py
+  src/state/snapshot_repo.py:
+    zone: K2_runtime
+    authority_role: executable_market_snapshot_journal
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands.
+    downstream:
+    - src/state/venue_command_repo.py
+    - src/execution/executor.py
+  src/state/venue_command_repo.py:
+    zone: K2_runtime
+    authority_role: venue_command_journal
+    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events.
+    write_routes:
+    - venue_command_write
+    downstream:
+    - src/execution/executor.py
+    - src/state/collateral_ledger.py
   src/state/canonical_write.py:
     zone: K0_frozen_kernel
     authority_role: canonical_write_guard
@@ -1078,7 +1397,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, and canonical DB queries.
+    why: SQLite connections, schema setup, canonical DB queries, and R3 U2 raw provenance projection schema initialization.
     write_routes:
     - canonical_position_write
     - settlement_write

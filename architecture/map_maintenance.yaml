@@ -83,13 +83,13 @@ rules:
       - config/reality_contracts/AGENTS.md
     rationale: reality contract config files are registered locally.
   - id: reference_doc_registry
-    path_globs: ["docs/reference/*.md"]
+    path_globs: ["docs/reference/zeus_*.md"]
     on_change: [added, deleted]
     required_companions:
       - docs/reference/AGENTS.md
       - architecture/reference_replacement.yaml
       - architecture/docs_registry.yaml
-    rationale: reference docs keep a human registry plus a replacement matrix.
+    rationale: top-level canonical reference docs keep a human registry plus a replacement matrix; module books are routed by module_reference_doc_registry.
   - id: module_reference_router_registry
     path_globs: ["docs/reference/modules/AGENTS.md"]
     on_change: [added, deleted]

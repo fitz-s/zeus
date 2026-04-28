@@ -1,15 +1,18 @@
 # Created: 2026-04-26
 # Last reused/audited: 2026-04-26
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
-"""Command recovery loop u2014 INV-31.
+"""Command recovery loop — INV-31.
 
-At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES (SUBMITTING,
-UNKNOWN, REVIEW_REQUIRED, CANCEL_PENDING) and reconciles each against venue
-truth. Appends durable events that advance state per the u00a7P1.S4 resolution
-table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
+At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
+reconciles currently-supported side-effect states against venue truth. M2 owns
+SUBMIT_UNKNOWN_SIDE_EFFECT resolution: lookup by known venue_order_id or by
+idempotency-key capability, then convert found orders to ACKED/PARTIAL/FILLED
+or mark safe replay permitted via a terminal SUBMIT_REJECTED payload after the
+window elapses. Appends durable events that advance state per the §P1.S4
+resolution table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
 
 Chain reconciliation (FILL_CONFIRMED via on-chain settlement evidence) is OUT
-of scope for P1.S4 u2014 that requires deep chain-state integration. Deferred to
+of scope for P1.S4 — that requires deep chain-state integration. Deferred to
 P2/K4 where chain authority is surfaced as a first-class seam.
 
 Cross-DB note (per INV-30 caveat): venue_commands lives in zeus_trades.db.
@@ -46,10 +49,63 @@ _INACTIVE_STATUSES = frozenset({
 _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
 })
+_SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ts(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _age_seconds(cmd: VenueCommand, *, now: datetime) -> float | None:
+    started_at = _parse_ts(cmd.updated_at) or _parse_ts(cmd.created_at)
+    if started_at is None:
+        return None
+    return (now - started_at).total_seconds()
+
+
+def _extract_order_id(venue_resp: dict | None, fallback: str | None = None) -> str | None:
+    if not isinstance(venue_resp, dict):
+        return fallback
+    return (
+        venue_resp.get("orderID")
+        or venue_resp.get("orderId")
+        or venue_resp.get("order_id")
+        or venue_resp.get("id")
+        or fallback
+    )
+
+
+def _lookup_unknown_side_effect_order(cmd: VenueCommand, client) -> tuple[str, dict | None]:
+    """Return ('found'|'not_found'|'unavailable', venue_response)."""
+
+    if cmd.venue_order_id:
+        return "found", client.get_order(cmd.venue_order_id)
+    finder = getattr(client, "find_order_by_idempotency_key", None)
+    if callable(finder):
+        found = finder(cmd.idempotency_key.value)
+        if found is None:
+            return "found", None
+        if isinstance(found, dict):
+            return "found", found
+        logger.warning(
+            "recovery: command %s idempotency-key lookup returned non-dict %s; "
+            "treating lookup as unavailable",
+            cmd.command_id, type(found).__name__,
+        )
+        return "unavailable", None
+    return "unavailable", None
 
 
 def _reconcile_row(
@@ -59,7 +115,7 @@ def _reconcile_row(
 ) -> str:
     """Apply one resolution-table row.  Returns 'advanced', 'stayed', or 'error'.
 
-    Raises nothing u2014 all exceptions are caught and logged; the loop counts them.
+    Raises nothing — all exceptions are caught and logged; the loop counts them.
     """
     try:
         state = cmd.state
@@ -92,6 +148,112 @@ def _reconcile_row(
             return "advanced"
 
         # ------------------------------------------------------------------ #
+        # M2: SUBMIT_UNKNOWN_SIDE_EFFECT                                      #
+        # ------------------------------------------------------------------ #
+        if state == CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT:
+            lookup_status, venue_resp = _lookup_unknown_side_effect_order(cmd, client)
+            if lookup_status == "unavailable":
+                logger.warning(
+                    "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT cannot be resolved; "
+                    "client lacks idempotency-key lookup and no venue_order_id is known",
+                    cmd.command_id,
+                )
+                return "error"
+
+            venue_order_id = _extract_order_id(venue_resp, cmd.venue_order_id)
+            if venue_resp is not None:
+                venue_status = str(venue_resp.get("status") or "").upper()
+                payload = {
+                    "venue_order_id": venue_order_id,
+                    "venue_status": venue_status,
+                    "venue_response": venue_resp,
+                    "idempotency_key": cmd.idempotency_key.value,
+                }
+                if venue_status in {"FILLED", "MINED", "CONFIRMED"}:
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.FILL_CONFIRMED.value,
+                        occurred_at=now,
+                        payload=payload,
+                    )
+                    logger.info(
+                        "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> FILLED "
+                        "(venue status=%s order %s)",
+                        cmd.command_id, venue_status, venue_order_id,
+                    )
+                    return "advanced"
+                if venue_status in {"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+                        occurred_at=now,
+                        payload=payload,
+                    )
+                    logger.info(
+                        "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> PARTIAL "
+                        "(venue status=%s order %s)",
+                        cmd.command_id, venue_status, venue_order_id,
+                    )
+                    return "advanced"
+                if venue_status == "REJECTED":
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.SUBMIT_REJECTED.value,
+                        occurred_at=now,
+                        payload={**payload, "reason": "recovery_venue_rejected"},
+                    )
+                    logger.info(
+                        "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED "
+                        "(venue status=%s)",
+                        cmd.command_id, venue_status,
+                    )
+                    return "advanced"
+                append_event(
+                    conn,
+                    command_id=cmd.command_id,
+                    event_type=CommandEventType.SUBMIT_ACKED.value,
+                    occurred_at=now,
+                    payload=payload,
+                )
+                logger.info(
+                    "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> ACKED "
+                    "(venue status=%s order %s)",
+                    cmd.command_id, venue_status, venue_order_id,
+                )
+                return "advanced"
+
+            age = _age_seconds(cmd, now=datetime.now(timezone.utc))
+            if age is None or age < _SAFE_REPLAY_MIN_AGE_SECONDS:
+                logger.info(
+                    "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT not found but age=%s; "
+                    "staying until safe replay window elapses",
+                    cmd.command_id, age,
+                )
+                return "stayed"
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.SUBMIT_REJECTED.value,
+                occurred_at=now,
+                payload={
+                    "reason": "safe_replay_permitted_no_order_found",
+                    "safe_replay_permitted": True,
+                    "previous_unknown_command_id": cmd.command_id,
+                    "idempotency_key": cmd.idempotency_key.value,
+                    "age_seconds": age,
+                },
+            )
+            logger.warning(
+                "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED "
+                "(safe replay permitted; idempotency key not found after %.1fs)",
+                cmd.command_id, age,
+            )
+            return "advanced"
+
+        # ------------------------------------------------------------------ #
         # States that require a venue lookup (need venue_order_id).           #
         # SUBMITTING+id, UNKNOWN, CANCEL_PENDING all fall here.               #
         # ------------------------------------------------------------------ #
@@ -108,7 +270,7 @@ def _reconcile_row(
                     payload={"reason": "recovery_unknown_no_venue_order_id"},
                 )
                 logger.warning(
-                    "recovery: command %s UNKNOWN without venue_order_id u2192 REVIEW_REQUIRED",
+                    "recovery: command %s UNKNOWN without venue_order_id -> REVIEW_REQUIRED",
                     cmd.command_id,
                 )
                 return "advanced"
@@ -121,7 +283,7 @@ def _reconcile_row(
                 return "stayed"
             return "stayed"
 
-        # Venue lookup u2014 exceptions propagate to caller's per-row try/except.
+        # Venue lookup — exceptions propagate to caller's per-row try/except.
         try:
             venue_resp = client.get_order(venue_order_id)
         except Exception as exc:
@@ -329,10 +491,10 @@ def reconcile_unresolved_commands(
     so cycle_runner can record it in the cycle summary.
 
     Each row in IN_FLIGHT_STATES is looked up at the venue (if it has a
-    venue_order_id) and an event is appended per u00a7P1.S4. Rows in
+    venue_order_id) and an event is appended per §P1.S4. Rows in
     REVIEW_REQUIRED are skipped (operator-handoff). Rows without a
-    venue_order_id and in SUBMITTING get an EXPIRED event since recovery
-    cannot reconcile what was never acked.
+    venue_order_id and in SUBMITTING get a REVIEW_REQUIRED event since recovery
+    cannot distinguish never-placed from ack-lost side effects.
 
     DB connection: if conn is None, opens get_trade_connection_with_world()
     internally (with a try/finally to close). P1.S5 will thread the trade

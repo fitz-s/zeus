@@ -25,6 +25,8 @@ Use `python3 scripts/topology_doctor.py --tests --json` to check that active
 |------|---------|
 | `__init__.py` | Package marker for pytest/import tooling |
 | `contracts/` | Spec-owned validation manifests; see `tests/contracts/AGENTS.md` |
+| `fakes/` | Test-only fake venue/runtime doubles; must not import credentials or perform live I/O |
+| `integration/` | Cross-module integration antibodies such as R3 T1 paper/live parity scenarios |
 
 Top-level `test_*.py` files are intentionally not duplicated here. Query
 `architecture/test_topology.yaml` instead of hand-maintaining another file list.

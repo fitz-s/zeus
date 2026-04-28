@@ -64,7 +64,6 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
-import requests
 
 # G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4): import from
 # canonical location to avoid transitively pulling src.calibration into the
@@ -1070,7 +1069,7 @@ def _fetch_ogimet_day(
     body = ""
     for attempt in range(_OGIMET_RETRY_COUNT + 1):
         try:
-            resp = requests.get(url, params=params, headers=_OGIMET_HEADERS, timeout=45)
+            resp = httpx.get(url, params=params, headers=_OGIMET_HEADERS, timeout=45)
             if resp.status_code == 200:
                 body = resp.text
                 break
@@ -1079,7 +1078,7 @@ def _fetch_ogimet_day(
                 target.station, target_date, resp.status_code,
                 attempt + 1, _OGIMET_RETRY_COUNT + 1,
             )
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.warning(
                 "Ogimet %s %s %s (attempt %d/%d)",
                 target.station, target_date, e,

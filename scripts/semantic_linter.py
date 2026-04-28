@@ -47,7 +47,17 @@ SEMANTIC_RULES = {
     }
 }
 
-TIME_SEMANTICS_ALLOWED_FILES = {"diurnal.py", "day0_signal.py", "solar.py"}
+TIME_SEMANTICS_ALLOWED_FILES = {
+    "diurnal.py",
+    "day0_signal.py",
+    "solar.py",
+    # Observation ingest/schema boundary files must carry the persisted
+    # `local_hour` column and DST flags.  They may transport these values but
+    # must not perform signal-time inference with them; the inference layer
+    # remains diurnal/day0/solar.
+    "observation_instants_v2_writer.py",
+    "wu_hourly_client.py",
+}
 P_RAW_CALIBRATION_FILES = {"blocked_oos.py"}
 
 # K2_struct: forbid bare FROM calibration_pairs outside the allowlist.

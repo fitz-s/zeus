@@ -52,6 +52,8 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
             self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=5000):
             return np.array([0.60, 0.25, 0.15])
@@ -73,7 +75,7 @@ def _patch_evaluator(monkeypatch, *, entry_price: float):
 
         def find_edges(self, n_bootstrap=500):
             edge = BinEdge(
-                bin=self.bins[0],
+                bin=self.bins[1],
                 direction="buy_yes",
                 edge=0.05,
                 ci_lower=0.03,
@@ -131,9 +133,9 @@ def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> 
         city=NYC,
         target_date="2026-04-03",
         outcomes=[
+            {"title": "38°F or below", "range_low": None, "range_high": 38, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0", "price": 0.01},
             {"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.01},
-            {"title": "41-42°F", "range_low": 41, "range_high": 42, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.02},
-            {"title": "43°F or higher", "range_low": 43, "range_high": None, "token_id": "yes3", "no_token_id": "no3", "market_id": "m3", "price": 0.03},
+            {"title": "41°F or higher", "range_low": 41, "range_high": None, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2", "price": 0.03},
         ],
         hours_since_open=10.0,
         hours_to_resolution=30.0,

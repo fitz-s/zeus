@@ -19,6 +19,8 @@ from src.state.ledger import (
     append_many_and_project,
 )
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
+from src.state.collateral_ledger import init_collateral_schema
+from src.state.snapshot_repo import init_snapshot_schema
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
@@ -122,6 +124,211 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "quarantined": "quarantined",
     "admin_closed": "admin_closed",
 }
+
+
+def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
+    """Create U2 raw-provenance projection tables and legacy migrations.
+
+    U2 is intentionally append-only: command/order/trade/lot facts are facts,
+    not mutable current-state rows. Later phases may derive read models from
+    these tables, but they must not mutate historical provenance.
+    """
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS venue_submission_envelopes (
+          envelope_id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL DEFAULT 1,
+          sdk_package TEXT NOT NULL,
+          sdk_version TEXT NOT NULL,
+          host TEXT NOT NULL,
+          chain_id INTEGER NOT NULL,
+          funder_address TEXT NOT NULL,
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL,
+          yes_token_id TEXT NOT NULL,
+          no_token_id TEXT NOT NULL,
+          selected_outcome_token_id TEXT NOT NULL,
+          outcome_label TEXT NOT NULL CHECK (outcome_label IN ('YES','NO')),
+          side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+          price TEXT NOT NULL,
+          size TEXT NOT NULL,
+          order_type TEXT NOT NULL CHECK (order_type IN ('GTC','GTD','FOK','FAK')),
+          post_only INTEGER NOT NULL CHECK (post_only IN (0,1)),
+          tick_size TEXT NOT NULL,
+          min_order_size TEXT NOT NULL,
+          neg_risk INTEGER NOT NULL CHECK (neg_risk IN (0,1)),
+          fee_details_json TEXT NOT NULL,
+          canonical_pre_sign_payload_hash TEXT NOT NULL,
+          signed_order_blob BLOB,
+          signed_order_hash TEXT,
+          raw_request_hash TEXT NOT NULL,
+          raw_response_json TEXT,
+          order_id TEXT,
+          trade_ids_json TEXT NOT NULL DEFAULT '[]',
+          transaction_hashes_json TEXT NOT NULL DEFAULT '[]',
+          error_code TEXT,
+          error_message TEXT,
+          captured_at TEXT NOT NULL
+        );
+
+        CREATE TRIGGER IF NOT EXISTS venue_submission_envelopes_no_update
+        BEFORE UPDATE ON venue_submission_envelopes
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_submission_envelopes is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS venue_submission_envelopes_no_delete
+        BEFORE DELETE ON venue_submission_envelopes
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_submission_envelopes is append-only');
+        END;
+
+        CREATE TABLE IF NOT EXISTS venue_order_facts (
+          fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          venue_order_id TEXT NOT NULL,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id),
+          state TEXT NOT NULL CHECK (state IN (
+            'LIVE','RESTING','MATCHED','PARTIALLY_MATCHED',
+            'CANCEL_REQUESTED','CANCEL_CONFIRMED','CANCEL_UNKNOWN','CANCEL_FAILED',
+            'EXPIRED','VENUE_WIPED','HEARTBEAT_CANCEL_SUSPECTED'
+          )),
+          remaining_size TEXT,
+          matched_size TEXT,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          raw_payload_hash TEXT NOT NULL,
+          raw_payload_json TEXT,
+          UNIQUE (venue_order_id, local_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_facts_command ON venue_order_facts (command_id, observed_at);
+        CREATE INDEX IF NOT EXISTS idx_order_facts_state ON venue_order_facts (state, observed_at);
+
+        CREATE TRIGGER IF NOT EXISTS venue_order_facts_no_update
+        BEFORE UPDATE ON venue_order_facts
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_order_facts is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS venue_order_facts_no_delete
+        BEFORE DELETE ON venue_order_facts
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_order_facts is append-only');
+        END;
+
+        CREATE TABLE IF NOT EXISTS venue_trade_facts (
+          trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trade_id TEXT NOT NULL,
+          venue_order_id TEXT NOT NULL,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id),
+          state TEXT NOT NULL CHECK (state IN ('MATCHED','MINED','CONFIRMED','RETRYING','FAILED')),
+          filled_size TEXT NOT NULL,
+          fill_price TEXT NOT NULL,
+          fee_paid_micro INTEGER,
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          raw_payload_hash TEXT NOT NULL,
+          raw_payload_json TEXT,
+          UNIQUE (trade_id, local_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_facts_command ON venue_trade_facts (command_id, observed_at);
+        CREATE INDEX IF NOT EXISTS idx_trade_facts_trade ON venue_trade_facts (trade_id, observed_at);
+
+        CREATE TRIGGER IF NOT EXISTS venue_trade_facts_no_update
+        BEFORE UPDATE ON venue_trade_facts
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_trade_facts is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS venue_trade_facts_no_delete
+        BEFORE DELETE ON venue_trade_facts
+        BEGIN
+          SELECT RAISE(ABORT, 'venue_trade_facts is append-only');
+        END;
+
+        CREATE TABLE IF NOT EXISTS position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN (
+            'OPTIMISTIC_EXPOSURE','CONFIRMED_EXPOSURE',
+            'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
+            'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED','QUARANTINED'
+          )),
+          shares INTEGER NOT NULL,
+          entry_price_avg TEXT NOT NULL,
+          exit_price_avg TEXT,
+          source_command_id TEXT REFERENCES venue_commands(command_id),
+          source_trade_fact_id INTEGER REFERENCES venue_trade_facts(trade_fact_id),
+          captured_at TEXT NOT NULL,
+          state_changed_at TEXT NOT NULL,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          raw_payload_hash TEXT NOT NULL,
+          raw_payload_json TEXT,
+          UNIQUE (position_id, local_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS idx_position_lots_state ON position_lots (state, position_id);
+        CREATE INDEX IF NOT EXISTS idx_position_lots_trade ON position_lots (source_trade_fact_id);
+
+        CREATE TRIGGER IF NOT EXISTS position_lots_no_update
+        BEFORE UPDATE ON position_lots
+        BEGIN
+          SELECT RAISE(ABORT, 'position_lots is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS position_lots_no_delete
+        BEFORE DELETE ON position_lots
+        BEGIN
+          SELECT RAISE(ABORT, 'position_lots is append-only');
+        END;
+
+        CREATE TABLE IF NOT EXISTS provenance_envelope_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_type TEXT NOT NULL CHECK (subject_type IN ('command','order','trade','lot','settlement','wrap_unwrap','heartbeat')),
+          subject_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
+          observed_at TEXT NOT NULL,
+          venue_timestamp TEXT,
+          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          local_sequence INTEGER NOT NULL,
+          UNIQUE (subject_type, subject_id, local_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS idx_envelope_events_subject ON provenance_envelope_events (subject_type, subject_id, observed_at);
+
+        CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_update
+        BEFORE UPDATE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS provenance_envelope_events_no_delete
+        BEFORE DELETE ON provenance_envelope_events
+        BEGIN
+          SELECT RAISE(ABORT, 'provenance_envelope_events is append-only');
+        END;
+        """
+    )
+
+    try:
+        conn.execute("ALTER TABLE venue_commands ADD COLUMN envelope_id TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_envelope ON venue_commands(envelope_id);")
 
 
 DEFAULT_CONTROL_OVERRIDE_PRECEDENCE = 100
@@ -720,6 +927,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             temp_unit TEXT DEFAULT 'F',
             retrieved_at TEXT,
             imported_at TEXT,
+            source_id TEXT,
+            raw_payload_hash TEXT,
+            captured_at TEXT,
+            authority_tier TEXT,
             rebuild_run_id TEXT,
             data_source_version TEXT,
             UNIQUE(city, target_date, source, forecast_basis_date)
@@ -812,6 +1023,13 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         -- only — no direct SQL outside the repo module.
         CREATE TABLE IF NOT EXISTS venue_commands (
             command_id TEXT PRIMARY KEY,
+            -- U1 (INV-NEW-E): every persisted venue command cites an
+            -- executable-market snapshot. Freshness/tradability are enforced
+            -- in src/state/venue_command_repo.py because they depend on now().
+            snapshot_id TEXT NOT NULL,
+            -- U2 (INV-NEW-F): every venue command cites a pre-side-effect
+            -- submission provenance envelope.
+            envelope_id TEXT NOT NULL,
             -- Identity
             position_id TEXT NOT NULL,
             decision_id TEXT NOT NULL,
@@ -857,6 +1075,115 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
 
     """)
+    init_snapshot_schema(conn)
+    init_collateral_schema(conn)
+    # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
+    # importing src.execution modules.  The execution module repeats the same
+    # idempotent CREATE TABLE for direct use.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS exit_mutex_holdings (
+          mutex_key TEXT PRIMARY KEY,
+          command_id TEXT NOT NULL REFERENCES venue_commands(command_id) DEFERRABLE INITIALLY DEFERRED,
+          acquired_at TEXT NOT NULL,
+          released_at TEXT,
+          release_reason TEXT
+        );
+    """)
+    # R3 M5 exchange reconciliation findings.  Schema stays in state/db.py so
+    # DB initialization does not import the execution sweep module.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
+          finding_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'exchange_ghost_order','local_orphan_order','unrecorded_trade',
+            'position_drift','heartbeat_suspected_cancel','cutover_wipe'
+          )),
+          subject_id TEXT NOT NULL,
+          context TEXT NOT NULL CHECK (context IN (
+            'periodic','ws_gap','heartbeat_loss','cutover','operator'
+          )),
+          evidence_json TEXT NOT NULL,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          resolution TEXT,
+          resolved_by TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_findings_unresolved
+          ON exchange_reconcile_findings (resolved_at)
+          WHERE resolved_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
+          ON exchange_reconcile_findings (kind, subject_id, context)
+          WHERE resolved_at IS NULL;
+    """)
+    init_provenance_projection_schema(conn)
+    # Keep wrap/unwrap DDL local to the schema owner so src.state does not
+    # import src.execution during DB initialization. The execution module owns
+    # the command API and repeats the same idempotent DDL for direct use.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS wrap_unwrap_commands (
+          command_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK (direction IN ('WRAP','UNWRAP')),
+          amount_micro INTEGER NOT NULL,
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          requested_at TEXT NOT NULL,
+          terminal_at TEXT,
+          error_payload TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS wrap_unwrap_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT NOT NULL REFERENCES wrap_unwrap_commands(command_id),
+          event_type TEXT NOT NULL,
+          payload_json TEXT,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    # R3 R1 settlement/redeem command ledger.  Keep DDL in the schema owner so
+    # DB initialization does not import src.execution during startup.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS settlement_commands (
+          command_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL CHECK (state IN (
+            'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
+            'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
+          )),
+          condition_id TEXT NOT NULL,
+          market_id TEXT NOT NULL,
+          payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
+          pusd_amount_micro INTEGER,
+          token_amounts_json TEXT,
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          requested_at TEXT NOT NULL,
+          submitted_at TEXT,
+          terminal_at TEXT,
+          error_payload TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_settlement_commands_state
+          ON settlement_commands (state, requested_at);
+        CREATE INDEX IF NOT EXISTS idx_settlement_commands_condition
+          ON settlement_commands (condition_id, market_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_commands_active_condition_asset
+          ON settlement_commands (condition_id, market_id, payout_asset)
+          WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
+
+        CREATE TABLE IF NOT EXISTS settlement_command_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT NOT NULL REFERENCES settlement_commands(command_id),
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_settlement_command_events_command
+          ON settlement_command_events (command_id, recorded_at);
+    """)
     
     # Safe Schema evolution for phase 3 attribution
     for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:
@@ -872,11 +1199,28 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     # rebuild_run_id" (observed: k2_forecasts_daily FAILED every 30 min per
     # state/scheduler_jobs_health.json). ALTER path catches legacy DBs without
     # disturbing fresh DBs (OperationalError on duplicate-column is swallowed).
-    for col in ["rebuild_run_id", "data_source_version"]:
+    for col in [
+        "rebuild_run_id",
+        "data_source_version",
+        "source_id",
+        "raw_payload_hash",
+        "captured_at",
+        "authority_tier",
+    ]:
         try:
             conn.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT;")
         except sqlite3.OperationalError:
             pass
+
+    # U1: legacy trade DBs predate the executable snapshot citation. SQLite
+    # cannot add a NOT NULL column without a table rebuild, so old DBs get the
+    # nullable column while venue_command_repo.insert_command enforces it for
+    # every new command row.
+    try:
+        conn.execute("ALTER TABLE venue_commands ADD COLUMN snapshot_id TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_snapshot ON venue_commands(snapshot_id);")
 
     try:
         conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")

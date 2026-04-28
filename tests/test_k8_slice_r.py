@@ -79,6 +79,7 @@ class TestDay0SignalRng:
 
     def test_p_vector_accepts_rng(self):
         from src.signal.day0_signal import Day0Signal
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         rng = np.random.default_rng(99)
         bins = _bins_3()
@@ -90,6 +91,7 @@ class TestDay0SignalRng:
             hours_remaining=4.0,
             member_maxes_remaining=members,
             unit="F",
+            temperature_metric=HIGH_LOCALDAY_MAX,
         )
         result = sig.p_vector(bins, rng=rng)
 
@@ -98,6 +100,7 @@ class TestDay0SignalRng:
 
     def test_p_vector_rng_reproducibility(self):
         from src.signal.day0_signal import Day0Signal
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         bins = _bins_3()
         members = np.random.default_rng(42).normal(65, 5, size=20)
@@ -107,6 +110,7 @@ class TestDay0SignalRng:
             hours_remaining=4.0,
             member_maxes_remaining=members,
             unit="F",
+            temperature_metric=HIGH_LOCALDAY_MAX,
         )
 
         r1 = sig.p_vector(bins, rng=np.random.default_rng(77))

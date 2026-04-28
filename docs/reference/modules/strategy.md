@@ -13,6 +13,7 @@ Convert calibrated predictive information and market context into a portfolio of
 - Not a place to hide strategy-specific exceptions that should be general law.
 
 ## 3. Domain model
+- StrategyBenchmarkSuite replay/paper/live-shadow benchmark and promotion gate (R3 A1).
 - Market analysis and family scan.
 - Correlation pruning and selection family logic.
 - FDR filter and statistical multiple-testing control.
@@ -55,6 +56,8 @@ Derived but economically central. Strategy code must stay downstream of contract
 | `kelly.py` | Sizing logic; dangerous if semantically untethered. |
 | `correlation.py` | Cross-market dependence control. |
 | `risk_limits.py / oracle_penalty.py / selection_family.py` | Strategy-side constraints and grouping. |
+| `benchmark_suite.py / data_lake.py` | R3 A1 evidence-only benchmark metrics, replay-corpus accessor, and replay→paper→shadow promotion gate. |
+| `candidates/` | R3 A1 non-executable strategy candidate stubs for future benchmark registration. |
 
 ## 10. Relevant tests
 - tests/test_alpha_target_coherence.py
@@ -65,11 +68,14 @@ Derived but economically central. Strategy code must stay downstream of contract
 - tests/test_cluster_taxonomy_backfill.py
 
 ## 11. Invariants
+- INV-NEW-Q: no strategy may be promoted to live unless StrategyBenchmarkSuite.promotion_decision() returns PROMOTE from replay + paper + shadow evidence.
 - Strategy logic must stay downstream of semantic truth, not infer its own contract/source law.
 - Multiple-testing and dependence control are part of economic safety, not optional optimization.
 - Sizing must remain coupled to calibrated uncertainty and risk limits.
 
 ## 12. Negative constraints
+- A1 live-shadow evaluation is read-only evidence; it must not place orders, activate credentials, mutate production DB/state artifacts, or authorize CLOB cutover.
+- Strategy candidate stubs are not executable alpha.
 - Do not let strategy modules reach into execution/state to patch economic truth directly.
 - Do not treat narrow historical strategy wins/losses as universal law.
 
@@ -104,6 +110,7 @@ Derived but economically central. Strategy code must stay downstream of contract
 
 ## 20. Verification commands
 ```bash
+pytest -q tests/test_strategy_benchmark.py
 pytest -q tests/test_alpha_target_coherence.py tests/test_correlation.py tests/test_center_buy_diagnosis.py tests/test_center_buy_repair.py
 pytest -q tests/test_cluster_collapse.py tests/test_cluster_taxonomy_backfill.py
 python -m py_compile src/strategy/*.py

@@ -215,7 +215,7 @@ def test_T5_write_settlement_verified_path(scratch_db):
     assert r["settlement_value"] == 17.0  # wmo_half_up(17.3) = 17
     assert r["winning_bin"] == "17°C"
     assert r["temperature_metric"] == "high"
-    assert r["physical_quantity"] == "daily_maximum_air_temperature"
+    assert r["physical_quantity"] == "mx2t6_local_calendar_day_max"
     assert r["observation_field"] == "high_temp"
     assert r["data_version"] == "wu_icao_history_v1"
     prov = json.loads(r["provenance_json"])

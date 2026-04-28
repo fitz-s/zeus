@@ -1,0 +1,90 @@
+id: R1
+phase: R
+title: Settlement / redeem command ledger
+purpose: |
+  Make settlement side effects (winning-share redemption) as auditable as
+  order side effects. Replaces R2 K6 deferred work.
+authority_basis:
+  - V2.1 §R1
+  - Apr26 review F-011 (raw payload provenance — extends to settlement)
+  - R2 down-07.yaml (redemption path scope acknowledged)
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 + U1 + U2 + M1 + M2 + M3 + M4 land
+deliverables:
+  new_modules:
+    - path: src/execution/settlement_commands.py
+      summary: Settlement / redeem command ledger writer.
+      surface: |
+        class SettlementState(str, Enum):
+            REDEEM_INTENT_CREATED = "REDEEM_INTENT_CREATED"
+            REDEEM_SUBMITTED = "REDEEM_SUBMITTED"
+            REDEEM_TX_HASHED = "REDEEM_TX_HASHED"
+            REDEEM_CONFIRMED = "REDEEM_CONFIRMED"
+            REDEEM_FAILED = "REDEEM_FAILED"
+            REDEEM_RETRYING = "REDEEM_RETRYING"
+            REDEEM_REVIEW_REQUIRED = "REDEEM_REVIEW_REQUIRED"
+
+        def request_redeem(condition_id: str, payout_asset: str) -> str: ...
+        def submit_redeem(command_id: str, adapter: PolymarketV2Adapter, ledger: CollateralLedger) -> SettlementResult: ...
+        def reconcile_pending_redeems(web3, conn) -> None: ...
+  new_tables:
+    - sql: |
+        CREATE TABLE IF NOT EXISTS settlement_commands (
+          command_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL CHECK (state IN (
+            'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
+            'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
+          )),
+          condition_id TEXT NOT NULL,
+          market_id TEXT NOT NULL,
+          payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
+          pusd_amount_micro INTEGER,
+          token_amounts_json TEXT,  -- {token_id: shares_redeemed}
+          tx_hash TEXT,
+          block_number INTEGER,
+          confirmation_count INTEGER DEFAULT 0,
+          requested_at TEXT NOT NULL,
+          submitted_at TEXT,
+          terminal_at TEXT,
+          error_payload TEXT
+        );
+        CREATE TABLE IF NOT EXISTS settlement_command_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT NOT NULL REFERENCES settlement_commands(command_id),
+          event_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT,
+          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+  extended_modules:
+    - file: src/execution/harvester.py
+      change: |
+        Replace direct adapter.redeem() calls with settlement_commands.request_redeem()
+        + settlement_commands.submit_redeem(). Harvester reconciles pending
+        redeems against chain receipts each cycle.
+acceptance_tests:
+  - tests/test_settlement_commands.py::test_redeem_lifecycle_atomic_states
+    | INTENT_CREATED → SUBMITTED → TX_HASHED → CONFIRMED progression with crash-recoverable persistence
+  - tests/test_settlement_commands.py::test_redeem_crash_after_tx_hash_recovers_by_chain_receipt
+  - tests/test_settlement_commands.py::test_redeem_failure_does_not_mark_position_settled
+  - tests/test_settlement_commands.py::test_v1_legacy_unresolved_classified_separately_from_v2_pusd_payout
+  - tests/test_settlement_commands.py::test_redeem_blocked_until_q_fx_1_classified
+    | Z4 ship-block gate inherited; FXClassificationPending raised when ZEUS_PUSD_FX_CLASSIFIED unset
+  - tests/test_settlement_commands.py::test_payout_asset_constraint_enforced
+operator_decision_required:
+  - gate_id: Q-FX-1 (inherited from Z4)
+    blocking: yes
+    artifact: docs/operations/.../q_fx_1_classification_decision_2026-04-26.md
+    runtime_gate: ZEUS_PUSD_FX_CLASSIFIED env flag + FXClassification enum
+depends_on: [Z0..Z4, U1, U2, M1, M2, M3, M4]
+estimated_h: 12
+risk: medium
+critic_gate: critic-opus
+links:
+  r2_cards: [down-07 (redemption portion)]
+  v2_1_phases: [R1]
+new_invariants_or_NCs:
+  - INV-NEW-L: "Settlement transitions are durable + crash-recoverable — REDEEM_TX_HASHED state is the recovery anchor (chain truth-chain reconcile reads tx_hash and follows receipt)."
+notes:
+  - K6 settlement work that was R2-deferred lands here.
+  - Coordinate with Z4: redemption goes through R1 settlement_commands, NOT directly through Z4 CollateralLedger.

@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 
 from src.config import cities_by_name, get_mode, settings
+from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
 from src.data.market_scanner import find_weather_markets
 from src.data.observation_client import get_current_observation
@@ -19,7 +20,12 @@ from src.data.polymarket_client import PolymarketClient
 from src.engine import cycle_runtime as _runtime
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
-from src.execution.executor import create_execution_intent, execute_intent
+from src.execution.command_bus import IdempotencyKey, IntentKind
+from src.execution.executor import (
+    _persist_pre_submit_envelope,
+    create_execution_intent,
+    execute_intent,
+)
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
@@ -57,7 +63,12 @@ KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "openin
 _TERMINAL_POSITION_STATES_FOR_SWEEP = TERMINAL_STATES
 
 
-def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
+def _execute_force_exit_sweep(
+    portfolio: PortfolioState,
+    *,
+    conn=None,
+    now: datetime | None = None,
+) -> dict:
     """DT#2 / INV-19 RED force-exit sweep (Phase 9B).
 
     Marks all active (non-terminal) positions with `exit_reason="red_force_exit"`
@@ -72,12 +83,32 @@ def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
     docs/authority/zeus_dual_track_architecture.md §6 DT#2. Pre-P9B behavior
     was entry-block-only (Phase 1 scope); this closes the Phase 2 sweep gap.
 
+    When ``conn`` is supplied, M1 additionally emits durable CANCEL proxy
+    commands for swept positions that carry enough executable-market context.
+    This remains side-effect-free: it records intent and a CANCEL_REQUESTED
+    journal event only; M4/M5 own actual cancel/replace and reconciliation
+    runtime.
+
     Returns:
-        dict with counts: {attempted, already_exiting, skipped_terminal}
+        dict with counts: {attempted, already_exiting, skipped_terminal,
+        cancel_commands_inserted, cancel_commands_existing,
+        cancel_commands_skipped}
     """
     attempted = 0
     already_exiting = 0
     skipped_terminal = 0
+    cancel_commands_inserted = 0
+    cancel_commands_existing = 0
+    cancel_commands_skipped = 0
+    cancel_command_errors = 0
+    now_dt = now or _utcnow()
+    now_iso = now_dt.isoformat()
+    if conn is not None:
+        from src.state.venue_command_repo import (
+            append_event,
+            find_command_by_idempotency_key,
+            insert_command,
+        )
 
     for pos in portfolio.positions:
         # pos.state may be a LifecycleState enum (str-subclass) or a bare string;
@@ -94,12 +125,133 @@ def _execute_force_exit_sweep(portfolio: PortfolioState) -> dict:
             continue
         pos.exit_reason = "red_force_exit"
         attempted += 1
+        if conn is not None:
+            try:
+                venue_order_id = (
+                    getattr(pos, "order_id", None)
+                    or getattr(pos, "entry_order_id", None)
+                    or getattr(pos, "last_exit_order_id", None)
+                )
+                snapshot_id = str(getattr(pos, "decision_snapshot_id", "") or "").strip()
+                token_id = _held_token_id(pos)
+                price = _red_proxy_price(pos)
+                size = _red_proxy_size(pos)
+                if not venue_order_id or not snapshot_id or not token_id or price is None or size is None:
+                    outcome = "skipped"
+                else:
+                    decision_id = f"red_force_exit_proxy:{getattr(pos, 'trade_id', '') or token_id}"
+                    side = "SELL"
+                    idempotency_key = IdempotencyKey.from_inputs(
+                        decision_id=decision_id,
+                        token_id=token_id,
+                        side=side,
+                        price=price,
+                        size=size,
+                        intent_kind=IntentKind.CANCEL,
+                    ).value
+                    if find_command_by_idempotency_key(conn, idempotency_key) is not None:
+                        outcome = "existing"
+                    else:
+                        command_id = f"red-cancel-{idempotency_key[:16]}"
+                        envelope_id = _persist_pre_submit_envelope(
+                            conn,
+                            command_id=command_id,
+                            snapshot_id=snapshot_id,
+                            token_id=token_id,
+                            side=side,
+                            price=price,
+                            size=size,
+                            order_type="GTC",
+                            post_only=False,
+                            captured_at=now_iso,
+                        )
+                        insert_command(
+                            conn,
+                            command_id=command_id,
+                            snapshot_id=snapshot_id,
+                            envelope_id=envelope_id,
+                            position_id=str(getattr(pos, "trade_id", "") or token_id),
+                            decision_id=decision_id,
+                            idempotency_key=idempotency_key,
+                            intent_kind=IntentKind.CANCEL.value,
+                            market_id=str(
+                                getattr(pos, "market_id", "")
+                                or getattr(pos, "condition_id", "")
+                                or "unknown"
+                            ),
+                            token_id=token_id,
+                            side=side,
+                            size=size,
+                            price=price,
+                            created_at=now_iso,
+                            snapshot_checked_at=now_iso,
+                            venue_order_id=str(venue_order_id),
+                            reason="red_force_exit_proxy",
+                        )
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type="CANCEL_REQUESTED",
+                            occurred_at=now_iso,
+                            payload={
+                                "reason": "red_force_exit_proxy",
+                                "venue_order_id": str(venue_order_id),
+                                "source": "cycle_runner._execute_force_exit_sweep",
+                            },
+                        )
+                        outcome = "inserted"
+            except Exception as exc:  # fail closed for command truth, preserve sweep mark
+                cancel_command_errors += 1
+                logger.warning(
+                    "M1 RED cancel proxy emission failed for trade_id=%s: %s",
+                    getattr(pos, "trade_id", ""),
+                    exc,
+                )
+            else:
+                if outcome == "inserted":
+                    cancel_commands_inserted += 1
+                elif outcome == "existing":
+                    cancel_commands_existing += 1
+                else:
+                    cancel_commands_skipped += 1
 
     return {
         "attempted": attempted,
         "already_exiting": already_exiting,
         "skipped_terminal": skipped_terminal,
+        "cancel_commands_inserted": cancel_commands_inserted,
+        "cancel_commands_existing": cancel_commands_existing,
+        "cancel_commands_skipped": cancel_commands_skipped,
+        "cancel_command_errors": cancel_command_errors,
     }
+
+
+def _held_token_id(pos: Position) -> str:
+    direction = str(getattr(pos, "direction", "") or "").lower()
+    if "no" in direction:
+        return str(getattr(pos, "no_token_id", "") or "").strip()
+    return str(getattr(pos, "token_id", "") or "").strip()
+
+
+def _red_proxy_price(pos: Position) -> float | None:
+    for attr in ("last_monitor_best_bid", "entry_price"):
+        value = getattr(pos, attr, None)
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 < price < 1:
+            return price
+    return None
+
+
+def _red_proxy_size(pos: Position) -> float | None:
+    value = getattr(pos, "shares", None)
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0 else None
 
 
 def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
@@ -295,6 +447,32 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         # the pre-lookup per DT#6 semantics. Canonical value for this cycle is
         # whatever tick_with_portfolio returned (typically RiskLevel.DATA_DEGRADED).
         summary["risk_level"] = risk_level.value
+    try:
+        from src.control.heartbeat_supervisor import summary as _heartbeat_summary
+        from src.control.ws_gap_guard import summary as _ws_gap_summary
+        from src.risk_allocator import refresh_global_allocator
+
+        _governor_start_heartbeat = _heartbeat_summary()
+        _governor_start_ws = _ws_gap_summary()
+        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
+        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
+        _drawdown_pct = max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0) if _baseline > 0 else 0.0
+        summary["portfolio_governor_cycle_start"] = refresh_global_allocator(
+            conn,
+            ledger={"current_drawdown_pct": _drawdown_pct, "risk_level": risk_level.value},
+            heartbeat=_governor_start_heartbeat,
+            ws_status=_governor_start_ws,
+        )
+    except Exception as _governor_start_exc:
+        logger.error(
+            "PortfolioGovernor cycle-start refresh failed: %s; blocking new entries fail-closed",
+            _governor_start_exc,
+        )
+        summary["portfolio_governor_cycle_start"] = {
+            "configured": False,
+            "error": str(_governor_start_exc),
+            "entry": {"allow_submit": False, "reason": "portfolio_governor_unavailable"},
+        }
     clob = PolymarketClient()
     tracker = get_tracker()
     limits = RiskLimits()
@@ -360,7 +538,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     if force_exit:
         summary["force_exit_review"] = True
         summary["force_exit_review_scope"] = "sweep_active_positions"
-        sweep_result = _execute_force_exit_sweep(portfolio)
+        sweep_result = _execute_force_exit_sweep(portfolio, conn=conn)
         summary["force_exit_sweep"] = sweep_result
         if sweep_result["attempted"] > 0:
             portfolio_dirty = True  # positions' exit_reason changed; persist
@@ -434,6 +612,74 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         _current_posture = "NO_NEW_ENTRIES"
     summary["posture"] = _current_posture
+    try:
+        _cutover_summary = cutover_guard.summary()
+    except Exception as _cutover_exc:
+        logger.error(
+            "CutoverGuard summary failed: %s; blocking new entries fail-closed",
+            _cutover_exc,
+        )
+        _cutover_summary = {
+            "state": "BLOCKED",
+            "error": str(_cutover_exc),
+            "entry": {"allow_submit": False},
+        }
+    summary["cutover_guard"] = _cutover_summary
+    try:
+        from src.control.heartbeat_supervisor import summary as _heartbeat_summary
+        _heartbeat_status = _heartbeat_summary()
+    except Exception as _heartbeat_exc:
+        logger.error(
+            "HeartbeatSupervisor summary failed: %s; blocking new entries fail-closed",
+            _heartbeat_exc,
+        )
+        _heartbeat_status = {
+            "health": "LOST",
+            "error": str(_heartbeat_exc),
+            "entry": {"allow_submit": False},
+        }
+    summary["heartbeat"] = _heartbeat_status
+    try:
+        from src.control.ws_gap_guard import summary as _ws_gap_summary
+        _ws_gap_status = _ws_gap_summary()
+    except Exception as _ws_gap_exc:
+        logger.error(
+            "WS user-channel guard summary failed: %s; blocking new entries fail-closed",
+            _ws_gap_exc,
+        )
+        _ws_gap_status = {
+            "subscription_state": "DISCONNECTED",
+            "gap_reason": str(_ws_gap_exc),
+            "m5_reconcile_required": True,
+            "entry": {"allow_submit": False},
+        }
+    summary["ws_user_channel"] = _ws_gap_status
+    try:
+        from src.risk_allocator import refresh_global_allocator
+
+        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
+        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
+        _drawdown_pct = max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0) if _baseline > 0 else 0.0
+        _governor_status = refresh_global_allocator(
+            conn,
+            ledger={"current_drawdown_pct": _drawdown_pct, "risk_level": risk_level.value},
+            heartbeat=_heartbeat_status,
+            ws_status=_ws_gap_status,
+        )
+    except Exception as _governor_exc:
+        logger.error(
+            "PortfolioGovernor summary failed: %s; blocking new entries fail-closed",
+            _governor_exc,
+        )
+        _governor_status = {
+            "configured": False,
+            "error": str(_governor_exc),
+            "entry": {"allow_submit": False, "reason": "portfolio_governor_unavailable"},
+        }
+    summary["portfolio_governor"] = _governor_status
+    if bool(_ws_gap_status.get("m5_reconcile_required", False)):
+        summary["m5_reconcile_required"] = True
+        summary["m5_reconcile_reason"] = f"ws_gap={_ws_gap_status.get('subscription_state', 'DISCONNECTED')}:{_ws_gap_status.get('gap_reason', '')}"
 
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
@@ -462,6 +708,14 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entries_paused = is_entries_paused()
     if entries_paused and entries_blocked_reason is None:
         entries_blocked_reason = "entries_paused"
+    if entries_blocked_reason is None and not bool((_cutover_summary.get("entry") or {}).get("allow_submit", False)):
+        entries_blocked_reason = f"cutover_guard={_cutover_summary.get('state', 'BLOCKED')}"
+    if entries_blocked_reason is None and not bool((_heartbeat_status.get("entry") or {}).get("allow_submit", False)):
+        entries_blocked_reason = f"heartbeat={_heartbeat_status.get('health', 'LOST')}"
+    if entries_blocked_reason is None and not bool((_ws_gap_status.get("entry") or {}).get("allow_submit", False)):
+        entries_blocked_reason = f"ws_gap={_ws_gap_status.get('subscription_state', 'DISCONNECTED')}:{_ws_gap_status.get('gap_reason', '')}"
+    if entries_blocked_reason is None and not bool((_governor_status.get("entry") or {}).get("allow_submit", True)):
+        entries_blocked_reason = f"portfolio_governor={(_governor_status.get('entry') or {}).get('reason', 'blocked')}"
     # INV-26 final fallback: posture forbids new entries when no more-specific
     # gate fires. Recorded last so all actionable reasons take precedence;
     # posture surfaces only when it is the *sole* block.

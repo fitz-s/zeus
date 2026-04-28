@@ -320,7 +320,12 @@ scripts:
     required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
   backfill_observations_from_settlements.py: {class: etl_writer}
   # backfill_open_positions_canonical.py: REMOVED — dead script calling deleted function
-  backfill_openmeteo_previous_runs.py: {class: etl_writer}
+  backfill_openmeteo_previous_runs.py:
+    class: etl_writer
+    module_owner: data
+    write_targets: [state/zeus-world.db]
+    target_db: state/zeus-world.db
+    required_tests: [tests/test_backfill_openmeteo_previous_runs.py, tests/test_forecasts_schema_alignment.py, tests/test_forecast_source_registry.py]
   backfill_outcome_fact.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_probability_traces_from_opportunities.py: {class: etl_writer}
   backfill_recent_exits_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
@@ -406,6 +411,18 @@ scripts:
     required_helpers: [src.state.db.get_world_connection]
     required_tests: [tests/test_data_rebuild_relationships.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
+  live_readiness_check.py:
+    class: enforcement
+    module_owner: scripts
+    packet: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
+    reason: "R3 G1 live-readiness orchestrator; runs 17 explicit PASS/FAIL gates and fails closed when staged-smoke/operator evidence is absent."
+    canonical_command: "python3 scripts/live_readiness_check.py"
+    read_targets: [repo, docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence, docs/operations/task_2026-04-26_ultimate_plan/r3/evidence]
+    write_targets: [stdout]
+    required_helpers: []
+    required_tests: [tests/test_live_readiness_gates.py]
+    dangerous_if_run: false
+    promotion_barrier: "This script can report readiness only; it cannot authorize live deployment without the live-money-deploy-go operator gate."
   live_smoke_test.py: {class: runtime_support}
   migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
   migrate_cluster_to_city.py: {class: repair, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing migration mutates calibration tables without an apply flag; manifest marks it dangerous pending hardening."}
@@ -431,6 +448,40 @@ scripts:
     target_db: "--db"
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
   rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
+  rebuild_settlements.py:
+    class: repair
+    module_owner: scripts
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [settlements]
+    dry_run_default: true
+    dangerous_if_run: true
+    required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]
+    required_tests: [tests/test_authority_gate.py]
+    reason: "Narrow high-track repair helper: rebuild settlements only from observations with authority='VERIFIED'; dry-run by default."
+  r3_drift_check.py:
+    class: validation
+    module_owner: scripts
+    status: active
+    lifecycle: long_lived
+    packet: docs/operations/task_2026-04-26_ultimate_plan/r3
+    authority_scope: validation_only
+    reuse_when: "Validating R3 slice-card drift or architecture YAML cited-path drift."
+    do_not_use_when: "Never use as proof of live-money authorization; it validates repository drift only."
+    canonical_command: "python3 scripts/r3_drift_check.py"
+    read_targets: [architecture, docs/operations/task_2026-04-26_ultimate_plan/r3]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_r3_packet_archived
+    promotion_barrier: "Validation-only utility; no promotion side effects."
+    required_helpers: []
+    required_tests: []
+    reason: "Top-level shim for R3 drift validation and architecture YAML cited-path drift checks."
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 refit; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
@@ -498,13 +549,3 @@ scripts:
       and classify staged files against declared packet scope. No write
       authority; no external inputs.
     required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py]
-  # G10-scaffold (2026-04-26) — standalone ingest-tick lane. Each *_tick.py
-  # is runnable as `python scripts/ingest/<name>.py` and parallels (does
-  # not yet replace) the corresponding `_k2_*_tick` in src/main.py.
-  # Isolation contract enforced by tests/test_ingest_isolation.py.
-  ingest/daily_obs_tick.py: {class: runtime_support, canonical_command: "python3 scripts/ingest/daily_obs_tick.py", reason: "Standalone WU+HKO+Ogimet daily-obs tick — mirrors src/main.py::_k2_daily_obs_tick.", required_tests: [tests/test_ingest_isolation.py]}
-  ingest/hourly_instants_tick.py: {class: runtime_support, canonical_command: "python3 scripts/ingest/hourly_instants_tick.py", reason: "Standalone hourly Open-Meteo tick for observation_instants — mirrors src/main.py::_k2_hourly_instants_tick.", required_tests: [tests/test_ingest_isolation.py]}
-  ingest/solar_daily_tick.py: {class: runtime_support, canonical_command: "python3 scripts/ingest/solar_daily_tick.py", reason: "Standalone solar (sunrise/sunset) daily tick — mirrors src/main.py::_k2_solar_daily_tick.", required_tests: [tests/test_ingest_isolation.py]}
-  ingest/forecasts_daily_tick.py: {class: runtime_support, canonical_command: "python3 scripts/ingest/forecasts_daily_tick.py", reason: "Standalone NWP forecasts daily tick — mirrors src/main.py::_k2_forecasts_daily_tick.", required_tests: [tests/test_ingest_isolation.py]}
-  ingest/hole_scanner_tick.py: {class: runtime_support, canonical_command: "python3 scripts/ingest/hole_scanner_tick.py", reason: "Standalone hole-scanner daily patrol — mirrors src/main.py::_k2_hole_scanner_tick.", required_tests: [tests/test_ingest_isolation.py]}
-  ingest/_shared.py: {class: utility, canonical_command: DO_NOT_RUN, reason: "Shared helpers (logging setup, world_connection context manager, run_tick wrapper) for scripts/ingest/* tick scripts.", required_tests: [tests/test_ingest_isolation.py]}

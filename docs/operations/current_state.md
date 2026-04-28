@@ -4,6 +4,20 @@ Role: single live control pointer for the repo.
 
 ## Active program
 
+### Active override — Zeus R3 ultimate plan (2026-04-27)
+
+- Branch: `plan-pre5`
+- Mainline task: **Zeus R3 CLOB V2 / live-money upgrade — G1 live-readiness gates phase entry**
+- Active package source: `docs/operations/task_2026-04-26_ultimate_plan/r3/R3_README.md`
+- Active package plan: `docs/operations/task_2026-04-26_ultimate_plan/r3/ULTIMATE_PLAN_R3.md`
+- Current R3 phase card: `docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml`
+- Supporting CLOB V2 packet: `docs/operations/task_2026-04-26_polymarket_clob_v2_migration/`
+- Live-money contract: `docs/operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md`
+- Phase status tracker: `docs/operations/task_2026-04-26_ultimate_plan/r3/_phase_status.yaml`
+- Current phase: `G1 ENGINEERING HARDENED; EXTERNAL EVIDENCE BLOCKED / LIVE NO-GO` — post-interruption verification confirms the safe no-operator seams keep improving, but this is **not** only waiting for a human "yes". The current local evidence is: targeted residual repair group `15 passed, 15 skipped`; broad R3 aggregate `128 passed, 2 skipped`; topology `--scripts` and `--tests` both `ok true`; R3 drift `GREEN=241 YELLOW=0 RED=0` with `r3/drift_reports/2026-04-28.md`; `scripts/live_readiness_check.py --json` still fails closed with `16/17` gates because Q1 Zeus-egress and staged-live-smoke evidence are absent and `live_deploy_authorized=false`; full-repo pytest sample is still red (`--maxfail=30`: 30 failed, 2566 passed, 91 skipped, 16 deselected, 1 xfailed, 1 xpassed). Additional hardening since the second-round review includes CutoverGuard LIVE_ENABLED evidence binding to a 17/17 readiness report, WU transition scripts requiring operator-provided `WU_API_KEY`, settlement rebuild helper registration, and stale fixture compatibility fixes. Remaining no-go blockers: real Q1/staged evidence, G1 close review, explicit `live-money-deploy-go`, full-suite riskguard/harvester/runtime-guard triage, and current-fact data/training evidence for any TIGGE/calibration/live-alpha claim.
+- Freeze note: A2 pre-close completion does not authorize live venue submission/cancel/redeem, CLOB cutover, automatic cancel-unknown unblock in production, live R1 redeem side effects, calibration retrain go-live, external TIGGE archive HTTP/GRIB fetch, production DB mutation outside explicit test/local schema seams, credentialed WS activation, live strategy promotion, or live deployment. Q1-zeus-egress and CLOB v2 cutover go/no-go remain OPEN.
+- Freeze point: live placement remains blocked by Q1/cutover plus heartbeat/collateral/snapshot gates. G1 may implement/readiness-check gate surfaces only; it cannot authorize live deployment, run live smoke, or execute live venue side effects.
+
 - Branch: `main`
 - Mainline task: **Post-audit remediation mainline — operations package cleanup closed; P4 mutation blocked**
 - Active package source: `docs/operations/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md`

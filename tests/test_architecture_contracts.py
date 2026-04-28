@@ -3650,6 +3650,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
                 "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40}],
                 "hours_since_open": 30.0,
                 "hours_to_resolution": 10.0,
+                "temperature_metric": "high",
                 "event_id": "evt-1",
                 "slug": "nyc-2026-04-03",
             }

@@ -1,0 +1,145 @@
+id: U1
+phase: U
+title: ExecutableMarketSnapshotV2 — table + freshness gate + capture seam
+purpose: |
+  Convert market discovery into executable, immutable, externally-reconcilable
+  market truth. Every venue_command MUST cite a fresh snapshot whose token id,
+  tick, min size, fee details, neg risk, and tradability flags match the
+  intent. Replaces R2 up-03 with V2-aware fields.
+authority_basis:
+  - V2.1 §U1
+  - R2 up-03.yaml (ExecutableMarketSnapshot table with raw_orderbook_jsonb extension)
+  - R2 up-07.yaml (snapshot↔command freshness gate)
+  - Apr26 review F-007 design language ("ExecutableMarketSnapshot from CLOB only; no trading decision can pass without it")
+  - NC-NEW-B (snapshot append-only) preserved
+preconditions:
+  head: 874e00cc0244 + Z0..Z4 land
+deliverables:
+  new_modules:
+    - path: src/contracts/executable_market_snapshot_v2.py
+      summary: Frozen dataclass + freshness check helper.
+      surface: |
+        @dataclass(frozen=True)
+        class ExecutableMarketSnapshotV2:
+            snapshot_id: str  # UUID
+            gamma_market_id: str
+            event_id: str
+            event_slug: str
+            condition_id: str
+            question_id: str
+            yes_token_id: str
+            no_token_id: str
+            selected_outcome_token_id: Optional[str]  # populated post-decision
+            outcome_label: Optional[Literal["YES", "NO"]]
+            enable_orderbook: bool
+            active: bool
+            closed: bool
+            accepting_orders: Optional[bool]  # None if API doesn't expose
+            market_start_at: Optional[datetime]
+            market_end_at: Optional[datetime]
+            market_close_at: Optional[datetime]
+            sports_start_at: Optional[datetime]  # for sports markets only
+            min_tick_size: Decimal  # from CLOB `mts`
+            min_order_size: Decimal  # from CLOB `mos`
+            fee_details: dict  # CLOB `fd` raw
+            token_map_raw: dict  # CLOB `t` raw
+            rfqe: Optional[bool]
+            neg_risk: bool
+            orderbook_top_bid: Decimal
+            orderbook_top_ask: Decimal
+            orderbook_depth_jsonb: str  # JSON-serialized depth ladder
+            raw_gamma_payload_hash: str  # SHA256
+            raw_clob_market_info_hash: str  # SHA256
+            raw_orderbook_hash: str  # SHA256
+            authority_tier: Literal["GAMMA", "DATA", "CLOB", "CHAIN"]
+            captured_at: datetime
+            freshness_deadline: datetime  # captured_at + freshness_window
+
+        FRESHNESS_WINDOW_DEFAULT = timedelta(seconds=30)
+
+        def is_fresh(snapshot: ExecutableMarketSnapshotV2, now: datetime) -> bool: ...
+    - path: src/state/snapshot_repo.py
+      summary: APPEND-ONLY repo for snapshot persistence + lookup.
+      surface: |
+        def insert_snapshot(conn, snapshot: ExecutableMarketSnapshotV2) -> None: ...
+        def get_snapshot(conn, snapshot_id: str) -> Optional[ExecutableMarketSnapshotV2]: ...
+        def latest_snapshot_for_market(conn, condition_id: str, fresh_as_of: datetime) -> Optional[ExecutableMarketSnapshotV2]: ...
+
+      sql_trigger: |
+        CREATE TRIGGER IF NOT EXISTS no_update_executable_market_snapshots
+        BEFORE UPDATE ON executable_market_snapshots
+        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
+        CREATE TRIGGER IF NOT EXISTS no_delete_executable_market_snapshots
+        BEFORE DELETE ON executable_market_snapshots
+        BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
+  new_tables:
+    - sql: |
+        CREATE TABLE IF NOT EXISTS executable_market_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          gamma_market_id TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          event_slug TEXT,
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL,
+          yes_token_id TEXT NOT NULL,
+          no_token_id TEXT NOT NULL,
+          selected_outcome_token_id TEXT,
+          outcome_label TEXT CHECK (outcome_label IN ('YES','NO') OR outcome_label IS NULL),
+          enable_orderbook INTEGER NOT NULL CHECK (enable_orderbook IN (0,1)),
+          active INTEGER NOT NULL CHECK (active IN (0,1)),
+          closed INTEGER NOT NULL CHECK (closed IN (0,1)),
+          accepting_orders INTEGER,
+          market_start_at TEXT, market_end_at TEXT, market_close_at TEXT,
+          sports_start_at TEXT,
+          min_tick_size TEXT NOT NULL,
+          min_order_size TEXT NOT NULL,
+          fee_details_json TEXT NOT NULL,
+          token_map_json TEXT NOT NULL,
+          rfqe INTEGER,
+          neg_risk INTEGER NOT NULL CHECK (neg_risk IN (0,1)),
+          orderbook_top_bid TEXT NOT NULL,
+          orderbook_top_ask TEXT NOT NULL,
+          orderbook_depth_json TEXT NOT NULL,
+          raw_gamma_payload_hash TEXT NOT NULL,
+          raw_clob_market_info_hash TEXT NOT NULL,
+          raw_orderbook_hash TEXT NOT NULL,
+          authority_tier TEXT NOT NULL CHECK (authority_tier IN ('GAMMA','DATA','CLOB','CHAIN')),
+          captured_at TEXT NOT NULL,
+          freshness_deadline TEXT NOT NULL,
+          UNIQUE (snapshot_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshots_condition_captured
+          ON executable_market_snapshots (condition_id, captured_at DESC);
+  extended_modules:
+    - file: src/state/venue_command_repo.py
+      function: insert_command
+      change: REQUIRE snapshot_id in command row; raise StaleMarketSnapshotError if snapshot is missing OR captured_at < now() - FRESHNESS_WINDOW OR token_id/tick/min_size/neg_risk mismatch intent
+acceptance_tests:
+  - tests/test_executable_market_snapshot_v2.py::test_insert_snapshot_persists_all_fields
+  - tests/test_executable_market_snapshot_v2.py::test_update_snapshot_raises_via_trigger
+  - tests/test_executable_market_snapshot_v2.py::test_delete_snapshot_raises_via_trigger
+  - tests/test_executable_market_snapshot_v2.py::test_freshness_check_fails_after_window
+  - tests/test_executable_market_snapshot_v2.py::test_command_insertion_requires_fresh_snapshot
+  - tests/test_executable_market_snapshot_v2.py::test_enable_orderbook_false_blocks_submit
+  - tests/test_executable_market_snapshot_v2.py::test_active_false_blocks_submit
+  - tests/test_executable_market_snapshot_v2.py::test_closed_true_blocks_submit
+  - tests/test_executable_market_snapshot_v2.py::test_tick_mismatch_blocks_before_signing
+  - tests/test_executable_market_snapshot_v2.py::test_min_order_size_mismatch_blocks_before_signing
+  - tests/test_executable_market_snapshot_v2.py::test_sports_market_start_auto_cancel_represented_in_snapshot
+  - tests/test_executable_market_snapshot_v2.py::test_authority_tier_constraint_enforced
+  - tests/test_executable_market_snapshot_v2.py::test_raw_payload_hashes_persisted_for_replay
+operator_decision_required: []
+depends_on: [Z0, Z1, Z2, Z3, Z4]
+estimated_h: 14
+risk: medium
+critic_gate: critic-opus
+links:
+  r2_cards: [up-03, up-07]
+  v2_1_phases: [U1]
+new_invariants_or_NCs:
+  - NC-NEW-B preserved: append-only via SQLite triggers + semgrep + Python encapsulation.
+  - INV-NEW-E: "Every venue_commands row MUST cite a snapshot_id; freshness gate enforced in venue_command_repo.insert_command (Python single-insertion-point, NOT SQL CHECK because freshness depends on now())."
+notes:
+  - Snapshot is captured by the discovery phase / engine cycle BEFORE intent decision; persistence is APPEND-ONLY.
+  - This card replaces R2 up-03 + up-07 by absorbing both into one slice; the freshness gate IS part of the snapshot module.
+  - Coordinate with U2: snapshot_id appears in venue_commands as foreign-key-by-convention (Python-side enforced).

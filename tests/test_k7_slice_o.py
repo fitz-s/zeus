@@ -107,10 +107,11 @@ def test_polymarket_client_init_is_lazy():
 
 
 def test_ensure_client_called_on_cancel():
-    """cancel_order must call _ensure_client before using _clob_client."""
+    """cancel_order must route through the V2 adapter behind CutoverGuard."""
     import src.data.polymarket_client as mod
     import inspect
     source = inspect.getsource(mod.PolymarketClient.cancel_order)
-    assert "_ensure_client" in source, (
-        "cancel_order must call _ensure_client for lazy init"
+    assert "gate_for_intent" in source and "IntentKind.CANCEL" in source
+    assert "_ensure_v2_adapter" in source, (
+        "cancel_order must call the V2 adapter boundary for lazy live I/O"
     )

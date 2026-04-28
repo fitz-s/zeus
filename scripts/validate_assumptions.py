@@ -49,7 +49,11 @@ def run_validation() -> dict:
             mismatches.append(f"{city.name} settlement unit mismatch: {semantics.measurement_unit} vs {city.settlement_unit}")
         if semantics.precision != expected_precision:
             mismatches.append(f"{city.name} settlement precision mismatch: {semantics.precision} vs {expected_precision}")
-        if semantics.rounding_rule != assumptions["settlement"]["rounding_rule"]:
+        expected_rounding = (
+            assumptions["settlement"].get("rounding_rule_overrides", {}).get(city.name)
+            or assumptions["settlement"]["rounding_rule"]
+        )
+        if semantics.rounding_rule != expected_rounding:
             mismatches.append(f"{city.name} rounding mismatch: {semantics.rounding_rule}")
     checks.append("SettlementSemantics.for_city matches config units/precision/rounding")
 

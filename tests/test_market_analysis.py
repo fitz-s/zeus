@@ -34,9 +34,9 @@ class TestVWMP:
         assert result < 0.50  # Closer to bid
 
     def test_zero_size_fallback(self):
-        """CLAUDE.md: VWMP with total size = 0 → fall back to mid-price."""
-        result = vwmp(0.45, 0.55, 0.0, 0.0)
-        assert result == pytest.approx(0.50, abs=0.001)
+        """VWMP with total size = 0 must fail closed, not fabricate mid-price."""
+        with pytest.raises(ValueError, match="Illiquid market"):
+            vwmp(0.45, 0.55, 0.0, 0.0)
 
 
 class TestComputeAlpha:

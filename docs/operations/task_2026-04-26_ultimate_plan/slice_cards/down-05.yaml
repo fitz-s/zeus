@@ -1,0 +1,43 @@
+id: down-05
+title: Packet status amendment — flip to dormant-tracker; impact_report rewrite gate at Phase 0.F
+authority_basis:
+  - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/v2_system_impact_report.md (REWRITE-PENDING; 6+ premises BUSTED-HIGH)
+  - docs/operations/task_2026-04-26_ultimate_plan/evidence/down/_context_boot_opponent.md (5 R1 + 3 R2 + Q-NEW-1 RESOLVED-DIVERGENT)
+  - converged R1L1 §"Plan provisions DROPPED outright"
+  - PyPI metadata (V1 v0.34.6 wheel uploaded 2026-02-19 — 2 months PRE-V2-GA, contradicts impact_report:23 transcription error)
+  - On-chain Q-NEW-1 result (symbol="pUSD" name="Polymarket USD") overturns earlier "marketing label" stipulation
+file_line:
+  current_state:
+    - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/plan.md §1 (packet status implicitly ACTIVE)
+    - v2_system_impact_report.md:13-25 (executive verdict claims V2 is "real and structural"; partially still true post-Q-NEW-1, but urgency framing wrong)
+    - v2_system_impact_report.md:21 ("EIP-712 domain version bumps from `1` → `2`" — FALSE; SDK does per-token resolution)
+    - v2_system_impact_report.md:23-24 ("`py-clob-client v0.34.6` on 2026-04-19, two days after V2 GA" — FALSE; PyPI shows 2026-02-19)
+    - 'v2_system_impact_report.md:51-52 ("V2-only fields: metadata, builder_code, defer_exec, timestamp" — partial-truth; defer_exec is on PostOrdersV2Args, timestamp is on signed order)'
+    - v2_system_impact_report.md:62 ("Missing heartbeat for ~10s cancels all open orders server-side" — UNSOURCED; cite required)
+    - v2_system_impact_report.md:67 ("delayed / ORDER_DELAYED / DELAYING_ORDER_ERROR" — UNSOURCED in V2 SDK source)
+    - v2_system_impact_report.md:84 ("pUSD replaces USDC.e" — partially-resolved; pUSD IS distinct ERC-20 per Q-NEW-1 RESOLVED but the bridge narrative still needs §4.5 cleanup against on-chain truth)
+    - v2_system_impact_report.md §4.5 (entire "deepest system shock" narrative — needs rewrite against Q-NEW-1 result)
+  new_emission_seam:
+    - 'plan.md add to §1.Charter: "Packet status: dormant-tracker (2026-04-26). Re-activates on V1 EOL announcement OR operator-completed D0 question-trio."'
+    - 'v2_system_impact_report.md §1 executive verdict: append marketing-label disclaimer: "pUSD label per docs.polymarket.com is the product name; on-chain ERC-20 identity at 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB is `Polymarket USD` (symbol `pUSD`) per direct eth_call probe 2026-04-26 11:12. Contract was repurposed from historical USDC.e association."'
+    - 'v2_system_impact_report.md:21 amend to: "EIP-712 domain version is RUNTIME-RESOLVED per-token via SDK''s `_resolve_version()` (commit a2ec069f client.py:1041); not a deploy-time switch."'
+    - 'v2_system_impact_report.md:23 amend to: "py-clob-client v0.34.6 was released 2026-02-19 (2 months PRE-V2-GA; PyPI metadata authoritative). V1 has been DORMANT since."'
+    - 'v2_system_impact_report.md:62 amend to: "Heartbeat cadence is UNSOURCED in V2 SDK (post_heartbeat() exists at /v1/heartbeats endpoint but no internal cadence, no example, no docs reference). Q-HB inquiry to Polymarket support pending."'
+    - 'v2_system_impact_report.md:67 amend to: "`delayed`/`ORDER_DELAYED`/`DELAYING_ORDER_ERROR` strings are UNSOURCED in V2 SDK source (zero hits over client.py + clob_types.py + endpoints.py at commit a2ec069f). Provenance unknown."'
+    - 'v2_system_impact_report.md §4.5 rewrite against Q-NEW-1 RESOLVED-DIVERGENT: pUSD ABI rewire IS real work (down-07 scope), but the "no public document explains the bridge path" narrative needs reconciliation with docs.polymarket.com which DOES name pUSD.'
+    - 'Phase 0.F slice in plan.md §3.2: critic verdict gate amended to require impact_report rewrite as PRE-CONDITION for Phase 1 entry.'
+antibody_test:
+  new_file_or_extend: NONE (doc-only slice)
+  assertions:
+    - critic-opus reviews rewritten impact_report against R1L1 evidence; verdict file evidence/phase0_critic_verdict.md states explicit "rewrite incorporates 6+ BUSTED-HIGH findings + Q-NEW-1 result"
+  closes_invariants: [Phase 0.F → Phase 1 gate]
+depends_on:
+  - down-02  # D0 trio captures Q-NEW-1 ground truth + Q1 + Q-HB before rewrite cites them
+estimated_h: 2
+risk: low
+critic_gate: critic-opus
+notes:
+  - Pure doc-rewrite slice. Cost is review-bandwidth, not LOC.
+  - The impact_report rewrite is BLOCKING for Phase 1 entry per Phase 0.F gate. Without it, down-01 D1 swap proceeds against falsified premises.
+  - 'Why this matters as a slice (not a casual edit): the impact_report is REGISTERED as the authority basis for plan.md (line 5 of plan.md). Six teammates and one critic-opus need a single coherent reference. Spot-edits across 6+ premises would diverge under L20 rot. This slice owns the full reconciliation.'
+  - Lands AFTER down-02 because Q-NEW-1 / Q1 / Q-HB results need to be in evidence/ before the rewrite cites them.

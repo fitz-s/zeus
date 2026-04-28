@@ -7,6 +7,7 @@ API: https://ensemble-api.open-meteo.com/v1/ensemble
 Free tier: 10,000 calls/day, no API key required.
 """
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,6 +15,11 @@ import httpx
 import numpy as np
 
 from src.config import City, ensemble_member_count
+from src.data.forecast_source_registry import (
+    gate_source,
+    source_id_for_ensemble_model,
+    stable_payload_hash,
+)
 from src.data.openmeteo_quota import quota_tracker
 
 
@@ -71,6 +77,16 @@ def fetch_ensemble(
 
     Returns None if all retries fail.
     """
+    source_id = source_id_for_ensemble_model(model)
+    source_spec = gate_source(source_id)
+    if source_spec.ingest_class is not None:
+        return _fetch_registered_ingest_ensemble(
+            city,
+            forecast_days=forecast_days,
+            model=model,
+            past_days=past_days,
+            ingest_class=source_spec.ingest_class,
+        )
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
 
     params = {
@@ -103,7 +119,13 @@ def fetch_ensemble(
             resp.raise_for_status()
             data = resp.json()
             quota_tracker.record_call("ensemble")
-            parsed = _parse_response(data, model, fetch_time)
+            parsed = _parse_response(
+                data,
+                model,
+                fetch_time,
+                source_id=source_spec.source_id,
+                authority_tier=source_spec.authority_tier,
+            )
             parsed["forecast_days"] = int(forecast_days)
             _ENSEMBLE_CACHE[cache_key] = parsed
             return _clone_result(parsed)
@@ -125,7 +147,122 @@ def fetch_ensemble(
     return None
 
 
-def _parse_response(data: dict, model: str, fetch_time: datetime) -> dict:
+def _fetch_registered_ingest_ensemble(
+    city: City,
+    *,
+    forecast_days: int,
+    model: str,
+    past_days: int,
+    ingest_class,
+) -> Optional[dict]:
+    """Fetch an operator-gated registered ingest source without Open-Meteo.
+
+    This keeps TIGGE switch-only wiring dormant behind the forecast-source
+    registry. Gate-closed TIGGE fails before this function is reached; gate-open
+    TIGGE reads only the operator-approved local payload configured on the
+    ingest adapter.
+    """
+
+    fetch_time = datetime.now(timezone.utc)
+    cache_key = _cache_key(city, model, past_days)
+    cached = _ENSEMBLE_CACHE.get(cache_key)
+    if cached is not None:
+        age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
+        cached_days = int(cached.get("forecast_days", 0))
+        if age_seconds <= CACHE_TTL_SECONDS and cached_days >= int(forecast_days):
+            return _clone_result(cached)
+
+    lead_hours = tuple(range(0, max(1, int(forecast_days)) * 24))
+    ingest = ingest_class()
+    bundle = ingest.fetch(fetch_time, lead_hours)
+    parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time)
+    parsed["forecast_days"] = int(forecast_days)
+    _ENSEMBLE_CACHE[cache_key] = parsed
+    return _clone_result(parsed)
+
+
+def _parse_ingest_bundle(bundle, *, model: str, fetch_time: datetime) -> dict:
+    raw = bundle.raw_payload
+    if isinstance(raw, Mapping) and "hourly" in raw:
+        parsed = _parse_response(
+            dict(raw),
+            model,
+            fetch_time,
+            source_id=bundle.source_id,
+            authority_tier=bundle.authority_tier,
+        )
+        parsed["issue_time"] = bundle.run_init_utc
+        parsed["raw_payload_hash"] = bundle.raw_payload_hash
+        parsed["captured_at"] = bundle.captured_at.isoformat()
+        return parsed
+
+    times = _extract_times(raw)
+    members = _extract_members(raw, bundle.ensemble_members)
+    if not times:
+        raise ValueError("registered ingest bundle must include `times` or hourly.time")
+    if not members:
+        raise ValueError("registered ingest bundle must include ensemble member vectors")
+    members_hourly = np.array(members, dtype=np.float64)
+    if members_hourly.ndim != 2:
+        raise ValueError("registered ingest member vectors must form a 2D array")
+    if members_hourly.shape[1] != len(times):
+        raise ValueError(
+            "registered ingest member vectors must align with the provided times"
+        )
+    return {
+        "members_hourly": members_hourly,
+        "times": list(times),
+        "issue_time": bundle.run_init_utc,
+        "first_valid_time": _parse_timestamp_as_utc(str(times[0])),
+        "fetch_time": fetch_time,
+        "captured_at": bundle.captured_at.isoformat(),
+        "model": model,
+        "source_id": bundle.source_id,
+        "raw_payload_hash": bundle.raw_payload_hash,
+        "authority_tier": bundle.authority_tier,
+        "n_members": int(members_hourly.shape[0]),
+    }
+
+
+def _extract_times(raw: object) -> Sequence[object]:
+    if isinstance(raw, Mapping):
+        if isinstance(raw.get("times"), Sequence) and not isinstance(raw.get("times"), (str, bytes)):
+            return raw["times"]  # type: ignore[index]
+        hourly = raw.get("hourly")
+        if (
+            isinstance(hourly, Mapping)
+            and isinstance(hourly.get("time"), Sequence)
+            and not isinstance(hourly.get("time"), (str, bytes))
+        ):
+            return hourly["time"]  # type: ignore[index]
+    return ()
+
+
+def _extract_members(raw: object, bundle_members: Sequence[object]) -> list[Sequence[object]]:
+    candidates: object = bundle_members
+    if isinstance(raw, Mapping):
+        if "members_hourly" in raw:
+            candidates = raw["members_hourly"]
+        elif "ensemble_members" in raw:
+            candidates = raw["ensemble_members"]
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
+        return []
+    rows: list[Sequence[object]] = []
+    for member in candidates:
+        values = member.get("values") if isinstance(member, Mapping) else member
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+            rows.append(values)
+    return rows
+
+
+def _parse_response(
+    data: dict,
+    model: str,
+    fetch_time: datetime,
+    *,
+    source_id: str | None = None,
+    authority_tier: str = "FORECAST",
+) -> dict:
     """Parse Open-Meteo ensemble response into structured dict.
 
     Open-Meteo returns ensemble members as separate keys:
@@ -164,7 +301,11 @@ def _parse_response(data: dict, model: str, fetch_time: datetime) -> dict:
         "issue_time": None,
         "first_valid_time": first_valid_time,
         "fetch_time": fetch_time,
+        "captured_at": fetch_time.isoformat(),
         "model": model,
+        "source_id": source_id or source_id_for_ensemble_model(model),
+        "raw_payload_hash": stable_payload_hash(data),
+        "authority_tier": authority_tier,
         "n_members": n_members,
     }
 

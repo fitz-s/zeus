@@ -1,0 +1,92 @@
+id: Z3
+phase: Z
+title: HeartbeatSupervisor — MANDATORY for live resting orders
+purpose: |
+  Heartbeat is mandatory for any live resting-order strategy (per V2.1 §Z3).
+  If heartbeat fails or is missed, local open orders are marked
+  HEARTBEAT_CANCEL_SUSPECTED and reconciled before new placement. Promoted
+  from R2 down-06 D2-gated tracker to required.
+authority_basis:
+  - V2.1 §Z3
+  - evidence/multi_review/V2_1_STRUCTURAL_DIFF.md §2.5 (heartbeat mandatory)
+  - R2 down-06.yaml (single-tombstone NC-NEW-F preserved)
+  - src/main.py:336-369 (existing apscheduler tombstone pattern)
+preconditions:
+  head: 874e00cc0244 + Z0 + Z1 + Z2 land
+  required_invariants: [INV-25, INV-26]
+deliverables:
+  new_modules:
+    - path: src/control/heartbeat_supervisor.py
+      summary: |
+        Async coroutine + state observer. Maintains heartbeat_id, posts
+        every cadence_seconds to the V2 adapter, tracks last_success_at,
+        emits health state. On miss: writes auto_pause_failclosed.tombstone
+        with reason `heartbeat_cancel_suspected`, blocks new GTC/GTD
+        submits via placement gate.
+      surface: |
+        class HeartbeatHealth(str, Enum):
+            STARTING = "STARTING"
+            HEALTHY = "HEALTHY"
+            DEGRADED = "DEGRADED"  # one miss
+            LOST = "LOST"  # two consecutive misses
+            DISABLED_FOR_NON_RESTING_ONLY = "DISABLED_FOR_NON_RESTING_ONLY"  # FOK/FAK only mode
+
+        @dataclass
+        class HeartbeatStatus:
+            health: HeartbeatHealth
+            last_success_at: Optional[datetime]
+            consecutive_failures: int
+            heartbeat_id: str
+            cadence_seconds: int
+            last_error: Optional[str]
+
+        class HeartbeatSupervisor:
+            def __init__(self, adapter: PolymarketV2Adapter, cadence_seconds: int = 5) -> None: ...
+            async def start(self) -> None: ...
+            async def stop(self) -> None: ...
+            def status(self) -> HeartbeatStatus: ...
+            def gate_for_order_type(self, order_type: OrderType) -> bool: ...  # True iff allowed
+
+        # Placement gate
+        def heartbeat_required_for(order_type: OrderType) -> bool:
+            return order_type in (OrderType.GTC, OrderType.GTD)
+  extended_modules:
+    - file: src/main.py
+      change: spawn HeartbeatSupervisor as background task in daemon entrypoint; integrate with existing apscheduler tombstone pattern at main.py:336-369
+    - file: src/execution/executor.py
+      function: execute_entry_order
+      change: 'pre-submit gate `if heartbeat_required_for(intent.order_type) and not supervisor.status().health == HEALTHY: raise HeartbeatNotHealthy`'
+    - file: src/engine/cycle_runner.py
+      change: surface HeartbeatStatus into cycle_summary
+  new_tables: []
+acceptance_tests:
+  - tests/test_heartbeat_supervisor.py::test_initial_state_starting_then_healthy_after_first_success
+  - tests/test_heartbeat_supervisor.py::test_one_miss_degraded_two_misses_lost
+  - tests/test_heartbeat_supervisor.py::test_lost_state_writes_tombstone_with_heartbeat_cancel_suspected_reason
+  - tests/test_heartbeat_supervisor.py::test_lost_state_blocks_GTC_and_GTD_placement
+  - tests/test_heartbeat_supervisor.py::test_lost_state_allows_FOK_FAK_immediate_only
+  - |
+    tests/test_heartbeat_supervisor.py::test_recovery_does_not_duplicate_orders
+    simulate heartbeat loss with resting order; recovery + reconcile sweep does NOT re-submit
+  - tests/test_heartbeat_supervisor.py::test_post_heartbeat_loss_reconcile_marks_local_orders_HEARTBEAT_CANCEL_SUSPECTED
+  - tests/test_heartbeat_supervisor.py::test_recovery_reads_open_orders_and_unquarantines_only_after_truth_aligns
+  - tests/test_p0_live_money_safety.py::test_forced_16s_heartbeat_miss_in_fake_venue_auto_cancels_orders_and_reconciles
+operator_decision_required:
+  - gate_id: Q-HB-cadence
+    blocking: no (engineering implements default 5s; operator may tune)
+    artifact: docs/operations/.../evidence/q_hb_cadence_2026-XX-XX.md
+    runtime_gate: cadence_seconds default 5; reads ZEUS_HEARTBEAT_CADENCE_SECONDS env var if set
+depends_on: [Z0, Z1, Z2]
+estimated_h: 12
+risk: high
+critic_gate: critic-opus
+links:
+  r2_cards: [down-06]
+  v2_1_phases: [Z3]
+new_invariants_or_NCs:
+  - INV-NEW-C: "GTC/GTD orders MUST NOT be submitted when HeartbeatSupervisor.status().health is not HEALTHY. HeartbeatNotHealthy raised pre-submit."
+  - 'NC-NEW-F (preserved from R2): single-tombstone — HeartbeatSupervisor reuses state/auto_pause_failclosed.tombstone, does NOT introduce a second tombstone source.'
+notes:
+  - Async coroutine integrates with existing daemon apscheduler. Reuses tombstone pattern from main.py:336-369.
+  - Default cadence 5s; Polymarket may not document a hard cadence requirement (Q-HB inquiry pending) but Zeus's correctness needs the heartbeat regardless.
+  - Placement gate is the load-bearing surface — ensure executor.py call sites all consult it.

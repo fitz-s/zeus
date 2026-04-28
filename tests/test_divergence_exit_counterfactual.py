@@ -41,7 +41,14 @@ def test_counterfactual_reports_delayed_and_settlement_pnl(tmp_path, monkeypatch
         "INSERT INTO token_price_log (token_id, price, timestamp) VALUES ('yes1', 0.90, '2026-04-02T16:00:00Z')"
     )
     conn.execute(
-        "INSERT INTO settlements (city, target_date, winning_bin, settlement_value) VALUES ('Paris', '2026-04-03', '12°C', 12.0)"
+        """
+        INSERT INTO settlements
+        (city, target_date, winning_bin, settlement_value, temperature_metric,
+         physical_quantity, observation_field, data_version)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp',
+                'tigge_mx2t6_local_calendar_day_max_v1')
+        """
     )
     conn.commit()
     conn.close()

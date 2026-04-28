@@ -49,8 +49,12 @@ fi
 
 REPO_ROOT="/Users/leofitz/.openclaw/workspace-venus/zeus"
 PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
-TEST_FILE="tests/test_architecture_contracts.py"
-BASELINE_PASSED=73
+# TEST_FILES widened in BATCH C to include the 3 new settlement-semantics
+# relationship tests (HKO+WMO type-encoded antibody). Per dispatch OP-FOLLOWUP-1
+# baseline bumped 73 → 76 (73 from test_architecture_contracts + 3 from
+# test_settlement_semantics).
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py"
+BASELINE_PASSED=76
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
@@ -60,8 +64,9 @@ fi
 
 cd "$REPO_ROOT"
 
-# Run, capture, parse (PYTEST_BIN is the venv python; invoke pytest as module)
-RESULT=$("$PYTEST_BIN" -m pytest "$TEST_FILE" -q --no-header 2>&1 || true)
+# Run, capture, parse (PYTEST_BIN is the venv python; invoke pytest as module).
+# Multi-file: TEST_FILES is space-separated; let word-splitting expand it.
+RESULT=$("$PYTEST_BIN" -m pytest $TEST_FILES -q --no-header 2>&1 || true)
 # Note: `-m pytest` after the python interpreter is correct (python -m pytest <args>)
 SUMMARY=$(printf '%s' "$RESULT" | tail -3 | tr '\n' ' ')
 
@@ -73,7 +78,7 @@ ERRORS=$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ error' | head -1 | grep -oE '
 if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
     cat >&2 <<EOF
 [pre-commit-invariant-test] BLOCKED: ${FAILED} failed + ${ERRORS} errors
-in ${TEST_FILE} (baseline: ${BASELINE_PASSED} passed / ${BASELINE_SKIPPED} skipped / 0 failed).
+in ${TEST_FILES} (baseline: ${BASELINE_PASSED} passed / ${BASELINE_SKIPPED} skipped / 0 failed).
 
 Fix the failing tests OR explicitly opt out:
   export COMMIT_INVARIANT_TEST_SKIP=1

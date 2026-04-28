@@ -25,6 +25,8 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 | `data.md` | Dense module book for source-role routing, ingest discipline, and data-version boundaries |
 | `contracts.md` | Dense module book for frozen semantic contracts and typed cross-layer boundaries |
 | `execution.md` | Dense module book for live-money order placement, exit mechanics, and settlement harvest |
+| `venue.md` | Dense module book for Polymarket V2 adapter boundaries and submission provenance |
+| `ingest.md` | Dense module book for user-channel event-stream ingest and U2 fact append bridges |
 | `riskguard.md` | Dense module book for protective enforcement and behavior-changing risk levels |
 | `control.md` | Dense module book for the external control plane and gate provenance |
 | `supervisor_api.md` | Dense module book for Zeus/Venus typed boundary contracts |

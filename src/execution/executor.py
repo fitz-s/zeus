@@ -10,12 +10,16 @@ Key rules:
 - Dynamic limit: if within 5% of best ask, jump to ask for guaranteed fill
 """
 
+import hashlib
+import json
 import logging
 import math
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING
 from typing import Optional
 
 from src.config import get_mode, settings
@@ -47,11 +51,237 @@ MODE_TIMEOUTS = {
 }
 
 
+def _assert_cutover_allows_submit(intent_kind) -> None:
+    """Fail before command persistence or SDK contact when cutover is not live."""
+    from src.control.cutover_guard import assert_submit_allowed
+
+    assert_submit_allowed(intent_kind)
+
+
+def _assert_heartbeat_allows_submit(order_type: str = "GTC") -> None:
+    """Fail before command persistence or SDK contact when heartbeat is unhealthy."""
+    from src.control.heartbeat_supervisor import assert_heartbeat_allows_order_type
+
+    assert_heartbeat_allows_order_type(order_type)
+
+
+def _assert_ws_gap_allows_submit(market_id: str | None = None) -> None:
+    """Fail before command persistence or SDK contact when M3 user WS is gapped."""
+    from src.control.ws_gap_guard import assert_ws_allows_submit
+
+    assert_ws_allows_submit(market_id)
+
+
+def _assert_risk_allocator_allows_submit(intent: ExecutionIntent) -> None:
+    """Fail before command persistence or SDK contact when A2 allocator denies risk."""
+    from src.risk_allocator import assert_global_allocation_allows
+
+    assert_global_allocation_allows(intent)
+
+
+def _assert_risk_allocator_allows_exit_submit() -> None:
+    """Fail before exit command persistence/SDK contact when A2 kill switch is armed."""
+    from src.risk_allocator import assert_global_submit_allows
+
+    assert_global_submit_allows(reduce_only=True)
+
+
+def _select_risk_allocator_order_type(conn: sqlite3.Connection, snapshot_id: str) -> str:
+    """Select the concrete venue order type from A2 governor + snapshot evidence.
+
+    This is read-only and must run before venue-command persistence so degraded
+    states can force FOK/FAK-family submission rather than merely reporting an
+    advisory maker/taker mode.
+    """
+
+    from src.risk_allocator import select_global_order_type
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, snapshot_id) if snapshot_id else None
+    return select_global_order_type(snapshot)
+
+
+def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
+    """Return JSON-safe A2 allocation metadata for SUBMIT_REQUESTED payloads."""
+
+    market_id = _json_safe_string(getattr(intent, "market_id", ""), "")
+    event_id = _json_safe_string(getattr(intent, "event_id", None), market_id)
+    resolution_window = _json_safe_string(getattr(intent, "resolution_window", None), "default") or "default"
+    correlation_key = _json_safe_string(getattr(intent, "correlation_key", None), event_id or market_id)
+    return {
+        "event_id": event_id,
+        "resolution_window": resolution_window,
+        "correlation_key": correlation_key,
+    }
+
+
+def _json_safe_string(value, fallback: str = "") -> str:
+    if value is None:
+        return str(fallback or "")
+    if isinstance(value, (str, int, float, bool)):
+        text = str(value)
+        return text if text else str(fallback or "")
+    return str(fallback or "")
+
+
+def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
+    """Return worst-case pUSD spend for the actual submitted BUY order.
+
+    Entry sizing rounds BUY shares up to the venue's 0.01-share grid. The
+    collateral gate must therefore use submitted `shares * limit_price`, not the
+    original target_size_usd, otherwise a target-sized balance can pass preflight
+    and still underfund the quantized order.
+    """
+
+    notional = Decimal(str(shares)) * Decimal(str(intent.limit_price)) * Decimal(1_000_000)
+    return int(notional.to_integral_value(rounding=ROUND_CEILING))
+
+
+def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int | None = None) -> None:
+    """Fail before command persistence or SDK contact when pUSD is insufficient."""
+    from src.state.collateral_ledger import assert_buy_preflight
+
+    assert_buy_preflight(intent, spend_micro=spend_micro)
+
+
+def _assert_collateral_allows_sell(token_id: str, shares: float) -> None:
+    """Fail before command persistence or SDK contact when CTF inventory is insufficient."""
+    from src.state.collateral_ledger import assert_sell_preflight
+
+    assert_sell_preflight(token_id, shares)
+
+
+def _reserve_collateral_for_buy(
+    command_id: str,
+    intent: ExecutionIntent,
+    conn: sqlite3.Connection,
+    *,
+    spend_micro: int,
+) -> None:
+    """Reserve pUSD on the same connection as the venue command row."""
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(conn).reserve_pusd_for_buy(command_id, spend_micro)
+
+
+def _reserve_collateral_for_sell(
+    command_id: str, token_id: str, shares: float, conn: sqlite3.Connection
+) -> None:
+    """Reserve CTF inventory on the same connection as the venue command row."""
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(conn).reserve_tokens_for_sell(command_id, token_id, shares)
+
+
+def _persist_pre_submit_envelope(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    snapshot_id: str,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    order_type: str,
+    post_only: bool,
+    captured_at: str,
+) -> str | None:
+    """Persist the U2 venue-submission envelope before SDK contact.
+
+    This deliberately uses only the already-captured ExecutableMarketSnapshotV2
+    plus the command's intended order shape.  It does not resolve keychain
+    credentials or instantiate the SDK client, preserving INV-30's
+    persist-before-submit ordering.  If the snapshot is missing or the token is
+    not in that snapshot, return None and let insert_command's executable
+    snapshot gate raise the more precise fail-closed error.
+    """
+
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.state.snapshot_repo import get_snapshot
+    from src.state.venue_command_repo import insert_submission_envelope
+    from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
+
+    if not snapshot_id:
+        return None
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        return None
+    if token_id == snapshot.yes_token_id:
+        outcome_label = "YES"
+    elif token_id == snapshot.no_token_id:
+        outcome_label = "NO"
+    else:
+        return None
+
+    price_dec = Decimal(str(price))
+    size_dec = Decimal(str(size))
+    canonical_payload = {
+        "command_id": command_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "token_id": token_id,
+        "side": side,
+        "price": str(price_dec),
+        "size": str(size_dec),
+        "order_type": order_type,
+        "post_only": bool(post_only),
+        "condition_id": snapshot.condition_id,
+        "question_id": snapshot.question_id,
+    }
+    canonical_json = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    payload_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    envelope = VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="pre-submit",
+        host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+        chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+        funder_address=(
+            os.environ.get("POLYMARKET_FUNDER_ADDRESS")
+            or os.environ.get("POLYMARKET_PROXY_ADDRESS")
+            or "UNRESOLVED_PRE_SUBMIT_FUNDER"
+        ),
+        condition_id=snapshot.condition_id,
+        question_id=snapshot.question_id,
+        yes_token_id=snapshot.yes_token_id,
+        no_token_id=snapshot.no_token_id,
+        selected_outcome_token_id=token_id,
+        outcome_label=outcome_label,
+        side=side,
+        price=price_dec,
+        size=size_dec,
+        order_type=order_type,
+        post_only=post_only,
+        tick_size=snapshot.min_tick_size,
+        min_order_size=snapshot.min_order_size,
+        neg_risk=snapshot.neg_risk,
+        fee_details=snapshot.fee_details,
+        canonical_pre_sign_payload_hash=payload_hash,
+        signed_order=None,
+        signed_order_hash=None,
+        raw_request_hash=payload_hash,
+        raw_response_json=None,
+        order_id=None,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at=captured_at,
+    )
+    return insert_submission_envelope(
+        conn,
+        envelope,
+        envelope_id=f"pre-submit:{command_id}",
+    )
+
+
 @dataclass
 class OrderResult:
     """Result of an order attempt."""
     trade_id: str
-    status: str  # "filled", "pending", "cancelled", "rejected"
+    status: str  # "filled", "pending", "cancelled", "rejected", "unknown_side_effect"
     fill_price: Optional[float] = None
     filled_at: Optional[str] = None
     reason: Optional[str] = None
@@ -82,6 +312,10 @@ class ExitOrderIntent:
     best_bid: Optional[float] = None
     intent_id: Optional[str] = None
     idempotency_key: Optional[str] = None
+    executable_snapshot_id: str = ""
+    executable_snapshot_min_tick_size: Decimal | str | None = None
+    executable_snapshot_min_order_size: Decimal | str | None = None
+    executable_snapshot_neg_risk: bool | None = None
 
 
 def _orderresult_from_existing(
@@ -132,6 +366,19 @@ def _orderresult_from_existing(
             intent_id=intent_id,
             command_state=s.value,
         )
+    if s == CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT:
+        return OrderResult(
+            trade_id=trade_id,
+            status="unknown_side_effect",
+            reason="idempotency_collision: prior attempt unknown side effect; recovery required",
+            submitted_price=limit_price,
+            shares=shares,
+            order_role=order_role,
+            external_order_id=existing.venue_order_id,
+            idempotency_key=idem_value,
+            intent_id=intent_id,
+            command_state=s.value,
+        )
     if s in (CommandState.SUBMITTING, CommandState.UNKNOWN):
         return OrderResult(
             trade_id=trade_id,
@@ -171,6 +418,34 @@ def _orderresult_from_existing(
     )
 
 
+def _orderresult_from_economic_unknown(
+    existing: "VenueCommand",  # type: ignore[name-defined]
+    trade_id: str,
+    limit_price: float,
+    shares: float,
+    idem_value: str,
+    intent_id: Optional[str],
+    order_role: str,
+) -> "OrderResult":
+    """Block a new command whose economics duplicate an unresolved unknown."""
+
+    return OrderResult(
+        trade_id=trade_id,
+        status="unknown_side_effect",
+        reason=(
+            "economic_intent_duplication: prior attempt unknown side effect "
+            f"command_id={existing.command_id}; recovery required"
+        ),
+        submitted_price=limit_price,
+        shares=shares,
+        order_role=order_role,
+        external_order_id=existing.venue_order_id,
+        idempotency_key=idem_value,
+        intent_id=intent_id,
+        command_state=existing.state.value,
+    )
+
+
 def create_execution_intent(
     edge_context: EdgeContext,
     edge: BinEdge,
@@ -180,16 +455,24 @@ def create_execution_intent(
     token_id: str = "",
     no_token_id: str = "",
     best_ask: Optional[float] = None,
+    executable_snapshot_id: str = "",
+    executable_snapshot_min_tick_size: Decimal | str | None = None,
+    executable_snapshot_min_order_size: Decimal | str | None = None,
+    executable_snapshot_neg_risk: bool | None = None,
+    event_id: str = "",
+    resolution_window: str = "",
+    correlation_key: str = "",
 ) -> ExecutionIntent:
     """Execution Planner: Generates the intent based on Fair Value Plane output."""
     if False: _ = edge.entry_method
 
     limit_offset = settings["execution"]["limit_offset_pct"]
+    edge_direction = Direction(edge.direction)
 
     # Compute initial limit price in the native/held-side probability space.
     limit_price = compute_native_limit_price(
-        HeldSideProbability(edge_context.p_posterior, edge.direction),
-        NativeSidePrice(edge.vwmp, edge.direction),
+        HeldSideProbability(edge_context.p_posterior, edge_direction),
+        NativeSidePrice(edge.vwmp, edge_direction),
         limit_offset=limit_offset,
     )
 
@@ -203,9 +486,9 @@ def create_execution_intent(
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
 
-    if edge.direction.value == "buy_yes":
+    if edge_direction.value == "buy_yes":
         order_token = token_id
-    elif edge.direction.value == "buy_no":
+    elif edge_direction.value == "buy_no":
         order_token = no_token_id
     else:
         raise ValueError(f"Strict token routing failed: unsupported token direction '{edge.direction}'")
@@ -222,7 +505,7 @@ def create_execution_intent(
     # tighter) instead of 0.02 fraction. Import hoisted to module top
     # per PEP 8.
     return ExecutionIntent(
-        direction=Direction(edge.direction),
+        direction=edge_direction,
         target_size_usd=size_usd,
         limit_price=limit_price,
         toxicity_budget=0.05,
@@ -232,6 +515,13 @@ def create_execution_intent(
         token_id=order_token,
         timeout_seconds=timeout,
         decision_edge=edge.edge,
+        executable_snapshot_id=executable_snapshot_id,
+        executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
+        executable_snapshot_min_order_size=executable_snapshot_min_order_size,
+        executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        event_id=event_id or market_id,
+        resolution_window=resolution_window or "default",
+        correlation_key=correlation_key or event_id or market_id,
     )
 
 
@@ -265,6 +555,9 @@ def execute_intent(
             reason=f"No token_id provided for intent",
         )
 
+    from src.execution.command_bus import IntentKind
+    _assert_cutover_allows_submit(IntentKind.ENTRY)
+
     return _live_order(
         trade_id, intent, shares, conn=conn, decision_id=decision_id
     )
@@ -277,6 +570,10 @@ def create_exit_order_intent(
     shares: float,
     current_price: float,
     best_bid: Optional[float] = None,
+    executable_snapshot_id: str = "",
+    executable_snapshot_min_tick_size: Decimal | str | None = None,
+    executable_snapshot_min_order_size: Decimal | str | None = None,
+    executable_snapshot_neg_risk: bool | None = None,
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
 
@@ -288,6 +585,10 @@ def create_exit_order_intent(
         best_bid=best_bid,
         intent_id=f"{trade_id}:exit",
         idempotency_key=f"{trade_id}:exit:{token_id}",
+        executable_snapshot_id=executable_snapshot_id,
+        executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
+        executable_snapshot_min_order_size=executable_snapshot_min_order_size,
+        executable_snapshot_neg_risk=executable_snapshot_neg_risk,
     )
 
 
@@ -339,6 +640,9 @@ def execute_exit_order(
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
     from src.state.venue_command_repo import insert_command, append_event, get_command
+    from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+
+    _assert_cutover_allows_submit(IntentKind.EXIT)
 
     current_price = intent.current_price
     best_bid = intent.best_bid
@@ -407,6 +711,8 @@ def execute_exit_order(
             idempotency_key=intent.idempotency_key,
         )
 
+    _assert_risk_allocator_allows_exit_submit()
+
     # -----------------------------------------------------------------------
     # build phase — pure, no I/O (INV-30)
     # -----------------------------------------------------------------------
@@ -448,13 +754,25 @@ def execute_exit_order(
             effective_decision_id,
         )
     try:
+        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        _assert_heartbeat_allows_submit(order_type)
+        _assert_ws_gap_allows_submit(intent.token_id)
+        _assert_collateral_allows_sell(intent.token_id, shares)
+
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
         # Check BEFORE the INSERT to avoid a failed-INSERT roundtrip on retries.
         # The IntegrityError handler below is the race-condition safety belt.
         # -------------------------------------------------------------------
-        from src.state.venue_command_repo import find_command_by_idempotency_key
+        from src.state.venue_command_repo import (
+            find_command_by_idempotency_key,
+            find_unknown_command_by_economic_intent,
+        )
         from src.execution.command_bus import VenueCommand
+        from src.execution.exit_safety import (
+            ExitMutex,
+            can_submit_replacement_sell,
+        )
         pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
         if pre_lookup_row is not None:
             logger.info(
@@ -471,11 +789,71 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 order_role="exit",
             )
+        economic_unknown_row = find_unknown_command_by_economic_intent(
+            conn,
+            intent_kind=IntentKind.EXIT.value,
+            token_id=intent.token_id,
+            side="SELL",
+            price=limit_price,
+            size=shares,
+            exclude_idempotency_key=idem.value,
+        )
+        if economic_unknown_row is not None:
+            logger.warning(
+                "execute_exit_order: same economic intent is already unresolved as "
+                "unknown_side_effect (idem=%s trade_id=%s)",
+                idem.value, intent.trade_id,
+            )
+            return _orderresult_from_economic_unknown(
+                VenueCommand.from_row(economic_unknown_row),
+                trade_id=intent.trade_id,
+                limit_price=limit_price,
+                shares=shares,
+                idem_value=idem.value,
+                intent_id=intent.intent_id,
+                order_role="exit",
+            )
+
+        replacement_allowed, replacement_block_reason = can_submit_replacement_sell(
+            conn,
+            intent.trade_id,
+            intent.token_id,
+            exclude_idempotency_key=idem.value,
+        )
+        if not replacement_allowed:
+            logger.warning(
+                "execute_exit_order: replacement sell blocked for trade_id=%s token=%s: %s",
+                intent.trade_id, intent.token_id, replacement_block_reason,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=replacement_block_reason or "replacement_sell_blocked",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
 
         try:
+            envelope_id = _persist_pre_submit_envelope(
+                conn,
+                command_id=command_id,
+                snapshot_id=intent.executable_snapshot_id,
+                token_id=intent.token_id,
+                side="SELL",
+                price=limit_price,
+                size=shares,
+                order_type=order_type,
+                post_only=False,
+                captured_at=now_str,
+            )
             insert_command(
                 conn,
                 command_id=command_id,
+                snapshot_id=intent.executable_snapshot_id,
+                envelope_id=envelope_id,
                 position_id=intent.trade_id,
                 decision_id=effective_decision_id,
                 idempotency_key=idem.value,
@@ -486,17 +864,55 @@ def execute_exit_order(
                 size=shares,
                 price=limit_price,
                 created_at=now_str,
+                snapshot_checked_at=now_str,
+                expected_min_tick_size=intent.executable_snapshot_min_tick_size,
+                expected_min_order_size=intent.executable_snapshot_min_order_size,
+                expected_neg_risk=intent.executable_snapshot_neg_risk,
             )
+            if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="REVIEW_REQUIRED",
+                    occurred_at=now_str,
+                    payload={"reason": "exit_mutex_held"},
+                )
+                if _own_conn:
+                    conn.commit()
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="rejected",
+                    reason="exit_mutex_held",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    command_state="REVIEW_REQUIRED",
+                )
             append_event(
                 conn,
                 command_id=command_id,
                 event_type="SUBMIT_REQUESTED",
                 occurred_at=now_str,
+                payload={"order_type": order_type},
             )
+            _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
             if not _own_conn:
                 pass  # caller manages commit
             else:
                 conn.commit()
+        except MarketSnapshotError as exc:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"executable_snapshot_gate: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
             # lookup and our INSERT. Existing command is the canonical record.
@@ -538,42 +954,87 @@ def execute_exit_order(
         # -----------------------------------------------------------------------
         try:
             client = PolymarketClient()
-            result = client.place_limit_order(
-                token_id=intent.token_id,
-                price=limit_price,
-                size=shares,
-                side="SELL",
-            )
         except Exception as exc:
-            # SUBMIT_UNKNOWN: the SDK raised — we don't know if the order reached
-            # the venue. Row remains in SUBMITTING; recovery loop will resolve.
-            ack_time = datetime.now(timezone.utc).isoformat()
+            # Constructor / credential / adapter setup failures happen before
+            # any venue submit side effect. They are safe terminal rejections,
+            # not M2 unknown-side-effect outcomes.
+            rej_time = datetime.now(timezone.utc).isoformat()
             try:
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="SUBMIT_UNKNOWN",
-                    occurred_at=ack_time,
-                    payload={"exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_client_init_failed",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
                 )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_UNKNOWN append_event failed after SDK exception "
+                    "execute_exit_order: SUBMIT_REJECTED append_event failed after client "
+                    "init exception (command_id=%s trade_id=%s): inner=%s original=%s",
+                    command_id, intent.trade_id, inner, exc,
+                )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_client_init_failed: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+        try:
+            result = client.place_limit_order(
+                token_id=intent.token_id,
+                price=limit_price,
+                size=shares,
+                side="SELL",
+                order_type=order_type,
+            )
+        except Exception as exc:
+            # M2: place_limit_order has crossed the submit side-effect boundary.
+            # Treat SDK/network exceptions as unknown side effects, never as
+            # semantic rejection; recovery proves ACK/FILL or safe replay.
+            ack_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                    occurred_at=ack_time,
+                    payload={
+                        "reason": "post_submit_exception_possible_side_effect",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "idempotency_key": idem.value,
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "execute_exit_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, intent.trade_id, inner, exc,
                 )
             logger.error("Live exit order SDK exception: %s", exc)
             return OrderResult(
                 trade_id=intent.trade_id,
-                status="rejected",
-                reason=f"submit_unknown: {exc}",
+                status="unknown_side_effect",
+                reason=f"submit_unknown_side_effect: {exc}",
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
+                command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
             )
 
         # -----------------------------------------------------------------------
@@ -612,6 +1073,43 @@ def execute_exit_order(
             or result.get("orderId")
             or result.get("id")
         )
+        if result.get("success") is False:
+            rejection_reason = (
+                result.get("errorCode")
+                or result.get("error_code")
+                or result.get("reason")
+                or "submit_rejected"
+            )
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=ack_time,
+                    payload={
+                        "reason": str(rejection_reason),
+                        "detail": result.get("errorMessage") or result.get("error_message") or "",
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "execute_exit_order: SUBMIT_REJECTED (success_false) append_event failed "
+                    "(command_id=%s): %s",
+                    command_id, inner,
+                )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=str(rejection_reason),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+                venue_status=str(result.get("status") or ""),
+            )
         if not order_id:
             try:
                 append_event(
@@ -619,7 +1117,7 @@ def execute_exit_order(
                     command_id=command_id,
                     event_type="SUBMIT_REJECTED",
                     occurred_at=ack_time,
-                    payload={"reason": "clob_returned_none"},
+                    payload={"reason": "missing_order_id"},
                 )
                 if _own_conn:
                     conn.commit()
@@ -648,7 +1146,7 @@ def execute_exit_order(
                 command_id=command_id,
                 event_type="SUBMIT_ACKED",
                 occurred_at=ack_time,
-                payload={"venue_order_id": order_id},
+                payload={"venue_order_id": order_id, "order_type": order_type},
             )
             if _own_conn:
                 conn.commit()
@@ -710,6 +1208,9 @@ def _live_order(
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import insert_command, append_event
+    from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+
+    _assert_cutover_allows_submit(IntentKind.ENTRY)
 
     timeout = intent.timeout_seconds
 
@@ -754,6 +1255,9 @@ def _live_order(
             order_role="entry",
         )
 
+    _assert_risk_allocator_allows_submit(intent)
+    required_pusd_micro = _buy_order_notional_micro(intent, shares)
+
     # -----------------------------------------------------------------------
     # Phase 2: build — pure, no I/O (INV-30)
     # Derive a synthetic decision_id when caller hasn't supplied a real one.
@@ -787,12 +1291,20 @@ def _live_order(
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
+        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        _assert_heartbeat_allows_submit(order_type)
+        _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
+        _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
+
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
         # Check BEFORE the INSERT to avoid a failed-INSERT roundtrip on retries.
         # The IntegrityError handler below is the race-condition safety belt.
         # -------------------------------------------------------------------
-        from src.state.venue_command_repo import find_command_by_idempotency_key
+        from src.state.venue_command_repo import (
+            find_command_by_idempotency_key,
+            find_unknown_command_by_economic_intent,
+        )
         from src.execution.command_bus import VenueCommand
         pre_lookup_row = find_command_by_idempotency_key(conn, idem.value)
         if pre_lookup_row is not None:
@@ -810,11 +1322,49 @@ def _live_order(
                 intent_id=None,
                 order_role="entry",
             )
+        economic_unknown_row = find_unknown_command_by_economic_intent(
+            conn,
+            intent_kind=IntentKind.ENTRY.value,
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.limit_price,
+            size=shares,
+            exclude_idempotency_key=idem.value,
+        )
+        if economic_unknown_row is not None:
+            logger.warning(
+                "_live_order: same economic intent is already unresolved as "
+                "unknown_side_effect (idem=%s trade_id=%s)",
+                idem.value, trade_id,
+            )
+            return _orderresult_from_economic_unknown(
+                VenueCommand.from_row(economic_unknown_row),
+                trade_id=trade_id,
+                limit_price=intent.limit_price,
+                shares=shares,
+                idem_value=idem.value,
+                intent_id=None,
+                order_role="entry",
+            )
 
         try:
+            envelope_id = _persist_pre_submit_envelope(
+                conn,
+                command_id=command_id,
+                snapshot_id=intent.executable_snapshot_id,
+                token_id=intent.token_id,
+                side="BUY",
+                price=intent.limit_price,
+                size=shares,
+                order_type=order_type,
+                post_only=False,
+                captured_at=now_str,
+            )
             insert_command(
                 conn,
                 command_id=command_id,
+                snapshot_id=intent.executable_snapshot_id,
+                envelope_id=envelope_id,
                 position_id=trade_id,
                 decision_id=effective_decision_id,
                 idempotency_key=idem.value,
@@ -825,15 +1375,38 @@ def _live_order(
                 size=shares,
                 price=intent.limit_price,
                 created_at=now_str,
+                snapshot_checked_at=now_str,
+                expected_min_tick_size=intent.executable_snapshot_min_tick_size,
+                expected_min_order_size=intent.executable_snapshot_min_order_size,
+                expected_neg_risk=intent.executable_snapshot_neg_risk,
             )
             append_event(
                 conn,
                 command_id=command_id,
                 event_type="SUBMIT_REQUESTED",
                 occurred_at=now_str,
+                payload={
+                    "allocation": _allocation_payload_for_intent(intent),
+                    "order_type": order_type,
+                },
+            )
+            _reserve_collateral_for_buy(
+                command_id,
+                intent,
+                conn,
+                spend_micro=required_pusd_micro,
             )
             if _own_conn:
                 conn.commit()
+        except MarketSnapshotError as exc:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"executable_snapshot_gate: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
             # lookup and our INSERT. Existing command is the canonical record.
@@ -868,7 +1441,43 @@ def _live_order(
         # share the same instance. If preflight fails, append SUBMIT_REJECTED
         # (the row is already SUBMITTING and must reach a terminal state).
         # -----------------------------------------------------------------------
-        client = PolymarketClient()
+        try:
+            client = PolymarketClient()
+        except Exception as exc:
+            # Constructor / credential / adapter setup failures happen before
+            # any venue submit side effect. They are safe terminal rejections,
+            # not M2 unknown-side-effect outcomes.
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "pre_submit_client_init_failed",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED append_event failed after client init "
+                    "(command_id=%s trade_id=%s): inner=%s original=%s",
+                    command_id, trade_id, inner, exc,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_client_init_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         try:
             client.v2_preflight()
         except V2PreflightError as exc:
@@ -902,6 +1511,43 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
             )
+        except Exception as exc:
+            logger.error(
+                "LIVE ORDER rejected: v2_preflight_exception for trade_id=%s: %s",
+                trade_id,
+                exc,
+            )
+            rej_time = datetime.now(timezone.utc).isoformat()
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=rej_time,
+                    payload={
+                        "reason": "v2_preflight_exception",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED append_event failed after generic "
+                    "v2_preflight exception (command_id=%s): %s",
+                    command_id, inner,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"v2_preflight_exception: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
 
         logger.info(
             "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
@@ -919,34 +1565,44 @@ def _live_order(
                 price=intent.limit_price,
                 size=shares,
                 side="BUY",  # Always BUY
+                order_type=order_type,
             )
         except Exception as exc:
-            # SUBMIT_UNKNOWN: SDK raised; we don't know if the order reached venue.
+            # M2: place_limit_order has crossed the submit side-effect boundary.
+            # Treat SDK/network exceptions as unknown side effects, never as
+            # semantic rejection; recovery proves ACK/FILL or safe replay.
             unk_time = datetime.now(timezone.utc).isoformat()
             try:
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="SUBMIT_UNKNOWN",
+                    event_type="SUBMIT_TIMEOUT_UNKNOWN",
                     occurred_at=unk_time,
-                    payload={"exception_type": type(exc).__name__, "exception_message": str(exc)},
+                    payload={
+                        "reason": "post_submit_exception_possible_side_effect",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "idempotency_key": idem.value,
+                    },
                 )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_UNKNOWN append_event failed after SDK exception "
+                    "_live_order: SUBMIT_TIMEOUT_UNKNOWN append_event failed after SDK exception "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, trade_id, inner, exc,
                 )
             logger.error("Live order SDK exception: %s", exc)
             return OrderResult(
                 trade_id=trade_id,
-                status="rejected",
-                reason=f"submit_unknown: {exc}",
+                status="unknown_side_effect",
+                reason=f"submit_unknown_side_effect: {exc}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
+                idempotency_key=idem.value,
+                command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
             )
 
         # -----------------------------------------------------------------------
@@ -980,6 +1636,69 @@ def _live_order(
             or result.get("id")
             or None
         )
+        if result.get("success") is False:
+            rejection_reason = (
+                result.get("errorCode")
+                or result.get("error_code")
+                or result.get("reason")
+                or "submit_rejected"
+            )
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=ack_time,
+                    payload={
+                        "reason": str(rejection_reason),
+                        "detail": result.get("errorMessage") or result.get("error_message") or "",
+                    },
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED (success_false) append_event failed "
+                    "(command_id=%s): %s",
+                    command_id, inner,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=str(rejection_reason),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                venue_status=str(result.get("status") or ""),
+                idempotency_key=idem.value,
+            )
+        if not order_id:
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REJECTED",
+                    occurred_at=ack_time,
+                    payload={"reason": "missing_order_id"},
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
+                    "(command_id=%s): %s",
+                    command_id, inner,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="missing_order_id",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                venue_status=str(result.get("status") or ""),
+                idempotency_key=idem.value,
+            )
         # SUBMIT_ACKED
         try:
             append_event(
@@ -987,7 +1706,11 @@ def _live_order(
                 command_id=command_id,
                 event_type="SUBMIT_ACKED",
                 occurred_at=ack_time,
-                payload={"venue_order_id": order_id, "venue_status": str(result.get("status") or "")},
+                payload={
+                    "venue_order_id": order_id,
+                    "venue_status": str(result.get("status") or ""),
+                    "order_type": order_type,
+                },
             )
             if _own_conn:
                 conn.commit()

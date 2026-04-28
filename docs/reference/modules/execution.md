@@ -27,7 +27,10 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 ## 6. Read/write surfaces and canonical truth
 ### Canonical truth surfaces
 - `docs/authority/zeus_current_architecture.md` sections on runtime truth, lifecycle grammar, and money path
-- `src/execution/executor.py`, `exit_triggers.py`, `exit_lifecycle.py`, `fill_tracker.py`, `collateral.py`, `harvester.py`
+- `src/execution/command_bus.py`, `executor.py`, `exchange_reconcile.py`, `settlement_commands.py`, `exit_triggers.py`, `exit_lifecycle.py`, `exit_safety.py`, `fill_tracker.py`, `collateral.py`, `wrap_unwrap_commands.py`, `harvester.py`
+- `src/control/cutover_guard.py` and `src/control/heartbeat_supervisor.py` as pre-submit live-money gates consumed by executor
+- `src/risk_allocator/governor.py` as the R3 A2 pre-submit capital allocation and kill-switch gate consumed by executor
+- `src/execution/executor.py` must persist a U2 pre-submit `VenueSubmissionEnvelope` before SDK contact; no live order may rely on an uncited command row.
 - `src/contracts/execution_price.py` and state lifecycle/ledger surfaces
 - `architecture/invariants.yaml` on exit-vs-settlement and risk actuation
 
@@ -38,9 +41,10 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 
 ## 7. Public interfaces
 - `executor.py` live actuation path
+- `command_bus.py` durable venue-command grammar (`CommandState`, `CommandEventType`, `IntentKind`, idempotency keys)
 - `exit_triggers.py` threshold/gating logic
 - `exit_lifecycle.py` transition management for exits
-- `fill_tracker.py` and `collateral.py` helper APIs
+- `fill_tracker.py`, `collateral.py`, `wrap_unwrap_commands.py`, and `settlement_commands.py` helper APIs
 - `harvester.py` for post-trade/settlement collection flows
 
 ## 8. Internal seams
@@ -52,11 +56,16 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 ## 9. Source files and their roles
 | File / surface | Role |
 |---|---|
-| `executor.py` | Primary live-money actuation entrypoint. |
+| `command_bus.py` | Closed command-side grammar and deterministic idempotency contract. M1 adds command states/events while keeping order/trade facts in U2. |
+| `executor.py` | Primary live-money actuation entrypoint. M2 maps exceptions after possible venue submit side effects to `OrderResult.status="unknown_side_effect"` and `SUBMIT_UNKNOWN_SIDE_EFFECT`, never semantic rejection. R3 A2 consults the global RiskAllocator before command persistence/SDK contact, persists/submits the selected maker/taker order type, and raises structured `AllocationDenied` when capacity/governor gates deny new risk. |
+| `exchange_reconcile.py` | R3 M5 read-only venue-vs-journal sweep. Writes findings and linkable missing trade facts; never creates `venue_commands` for exchange-only state. |
+| `settlement_commands.py` | R3 R1 durable settlement/redeem command ledger. `REDEEM_TX_HASHED` is the crash-recovery anchor; Q-FX-1 gates pUSD redemption/accounting. |
 | `exit_triggers.py` | Where monitoring and execution semantics meet; extremely failure-prone. |
 | `exit_lifecycle.py` | Keeps exit intent and economic closure distinct. |
+| `exit_safety.py` | R3 M4 typed cancel outcomes, per-position/token exit mutex, and replacement-sell gating. |
 | `fill_tracker.py` | Tracks fill/partial-fill state for downstream lifecycle truth. |
-| `collateral.py` | Controls what capital is actually deployable. |
+| `collateral.py` | Compatibility facade for sell collateral checks; delegates token-inventory truth to CollateralLedger. |
+| `wrap_unwrap_commands.py` | Durable USDC.e↔pUSD command states; Z4 has no live chain-submission authority. |
 | `harvester.py` | Collects external result/harvest information without redefining settlement law. |
 
 ## 10. Relevant tests
@@ -64,19 +73,31 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 - tests/test_execution_price.py
 - tests/test_exit_authority.py
 - tests/test_entry_exit_symmetry.py
+- tests/test_unknown_side_effect.py
 - tests/test_day0_exit_gate.py
 - tests/test_divergence_exit_counterfactual.py
+- tests/test_collateral_ledger.py
+- tests/test_command_grammar_amendment.py
+- tests/test_command_bus_types.py
+- tests/test_exit_safety.py
+- tests/test_exchange_reconcile.py
+- tests/test_settlement_commands.py
+- tests/test_risk_allocator.py
 
 ## 11. Invariants
 - Exit intent is not closure; economic close is not settlement.
 - Execution must obey risk/control actuation; advisory-only risk is theater.
+- Resting GTC/GTD live orders must pass CutoverGuard, HeartbeatSupervisor, RiskAllocator/PortfolioGovernor, and CollateralLedger before venue-command persistence or SDK contact; missing heartbeat/collateral/allocation health is a hard pre-submit failure.
 - Monitoring triggers must be proven against the correct Day0 truth surface.
 - Fill tracking must not be mistaken for final outcome truth.
+- `RESTING`, `MATCHED`, `MINED`, and `CONFIRMED` are not `CommandState` values; they remain U2 order/trade facts.
+- Settlement redemption is durable and crash-recoverable; redeem failure/review states must not mark positions settled.
 
 ## 12. Negative constraints
 - Do not infer settlement success from local order/fill state.
 - Do not wire a convenient observation source into exits without source/date proof.
 - Do not bypass state/ledger append-first discipline.
+- Do not bypass CutoverGuard, HeartbeatSupervisor, RiskAllocator/PortfolioGovernor, or CollateralLedger for live placement convenience tests; tests that exercise executor mechanics must explicitly opt out with monkeypatches.
 - Do not let harvester metadata overwrite canonical outcome semantics.
 
 ## 13. Known failure modes
@@ -113,13 +134,20 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 
 ## 19. Do-not-change-without-checking list
 - `executor.py` actuation flow
+- `exchange_reconcile.py` findings-vs-command boundary and stale-read absence proof
+- `settlement_commands.py` Q-FX-1 gate, payout-asset classification, and `REDEEM_TX_HASHED` recovery semantics
+- Heartbeat/order-type submit gates before `_live_order` and `execute_exit_order`
+- RiskAllocator/PortfolioGovernor pre-submit gate and structured denial reason propagation
 - `exit_triggers.py` thresholds/source bindings
 - `exit_lifecycle.py` phase transitions
+- `exit_safety.py` cancel/replace gates and mutex release semantics
+- `exchange_reconcile.py` unresolved finding idempotence and operator-resolution loop
 - `harvester.py` settlement-result handling
 
 ## 20. Verification commands
 ```bash
 pytest -q tests/test_executor.py tests/test_execution_price.py tests/test_exit_authority.py
+pytest -q -p no:cacheprovider tests/test_risk_allocator.py
 pytest -q tests/test_day0_exit_gate.py tests/test_entry_exit_symmetry.py tests/test_divergence_exit_counterfactual.py
 python -m py_compile src/execution/*.py
 ```

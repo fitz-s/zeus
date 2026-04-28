@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-04-23; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Purpose: Lock typed ExecutionPrice validation at the executor live-send boundary.
+# Reuse: Run when executor live order construction or typed boundary contracts change.
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-27
 # Authority basis: T5.a of midstream remediation packet
 # (docs/operations/task_2026-04-23_midstream_remediation/plan.md);
 # D3 typed-pipeline extension past evaluator into executor CLOB-send
@@ -56,6 +59,12 @@ def _inject_mem_conn(monkeypatch):
     mem.execute("PRAGMA foreign_keys=ON")
     init_schema(mem)
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
     yield mem
     mem.close()
 

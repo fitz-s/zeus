@@ -26,6 +26,8 @@ Derived surfaces may never become truth by being convenient.
 | `ledger.py` | Append-only event spine | CRITICAL — canonical event history |
 | `projection.py` | Deterministic projection fold from events | CRITICAL — current state from events |
 | `chain_reconciliation.py` | On-chain truth convergence | HIGH — Chain > local |
+| `collateral_ledger.py` | pUSD/CTF collateral snapshot + reservations | HIGH — live pre-submit fail-closed truth |
+| `venue_command_repo.py` | Durable venue command/event journal | HIGH — command state drives reservation release |
 | `portfolio.py` | Runtime position read model | HIGH — what evaluator/executor see |
 | `portfolio_loader_policy.py` | DB-vs-fallback load discipline | HIGH — truth source selection |
 | `decision_chain.py` | Point-in-time decision lineage | MEDIUM |
@@ -56,6 +58,8 @@ Derived surfaces may never become truth by being convenient.
 
 - **DB commits must precede JSON export writes.** The canonical truth is the
   DB. JSON/status files are derived exports that must trail, never lead.
+
+- **Collateral is asset-specific.** `collateral_ledger.py` treats pUSD as BUY collateral and CTF outcome tokens as SELL inventory; never let pUSD balance satisfy a sell preflight.
 
 - **`strategy_key` is the sole governance identity.** All position attribution,
   risk policy resolution, and performance slicing flows through `strategy_key`.

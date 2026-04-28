@@ -1,0 +1,32 @@
+id: up-05
+title: NET_NEW SignedExecutionEnvelope atom — chain-anchor lifecycle (post-D-phase-final)
+authority_basis:
+  - opponent-up Attack-3 (observational vs performative — atom is lifecycle-anchored not authority-anchored)
+  - opponent-up Attack-4 + Attack-6 sequencing (atom against stable post-D-phase shape)
+  - apr26_findings_routing.yaml:F-011 / §9 (raw-payload-storage)
+  - INV-29 (frozen-dataclass kernel-boundary pattern)
+  - cross_region_questions.md X-UD-1 (Up↔Down sequencing dependency on D-phase collapse outcome)
+file_line:
+  - src/types/observation_atom.py:44-130 (frozen-dataclass + __post_init__ kernel pattern — same shape, different invariants)
+  - src/state/db.py:813 (venue_commands columns added in up-04 — atom is typed read/write API over those columns)
+  - src/execution/executor.py (call sites emit envelopes; consume from fill_tracker / harvester at terminal states)
+  - src/execution/fill_tracker.py (lifecycle transitions DRAFT→SIGNED→SUBMITTED→MINED→CONFIRMED|REORGED)
+antibody_test:
+  - tests/test_signed_execution_envelope.py::test_envelope_is_frozen_dataclass
+  - tests/test_signed_execution_envelope.py::test_chain_anchor_state_grammar_is_closed (DRAFT|SIGNED|SUBMITTED|MINED|CONFIRMED|REORGED only)
+  - tests/test_signed_execution_envelope.py::test_chain_anchor_required_at_mined_or_after (txhash/block_no MUST be set; raises IngestionRejected-equivalent if not)
+  - tests/test_signed_execution_envelope.py::test_chain_anchor_must_be_null_pre_submitted (DRAFT/SIGNED rows cannot carry chain_anchor)
+  - tests/test_signed_execution_envelope.py::test_authority_derived_from_state_not_asserted (no authority field at construction; authority(env) is a function of state)
+  - tests/test_signed_execution_envelope.py::test_reorged_state_demotes_authority (REORGED → authority drops below CONFIRMED)
+  - tests/test_signed_execution_envelope.py::test_idempotency_key_invariant (same inputs same key — INV-29 mirror)
+  - tests/test_relationship_envelope_to_command.py::test_envelope_lifecycle_matches_venue_command_state_machine (Fitz #2 cross-module test)
+depends_on: [up-04, up-07, X4-resolved]
+estimated_h: 8
+risk: medium
+critic_gate: critic-opus
+notes:
+  - NOT mirror-ObservationAtom — performative not observational. authority is derived from state, not asserted at construction.
+  - Sequencing CRITICAL: must land AFTER X-UD-1 is resolved. If Down's V2-SDK-collapse audit confirms D2.D ceases as discrete phase, "after D-phase-final" replaces "after D2.D".
+  - Opaque payload via raw_envelope_jsonb (added in up-04) — SDK-version-tagged but our schema is opaque to envelope keys. This survives v2→v3 SDK swap.
+  - REORGED handling deferred to Layer 2/3 — Layer 1 commits to the enum membership; transition rules + recovery semantics are Layer 3 territory.
+  - critic-opus gate because (a) new typed kernel atom on hot execution path, (b) lifecycle state machine semantics require correctness review.

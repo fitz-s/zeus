@@ -34,14 +34,10 @@ TS=$(date +%Y%m%d-%H%M%S)
 LOG="state/rebuild-sequential-${TS}.log"
 DB="state/zeus-world.db"
 
-# Transition WU_API_KEY export for the fillback restart after the old
-# stale-in-memory-Layer-3 process was killed on 2026-04-14. The K2 fix
-# removed the hardcoded default so scripts/backfill_wu_daily_all.py now
-# fail-closes without this env var. Mirrors the same constant in
-# scripts/post_sequential_fillback.sh — task #62 tracks rotation.
-if [ -z "${WU_API_KEY:-}" ]; then
-    export WU_API_KEY="e1f10a1e78da46f5b10a1e78da96f525"
-fi
+# WU calls require an operator-provided key. Do not embed transition keys in
+# active scripts; shell parameter expansion fails closed before any fetch.
+: "${WU_API_KEY:?WU_API_KEY must be set in the operator environment before running WU backfill}"
+export WU_API_KEY
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"

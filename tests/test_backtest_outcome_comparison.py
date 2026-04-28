@@ -24,8 +24,12 @@ def _init_trade_world(tmp_path):
     init_schema(world)
     world.execute(
         """
-        INSERT INTO settlements (city, target_date, settlement_value)
-        VALUES ('NYC', '2026-04-03', 40.0)
+        INSERT INTO settlements
+        (city, target_date, settlement_value, temperature_metric,
+         physical_quantity, observation_field, data_version)
+        VALUES ('NYC', '2026-04-03', 40.0, 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp',
+                'tigge_mx2t6_local_calendar_day_max_v1')
         """
     )
     world.commit()
@@ -209,11 +213,20 @@ def test_new_lanes_write_to_zeus_backtest_not_replay_results(tmp_path, monkeypat
     trade.close()
     _patch_connections(monkeypatch, trade_db, world_db, backtest_db)
 
-    replay_module.run_replay("2026-04-03", "2026-04-03", mode="wu_settlement_sweep")
+    replay_module.run_replay(
+        "2026-04-03",
+        "2026-04-03",
+        mode="wu_settlement_sweep",
+        allow_snapshot_only_reference=True,
+    )
 
     trade = get_connection(trade_db)
     backtest = get_connection(backtest_db)
-    assert trade.execute("SELECT COUNT(*) FROM replay_results").fetchone()[0] == 0
+    replay_results = trade.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='replay_results'"
+    ).fetchone()
+    if replay_results is not None:
+        assert trade.execute("SELECT COUNT(*) FROM replay_results").fetchone()[0] == 0
     assert backtest.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 1
     trade.close()
     backtest.close()

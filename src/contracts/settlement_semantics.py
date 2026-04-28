@@ -1,5 +1,7 @@
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from typing import ClassVar, Literal
 
 import logging
 import numpy as np
@@ -180,3 +182,89 @@ class SettlementSemantics:
             rounding_rule="wmo_half_up",
             finalization_time="12:00:00Z",
         )
+
+
+# Created: 2026-04-27 (BATCH C of 2026-04-27 harness debate executor work)
+# Last reused/audited: 2026-04-27
+# Authority basis: docs/operations/task_2026-04-27_harness_debate/round2_verdict.md
+#   §1.1 #4 + §4.1 #4 (both proponent + opponent endorsed type-encoded HK HKO
+#   antibody; opponent §3.1 has the template). Per Fitz Constraint #1 "make the
+#   category impossible, not just the instance".
+#
+# This block APPENDS a parallel type-encoded settlement-rounding policy. It does
+# NOT replace the existing SettlementSemantics.round_values() string-dispatch
+# path; that migration is Tier 3 P8 territory. New code paths SHOULD use this
+# policy ABC; existing callers continue working unchanged.
+
+class SettlementRoundingPolicy(ABC):
+    """Type-encoded settlement-rounding policy. Replaces YAML antibody for
+    HK HKO truncation vs WMO half-up cross-city mixing with a TypeError at
+    the call site (per Fitz Constraint #1: make the category impossible).
+
+    Subclasses MUST set the ClassVar `name` to a stable string identifier and
+    implement `round_to_settlement` + `source_authority`. Mixing policies
+    across incompatible markets raises TypeError in `settle_market`.
+    """
+    name: ClassVar[str]
+
+    @abstractmethod
+    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
+        """Round a raw temperature to the integer settlement value."""
+
+    @abstractmethod
+    def source_authority(self) -> str:
+        """Return the authority string for this policy (e.g., 'WMO', 'HKO')."""
+
+
+class WMO_HalfUp(SettlementRoundingPolicy):
+    """WMO half-up: 74.45 → 74; 74.50 → 75. WU/NOAA/CWA settlement chains."""
+    name: ClassVar[str] = "wmo_half_up"
+
+    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
+        return int(raw_temp_c.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+    def source_authority(self) -> str:
+        return "WMO"
+
+
+class HKO_Truncation(SettlementRoundingPolicy):
+    """HKO truncation: 74.99 → 74. Hong Kong settlement chain ONLY.
+
+    UMA voters treat decimal °C as truncated ('28.7 hasn't reached 29, so it's
+    28'). Empirically verified: floor() achieves 14/14 (100%) match on HKO
+    same-source settlement days vs 5/14 (36%) with WMO half-up.
+    """
+    name: ClassVar[str] = "hko_truncation"
+
+    def round_to_settlement(self, raw_temp_c: Decimal) -> int:
+        return int(raw_temp_c.quantize(Decimal('1'), rounding=ROUND_DOWN))
+
+    def source_authority(self) -> str:
+        return "HKO"
+
+
+def settle_market(city_name: str, raw_temp_c: Decimal,
+                  policy: SettlementRoundingPolicy) -> int:
+    """Apply the rounding policy to raw °C, with type-encoded city/policy match.
+
+    HK markets REQUIRE HKO_Truncation; non-HK markets REQUIRE non-HKO policy.
+    Mismatch raises TypeError BEFORE any rounding happens — i.e., the wrong
+    rounding for the wrong city is structurally unconstructable. Per Fitz
+    Constraint #1 (make the category impossible).
+    """
+    if not isinstance(policy, SettlementRoundingPolicy):
+        raise TypeError(
+            f"settle_market requires a SettlementRoundingPolicy instance; "
+            f"got {type(policy).__name__}"
+        )
+    if city_name == "Hong Kong" and not isinstance(policy, HKO_Truncation):
+        raise TypeError(
+            f"Hong Kong markets require HKO_Truncation policy; "
+            f"got {type(policy).__name__}"
+        )
+    if city_name != "Hong Kong" and isinstance(policy, HKO_Truncation):
+        raise TypeError(
+            f"HKO_Truncation policy is valid for Hong Kong only; "
+            f"got city={city_name!r}"
+        )
+    return policy.round_to_settlement(raw_temp_c)

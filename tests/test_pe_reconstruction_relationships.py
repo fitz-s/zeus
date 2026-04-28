@@ -139,6 +139,8 @@ def _db_rows_as_plan() -> list[dict]:
 def plan() -> list[dict]:
     if TEST_SOURCE == "db":
         return _db_rows_as_plan()
+    if not PLAN_PATH.exists():
+        pytest.skip(f"PE reconstruction evidence plan not present: {PLAN_PATH}")
     with open(PLAN_PATH) as f:
         doc = json.load(f)
     return doc["plan"]
