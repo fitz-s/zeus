@@ -561,6 +561,13 @@ files:
     why: Appends live forecast-history rows and coverage for post-backfill freshness.
     downstream:
     - src/main.py
+  src/data/dissemination_schedules.py:
+    zone: K2_runtime
+    authority_role: forecast_dissemination_registry
+    why: Per-source (ECMWF/GFS/ICON/UKMO/OpenMeteo) deterministic base→available_at function and provenance tier; F11 antibody for forecast_issue_time NULL rows.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
   src/data/hole_scanner.py:
     zone: K2_runtime
     authority_role: data_hole_scanner
