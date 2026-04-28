@@ -161,32 +161,40 @@ def compute_reaction_latency_per_strategy(
         for sk in STRATEGY_KEYS
     }
     latencies_by_strategy: dict[str, list[float]] = {sk: [] for sk in STRATEGY_KEYS}
-    # Also collect (strategy, tick_ts_ms, position_id) so we can compute
-    # n_with_action via a second pass against position_events.
-    ticks_by_strategy: dict[str, list[tuple[int, str]]] = {sk: [] for sk in STRATEGY_KEYS}
+    # Per-strategy ticks for n_with_action: the SAME (token_id, zeus_ms) tick
+    # may map to MULTIPLE position_ids if more than one position holds the
+    # same token under that strategy (averaging-in / settled-then-re-entered
+    # / hedged). For n_with_action we need the SET of candidate position_ids
+    # per (strategy, zeus_ms) tick — if ANY of them has a position_events
+    # row inside the action window, the tick counts as "acted on".
+    ticks_by_strategy: dict[str, list[tuple[int, set[str]]]] = {sk: [] for sk in STRATEGY_KEYS}
 
-    # Pull ticks within window. token_price_log has token_id; position_current
-    # ALSO has token_id (architecture/2026_04_02_architecture_kernel.sql:123).
-    # Strategy_key is on position_current.
+    # MED-REVISE-WP-1-1 fix (critic 22nd cycle): position_current.token_id
+    # is NOT unique (PRIMARY KEY is position_id only; schema permits multiple
+    # positions on same token: averaging-in / settled-then-re-entered /
+    # hedged). The original JOIN multiplied rows under that case, inflating
+    # n_signals + biasing p50/p95 toward repeated samples. Fix: SELECT
+    # DISTINCT on the latency-bearing tuple (token_id, source_timestamp,
+    # zeus_timestamp, strategy_key) so each unique tick contributes exactly
+    # once per strategy. Position_id mapping for n_with_action is fetched
+    # via a separate query that aggregates positions per (token, strategy).
     cur = conn.execute("""
-        SELECT
+        SELECT DISTINCT
             tpl.token_id,
             tpl.source_timestamp,
             tpl.timestamp AS zeus_timestamp,
-            pc.strategy_key,
-            pc.position_id
+            pc.strategy_key
         FROM token_price_log tpl
         JOIN position_current pc ON pc.token_id = tpl.token_id
         WHERE tpl.timestamp IS NOT NULL
           AND pc.strategy_key IS NOT NULL
     """)
+    distinct_ticks: list[tuple[str, str | None, str, str, int]] = []  # (token, src, zeus_ts, strategy, zeus_ms)
     for row in cur.fetchall():
-        # sqlite3.Row supports both index and key access; tolerate both.
         token_id = row[0] if not hasattr(row, "keys") else row["token_id"]
         source_ts = row[1] if not hasattr(row, "keys") else row["source_timestamp"]
         zeus_ts = row[2] if not hasattr(row, "keys") else row["zeus_timestamp"]
         strategy_key = row[3] if not hasattr(row, "keys") else row["strategy_key"]
-        position_id = row[4] if not hasattr(row, "keys") else row["position_id"]
 
         if strategy_key not in per_strategy:
             # Unknown strategy_key (legacy data) — quarantine; per AGENTS.md
@@ -202,19 +210,45 @@ def compute_reaction_latency_per_strategy(
         # Clip negative latencies to 0 (clock-skew defense per module docstring).
         latency_ms = max(0.0, float(zeus_ms - source_ms))
         latencies_by_strategy[strategy_key].append(latency_ms)
-        ticks_by_strategy[strategy_key].append((zeus_ms, str(position_id)))
+        distinct_ticks.append((str(token_id), source_ts, str(zeus_ts), strategy_key, zeus_ms))
 
-    # n_with_action: count ticks where a position_events row exists for
-    # the same position_id within ACTION_WINDOW_SECONDS after the tick.
+    # Build (token_id, strategy_key) → set[position_id] map for n_with_action
+    # lookup. Multiple positions on the same token under same strategy all
+    # count as candidates; if ANY of them has a matching position_events row
+    # inside the action window, the tick counts as "acted on".
+    pos_map: dict[tuple[str, str], set[str]] = {}
+    pos_cur = conn.execute("""
+        SELECT DISTINCT token_id, strategy_key, position_id
+        FROM position_current
+        WHERE token_id IS NOT NULL AND strategy_key IS NOT NULL
+    """)
+    for row in pos_cur.fetchall():
+        tid = row[0] if not hasattr(row, "keys") else row["token_id"]
+        sk = row[1] if not hasattr(row, "keys") else row["strategy_key"]
+        pid = row[2] if not hasattr(row, "keys") else row["position_id"]
+        pos_map.setdefault((str(tid), str(sk)), set()).add(str(pid))
+
+    # Attach candidate position_ids to each distinct tick.
+    for token_id, _src, _zts, strategy_key, zeus_ms in distinct_ticks:
+        pids = pos_map.get((token_id, strategy_key), set())
+        ticks_by_strategy[strategy_key].append((zeus_ms, pids))
+
+    # n_with_action: count ticks where ANY candidate position has a
+    # position_events row within ACTION_WINDOW_SECONDS after the tick.
     action_window_ms = ACTION_WINDOW_SECONDS * 1000
     for sk, ticks in ticks_by_strategy.items():
         if not ticks:
             continue
-        # Get all position_events.occurred_at for the position_ids of interest,
-        # in window. Build a set of (position_id, occurred_at_ms) tuples.
-        position_ids = sorted({pid for _, pid in ticks})
-        if not position_ids:
+        # Each tick now has a SET of candidate position_ids (multiple
+        # positions on same token under same strategy all count). Collect
+        # the union of all candidate pids across ticks for a single bulk
+        # event lookup.
+        all_pids: set[str] = set()
+        for _tick_ms, pid_set in ticks:
+            all_pids |= pid_set
+        if not all_pids:
             continue
+        position_ids = sorted(all_pids)
         placeholders = ",".join("?" for _ in position_ids)
         ev_cur = conn.execute(
             f"SELECT position_id, occurred_at FROM position_events "
@@ -230,11 +264,16 @@ def compute_reaction_latency_per_strategy(
                 continue
             events_by_pid.setdefault(str(pid), []).append(occ_ms)
         n_acted = 0
-        for tick_ms, pid in ticks:
-            ev_times = events_by_pid.get(pid, [])
-            # Action: any position_events row at occurred_at in [tick_ms,
-            # tick_ms + action_window_ms]
-            if any(tick_ms <= ev_ms <= tick_ms + action_window_ms for ev_ms in ev_times):
+        for tick_ms, pid_set in ticks:
+            # Action: ANY candidate position has a position_events row at
+            # occurred_at in [tick_ms, tick_ms + action_window_ms].
+            acted = False
+            for pid in pid_set:
+                ev_times = events_by_pid.get(pid, [])
+                if any(tick_ms <= ev_ms <= tick_ms + action_window_ms for ev_ms in ev_times):
+                    acted = True
+                    break
+            if acted:
                 n_acted += 1
         per_strategy[sk]["n_with_action"] = n_acted
 

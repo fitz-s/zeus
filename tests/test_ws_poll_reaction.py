@@ -340,3 +340,85 @@ def test_n_with_action_counts_position_events_within_window():
     assert cb["n_signals"] == 2
     assert cb["n_with_action"] == 1, \
         f"action-window filter: got {cb['n_with_action']}, expected 1"
+
+
+# =====================================================================
+# MED-REVISE-WP-1-1 row-multiplication regression tests (critic 22nd cycle)
+# =====================================================================
+# Per critic empirical reproduction: position_current.token_id is NOT unique
+# (PRIMARY KEY is position_id only; schema permits multiple positions on
+# same token: averaging-in / settled-then-re-entered / hedged). The
+# pre-fix JOIN multiplied rows under that case, inflating n_signals + biasing
+# p50/p95 toward repeated samples. These two tests pin the fix:
+#
+#   - same-strategy / same-token / multiple-positions: the tick must count
+#     ONCE per strategy (not once per position). This is the load-bearing
+#     antibody for the defect critic caught.
+#   - different-strategy / same-token / one-position-each: each strategy
+#     gets its own count of 1 (this is the defensible case — the same
+#     market tick can legitimately attribute to multiple strategies if
+#     positions on the token are labeled differently).
+
+
+def test_multi_position_same_strategy_same_token_no_overcount():
+    """RELATIONSHIP (MED-REVISE-WP-1-1 antibody): 2 positions on the SAME
+    token under the SAME strategy + 1 tick → strategy n_signals=1, NOT 2.
+
+    Defect pre-fix: SQL JOIN multiplied (1 tick × 2 positions = 2 rows).
+    Fix: SELECT DISTINCT on (token_id, source_ts, zeus_ts, strategy_key);
+    each unique tick contributes ONCE per strategy regardless of how many
+    positions hold the token.
+    """
+    conn = _make_conn()
+    # 2 positions same strategy on same token (averaging-in scenario)
+    _insert_position_current(conn, position_id="p_avg1", token_id="tok-shared",
+                             strategy_key="opening_inertia")
+    _insert_position_current(conn, position_id="p_avg2", token_id="tok-shared",
+                             strategy_key="opening_inertia")
+    # ONE tick on that token
+    _insert_tick(conn, token_id="tok-shared",
+                 source_ts="2026-04-23T12:00:00+00:00",
+                 zeus_ts="2026-04-23T12:00:00.250000+00:00")  # 250ms
+    conn.commit()
+
+    result = compute_reaction_latency_per_strategy(conn, window_days=7, end_date="2026-04-28")
+    oi = result["opening_inertia"]
+    assert oi["n_signals"] == 1, \
+        f"row multiplication: 1 tick × 2 positions same strategy should count ONCE; got n_signals={oi['n_signals']}"
+    # Latency math should reflect ONE 250ms sample, not two.
+    assert abs(oi["latency_p50_ms"] - 250.0) < 1e-6
+    assert abs(oi["latency_p95_ms"] - 250.0) < 1e-6
+
+
+def test_multi_position_different_strategy_same_token_per_strategy_count():
+    """RELATIONSHIP (MED-REVISE-WP-1-1 defensible-case pin): 2 positions
+    on the SAME token but DIFFERENT strategies + 1 tick → each strategy
+    n_signals=1.
+
+    This is the non-defect case: the same market tick can legitimately
+    attribute to two strategies if positions on the token are labeled
+    differently (e.g., legacy migration left a center_buy position
+    alongside an opening_inertia rebalance on the same token). The fix
+    must NOT collapse this case to a single count.
+    """
+    conn = _make_conn()
+    _insert_position_current(conn, position_id="p_oi", token_id="tok-shared",
+                             strategy_key="opening_inertia")
+    _insert_position_current(conn, position_id="p_cb", token_id="tok-shared",
+                             strategy_key="center_buy")
+    _insert_tick(conn, token_id="tok-shared",
+                 source_ts="2026-04-23T12:00:00+00:00",
+                 zeus_ts="2026-04-23T12:00:00.300000+00:00")  # 300ms
+    conn.commit()
+
+    result = compute_reaction_latency_per_strategy(conn, window_days=7, end_date="2026-04-28")
+    assert result["opening_inertia"]["n_signals"] == 1, \
+        f"different-strategy-same-token: opening_inertia should count ONCE; got {result['opening_inertia']['n_signals']}"
+    assert result["center_buy"]["n_signals"] == 1, \
+        f"different-strategy-same-token: center_buy should count ONCE; got {result['center_buy']['n_signals']}"
+    # Both strategies see same 300ms latency for this tick.
+    assert abs(result["opening_inertia"]["latency_p50_ms"] - 300.0) < 1e-6
+    assert abs(result["center_buy"]["latency_p50_ms"] - 300.0) < 1e-6
+    # Other strategies untouched.
+    for sk in ("settlement_capture", "shoulder_sell"):
+        assert result[sk]["n_signals"] == 0
