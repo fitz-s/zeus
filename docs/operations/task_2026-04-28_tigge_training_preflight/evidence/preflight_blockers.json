@@ -1,0 +1,13 @@
+{
+  "blocker_set": "rebuild_calibration_pairs_v2 live-write preflight 2026-04-28",
+  "raised_when": "--no-dry-run --force on /tmp/zeus-tigge-preflight.sqlite",
+  "blockers": [
+    {"id": "empty_rebuild_eligible_snapshots", "scope": "scope-of-smoke", "next_action": "full 51-city re-extract"},
+    {"id": "observation_instants_v2.training_role_unsafe", "scope": "obs-side", "next_action": "review observation_instants_v2 row classification"},
+    {"id": "observations.hko_requires_fresh_source_audit", "scope": "obs-side", "next_action": "HKO source audit refresh"},
+    {"id": "observations.verified_without_provenance", "scope": "obs-side", "next_action": "populate observations.provenance_metadata"},
+    {"id": "observations.wu_empty_provenance", "scope": "obs-side", "next_action": "populate WU-source provenance"},
+    {"id": "payload_identity_missing", "scope": "schema", "next_action": "MetricIdentity stamping similar to settlements migration"}
+  ],
+  "implication": "TIGGE causality (this packet) is necessary but not sufficient for live training. Next packet should address observation-side gates."
+}

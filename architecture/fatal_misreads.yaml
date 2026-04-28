@@ -166,3 +166,35 @@ misreads:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
       - python3 scripts/topology_doctor.py --code-review-graph-status --json
     task_classes: [source_routing, docs_authority, graph_review]
+
+  - id: polymarket_low_market_history_starts_2026_04_15
+    severity: critical
+    false_equivalence: "absent_pre_2026_04_15_low_settlements == data_pipeline_bug"
+    correction: >
+      Polymarket DID NOT offer LOW (mn2t6 / "lowest temperature") weather
+      markets before 2026-04-15. The first closed LOW event resolved 2026-04-15.
+      Coverage is also restricted to 8 cities only (London, Seoul, NYC, Tokyo,
+      Shanghai, Paris, Miami, Hong Kong) — not all 51 zeus cities. Therefore
+      the absence of LOW settlement rows for (city, date) tuples that fall
+      outside this scope is NOT a backfill miss, NOT a scraper bug, NOT a
+      schema gap, and NOT actionable. Do not write retro-scrapers, do not
+      open quarantine reactivation tickets, do not search archives.
+      Confirmed via gamma-api.polymarket.com 2026-04-28: 48 closed LOW
+      events / 18 active, dates 2026-04-15..2026-04-29. The HIGH (max
+      temperature) market series predates LOW by ~2 years — this
+      asymmetry is upstream-Polymarket, not zeus-internal.
+      LOW Platt training MUST use observations.low_temp (42,749 rows /
+      51 cities / 2023-12-27..2026-04-19) as canonical ground truth, NOT
+      settlements LOW (only 48 rows ever exist).
+    proof_files:
+      - docs/operations/task_2026-04-28_settlements_low_backfill/plan.md
+      - docs/operations/task_2026-04-28_settlements_low_backfill/evidence/pm_settlement_truth_low.json
+      - docs/operations/known_gaps.md
+    invalidation_condition: >
+      Only a fresh gamma-api.polymarket.com probe showing closed/resolved LOW
+      events with endDate < 2026-04-15 OR coverage extending beyond the
+      8-city set may relax this caution. Prove with HTTP response artifacts,
+      not from logs/archives that pre-date the 2026-04-28 audit.
+    tests:
+      - python3 scripts/topology_doctor.py --fatal-misreads --json
+    task_classes: [settlement_backfill, market_scanner, source_routing, low_track]

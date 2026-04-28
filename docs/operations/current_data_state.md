@@ -1,11 +1,13 @@
 # Current Data State
 
 Status: active current-fact surface
-Last audited: 2026-04-23 (post-data-readiness-workstream closure)
+Last audited: 2026-04-28 (HIGH `physical_quantity` migration + LOW settlements backfill)
 Max staleness: 14 days for data/backfill/schema planning
-Evidence packet: `docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md`
-  + `docs/operations/task_2026-04-23_data_readiness_remediation/work_log.md` (full trail)
-  + `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/` (code-only follow-up, flag OFF)
+Evidence packets:
+  - `docs/operations/task_2026-04-23_data_readiness_remediation/` (HIGH baseline, P-E reconstruction)
+  - `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/` (code-only follow-up, flag OFF)
+  - `docs/operations/task_2026-04-28_settlements_physical_quantity_migration/` (HIGH `physical_quantity` canonical-string migration; APPLIED)
+  - `docs/operations/task_2026-04-28_settlements_low_backfill/` (LOW settlements bootstrap; APPLIED)
 Authority status: not authority law; audit-bound planning fact only
 If stale, do not use for: live data-readiness, backfill readiness, v2 cutover,
 or ingest-health claims
@@ -25,14 +27,19 @@ law, read `architecture/data_rebuild_topology.yaml`,
    forecasts, calibration, snapshots, and settlements.
 2. `state/zeus_trades.db` is trades-focused DB truth.
 3. `state/zeus.db` is legacy and not the current canonical data store.
-4. **`settlements` is canonical-authority-grade as of 2026-04-23**: 1,561 rows
-   (1,469 VERIFIED + 92 QUARANTINED), every row carrying INV-14 identity
-   spine (`temperature_metric`, `physical_quantity`, `observation_field`,
-   `data_version`) + full `provenance_json` with `decision_time_snapshot_id`
-   referencing `observations.fetched_at`. Schema carries the
-   `settlements_authority_monotonic` trigger (P-B). Writer signature on
-   every row: `p_e_reconstruction_2026-04-23`. See the closure summary at
-   `docs/operations/task_2026-04-23_data_readiness_remediation/CLOSURE_SUMMARY.md`.
+4. **`settlements` is canonical-authority-grade as of 2026-04-28**: 1,609 rows total. INV-14 identity spine intact on every row (`temperature_metric`, `physical_quantity`, `observation_field`, `data_version`) + full `provenance_json`. Schema carries `settlements_authority_monotonic` + `settlements_non_null_metric` + `settlements_verified_insert/update_integrity` triggers.
+
+   **HIGH track** (1,561 rows, writer `p_e_reconstruction_2026-04-23`, post-2026-04-28 migration):
+   - 1,469 VERIFIED + 92 QUARANTINED
+   - All rows now carry canonical `physical_quantity = "mx2t6_local_calendar_day_max"` (was legacy literal `"daily_maximum_air_temperature"` pre-2026-04-28; migrated by `task_2026-04-28_settlements_physical_quantity_migration` with snapshot at `state/zeus-world.db.pre-physqty-migration-2026-04-28`)
+   - Closure summary: `docs/operations/task_2026-04-23_data_readiness_remediation/CLOSURE_SUMMARY.md`
+
+   **LOW track** (48 rows, writer `p_e_reconstruction_low_2026-04-28`):
+   - 4 VERIFIED + 44 QUARANTINED
+   - Coverage: 8 cities (London/Seoul/NYC/Tokyo/Shanghai/Paris/Miami/Hong Kong), 2026-04-15..2026-04-27
+   - All rows carry canonical `physical_quantity = "mn2t6_local_calendar_day_min"`
+   - **STRUCTURAL LIMIT**: Polymarket did NOT offer LOW markets before 2026-04-15 (verified gamma-api 2026-04-28). LOW row count is upstream-limited, not a backfill miss. See `architecture/fatal_misreads.yaml::polymarket_low_market_history_starts_2026_04_15` and `docs/operations/task_2026-04-28_settlements_low_backfill/plan.md`.
+   - Snapshot: `state/zeus-world.db.pre-low-backfill-2026-04-28`
 5. **`observations` still carries the settlement-driving data**: 51 cities of
    `wu_icao_history` + `hko_daily_api` + `ogimet_metar_*` rows are the source
    of truth that P-E used to re-derive `settlements.settlement_value` via
@@ -70,14 +77,13 @@ law, read `architecture/data_rebuild_topology.yaml`,
 Re-audit before relying on this file if:
 
 - any v2 table becomes populated or promoted to canonical
-- a new writer/cutover lands on `settlements` beyond the two currently-registered
-  writers (`p_e_reconstruction_2026-04-23`, `harvester_live_dr33`)
+- a new writer/cutover lands on `settlements` beyond the three currently-registered writers (`p_e_reconstruction_2026-04-23`, `p_e_reconstruction_low_2026-04-28`, `harvester_live_dr33`)
 - `ZEUS_HARVESTER_LIVE_ENABLED` is flipped to `1`
 - ingest freshness materially changes
 - DB role ownership changes
-- any subsequent mutation changes the 1,561-row / 1,469-VERIFIED baseline
-- the file is older than Max staleness and the task needs present-tense data
-  truth
+- any subsequent mutation changes the 1,609-row baseline (1,561 HIGH + 48 LOW; 1,473 VERIFIED total)
+- a fresh gamma-api.polymarket.com probe shows LOW markets predating 2026-04-15 OR coverage beyond the 8-city set (which would invalidate the structural-limit caution)
+- the file is older than Max staleness and the task needs present-tense data truth
 
 ## Stale Behavior
 

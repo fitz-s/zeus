@@ -13,6 +13,30 @@ failed.
 
 ---
 
+## ANTI-RABBIT-HOLE: upstream-Polymarket scope limits (READ FIRST)
+
+### [STRUCTURAL — NOT A BUG] Polymarket LOW market series starts 2026-04-15
+**Status:** documented; do not chase.
+**Audit date:** 2026-04-28 (gamma-api.polymarket.com live probe).
+**Fact:** Polymarket did NOT offer LOW (mn2t6 / "lowest temperature") weather markets before 2026-04-15. First closed LOW event resolved 2026-04-15. Coverage is 8 cities only: London, Seoul, NYC, Tokyo, Shanghai, Paris, Miami, Hong Kong.
+**Reality numbers:** 48 closed LOW events / 18 active. Date range 2026-04-15..2026-04-29. HIGH (max temp) market series predates LOW by ~2 years.
+**Implication:**
+- `state/zeus-world.db::settlements` LOW rows will never exceed ~50 historical + ~8/day going forward
+- LOW Platt training MUST use `observations.low_temp` (42,749 rows / 51 cities / 2023-12-27..2026-04-19) as canonical ground truth — NOT `settlements` LOW
+- Absence of LOW settlement rows for (city, date) tuples outside the 8-city × post-2026-04-15 scope is structural, not a backfill miss
+**Do NOT:**
+- Write retro-scrapers for pre-2026-04-15 dates
+- Open quarantine reactivation tickets for cities outside the 8-city set
+- Search archives expecting historical LOW market truth to exist
+- Block on this gap when training LOW calibration; use observations.low_temp
+**Antibody:** `architecture/fatal_misreads.yaml::polymarket_low_market_history_starts_2026_04_15` (severity=critical)
+**Proof artifacts:**
+- `docs/operations/task_2026-04-28_settlements_low_backfill/plan.md`
+- `docs/operations/task_2026-04-28_settlements_low_backfill/evidence/pm_settlement_truth_low.json`
+**Invalidation:** only a fresh gamma-api probe with HTTP-evidence showing LOW events with endDate < 2026-04-15 OR coverage beyond 8 cities may relax this.
+
+---
+
 ## CRITICAL: DST / Timezone
 
 ### [OPEN — NOT LIVE-CERTIFIED] Historical diurnal aggregates still need DST-safe rebuild cleanup
