@@ -34,7 +34,7 @@ SELECT COUNT(*) FROM market_price_history;   -- 0
 
 - 361 live temperature markets exist right now → historical backlog is large
 - CLOB API has `getTrades` / `getTradesPaginated` for trade history
-- ⚠ **CORRECTED (see [04 §C4](04_corrections_2026-04-27.md#c4-polymarket-no-public-historical-archive-api))**: Polymarket has 4 data layers (Gamma API, public Subgraph with `orderbook-subgraph`, Data API REST `/trades`, WebSocket Market Channel). Trade history IS retrievable; orderbook-snapshot retention via subgraph still unverified (04 §3 U4).
+- ⚠ **CORRECTED (see [04 §C4](04_corrections_2026-04-27.md#c4-polymarket-no-public-historical-archive-api) + [04 §U4 RESOLVED](04_corrections_2026-04-27.md#3-verification-status-updated-2026-04-28))**: Polymarket has 4 data layers (Gamma API, public Subgraph, Data API REST `/trades` (auth-gated, U6), WebSocket Market Channel). Subgraph orderbook-subgraph schema verified verbatim: stores trade EVENTS only (OrderFilledEvent / OrdersMatchedEvent / aggregated Orderbook counters), **no bid/ask SNAPSHOT entity at any timestamp**. Realized-fill ECONOMICS reconstruction is possible from subgraph + free; counterfactual ECONOMICS (decision-time ask quote) requires forward WebSocket capture OR third-party paid archive (Tardis / Kaiko / Dune).
 - WebSocket "Market Channel" is the canonical real-time source; capture must be done forward-only
 - ⚠ **CORRECTED (see [04 §C3](04_corrections_2026-04-27.md#c3-polymarket-us-weather-market-resolution-source))**: US weather markets verified verbatim use **Wunderground** (KLGA/KORD/KMIA/KLAX) — Zeus's settlement_source matches reality. The earlier "NOAA stations" framing here was a WebSearch hallucination.
 
@@ -271,7 +271,7 @@ venue_commands: 0
 
 ### 3.C — Polymarket is opaque to Zeus historically
 
-⚠ **CORRECTED (see [04 §C4](04_corrections_2026-04-27.md#c4-polymarket-no-public-historical-archive-api))**: Polymarket DOES expose historical infrastructure (Subgraph + Data API + Gamma API). The previous framing ("no public archive → physics constraint") was overstated. The real constraint is narrower: **historical orderbook snapshots at arbitrary timestamps** (vs trade events) may not be retained in the subgraph (U4 unverified). Trade event history is fully retrievable. ECONOMICS purpose is gated by ingestion code work, not absence of upstream data.
+⚠ **CORRECTED, then U4 RESOLVED (see [04 §U4](04_corrections_2026-04-27.md#3-verification-status-updated-2026-04-28))**: Polymarket DOES expose historical trade-event infrastructure via subgraph (free) + Data API REST (auth-gated, U6). Schema verified 2026-04-28: subgraph stores EVENTS only — `OrderFilledEvent`, `OrdersMatchedEvent`, aggregated `Orderbook` counters. **No bid/ask snapshot at any timestamp.** Implication: realized-fill ECONOMICS (PnL of trades that actually printed) is reconstructable from subgraph; counterfactual ECONOMICS (what Zeus would have done against the decision-time orderbook) requires forward-only WebSocket capture OR third-party paid archive. The "physics constraint" framing was wrong-ish — it's a constraint on snapshot retention specifically, not on archive existence.
 
 ### 3.D — Going-forward truth is reachable, history is not
 

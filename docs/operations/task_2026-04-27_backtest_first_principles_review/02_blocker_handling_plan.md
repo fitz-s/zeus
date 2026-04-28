@@ -95,7 +95,7 @@ market_price_history: 0 rows
 
 | Option | Action | What it gets you | Cost |
 |---|---|---|---|
-| **A. Subgraph + Data API ingestion (FREE/CHEAP)** | Run a scheduled GraphQL puller against Polymarket public subgraph + Data API; populate `market_events_v2` from `activity-subgraph` + `orderbook-subgraph` | Historical trade events for all markets; orderbook events depending on subgraph schema (U4) | Low — free up to The Graph free tier; minimal infrastructure |
+| **A. Subgraph trade-event ingestion (FREE)** | Run a scheduled GraphQL puller against the public Polymarket subgraph; populate `market_events_v2` from `OrderFilledEvent` + `OrdersMatchedEvent`. **Per [04 §U4 RESOLVED](04_corrections_2026-04-27.md#3-verification-status-updated-2026-04-28) the subgraph stores trade events ONLY — no bid/ask snapshot history.** Sufficient for *realized-fill* reconstruction (verify: what trades printed at what price), insufficient for *counterfactual* ECONOMICS (what would Zeus have done at decision time, against the ask quote then?). | Realized-fill ECONOMICS (lower-fidelity); historical trade event log | Low — free up to The Graph free tier; minimal infrastructure. **Cannot satisfy full counterfactual ECONOMICS parity alone.** |
 | **B. Forward-only WebSocket capture** | Subscribe to Polymarket Market Channel; persist book/price_change/last_trade events into `market_price_history` going forward | Real-time orderbook truth from go-live; perfect for forward-grade ECONOMICS | Medium — daemon, sequence-gap handling |
 | **C. Both A+B** | A for historical reconstruction, B for going-forward orderbook precision | Maximum coverage and precision | Sum of A+B |
 
