@@ -270,3 +270,17 @@ End of round-2 verdict.
 BATCH D was RE-SCOPED to REVERT + ADD tests: blocks rather than DELETE. See round-1 verdict §10 erratum for the complete root-cause analysis. The synthesized harness target (~5K-6K LOC short-term, ~1.5-2K LOC asymptote) is UNCHANGED — the erratum corrects the LARP-rate empirical claim, not the architectural decisions.
 
 The methodology critic-gate caught this verdict-level drift; see `docs/methodology/adversarial_debate_for_project_evaluation.md` §5 case study for how.
+
+### §9.2 SECOND POST-IMPLEMENTATION ERRATUM (added 2026-04-28 after Tier 2 Phase 2 audit)
+
+§1.1 #10 (auto-generate `docs_registry.yaml` + `script_manifest.yaml` + `test_topology.yaml` from filesystem walk) was empirically FALSIFIED by Tier 2 Phase 2 audit:
+
+- **`script_manifest.yaml`**: 137 of 139 fs-discoverable scripts already cited (99% complete); 2 missing are Phase 1/2 audit scripts not yet added — NOT drift; just behind by one phase.
+- **`test_topology.yaml`**: 236 of 235 fs tests cited (1 orphan from path mismatch); not drifted.
+- **`docs_registry.yaml`**: 76 of 965 fs-discoverable docs cited — **INTENTIONAL CURATION**, not drift. Spot-check confirmed 20/20 missing entries are `docs/archives/*` (cold-storage class explicitly excluded by `AGENTS.md` root). Hand-curated metadata is 19-22 fields per entry (`promotion_deadline`, `dangerous_if_run`, `unguarded_write_rationale`, `delete_policy`) — none auto-derivable from filesystem.
+
+**Auto-generation would discard 95% of the load-bearing curation intent.**
+
+Corrected approach: audit tools per `architecture/topology.yaml` metadata.audit_cadence (added Phase 2). The audit IS the antibody — run before commits to catch drift; operator decides per-PR which lifecycle-header gaps are acceptable. **DON'T flip 3 registries to auto-gen.**
+
+This is the SECOND verdict-level erratum (after §9 INV-16/17). Both follow the same pattern: **apparent gap may be intentional, not drift**. Methodology updated at `docs/methodology/adversarial_debate_for_project_evaluation.md` §5.Z with the generalization.
