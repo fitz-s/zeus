@@ -54,7 +54,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from src.state.db import query_authoritative_settlement_rows
-from src.state.edge_observation import STRATEGY_KEYS
+from src.state.edge_observation import STRATEGY_KEYS, _classify_sample_quality
 
 BinTopology = Literal["point", "finite_range", "open_shoulder", "unknown"]
 DriftKind = Literal["label_matches_semantics", "drift_detected", "insufficient_signal"]
@@ -270,3 +270,112 @@ def detect_drifts_in_window(
             continue
         verdicts.append(detect_attribution_drift(row))
     return verdicts
+
+
+# =====================================================================
+# BATCH 2 — compute_drift_rate_per_strategy
+# =====================================================================
+# Per dispatch GO_BATCH_2 + boot §2 BATCH 2. Aggregates the per-position
+# verdicts from BATCH 1 into per-strategy drift rates over a time window.
+# Mirrors edge_observation.compute_realized_edge_per_strategy shape so
+# downstream consumers can render both side-by-side.
+#
+# DENOMINATOR CHOICE (per boot §6 #2 + dispatch GO_BATCH_1 ACCEPT default):
+# `insufficient_signal` positions are EXCLUDED from the drift_rate
+# denominator. Reason: a drift_rate of "5%" should mean "5% of
+# definitively-classifiable positions drifted", NOT "5% diluted by
+# uncertainty". Surface n_insufficient as a separate field so operators
+# can still see the uncertainty volume.
+#
+# Sample-quality boundaries match EDGE_OBSERVATION (10 / 30 / 100 trades
+# = insufficient / low / adequate / high).
+
+# Reuse boundaries from edge_observation (imported at top of file alongside
+# STRATEGY_KEYS to avoid the mid-file-import anti-pattern flagged in Tier 2
+# Phase 4 LOW-CAVEAT-EO-2-1).
+
+
+def _empty_strategy_drift_record(strategy_key: str, window_start: str, window_end: str) -> dict[str, Any]:
+    return {
+        "drift_rate": None,
+        "n_positions": 0,        # all verdicts (decidable + insufficient)
+        "n_drift": 0,            # drift_detected
+        "n_matches": 0,          # label_matches_semantics
+        "n_insufficient": 0,     # insufficient_signal
+        "n_decidable": 0,        # n_drift + n_matches (denominator for rate)
+        "sample_quality": "insufficient",
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+
+
+def compute_drift_rate_per_strategy(
+    conn: sqlite3.Connection,
+    window_days: int = 7,
+    end_date: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Aggregate per-strategy attribution-drift counts over a time window.
+
+    K1-compliant read-only projection. Uses detect_drifts_in_window (BATCH 1)
+    to fetch per-position verdicts, then groups by the persisted
+    `signature.label_strategy` (NOT inferred — operator wants to know the
+    drift rate of positions LABELED as each strategy).
+
+    drift_rate = n_drift / n_decidable, where n_decidable = n_drift +
+    n_matches. insufficient_signal positions are EXCLUDED from the
+    denominator (per boot §6 #2). Returns None when n_decidable == 0.
+
+    sample_quality classification uses n_decidable (the count we can
+    actually reason about), not n_positions, so a strategy with 100
+    positions all insufficient_signal is correctly classified
+    sample_quality='insufficient'.
+
+    Returns dict keyed by all 4 STRATEGY_KEYS; every key always present.
+    """
+    if window_days <= 0:
+        raise ValueError(f"window_days must be positive; got {window_days}")
+    if end_date is None:
+        end = datetime.now(timezone.utc).date()
+    else:
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    window_start = (end - timedelta(days=window_days)).isoformat()
+    window_end = end.isoformat()
+
+    verdicts = detect_drifts_in_window(conn, window_days=window_days, end_date=end_date)
+
+    per_strategy: dict[str, dict[str, Any]] = {
+        sk: _empty_strategy_drift_record(sk, window_start, window_end)
+        for sk in STRATEGY_KEYS
+    }
+
+    for v in verdicts:
+        # Group by the persisted label, not the inferred strategy. Operators
+        # ask "what fraction of MY shoulder_sell positions drifted?", not
+        # "what fraction of dispatch-rule shoulder_sell positions drifted?".
+        label = v.signature.label_strategy
+        if label not in per_strategy:
+            # Unknown strategy_key — already handled inside detect_attribution_drift
+            # as insufficient_signal, but the verdict's signature.label_strategy
+            # may be a non-governed label. Skip from per-strategy aggregation
+            # (these positions are upstream data quality issues, not silent
+            # attribution drift on a governed strategy).
+            continue
+        rec = per_strategy[label]
+        rec["n_positions"] += 1
+        if v.kind == "drift_detected":
+            rec["n_drift"] += 1
+        elif v.kind == "label_matches_semantics":
+            rec["n_matches"] += 1
+        elif v.kind == "insufficient_signal":
+            rec["n_insufficient"] += 1
+
+    # Finalize: compute drift_rate + sample_quality per strategy.
+    for sk, rec in per_strategy.items():
+        n_decidable = rec["n_drift"] + rec["n_matches"]
+        rec["n_decidable"] = n_decidable
+        if n_decidable > 0:
+            rec["drift_rate"] = rec["n_drift"] / n_decidable
+        # sample_quality based on n_decidable (the count we can reason about).
+        rec["sample_quality"] = _classify_sample_quality(n_decidable)
+
+    return per_strategy
