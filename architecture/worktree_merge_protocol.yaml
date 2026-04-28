@@ -1,0 +1,75 @@
+# architecture/worktree_merge_protocol.yaml
+# Codified protocol for cross-session/worktree merges into Zeus branches.
+# Created: 2026-04-28
+# Last reused/audited: 2026-04-28
+# Authority basis: contamination remediation verdict.md §6 Stage 4 Gate B
+# Plan evidence: docs/operations/task_2026-04-28_contamination_remediation/STAGE4_PROCESS_GATES_AE_PLAN.md §2
+# Cross-references: AGENTS.md "Cross-session merge protocol" + .agents/skills/zeus-ai-handoff/SKILL.md §8.8
+
+version: "1.0"
+
+trigger_commands:
+  - "git merge"
+  - "git pull"
+  - "git cherry-pick"
+  - "git rebase"
+  - "git am"
+
+trigger_conditions:
+  - any_command_in_trigger_commands
+  - working_branch in [main, plan-pre5, "plan-*", "release-*"]
+
+required_evidence:
+  env_var: MERGE_AUDIT_EVIDENCE
+  format: |
+    Path to critic verdict file documenting:
+    - diff_scope: (files + LOC)
+    - authoring session identifier
+    - drift_keyword_scan: bidirectional grep results against drift_keywords_for_grep below
+    - critic_verdict: APPROVE | REVISE | BLOCK
+    - critic identifier (critic-opus dispatch ID or critic-* longlast name)
+
+validation_steps:
+  pre_merge:
+    - check_env_var_set: MERGE_AUDIT_EVIDENCE
+    - check_evidence_file_exists: $MERGE_AUDIT_EVIDENCE
+    - check_evidence_contains: ["critic_verdict:", "diff_scope:", "drift_keyword_scan:"]
+    - check_critic_verdict: in [APPROVE, REVISE]
+  on_block:
+    - exit_code: 2
+    - message: "Merge BLOCKED — see $MERGE_AUDIT_EVIDENCE for defects"
+  on_revise:
+    - exit_code: 2
+    - message: "Merge REVISE required — address critic defects then re-dispatch"
+  on_approve:
+    - exit_code: 0
+    - message: "Merge gate PASSED via $MERGE_AUDIT_EVIDENCE"
+
+advisory_mode:
+  enabled: false
+  default_state_2026: "blocking"
+
+drift_keywords_for_grep:
+  # Bidirectional grep targets (forward + reverse per methodology §5.Y)
+  - HKO
+  - WU
+  - meteostat
+  - ogimet
+  - tier_resolver
+  - verify_truth_surfaces
+  - Day0
+  - settlement
+  - calibration
+  - source_role
+  - data_version
+
+escalation:
+  on_repeated_block: "Operator notify; consider freezing target branch"
+  on_advisory_only: "Document warning in branch handoff"
+
+cross_references:
+  - .claude/hooks/pre-merge-contamination-check.sh
+  - .agents/skills/zeus-ai-handoff/SKILL.md §8.8
+  - root AGENTS.md "Cross-session merge protocol"
+  - docs/operations/task_2026-04-28_contamination_remediation/verdict.md §6 Stage 4
+  - docs/methodology/adversarial_debate_for_project_evaluation.md §5 critic-gate workflow
