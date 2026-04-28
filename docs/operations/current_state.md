@@ -159,6 +159,10 @@ Role: single live control pointer for the repo.
   phase tree: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`,
   `docs/operations/task_2026-04-23_graph_rendering_integration/`, and
   `docs/operations/task_2026-04-25_p2_packet_runtime/`.
+- Merge-preserved packet evidence retained outside the active execution lane:
+  `docs/operations/task_2026-04-27_harness_debate/`. This is debate/review
+  evidence only; it is not live-deploy, production DB mutation, source-routing,
+  or calibration authority.
 
 ## Parallel infrastructure packet
 

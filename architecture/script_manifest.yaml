@@ -42,6 +42,8 @@ diagnostic_allowed_write_targets:
   - state/*.json
   - docs/reports
   - docs/reports/*
+  - docs/operations/attribution_drift/*
+  - docs/operations/edge_observation/*
 
 allowed_lifecycles:
   - long_lived
@@ -370,6 +372,17 @@ scripts:
   deprecate_legacy_state_files.py: {class: repair, apply_flag: implicit, target_db: state, unguarded_write_rationale: "Existing legacy-state deprecation script mutates state files without an apply flag; manifest marks it dangerous pending hardening."}
   diagnose_center_buy_failure.py: {class: diagnostic}
   diagnose_truth_surfaces.py: {class: diagnostic}
+  digest_profiles_export.py:
+    class: config_writer
+    reason: "Derived digest_profiles.py mirror exporter; YAML remains canonical until an operator-approved truth-source flip."
+    canonical_command: "python3 scripts/digest_profiles_export.py [--check]"
+    read_targets: [architecture/topology.yaml]
+    write_targets: [architecture/digest_profiles.py]
+    target_db: architecture/digest_profiles.py
+    external_inputs: []
+    required_tests: [tests/test_digest_profiles_equivalence.py]
+    promotion_barrier: "Generated Python mirror cannot replace architecture/topology.yaml as truth source without separate operator-approved packet."
+    unguarded_write_rationale: "Running without --check rewrites only the derived architecture/digest_profiles.py mirror; equivalence tests verify byte-for-byte sync."
   equity_curve.py: {class: diagnostic}
   etl_asos_wu_offset.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   etl_diurnal_curves.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, required_tests: [tests/test_obs_v2_reader_gate.py, tests/test_truth_surface_health.py]}
@@ -388,6 +401,10 @@ scripts:
   generate_monthly_bounds.py: {class: config_writer}
   healthcheck.py: {class: runtime_support}
   heartbeat_dispatcher.py: {class: runtime_support, external_inputs: [openclaw_binary, host_log_path]}
+  history_lore_audit.py:
+    class: utility
+    reason: "Read-only harness-debate audit utility for recent architecture/history_lore.yaml card mentions; outputs diagnostic evidence only."
+    write_targets: [stdout, temp, .code-review-graph]
   ingest_grib_to_snapshots.py:
     class: promotion_candidate
     status: pending_implementation
@@ -437,6 +454,10 @@ scripts:
   migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python3 scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
   migrate_to_isolated_dbs.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
   migrate_forecasts_availability_provenance.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [state/zeus-world.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "F11.2: ALTER TABLE forecasts ADD COLUMN availability_provenance TEXT with CHECK constraint enforcing the AvailabilityProvenance enum. Idempotent — skips if column exists.", do_not_use_when: "Column already present (idempotency guard).", canonical_command: "python3 scripts/migrate_forecasts_availability_provenance.py [--db PATH] (--dry-run | --apply | --verify)", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows the ALTER statement only.", required_helpers: [src.backtest.decision_time_truth.AvailabilityProvenance], required_tests: [tests/test_dissemination_schedules.py, tests/test_forecasts_writer_provenance_required.py], unguarded_write_rationale: "DDL only (ADD COLUMN); reversible because new column defaults NULL and old readers continue to work; --apply required."}
+  module_manifest_audit.py:
+    class: utility
+    reason: "Read-only harness-debate audit utility for module_manifest auto-derivability and bidirectional grep evidence; report artifacts are non-authority."
+    write_targets: [stdout, temp, docs/operations]
   nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--mode", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   parse_change_log.py: {class: utility}
@@ -487,6 +508,10 @@ scripts:
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
   refit_platt_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 refit; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
+  regenerate_registries.py:
+    class: utility
+    reason: "Read-only harness-debate audit utility for manifest completeness/header drift; deliberately audits instead of regenerating authority manifests."
+    write_targets: [stdout, temp]
   refresh_paper_runtime_artifacts.py: {class: repair, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/status_summary-paper.json, state/risk_state-paper.db], apply_flag: implicit, target_db: state/status_summary-paper.json + state/risk_state-paper.db, archive_reason: paper runtime artifacts are obsolete in live-only phase, unguarded_write_rationale: "Paper runtime artifact refresh writes obsolete paper status and paper risk DB rows; manifest marks it dangerous pending archive."}
   replay_parity.py: {class: diagnostic}
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
@@ -514,6 +539,10 @@ scripts:
   topology_doctor_script_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for script-manifest checker family}
   topology_doctor_source_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for source-rationale/scoped-AGENTS checker family}
   topology_doctor_test_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for test-topology checker family}
+  topology_section_audit.py:
+    class: utility
+    reason: "Read-only harness-debate audit utility for topology.yaml section recent-usage and replacement/sunset evidence; report artifacts are non-authority."
+    write_targets: [stdout, temp, docs/operations]
   topology_doctor.py:
     class: enforcement
     module_owner: topology_system
