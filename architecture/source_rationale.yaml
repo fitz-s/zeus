@@ -1523,6 +1523,14 @@ files:
     - src/engine/cycle_runner.py
     - src/execution/harvester.py
     - src/riskguard/riskguard.py
+  src/state/edge_observation.py:
+    zone: K2_runtime
+    authority_role: derived_edge_projection
+    why: "K1-compliant read-only realized-edge projection per strategy_key. Reads canonical position_events via query_authoritative_settlement_rows (db.py L3429) which dedupes by trade_id. EDGE_OBSERVATION packet BATCH 1 per round3_verdict.md §1 #2 (FIRST edge packet) + ULTIMATE_PLAN.md L297-301. Replaces the deprecated edge_compression_check stub at strategy_tracker.py L24 (which returns []). Uses metric_ready filter (db.py L3345) to admit rows valid for measurement; rejects metric_ready=False rows missing required fields like outcome / p_posterior."
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - scripts/edge_observation_weekly.py
   src/state/truth_files.py:
     zone: K2_runtime
     authority_role: truth_file_helpers
