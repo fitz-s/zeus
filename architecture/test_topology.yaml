@@ -41,6 +41,7 @@ test_trust_policy:
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_replay_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_etl_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -165,6 +166,7 @@ categories:
     - tests/test_dissemination_schedules.py
     - tests/test_forecasts_writer_provenance_required.py
     - tests/test_replay_skill_eligibility_filter.py
+    - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py

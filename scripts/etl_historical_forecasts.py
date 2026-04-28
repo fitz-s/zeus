@@ -65,11 +65,19 @@ def run_etl() -> dict:
     existing = zeus.execute("SELECT COUNT(*) FROM historical_forecasts").fetchone()[0]
     print(f"historical_forecasts has {existing} existing rows. Running incremental sync...")
 
-    rows = zeus.execute("""
+    # F11.5-migrate (2026-04-28): SKILL eligibility filter wired in.
+    # availability_provenance IS NULL clause tolerates pre-F11 legacy DBs;
+    # post-F11 backfilled rows must be tier'd SKILL-eligible (FETCH_TIME /
+    # RECORDED / DERIVED_FROM_DISSEMINATION) — RECONSTRUCTED rows
+    # (heuristic timestamps from ICON / UKMO / OpenMeteo redistributors)
+    # are excluded from training-grade ETL output.
+    from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
+    rows = zeus.execute(f"""
         SELECT city, target_date, source, forecast_high, forecast_low, lead_days,
                forecast_basis_date, forecast_issue_time, temp_unit
         FROM forecasts
         WHERE forecast_high IS NOT NULL
+          AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
     """).fetchall()
 
     print(f"Source rows: {len(rows):,}")
