@@ -1,0 +1,188 @@
+schema_version: 1
+drift_residual:
+  rationale: '16 wu_icao_history rows with 1F/1C drift between row value and
+
+    current WU API response. Likely cause: WU revised hourly observations
+
+    near integer rounding boundaries since original ingest.
+
+    '
+  signed_by: Fitz
+  signed_at: 2026-04-28T15:30Z
+  resolution: downgrade_authority_to_QUARANTINED
+  effect:
+  - exclude_from_training (rebuild_calibration_pairs_v2 filters VERIFIED)
+  - clear Gate 3+4 (predicate keys on authority=VERIFIED)
+  - preserve row data + provenance for audit
+  evidence_log: docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate34_fill_quarantine_apply_2026-04-28.json
+  rows:
+  - id: 55060
+    city: Ankara
+    target_date: '2024-10-06'
+    db_high: 29.0
+    db_low: 8.0
+    api_high: 29.0
+    api_low: 7.0
+    drift_dim: low_temp
+  - id: 68685
+    city: Atlanta
+    target_date: '2025-09-24'
+    db_high: 92.0
+    db_low: 72.0
+    api_high: 92.0
+    api_low: 71.0
+    drift_dim: low_temp
+  - id: 94283
+    city: Auckland
+    target_date: '2025-10-03'
+    db_high: 18.0
+    db_low: 16.0
+    api_high: 18.0
+    api_low: 15.0
+    drift_dim: low_temp
+  - id: 75772
+    city: Buenos Aires
+    target_date: '2024-10-06'
+    db_high: 24.0
+    db_low: 15.0
+    api_high: 23.0
+    api_low: 15.0
+    drift_dim: high_temp
+  - id: 76125
+    city: Buenos Aires
+    target_date: '2025-09-24'
+    db_high: 18.0
+    db_low: 7.0
+    api_high: 17.0
+    api_low: 7.0
+    drift_dim: high_temp
+  - id: 95481
+    city: Cape Town
+    target_date: '2024-07-02'
+    db_high: 15.0
+    db_low: 8.0
+    api_high: 14.0
+    api_low: 8.0
+    drift_dim: high_temp
+  - id: 70593
+    city: Denver
+    target_date: '2024-03-10'
+    db_high: 32.0
+    db_low: 32.0
+    api_high: 32.0
+    api_low: 31.0
+    drift_dim: low_temp
+  - id: 105811
+    city: Karachi
+    target_date: '2025-09-24'
+    db_high: 30.0
+    db_low: 27.0
+    api_high: 30.0
+    api_low: 26.0
+    drift_dim: low_temp
+  - id: 106293
+    city: Manila
+    target_date: '2024-10-07'
+    db_high: 31.0
+    db_low: 26.0
+    api_high: 30.0
+    api_low: 26.0
+    drift_dim: high_temp
+  - id: 73662
+    city: Miami
+    target_date: '2025-10-02'
+    db_high: 88.0
+    db_low: 75.0
+    api_high: 88.0
+    api_low: 74.0
+    drift_dim: low_temp
+  - id: 82806
+    city: Milan
+    target_date: '2025-10-03'
+    db_high: 17.0
+    db_low: 7.0
+    api_high: 17.0
+    api_low: 6.0
+    drift_dim: low_temp
+  - id: 67017
+    city: NYC
+    target_date: '2025-09-24'
+    db_high: 76.0
+    db_low: 72.0
+    api_high: 76.0
+    api_low: 71.0
+    drift_dim: low_temp
+  - id: 80321
+    city: Paris
+    target_date: '2025-10-20'
+    db_high: 18.0
+    db_low: 13.0
+    api_high: 18.0
+    api_low: 14.0
+    drift_dim: low_temp
+  - id: 90314
+    city: Seoul
+    target_date: '2026-04-04'
+    db_high: 16.0
+    db_low: 7.0
+    api_high: 17.0
+    api_low: 7.0
+    drift_dim: high_temp
+  - id: 86718
+    city: Shenzhen
+    target_date: '2025-06-20'
+    db_high: 31.0
+    db_low: 25.0
+    api_high: 30.0
+    api_low: 25.0
+    drift_dim: high_temp
+  - id: 88246
+    city: Wuhan
+    target_date: '2025-02-28'
+    db_high: 18.0
+    db_low: 14.0
+    api_high: 19.0
+    api_low: 14.0
+    drift_dim: high_temp
+obs_v2_unreproducible:
+  rationale: '322 obs_v2 rows fail Reproducibility (ogimet/WU APIs do not return hourly
+
+    observations matching these rows UTC hour buckets).
+
+    '
+  signed_by: Fitz
+  signed_at: 2026-04-28T22:31Z
+  resolution: set_training_allowed_0
+  evidence_logs:
+  - docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate5_fill_quarantine_apply_2026-04-28.json
+  - docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate5_ogimet_quarantine_apply_2026-04-28.json
+  row_predicate:
+    table: observation_instants_v2
+    where: training_allowed=1 AND (payload_hash IS NULL OR parser_version IS NULL)
+    estimated_count: 322
+  rows_affected: 322
+  effect:
+  - "322 obs_v2 rows training_allowed: 1 \u2192 0"
+  - rows preserved for runtime consumers (Day0 monitor, DST gap fill, audit)
+  - "Gate 5 (payload_identity_missing) clears \u2014 predicate keys on training_allowed=1"
+hko_canonical:
+  rationale: "Operator decision 2026-04-28T22:31Z: Hong Kong settlement source is EXCLUSIVELY HKO (no WU/VHHH alias, no fallback).\
+    \ RFC question 4 answered: HK\u2192HKO only. HK observations are excluded from calibration training pool \u2014 consistent\
+    \ with current_source_validity.md item 3 (\"HKO class was suspect or stalled\") + Gate 2 original design intent (\"HK\
+    \ is gap city, exclude from training\"). Live settlement still uses HKO via SettlementSemantics; calibration training\
+    \ does not include HK."
+  signed_by: Fitz
+  signed_at: 2026-04-28T22:31Z
+  resolution: downgrade_HK_observations_to_QUARANTINED
+  effect:
+  - "821 HK observations rows authority VERIFIED \u2192 QUARANTINED"
+  - HK rows excluded from rebuild_calibration_pairs_v2._fetch_verified_observation
+  - "Gate 2 (hko_requires_fresh_source_audit) clears \u2014 predicate filters VERIFIED"
+  - HKO remains canonical SETTLEMENT source via SettlementSemantics (live trading)
+  - 0 HK non-HKO settlements found needing quarantine (policy already aligned)
+  rfc_questions_answered:
+    4_hk_vhhh_routing: "NO \u2014 HK uses HKO exclusively; WU/VHHH alias rejected"
+  row_predicate:
+    table: observations
+    where: authority='VERIFIED' AND (LOWER(source) LIKE 'hko%' OR city='Hong Kong')
+    rows_affected: 821
