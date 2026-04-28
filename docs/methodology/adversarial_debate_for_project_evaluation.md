@@ -391,6 +391,39 @@ If any gate fails, the % rate is suspect and DELETE/REPLACE/AUTO-GEN actions can
 
 **This pattern applies BEYOND adversarial debate** — any audit-driven decision (CI gate, refactor planning, deprecation review) should follow it.
 
+### §5.Z3 4-cycle confirmation — methodology works in both directions
+
+Updated 2026-04-28 after Tier 2 Phase 4 closure. The "audit-first" methodology now has 4-for-4 empirical confirmation in a single execution cycle, AND it works regardless of which direction the audit goes:
+
+| Cycle | Verdict claim | Audit direction | Verdict outcome |
+|---|---|---|---|
+| BATCH D | INV-16/17 are LARP; DELETE | falsifies upstream | **upstream FALSIFIED** (9 hidden tests) |
+| Phase 2 | 3 registries are drift; auto-gen | falsifies upstream | **upstream FALSIFIED** (intentional curation) |
+| Phase 3 | module_manifest is drift; auto-gen | falsifies upstream | **upstream FALSIFIED** (21 KEEP, 0 REPLACE) |
+| Phase 4 | @enforced_by must STRICTLY DOMINATE | confirms upstream IF evidence | **upstream CONFIRMED with BOUNDED scope** (3-of-3 strict; citation-resolution layer only) |
+
+**Stronger claim than 3-for-3 falsification**: the audit-first methodology produces honest evaluation regardless of whether the audit confirms or refutes the upstream prescription. Methodologically:
+- Audit FALSIFIES → don't make the structural change; verdict erratum
+- Audit CONFIRMS BOUNDED → make the change with scope-honoring discipline (parallel surface, equivalence test, gradual rollout — not big-bang)
+- Audit CONFIRMS UNBOUNDED → safe to make change at full scope (if also passes other gates)
+- Audit INCONCLUSIVE → defer; gather more evidence
+
+**Phase 4 specifically demonstrates the BOUNDED-CONFIRMATION case**: prototype passed STRICT_DOMINANCE on 3 specific test cases (semgrep typo / test-fn typo / NC-id typo), but executor's own §8.1 caveat acknowledged the value-add is at "citation-resolution layer" not "semantic enforcement layer". The recommended action (MIGRATE PARALLEL with 15-20 PR gradual rollout + equivalence test + CI gate) honors the bounded scope. This is the OPPOSITE pattern from §5.Z2 falsifications but follows the SAME methodological discipline.
+
+**Codified: methodology pattern produces 4 distinct outcomes**, not just "go/no-go":
+1. **Falsified** — don't change; erratum upstream
+2. **Confirmed bounded** — change at bounded scope with discipline
+3. **Confirmed unbounded** — change at full scope (rare; requires multiple pass-gates)
+4. **Inconclusive** — defer; iterate on the audit
+
+**Cumulative cost-benefit across 4 cycles**:
+- Total audit-script writing: ~700 LOC across 4 phases (~10-15h cumulative)
+- Total avoided structural mistakes: 1 wrong DELETE + 4 wrong REPLACE/AUTO-GEN = 5 mis-prescribed actions blocked
+- Total bounded confirmations enabled: 1 (@enforced_by parallel migration with confidence)
+- Net win: 5 mistakes avoided + 1 confident go-ahead, for 10-15h of audit infrastructure that is now reusable across future cycles
+
+**Methodology graduation**: this audit-first pattern is no longer just a backstop for missed debate cases. It is a primary mode of harness evolution. Future Tier 3+ work should default to "audit before each prescribed structural change" not just "trust the verdict and execute".
+
 ---
 
 ## §6 Common failure modes + recovery
