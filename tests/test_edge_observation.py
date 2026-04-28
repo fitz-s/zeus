@@ -245,3 +245,156 @@ def test_strategy_filter_only_4_known():
     assert result["opening_inertia"]["n_trades"] == 1
     for sk in ["settlement_capture", "shoulder_sell", "center_buy"]:
         assert result[sk]["n_trades"] == 0
+
+
+# =====================================================================
+# BATCH 2 — detect_alpha_decay tests
+# =====================================================================
+# Per dispatch §"BATCH 2" + boot §2: 6-8 tests covering steady/sudden/gradual
+# decay patterns, threshold boundary, insufficient-history graceful, per-
+# strategy threshold override, negative-trailing-mean handling.
+
+from src.state.edge_observation import (
+    DEFAULT_DECAY_RATIO_THRESHOLD,
+    DriftVerdict,
+    detect_alpha_decay,
+)
+
+
+def _window(edge: float | None, n_trades: int = 50) -> dict:
+    """Build one synthetic window record as compute_realized_edge_per_strategy
+    would emit. n_trades=50 → sample_quality='adequate' (>=30, <100)."""
+    if edge is None:
+        return {
+            "edge_realized": None, "n_trades": 0, "n_wins": 0, "win_rate": None,
+            "sample_quality": "insufficient", "window_start": "x", "window_end": "x",
+        }
+    # Approximate sample_quality from n_trades using same boundaries.
+    if n_trades < 10:
+        sq = "insufficient"
+    elif n_trades < 30:
+        sq = "low"
+    elif n_trades < 100:
+        sq = "adequate"
+    else:
+        sq = "high"
+    return {
+        "edge_realized": edge, "n_trades": n_trades,
+        "n_wins": int(n_trades * (0.5 + edge / 2)),
+        "win_rate": 0.5 + edge / 2, "sample_quality": sq,
+        "window_start": "x", "window_end": "x",
+    }
+
+
+def test_decay_detected_on_sudden_drop():
+    """RELATIONSHIP: 4 trailing windows at edge=0.10, current at edge=0.02 →
+    ratio = 0.02/0.10 = 0.2 < threshold 0.5 AND < critical cutoff 0.3 →
+    alpha_decay_detected with critical severity."""
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.02)]
+    v = detect_alpha_decay(history, "settlement_capture")
+    assert isinstance(v, DriftVerdict)
+    assert v.kind == "alpha_decay_detected"
+    assert v.severity == "critical"
+    assert v.strategy_key == "settlement_capture"
+    assert abs(v.evidence["ratio"] - 0.2) < 1e-9
+    assert abs(v.evidence["trailing_mean"] - 0.10) < 1e-9
+
+
+def test_decay_detected_warn_severity_at_intermediate_ratio():
+    """RELATIONSHIP: ratio between critical cutoff (0.3) and threshold (0.5)
+    yields warn severity, not critical. trailing_mean=0.10, current=0.04 →
+    ratio=0.4 → warn."""
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.04)]
+    v = detect_alpha_decay(history, "shoulder_sell")
+    assert v.kind == "alpha_decay_detected"
+    assert v.severity == "warn"
+    assert abs(v.evidence["ratio"] - 0.4) < 1e-9
+
+
+def test_within_normal_range_when_steady():
+    """RELATIONSHIP: 4 trailing at 0.10, current at 0.09 → ratio=0.9 → within."""
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.09)]
+    v = detect_alpha_decay(history, "center_buy")
+    assert v.kind == "within_normal_range"
+    assert v.severity is None
+    assert abs(v.evidence["ratio"] - 0.9) < 1e-9
+
+
+def test_threshold_boundary_exactly_at_cutoff():
+    """RELATIONSHIP: at ratio == decay_ratio_threshold the verdict is
+    within_normal_range (strict less-than triggers decay). trailing=0.10,
+    current=0.05 → ratio=0.5 == threshold → within."""
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.05)]
+    v = detect_alpha_decay(history, "opening_inertia")
+    assert v.kind == "within_normal_range", \
+        f"strict less-than should NOT trigger at exactly threshold; got {v.kind}"
+
+
+def test_critical_cutoff_boundary_exactly_at_0_3():
+    """RELATIONSHIP: at ratio == CRITICAL_RATIO_CUTOFF (0.3) severity is
+    'warn', not 'critical' (strict less-than for the critical/warn split:
+    `severity = "critical" if ratio < CRITICAL_RATIO_CUTOFF else "warn"`).
+    Symmetric to test_threshold_boundary_exactly_at_cutoff for the
+    decay/normal split. Per critic-harness BATCH 2 review LOW-CAVEAT-EO-2-2.
+
+    trailing=0.10, current=0.03 → ratio=0.3 → alpha_decay_detected
+    (because 0.3 < 0.5 threshold) with severity=warn (because 0.3 is NOT
+    < 0.3 critical cutoff).
+    """
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.03)]
+    v = detect_alpha_decay(history, "settlement_capture")
+    assert v.kind == "alpha_decay_detected", \
+        f"ratio 0.3 < threshold 0.5 should trigger decay; got {v.kind}"
+    assert v.severity == "warn", \
+        f"strict less-than at critical cutoff 0.3 should yield 'warn' not 'critical'; got {v.severity!r}"
+    assert abs(v.evidence["ratio"] - 0.3) < 1e-9
+
+
+def test_insufficient_history_below_min_windows():
+    """RELATIONSHIP: 3 windows when min_windows=4 → insufficient_data."""
+    history = [_window(0.10), _window(0.10), _window(0.10)]
+    v = detect_alpha_decay(history, "settlement_capture")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "n_windows_below_min"
+    assert v.evidence["n_windows"] == 3
+    assert v.evidence["min_required"] == 4
+
+
+def test_insufficient_when_too_many_low_sample_windows():
+    """RELATIONSHIP: 5 windows but 3 are sample_quality='insufficient' (n<10)
+    → only 2 usable, below min_windows=4 → insufficient_data."""
+    history = [
+        _window(0.10, n_trades=5),    # insufficient
+        _window(0.10, n_trades=5),    # insufficient
+        _window(0.10, n_trades=5),    # insufficient
+        _window(0.10, n_trades=50),   # usable
+        _window(0.05, n_trades=50),   # usable
+    ]
+    v = detect_alpha_decay(history, "shoulder_sell")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "usable_windows_below_min"
+    assert v.evidence["n_usable"] == 2
+
+
+def test_insufficient_when_trailing_mean_non_positive():
+    """RELATIONSHIP: trailing edges average to <=0 → ratio undefined →
+    insufficient_data (a strategy that never had positive edge cannot
+    meaningfully 'decay')."""
+    history = [_window(-0.05), _window(-0.02), _window(0.0), _window(-0.01), _window(-0.10)]
+    v = detect_alpha_decay(history, "center_buy")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "trailing_mean_non_positive"
+    assert v.evidence["trailing_mean"] <= 0
+
+
+def test_per_call_threshold_override():
+    """RELATIONSHIP: caller can pass strict-er threshold to detect smaller
+    decays. trailing=0.10, current=0.07 → ratio=0.7. Default threshold 0.5
+    → within_normal. Override threshold=0.8 → alpha_decay_detected."""
+    history = [_window(0.10), _window(0.10), _window(0.10), _window(0.10), _window(0.07)]
+    v_default = detect_alpha_decay(history, "opening_inertia")
+    assert v_default.kind == "within_normal_range"
+    v_strict = detect_alpha_decay(history, "opening_inertia", decay_ratio_threshold=0.8)
+    assert v_strict.kind == "alpha_decay_detected"
+    assert v_strict.severity == "warn"  # 0.7 > 0.3 critical cutoff
+    assert abs(v_strict.evidence["decay_ratio_threshold"] - 0.8) < 1e-9
