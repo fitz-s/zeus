@@ -1,0 +1,454 @@
+{
+  "args": {
+    "cities": [
+      "Tel Aviv"
+    ],
+    "start_date": "2024-01-01",
+    "end_date": null,
+    "apply": true,
+    "tolerance": 0.5,
+    "limit": null,
+    "chunk_days": 31,
+    "sleep": 3.0
+  },
+  "snapshot_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db.pre-gate5-ogimet-fill-2026-04-28",
+  "quarantine_count": 71,
+  "quarantine": [
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1191841,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-01-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1191842,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-01-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1192607,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-03-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1192608,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-03-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193350,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193351,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193352,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194115,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194116,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194117,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194859,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194860,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194861,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195624,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195625,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195626,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1196365,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-08-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1196366,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-08-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1196367,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-08-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197130,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-09-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197131,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-09-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197132,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-09-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197874,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-10-05T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197875,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-10-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1197876,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-10-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1198620,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-11-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1198621,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-11-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1199364,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-12-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1199365,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-12-06T23:00:00+00:00"
+    },
+    {
+      "kind": "value_mismatch",
+      "row_id": 1200110,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-01-06T02:00:00+00:00",
+      "row_max": 14.0,
+      "api_max": 13.0,
+      "row_min": 13.0,
+      "api_min": 13.0,
+      "tolerance": 0.5
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200130,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-01-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200131,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-01-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200874,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-02-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200875,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-02-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1201640,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-03-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1201641,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-03-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1202383,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-04-09T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1202384,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-04-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1202385,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-04-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203148,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-05-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203149,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-05-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203150,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-05-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203892,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-06-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203893,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-06-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1203894,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-06-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204656,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204657,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204658,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1205400,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-08-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1205401,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-08-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1205402,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-08-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206165,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-09-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206166,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-09-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206167,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-09-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206907,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-10-12T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206908,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-10-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1206909,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-10-12T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1207652,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-11-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1207653,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-11-12T23:00:00+00:00"
+    },
+    {
+      "kind": "value_mismatch",
+      "row_id": 1207864,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-11-21T18:00:00+00:00",
+      "row_max": 24.0,
+      "api_max": 25.0,
+      "row_min": 23.0,
+      "api_min": 23.0,
+      "tolerance": 0.5
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1208418,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-12-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1208419,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-12-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209162,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-01-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209163,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-01-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209928,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-02-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209929,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-02-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1210670,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-03-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1210671,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-03-16T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211434,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211435,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211436,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T23:00:00+00:00"
+    }
+  ]
+}
