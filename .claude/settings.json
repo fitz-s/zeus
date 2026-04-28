@@ -19,6 +19,11 @@
             "type": "command",
             "command": ".claude/hooks/pre-commit-invariant-test.sh",
             "description": "Run pytest test_architecture_contracts.py before any `git commit` and block on regressions vs LIVE baseline 73/22/0 (round2_verdict.md §4.1 #5)"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-merge-contamination-check.sh",
+            "description": "Block git merge/pull/cherry-pick/rebase/am on protected branches without MERGE_AUDIT_EVIDENCE (verdict.md §6 Stage 4 Gate B; contamination remediation 2026-04-28)"
           }
         ]
       }
