@@ -60,6 +60,36 @@ Before choosing artifacts or dispatching, pick ONE mode based on task profile:
 
 **Anti-pattern**: using D (full debate) for what should be A or B is the most common mistake — wastes 70+ min on a 30-min decision. Use methodology §11 ROI signals to check.
 
+### §3.1 Scope-lock subclause
+
+When operator uses approval words ("continue", "proceed", "go", "推进",
+"ok", etc.) AFTER an initial task description, that approval applies
+ONLY to the previously declared task class. **Approval words do NOT
+expand scope to adjacent task classes.**
+
+Specifically:
+- Previously declared task: "fix X in module Y" → "continue" means
+  proceed with X-in-Y, NOT "fix anything else you find in module Y"
+- Previously declared task: "run cycle 1 phases A-D" → "continue" means
+  next phase in the SAME cycle, NOT "start cycle 2"
+- Previously declared task: "audit drift item #1" → "continue" means
+  finish #1, NOT "audit all 6 drift items"
+- Previously declared task: "TIGGE remainder cleanup" → "continue" does
+  NOT authorize "全量 suite 扫尾" (the 2026-04-28 contamination root)
+
+If scope expansion appears warranted mid-task, **stop and request explicit
+operator re-authorization** with the new scope explicitly named. Format:
+"Discovered ADJACENT_TASK while doing DECLARED_TASK; requires explicit
+authorization to proceed."
+
+This subclause exists because of the 2026-04-28 contamination event:
+"continue" was interpreted as scope-expansion authorization across
+multiple cycles, accumulating 9 commits of contamination before
+discovery. See `docs/operations/task_2026-04-28_contamination_remediation/`.
+
+When this rule activates against future "continue" prompts, cite this
+§3.1 explicitly in the request for re-authorization.
+
 ---
 
 ## §4 Requirement Tribunal (applies to all modes ≥ B)
@@ -175,6 +205,31 @@ When implementation discovers prior debate / verdict / plan was based on incompl
 - Add to methodology if pattern is reusable
 
 Methodological transparency compounds across cycles.
+
+### §8.8 Cross-session merge critic-gate
+
+When merging from another worktree/session into the active Zeus branch:
+
+1. Identify the diff: `git diff <current-branch>...<merging-branch>`
+2. Dispatch critic-opus (Agent or longlast critic-* in active team) with:
+   - Diff scope summary (files + LOC)
+   - Authoring session identifier (which session/worktree produced it)
+   - Boundary check: is the merging session subject to the same
+     authority files (root `AGENTS.md`, methodology, planning-lock)?
+   - Bidirectional grep: do drift-keyword greps trigger on the diff?
+3. Critic verdict gates the merge — BLOCK = abort; REVISE = address
+   defects per file:line + re-dispatch; APPROVE = proceed with merge
+4. Document: critic verdict path in commit message of the merge commit
+
+This extends §8.5 (per-batch critic-gate within a session) to the
+**cross-session boundary**. Per memory `feedback_executor_commit_boundary_gate`,
+self-review is forbidden; cross-session self-review is the same
+violation at session granularity.
+
+Hook enforcement: `.claude/hooks/pre-merge-contamination-check.sh`
+requires `MERGE_AUDIT_EVIDENCE` env var pointing to the critic verdict
+file before allowing `git merge` / `git pull` / `git cherry-pick` Bash
+commands; otherwise prints warning + advisory message + exits 2.
 
 ---
 

@@ -424,6 +424,47 @@ Updated 2026-04-28 after Tier 2 Phase 4 closure. The "audit-first" methodology n
 
 **Methodology graduation**: this audit-first pattern is no longer just a backstop for missed debate cases. It is a primary mode of harness evolution. Future Tier 3+ work should default to "audit before each prescribed structural change" not just "trust the verdict and execute".
 
+### §5.Z3.1 Quantitative erratum-frequency trigger (added 2026-04-28 cycle 5)
+
+If a single methodology cycle produces ≥3 errata (post-implementation
+falsifications of prior debate / verdict / plan claims), the **next
+methodology cycle MUST start with audit-first mode**:
+
+1. Bidirectional grep on EVERY load-bearing % claim BEFORE locking concession
+2. Intent-aware audit on EVERY structural change prescription (DELETE,
+   AUTO-GEN, REPLACE, REVERT) BEFORE adopting it as verdict direction
+3. Default-deny on grep-only evidence; require positive citation +
+   reverse confirmation
+4. 5-criterion weighing per §8 must explicitly note erratum-frequency
+   trigger as procedural context
+
+This trigger exists because the 5-cycle empirical history shows:
+- Cycle R1 verdict: 1 erratum (post-implementation BATCH D RE-SCOPE) — within tolerance
+- Cycle R2 verdict: 2 errata (Phase 2 auto-gen falsified + Phase 3 replace falsified) — within tolerance
+- Cycle R3 verdict: 1 erratum (Knight Capital citation re-scoping) — within tolerance
+- Tier 2 implementation: 0 verdict-level errata (all 4 phases met or surfaced bounded honest verdicts) — clean
+- **Cycle 5 (contamination remediation)**: TBD post-implementation; if Stage 1+2+3+5 produce ≥3 NEW errata against this verdict, gate E auto-triggers for any cycle 6+
+
+Threshold rationale: 3+ errata in a cycle indicates the cycle's audit
+discipline was insufficient — not the implementation's fault, but the
+debate's fault for not surfacing the issues earlier. Audit-first mode
+is the structural antibody.
+
+5th outcome category: in addition to §5.Z3's 4 outcomes (Falsified /
+Confirmed-bounded / Confirmed-unbounded / Inconclusive), the contamination
+remediation cycle 2026-04-28 added a 5th meta-level outcome:
+**CONDITIONAL-REVERT-PENDING-OTHER-SESSION-COMPLETION (Stage-gated
+revert with conditional restoration discipline)**. This applies when
+remediation operates on already-contaminated state across session
+boundaries; revert+quarantine NOW + condition future restoration on
+independent critic gate of in-flight fixes from contaminated session
++ staged restoration as evidence accumulates.
+
+Cross-reference: memory `feedback_critic_prompt_adversarial_template`
++ `.agents/skills/zeus-ai-handoff/SKILL.md` §8.7 (verdict-level erratum
+pattern) + `docs/operations/task_2026-04-28_contamination_remediation/verdict.md`
+(5th cycle's instantiation of the 5th outcome).
+
 ---
 
 ## §6 Common failure modes + recovery
