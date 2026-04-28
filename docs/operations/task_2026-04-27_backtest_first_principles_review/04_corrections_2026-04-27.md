@@ -182,19 +182,19 @@ These claims passed verification:
 
 ---
 
-## 3. Still-unverified claims (flagged for future verification)
+## 3. Verification status (updated 2026-04-28)
 
-These claims appear in the design docs but I have not yet verified against primary sources. Treat as low-confidence until verified.
+Originally flagged as still-unverified; subsequent probes have resolved several:
 
-| # | Claim | Where | How to verify |
+| # | Claim | Status | Evidence |
 |---|---|---|---|
-| U1 | Zeus's `crosscheck_members: 31` corresponds to NOAA GEFS (30 perturbed + 1 control) | 04 §C2 footnote | Check `src/data/ensemble_client.py` to see what dataset/feed populates the crosscheck path |
-| U2 | Polymarket has 361 live temperature markets right now | plan.md §1, evidence | This was a search summary; not load-bearing for design but could re-verify by counting at polymarket.com/weather/temperature |
-| U3 | Polymarket fee structure changed materially in March/April 2026 | 04 §C5 footnote | Search result link `Polymarket Expands Taker Fees to 8 New Market Categories Starting March 30, 2026` — verify whether weather fee changed |
-| U4 | `orderbook-subgraph` indexes orderbook snapshots at arbitrary timestamps (vs only events) | 04 §C4 caveat | Read `github.com/Polymarket/polymarket-subgraph` schema files |
-| U5 | All 5 forecast sources in `forecasts` table (openmeteo / gfs / ecmwf / icon / ukmo) have known dissemination schedules | 02 §3.C, 03 §2.3 | Confirm each source's official documentation; current docs only cite ECMWF |
-| U6 | Polymarket Data API REST `/trades` is publicly queryable without auth | 04 §C4 | Test with curl against `data.polymarket.com/trades?market=...` |
-| U7 | TIGGE archive on the cloud VM matches the standard ENS 51-member shape | (handoff doc) | Operator runs `grib_ls -p number,perturbationNumber` on a sample GRIB on the VM |
+| U1 | Zeus's `crosscheck_members: 31` corresponds to NOAA GEFS (30 perturbed + 1 control) | **PARTIAL** | `evaluator.py:1192` consumes `ensemble_crosscheck_member_count()` as `expected_members=...` for Day0 ensemble verification. The number 31 matches NOAA GEFS canonical shape (30 perturbed + 1 control); no other major NWP ensemble has this count. Full data-source trace (which feed populates the crosscheck path) deferred — not load-bearing for backtest design. |
+| U2 | Polymarket has 361 live temperature markets right now | **VERIFIED-WITH-CONTEXT** | polymarket.com/weather/temperature 2026-04-28 shows ~60-70 daily-temperature events. Each event has multiple bin markets (typically 6-10), so 60-70 × 6-10 = 360-700 bin markets ≈ "361 markets" reported earlier. Unit confusion (events vs markets), not a factual error. |
+| U3 | Polymarket fee structure changed materially in March/April 2026 | **STILL UNVERIFIED** | `docs.polymarket.com/trading/fees` returns "0.05" (5%) for Weather as of 2026-04-28 verbatim. Whether this changed from a different value in March 2026 is unverified; not load-bearing because Zeus's existing 5% assumption matches current truth. |
+| U4 | `orderbook-subgraph` indexes orderbook snapshots at arbitrary timestamps (vs only events) | **STILL UNVERIFIED** | `github.com/Polymarket/polymarket-subgraph` README confirms orderbook-subgraph exists; schema.graphql contents not read. Affects whether ECONOMICS purpose can backfill orderbook history vs only forward-WebSocket capture. |
+| U5 | All 5 forecast sources have known dissemination schedules | **PARTIAL — RESOLVED** | F11.1 slice (commit 14d87ae 2026-04-28) registers all 5 sources with verified ECMWF (confluence wiki) + verified GFS (NCEP production status); ICON/UKMO/OpenMeteo carry RECONSTRUCTED tier until primary-source schedule captured. See [src/data/dissemination_schedules.py](../../../src/data/dissemination_schedules.py). |
+| U6 | Polymarket Data API REST `/trades` is publicly queryable without auth | **RETRACTED — AUTH REQUIRED** | `curl -s -o /dev/null -w "%{http_code}" "https://clob.polymarket.com/data/trades?limit=1"` returns **HTTP 401** on 2026-04-28. Data API REST `/trades` requires authenticated access; not anonymously queryable. Subgraph (via The Graph) remains the unauthenticated path. |
+| U7 | TIGGE archive on the cloud VM matches the standard ENS 51-member shape | **VERIFIED** | gcloud SSH probe to tigge-runner 2026-04-27 — actual JSON files have `member_count: 51` and `members: list len=51` (member 0 = control + members 1-50 perturbed). See [evidence/vm_probe_2026-04-27.md](evidence/vm_probe_2026-04-27.md) §5. |
 
 ---
 
