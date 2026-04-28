@@ -61,8 +61,9 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   ATTRIBUTION_DRIFT BATCH 1 (per-position detector): 109 → 118 (+9)
 #   ATTRIBUTION_DRIFT BATCH 2 (per-strategy drift_rate aggregator): 118 → 124 (+6)
 #   ATTRIBUTION_DRIFT BATCH 3 (weekly runner end-to-end): 124 → 128 (+4)
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py"
-BASELINE_PASSED=128
+#   WS_OR_POLL_TIGHTENING BATCH 1 (PATH A latency-only detector): 128 → 137 (+9)
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py"
+BASELINE_PASSED=137
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
