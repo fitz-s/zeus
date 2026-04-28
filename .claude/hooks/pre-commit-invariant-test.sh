@@ -59,8 +59,9 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   BATCH 2 LOW-CAVEAT-EO-2-2 (critical-cutoff boundary test): 104 → 105 (+1)
 #   EDGE_OBSERVATION BATCH 3 (weekly runner end-to-end): 105 → 109 (+4)
 #   ATTRIBUTION_DRIFT BATCH 1 (per-position detector): 109 → 118 (+9)
+#   ATTRIBUTION_DRIFT BATCH 2 (per-strategy drift_rate aggregator): 118 → 124 (+6)
 TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py"
-BASELINE_PASSED=118
+BASELINE_PASSED=124
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
