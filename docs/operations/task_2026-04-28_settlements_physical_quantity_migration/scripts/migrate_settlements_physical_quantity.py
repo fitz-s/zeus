@@ -23,10 +23,22 @@ No imports from src/.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
+
+OPERATOR_APPLY_APPROVAL_ENV = "ZEUS_OPERATOR_APPROVED_DB_MUTATION"
+
+
+def _require_operator_apply_approval() -> None:
+    if os.environ.get(OPERATOR_APPLY_APPROVAL_ENV) != "YES":
+        raise SystemExit(
+            "REFUSING --apply: this packet script can mutate zeus DB state or call "
+            "external data sources. Set ZEUS_OPERATOR_APPROVED_DB_MUTATION=YES "
+            "only after the active packet/current_state authorizes the mutation."
+        )
 
 LEGACY_STRING = "daily_maximum_air_temperature"
 CANONICAL_STRING = "mx2t6_local_calendar_day_max"
@@ -203,6 +215,8 @@ def apply_migration(db_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    if not args.dry_run:
+        _require_operator_apply_approval()
     db_path = Path(args.db_path).expanduser().resolve()
 
     if args.dry_run:

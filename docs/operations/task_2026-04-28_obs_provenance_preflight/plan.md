@@ -169,7 +169,7 @@ The 42,749 figure is the count of rows with `low_temp IS NOT NULL` (and equivale
 ## Open questions (operator input required)
 
 1. **Gate 2 HKO audit promotion**: artifact format, storage location, signer. Without an answer, Gate 2 stays NOT_READY indefinitely and HKO is excluded from training. **HARD STOP for Gate 2.**
-2. **HK 03-13/03-14 known gap** (per `docs/operations/known_gaps.md:107-108`) uses WU/VHHH airport data, not HKO. Audit mechanism: per-date overrides or city-wide promotion only?
+2. **HK 03-13/03-14 known gap** (per `docs/operations/known_gaps.md`) must not be resolved via WU/VHHH or `wu_icao`: Hong Kong has no WU ICAO in Zeus. Audit mechanism must remain HKO/fresh-audit/operator-evidence only.
 3. **Gate 5 `payload_hash` for legacy rows**: original raw payload may not be recoverable. Acceptable placeholder (e.g., `"legacy:rebuild_run_id={…}"`)?
 4. **Gate 4 backfill scope**: WU only first (smoke unblock), or batch all VERIFIED tiers?
 5. **`provenance_metadata` (singular) column**: `_observation_provenance_column` at `verify_truth_surfaces.py:1339-1349` prefers it but schema only has the split columns. Planned future migration?

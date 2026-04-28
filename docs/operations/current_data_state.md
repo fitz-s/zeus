@@ -8,7 +8,7 @@ Evidence packets:
   - `docs/operations/task_2026-04-23_live_harvester_enablement_dr33/` (code-only follow-up, flag OFF)
   - `docs/operations/task_2026-04-28_settlements_physical_quantity_migration/` (HIGH `physical_quantity` canonical-string migration; APPLIED)
   - `docs/operations/task_2026-04-28_settlements_low_backfill/` (LOW settlements bootstrap; APPLIED)
-Authority status: not authority law; audit-bound planning fact only
+Authority status: not authority law; audit-bound planning fact only. The 2026-04-28 merge preserves the branch's APPLIED evidence claims as packet evidence; it does not itself authorize a new live/prod DB mutation.
 If stale, do not use for: live data-readiness, backfill readiness, v2 cutover,
 or ingest-health claims
 Refresh trigger: new data/schema audit, DB role change, v2 posture change,

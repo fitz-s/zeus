@@ -31,12 +31,24 @@ match the canonical typed identity (mirroring what the harvester uses).
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+OPERATOR_APPLY_APPROVAL_ENV = "ZEUS_OPERATOR_APPROVED_DB_MUTATION"
+
+
+def _require_operator_apply_approval() -> None:
+    if os.environ.get(OPERATOR_APPLY_APPROVAL_ENV) != "YES":
+        raise SystemExit(
+            "REFUSING --apply: this packet script can mutate zeus DB state or call "
+            "external data sources. Set ZEUS_OPERATOR_APPROVED_DB_MUTATION=YES "
+            "only after the active packet/current_state authorizes the mutation."
+        )
 
 # Canonical typed identity strings (mirror src/types/metric_identity.py::LOW_LOCALDAY_MIN).
 # Hardcoded here intentionally — script is stdlib-only.
@@ -241,6 +253,8 @@ def main() -> int:
     p.add_argument("--plan-out", default=None, help="optional: write plan JSON to this path")
     p.add_argument("--apply", action="store_true", help="apply DB writes (default: plan only)")
     args = p.parse_args()
+    if args.apply:
+        _require_operator_apply_approval()
 
     manifest = load_manifest(Path(args.manifest))
     print(f"manifest n_records: {manifest.get('n_records')}")

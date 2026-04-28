@@ -25,11 +25,23 @@ Behavior: dry-run default. --apply requires snapshot.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+OPERATOR_APPLY_APPROVAL_ENV = "ZEUS_OPERATOR_APPROVED_DB_MUTATION"
+
+
+def _require_operator_apply_approval() -> None:
+    if os.environ.get(OPERATOR_APPLY_APPROVAL_ENV) != "YES":
+        raise SystemExit(
+            "REFUSING --apply: this packet script can mutate zeus DB state or call "
+            "external data sources. Set ZEUS_OPERATOR_APPROVED_DB_MUTATION=YES "
+            "only after the active packet/current_state authorizes the mutation."
+        )
 
 # ABSOLUTE path to zeus repo root — refuses ambiguity.
 # This script is at docs/operations/<packet>/scripts/<file>; zeus root is parents[4]
@@ -56,6 +68,8 @@ def main() -> int:
     p.add_argument("--db-path", required=True)
     p.add_argument("--apply", action="store_true", help="Execute UPDATEs (default: dry-run)")
     args = p.parse_args()
+    if args.apply:
+        _require_operator_apply_approval()
 
     db = Path(args.db_path)
     if not db.exists():
