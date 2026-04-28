@@ -124,6 +124,7 @@ test_trust_policy:
     tests/test_settlement_semantics.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_sigma_floor_evaluation.py: {created: "2026-04-07", last_used: "2026-04-28"}
     tests/test_edge_observation.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_edge_observation_weekly.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_supervisor_contracts.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-28"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
