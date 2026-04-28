@@ -7,7 +7,7 @@ Zeus architecture authority.
 
 | Path | Purpose |
 |------|---------|
-| `zeus-ai-handoff/SKILL.md` | Zeus-specific handoff workflow adapting external starter-kit practices without overriding root guidance |
+| `zeus-ai-handoff/SKILL.md` | **v2 (2026-04-28)** — General-purpose 4-mode handoff playbook (Direct / Subagent / Longlast multi-batch with critic-gate / Adversarial debate). Includes proven discipline patterns (disk-first, bidirectional grep, co-tenant git hygiene, verdict erratum). Replaces v1 single-mode workflow. |
 
 ## Rules
 
