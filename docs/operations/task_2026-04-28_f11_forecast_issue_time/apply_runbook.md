@@ -47,8 +47,8 @@ sqlite3 -readonly state/zeus-world.db "SELECT COUNT(*) FROM forecasts;"
 # expect: 23,466 (or higher if cron ran since backup — note exact number)
 
 # F. Regression green at HEAD
-.venv/bin/python -m pytest tests/test_dissemination_schedules.py tests/test_forecasts_writer_provenance_required.py tests/test_backtest_training_eligibility.py
-# expect: 41 passed
+.venv/bin/python -m pytest tests/test_dissemination_schedules.py tests/test_forecasts_writer_provenance_required.py tests/test_backtest_training_eligibility.py tests/test_forecasts_schema_alignment.py tests/test_backtest_purpose_contract.py tests/test_backtest_skill_economics.py
+# expect: 70+ passed (numbers may vary as new antibodies land)
 ```
 
 **Stop conditions**:
@@ -143,9 +143,12 @@ Before resuming the cron, run one writer cycle in a controlled context to confir
 cd /Users/leofitz/.openclaw/workspace-venus/zeus
 
 # Run the unit test suite that exercises _insert_rows + _rows_from_payload
-.venv/bin/python -m pytest .claude/worktrees/mystifying-varahamihira-3d3733/tests/test_forecasts_writer_provenance_required.py -v
+# AND the schema-alignment antibody (catches CREATE/ALTER vs writer drift)
+.venv/bin/python -m pytest \
+    .claude/worktrees/mystifying-varahamihira-3d3733/tests/test_forecasts_writer_provenance_required.py \
+    .claude/worktrees/mystifying-varahamihira-3d3733/tests/test_forecasts_schema_alignment.py -v
 
-# Expected: 8 passed.
+# Expected: 13 passed (8 writer + 5 schema-alignment).
 
 # Run a manual one-shot append against canonical (dry-run safe via existing writer's INSERT OR IGNORE):
 .venv/bin/python -c "

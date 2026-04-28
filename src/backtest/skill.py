@@ -18,7 +18,6 @@ from src.backtest.purpose import (
     PurposeContract,
     PurposeContractViolation,
     SKILL_CONTRACT,
-    SKILL_FIELDS,
 )
 
 
@@ -53,7 +52,7 @@ def run_skill(
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
 
-    leaked = _economics_fields_in_limitations(summary.limitations)
+    leaked = _economics_fields_in_summary(summary)
     if leaked:
         raise PurposeContractViolation(
             f"SKILL summary leaked ECONOMICS-shaped fields: {sorted(leaked)}"
@@ -75,4 +74,23 @@ def _economics_fields_in_limitations(limitations: dict) -> set[str]:
     for key in limitations.keys():
         if key in ECONOMICS_FIELDS:
             leaked.add(key)
+    return leaked
+
+
+def _economics_fields_in_summary(summary) -> set[str]:
+    """Walk the full ReplaySummary (limitations + per_city + outcomes) for
+    any ECONOMICS-shaped field. Catches the seam where per_city dicts can
+    leak win_rate (an ECONOMICS_FIELDS member) into a SKILL output.
+    """
+    from src.backtest.purpose import ECONOMICS_FIELDS
+
+    leaked: set[str] = set()
+    leaked.update(_economics_fields_in_limitations(summary.limitations or {}))
+    per_city = getattr(summary, "per_city", None) or {}
+    for city_block in per_city.values():
+        if not isinstance(city_block, dict):
+            continue
+        for key in city_block.keys():
+            if key in ECONOMICS_FIELDS:
+                leaked.add(key)
     return leaked

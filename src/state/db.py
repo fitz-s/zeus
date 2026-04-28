@@ -722,6 +722,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             imported_at TEXT,
             rebuild_run_id TEXT,
             data_source_version TEXT,
+            availability_provenance TEXT
+                CHECK (availability_provenance IS NULL
+                       OR availability_provenance IN ('derived_dissemination', 'fetch_time', 'reconstructed', 'recorded')),
             UNIQUE(city, target_date, source, forecast_basis_date)
         );
         CREATE INDEX IF NOT EXISTS idx_forecasts_city_date
@@ -877,6 +880,17 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             conn.execute(f"ALTER TABLE forecasts ADD COLUMN {col} TEXT;")
         except sqlite3.OperationalError:
             pass
+
+    # F11 (2026-04-28): forecasts writer at src/data/forecasts_append.py:267-274 now
+    # inserts availability_provenance (D4 antibody). Same pattern as REOPEN-1 above:
+    # CREATE TABLE adds the column for fresh DBs, this ALTER catches legacy DBs.
+    # The CHECK constraint can't be added via ALTER in SQLite, so legacy DBs run
+    # without the DB-level enum enforcement; the writer-level assertion at
+    # forecasts_append.py:283-288 still rejects bad values. Fresh DBs get both.
+    try:
+        conn.execute("ALTER TABLE forecasts ADD COLUMN availability_provenance TEXT;")
+    except sqlite3.OperationalError:
+        pass
 
     try:
         conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")

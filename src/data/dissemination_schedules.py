@@ -44,10 +44,21 @@ class DisseminationEntry:
 
 
 def _gfs_available_at(base_time: datetime, lead_day: int) -> datetime:
-    """NOAA NCEP GFS completion ~ base + 4h14m for the latest product step.
+    """NOAA NCEP GFS approximate completion ~ base + 4h14m.
+
     Source (verified 2026-04-28): https://www.nco.ncep.noaa.gov/pmb/nwprod/prodstat/
-    GFS MOS Forecast at 04:14 UTC for the 00 UTC cycle; same +4h14m offset
-    holds for the 06 / 12 / 18 UTC cycles per the NCEP production status table.
+    GFS MOS Forecast component completion: 04:14 UTC for the 00 UTC cycle.
+    The full T1534 FORECAST F000-F384 product completes later (≈ 5h15m for
+    00 UTC); 4h14m is the MOS-completion lag, which is what most downstream
+    redistributors (including Open-Meteo's gfs_previous_runs) align with.
+    Cycles 06/12/18 UTC have similar 4h09–4h11m MOS completion times — the
+    approximation 4h14m holds within ~5 minutes for those.
+
+    Forecast rows tagged via this function carry DERIVED_FROM_DISSEMINATION
+    provenance (not FETCH_TIME / RECORDED), so consumers that need
+    promotion-grade decision-time truth (ECONOMICS) reject them anyway. The
+    tier itself is the load-bearing signal; the +4h14m offset is approximate
+    by design.
     """
     return base_time + timedelta(hours=4, minutes=14)
 

@@ -17,6 +17,9 @@ from src.data.forecasts_append import ForecastRow, _insert_rows
 
 
 def _make_test_table(conn: sqlite3.Connection) -> None:
+    """In-memory schema mirrors src/state/db.py's forecasts CREATE TABLE
+    (relevant subset for the writer). UNIQUE matches production exactly so
+    relationship antibodies catch cross-environment drift."""
     conn.execute("""
         CREATE TABLE forecasts (
             id INTEGER PRIMARY KEY,
@@ -25,7 +28,7 @@ def _make_test_table(conn: sqlite3.Connection) -> None:
             forecast_high REAL, forecast_low REAL, temp_unit TEXT,
             retrieved_at TEXT, imported_at TEXT, rebuild_run_id TEXT,
             data_source_version TEXT, availability_provenance TEXT,
-            UNIQUE (city, target_date, source, forecast_basis_date, lead_days)
+            UNIQUE (city, target_date, source, forecast_basis_date)
         )
     """)
     conn.commit()

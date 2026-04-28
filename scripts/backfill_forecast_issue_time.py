@@ -56,8 +56,21 @@ def _rows_needing_backfill(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def _derive_for_row(row: sqlite3.Row) -> tuple[str, str]:
-    """Returns (issue_time_iso, provenance_value)."""
-    basis = date_type.fromisoformat(str(row["forecast_basis_date"]))
+    """Returns (issue_time_iso, provenance_value).
+
+    Raises ValueError if forecast_basis_date is NULL or malformed (the
+    backfill schema guarantee was lost when the column was nullable; bad
+    rows are caught here and skipped at the caller level).
+    """
+    raw_basis = row["forecast_basis_date"]
+    if raw_basis is None or str(raw_basis).strip() == "":
+        raise ValueError(f"NULL forecast_basis_date on row id={row['id']}")
+    try:
+        basis = date_type.fromisoformat(str(raw_basis))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"malformed forecast_basis_date on row id={row['id']}: {raw_basis!r}"
+        ) from exc
     base_time = datetime.combine(basis, datetime.min.time(), tzinfo=timezone.utc)
     lead_day = int(row["lead_days"] or 0)
     issue_time, provenance = derive_availability(str(row["source"]), base_time, lead_day)
@@ -68,16 +81,23 @@ def _summarize(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[tuple[
     """Return {(source, derived_provenance): count}."""
     summary: dict[tuple[str, str], int] = {}
     unknown_sources: set[str] = set()
+    malformed = 0
     for row in rows:
         try:
             _, prov = _derive_for_row(row)
         except UnknownSourceError:
             unknown_sources.add(str(row["source"]))
             continue
+        except ValueError as exc:
+            malformed += 1
+            print(f"[summary] skipping malformed row: {exc}", file=sys.stderr)
+            continue
         key = (str(row["source"]), prov)
         summary[key] = summary.get(key, 0) + 1
     if unknown_sources:
         print(f"[summary] WARNING: unregistered sources skipped: {sorted(unknown_sources)}", file=sys.stderr)
+    if malformed:
+        print(f"[summary] WARNING: {malformed} rows skipped due to NULL/malformed forecast_basis_date", file=sys.stderr)
     return summary
 
 
@@ -119,15 +139,22 @@ def apply(db_path: Path, *, confirm_backup: bool) -> None:
             return
         updates: list[tuple[str, str, int]] = []
         unknown_count = 0
+        malformed_count = 0
         for row in rows:
             try:
                 issue_time, prov = _derive_for_row(row)
             except UnknownSourceError:
                 unknown_count += 1
                 continue
+            except ValueError as exc:
+                malformed_count += 1
+                print(f"[apply] skipping malformed row: {exc}", file=sys.stderr)
+                continue
             updates.append((issue_time, prov, int(row["id"])))
         if unknown_count:
             print(f"[apply] WARNING: {unknown_count} rows have unregistered sources and will remain NULL.", file=sys.stderr)
+        if malformed_count:
+            print(f"[apply] WARNING: {malformed_count} rows skipped (NULL/malformed forecast_basis_date).", file=sys.stderr)
         print(f"[apply] Writing {len(updates):,} updates in a single transaction...")
         conn.executemany(
             "UPDATE forecasts SET forecast_issue_time = ?, availability_provenance = ? WHERE id = ?",
@@ -138,8 +165,9 @@ def apply(db_path: Path, *, confirm_backup: bool) -> None:
             "SELECT COUNT(*) FROM forecasts WHERE forecast_issue_time IS NULL OR availability_provenance IS NULL"
         ).fetchone()[0]
         print(f"[apply] Remaining NULL rows: {post_null:,}")
-        if post_null != unknown_count:
-            print(f"[apply] WARNING: NULL count ({post_null}) != expected unknown ({unknown_count}).", file=sys.stderr)
+        expected_remaining = unknown_count + malformed_count
+        if post_null != expected_remaining:
+            print(f"[apply] WARNING: NULL count ({post_null}) != expected unmapped+malformed ({expected_remaining}).", file=sys.stderr)
     finally:
         conn.close()
 
