@@ -296,6 +296,36 @@ The 9 tests EXIST in the repo. The opponent's grep audit only counted INVs whose
 
 6. **The METHODOLOGY itself is improvable**. This case study was added to §5 after the cycle; the next cycle should bake "extend grep audits with repo-wide search" into the dispatch templates BEFORE the verdict locks. See §12 future extensions.
 
+### §5.Y Bidirectional grep pattern (concrete tool from §5.X case study)
+
+Add this to the **per-batch boot reading** of any future critic + to the **R1/R2 dispatch templates** under "audit discipline":
+
+When a debate cites "X% of Y lack Z" derived from a grep, the audit MUST be bidirectional:
+
+**Forward grep** (the typical claim): does the source file (e.g. `manifest.yaml`) cite the target field (e.g. `tests:`)?
+
+**Reverse grep** (the often-skipped check): does the target system (e.g. test files) cite the source identity (e.g. `INV-XX` in docstring, class name, file purpose comment)?
+
+Concrete bidirectional grep template for INV-style audits:
+
+```bash
+# Forward: which INVs have tests: blocks cited in their YAML?
+grep -B1 "tests:" architecture/invariants.yaml | grep "id: INV-"
+
+# Reverse: which INVs are referenced by name in any test file?
+grep -rn "INV-[0-9]\+" tests/ | sort -u
+
+# Diff: forward-found vs reverse-found tells you the schema-citation gap
+# (in YAML field) vs enforcement gap (no tests at all)
+```
+
+Apply this pattern to ANY claim of form "X% of [items] lack [enforcement]":
+- Are the items checked for the SPECIFIC field, or for ANY enforcement?
+- Has the target been searched for back-references?
+- If the answer to either is "no", the % is suspect.
+
+The schema-citation gap is real and worth fixing (data hygiene). The enforcement gap is often imaginary unless bidirectional grep is run.
+
 ---
 
 ## §6 Common failure modes + recovery
