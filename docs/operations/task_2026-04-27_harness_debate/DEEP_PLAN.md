@@ -77,7 +77,7 @@ Tier 1 (executor, in flight, ~14-20h)
 | 15 | module_manifest.yaml replacement | Python registries for active packages; ~150 LOC YAML for cross-package metadata | Active = touched in last 90 days | Migrate 9-12 packages to `__init__.py` registry; retain residual YAML |
 | 16 | history_lore.yaml policy | Archive (proponent H4 + Fitz #3) | Cost of archive << cost of premature delete | Archive `docs/archives/history_lore_extended_2026-04.md`; retain ~600 LOC active in architecture/ |
 | 17 | @enforced_by decorator prototype | BUILD IT (8-12h experiment) | If prototype strictly dominates current YAML+tests on 71-pass baseline → migrate; else hold YAML | Build prototype; empirical decide |
-| 11* | Generate registries from filesystem walk | DO IT | Auto-generation removes a maintenance surface | Write `scripts/regenerate_registries.py` (~200 LOC); CI gate |
+| 11* | Generate registries from filesystem walk | ~~DO IT~~ **AUDIT-AND-KEEP per Phase 2 erratum** | ~~Auto-generation removes a maintenance surface~~ Phase 2 audit found 3 manifests are 99% complete + INTENTIONAL CURATION (95% load-bearing hand-curated metadata). **Auto-gen would discard intent.** | Audit script `scripts/regenerate_registries.py` 228L written but used as PR-gate (--diff mode) NOT --apply. See round2_verdict §9.2 erratum + methodology §5.Z case study |
 | 12* | task_boot_profiles → 7 SKILL.md | DO IT | On-demand load saves ~3-5K boot tokens per session | Migrate 7 profiles |
 
 **Tier 2 sequencing**: items 13-17 can run in any order; 11* and 12* are Tier 1 → Tier 2 promotions.

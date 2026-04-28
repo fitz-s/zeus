@@ -326,6 +326,34 @@ Apply this pattern to ANY claim of form "X% of [items] lack [enforcement]":
 
 The schema-citation gap is real and worth fixing (data hygiene). The enforcement gap is often imaginary unless bidirectional grep is run.
 
+### §5.Z Generalized pattern — "apparent gap may be intentional, not drift"
+
+After two empirical case studies in the same cycle, a generalized methodology pattern emerges. Both round-1+2 verdicts had recommendations that empirical implementation falsified, and both had the same root cause: **the debate audit measured the wrong thing.**
+
+| Case study | Verdict claimed | Audit measured | Actual reality |
+|---|---|---|---|
+| BATCH D INV-16/17 (§5.X) | "33% INVs are pure prose-as-law; INV-16/17 should be DELETE" | YAML field `tests:` cited per INV (forward-only grep) | Tests EXIST in repo, just not cited via that field. **Schema-citation gap ≠ enforcement gap.** |
+| Phase 2 manifests | "3 registries should be auto-generated from filesystem (drifted)" | Numerical count cited-vs-fs (naive count) | 3 registries are INTENTIONAL CURATION (whitelist; 19-22 hand-curated fields per entry). **Naive-count gap ≠ intent-vs-fs drift.** |
+
+Both follow the same pattern: **a debate claim of "X is broken/incomplete" should be verified against the question "is X actually broken, or is X intentionally that way?"** before becoming a LOCKED concession or a DEEP_PLAN action item.
+
+**Diagnostic questions to ask BEFORE locking any "X is gap/drift/missing" claim**:
+
+1. What is X's intent — is it supposed to be COMPREHENSIVE or CURATED?
+2. If CURATED, what's the curation criterion? Apparent gaps may be deliberate exclusions.
+3. Does the missing element (test, citation, fs file) exist elsewhere? (bidirectional grep §5.Y)
+4. Is there metadata around X (file headers, AGENTS.md notes, naming conventions) that signals intent?
+5. What % of "missing" items are deliberate exclusions vs unintentional drift? Stratify before declaring a rate.
+
+**Pattern recognition for future debates**: when an audit produces a "% lacking" or "drift count" number, the audit method should be REVERSE-ENGINEERED before trust:
+- Did it check forward only or bidirectional?
+- Did it understand the surface's intent or treat it as naive?
+- Did it sample stratified or aggregate?
+
+Both case studies were caught by the longlast critic during execution, NOT by the debate-stage cross-examination. The debate had multiple grep audits and several rounds of mutual concession — yet missed both. The critic-gate during execution is the structural backstop.
+
+**Updated methodology recommendation** (extends §5 critic-gate workflow): always include in critic boot prompt the explicit attack vector "for any 'X% lack Y' claim from debate verdict, re-audit with intent-aware methodology before approving any DELETE/REPLACE action."
+
 ---
 
 ## §6 Common failure modes + recovery
