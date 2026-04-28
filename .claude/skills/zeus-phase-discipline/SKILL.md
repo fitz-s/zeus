@@ -20,6 +20,7 @@ When executing a phase from `docs/operations/task_*/r3/slice_cards/<phase>.yaml`
 
 - Antibody contracts (NC-NEW-A..J) are SQL/semgrep, not prose; if a new behavior would violate, the test fails BEFORE merge.
 - Citations rot. When you cite a file:line, also cite a SYMBOL (function/class). The drift-checker re-verifies on the symbol.
+- **Bidirectional grep before any "X% of Y lack Z" claim**: forward (manifest cites field?) AND reverse (target system back-cites identity?). Schema-citation gap (forward only) ≠ enforcement gap (both). A grep on `architecture/invariants.yaml:tests:` plus a separate `grep -rn "INV-[0-9]\+" tests/` together — diff is the real gap. See methodology §5.X case study (round-1 verdict §10 erratum: 33% LARP claim was 5x overcount because reverse grep was skipped).
 - Frozen interfaces are downstream-stable. If you need to break one, write `r3/_protocol_evolution/<topic>.md` first.
 - Every public API a downstream phase consumes must have at least one cross-phase relationship test.
 - DB-canonical-truth direction (INV-17 spirit) is one-way: DB > derived JSON > reports. Never write the reverse direction.
