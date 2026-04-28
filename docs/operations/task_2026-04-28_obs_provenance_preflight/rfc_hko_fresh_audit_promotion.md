@@ -28,9 +28,10 @@ calibration-pair rebuild until an audit artifact exists.
 - HKO is `gap_city` per `tier_resolver.source_role_assessment_for_city_source`.
 - The HKO API and HKO native data have stalled relative to the audited
   window (`current_source_validity.md` item 3).
-- Polymarket settles HKO contracts on WU values for VHHH (a wu_icao path
-  through the airport) when HKO endpoint diverges; this routing is
-  not a code constant — it is per-market description.
+- **Correction merged 2026-04-28**: Hong Kong has no WU ICAO in Zeus.
+  Do not route HKO/Hong Kong settlement truth through `wu_icao`, WU, or
+  VHHH aliases. Any stale market-description ambiguity remains a
+  fresh-audit/operator-evidence question, not an accepted source route.
 - `architecture/city_truth_contract.yaml` defines the stable schema; HKO
   routes are NOT promotable through that file.
 
@@ -103,11 +104,10 @@ matching audit record passes.
    measurement)?
 3. **Signer authority**: who can sign? Just the operator (Fitz) or any
    project agent?
-4. **HK-VHHH contract conflict**: Polymarket HK markets often settle on
-   WU values for VHHH. Should this RFC also formalize that routing
-   (i.e. "if HK market description specifies VHHH, treat WU readings as
-   audited even without HKO record")? Or keep VHHH-routing in market
-   contract semantics (separate concern)?
+4. **HK source-route correction**: do not formalize any HK→WU/VHHH
+   routing. Hong Kong has no WU ICAO in Zeus; HK remains an HKO/fresh-audit
+   caution path unless a future operator-approved primary-source receipt
+   proves a different non-WU route.
 5. **Audit record retention**: keep all records (history of audits) vs
    active records only?
 
@@ -116,7 +116,7 @@ matching audit record passes.
 - Replacing HKO API ingest mechanism (separate work)
 - Schema changes to `observations` (we are NOT adding columns; the audit
   table is operator-owned)
-- HK→VHHH market-routing contract (handled in `SettlementSemantics`)
+- Any future HK source-route exception (must not be WU/VHHH by default; requires separate operator-approved primary-source evidence)
 
 ## Stop conditions
 

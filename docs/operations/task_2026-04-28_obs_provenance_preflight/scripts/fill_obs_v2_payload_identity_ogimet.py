@@ -23,6 +23,7 @@ Differences from the WU patch:
 from __future__ import annotations
 
 import argparse
+import os
 import hashlib
 import json
 import shutil
@@ -31,6 +32,17 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone as _tz
 from pathlib import Path
+
+OPERATOR_APPLY_APPROVAL_ENV = "ZEUS_OPERATOR_APPROVED_DB_MUTATION"
+
+
+def _require_operator_apply_approval() -> None:
+    if os.environ.get(OPERATOR_APPLY_APPROVAL_ENV) != "YES":
+        raise SystemExit(
+            "REFUSING --apply: this packet script can mutate zeus DB state or call "
+            "external data sources. Set ZEUS_OPERATOR_APPROVED_DB_MUTATION=YES "
+            "only after the active packet/current_state authorizes the mutation."
+        )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -185,6 +197,8 @@ def main() -> int:
     p.add_argument("--chunk-days", type=int, default=DEFAULT_CHUNK_DAYS)
     p.add_argument("--sleep", type=float, default=DEFAULT_SLEEP_SEC)
     args = p.parse_args()
+    if args.apply:
+        _require_operator_apply_approval()
 
     if not DB_PATH.exists():
         sys.stderr.write(f"FATAL: db not found: {DB_PATH}\n")

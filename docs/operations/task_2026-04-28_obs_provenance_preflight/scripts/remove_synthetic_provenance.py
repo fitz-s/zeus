@@ -27,11 +27,23 @@ stdlib-only. dry-run default. Snapshot before apply.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
+
+OPERATOR_APPLY_APPROVAL_ENV = "ZEUS_OPERATOR_APPROVED_DB_MUTATION"
+
+
+def _require_operator_apply_approval() -> None:
+    if os.environ.get(OPERATOR_APPLY_APPROVAL_ENV) != "YES":
+        raise SystemExit(
+            "REFUSING --apply: this packet script can mutate zeus DB state or call "
+            "external data sources. Set ZEUS_OPERATOR_APPROVED_DB_MUTATION=YES "
+            "only after the active packet/current_state authorizes the mutation."
+        )
 
 SYNTHETIC_PROV_KEYS = ("payload_hash", "parser_version", "source_url", "source_file")
 SYNTH_PARSER_VERSION = "legacy:enrich_2026-04-28"
@@ -43,6 +55,8 @@ def main() -> int:
     p.add_argument("--db-path", required=True)
     p.add_argument("--apply", action="store_true", help="Execute UPDATEs (default: dry-run)")
     args = p.parse_args()
+    if args.apply:
+        _require_operator_apply_approval()
 
     db = Path(args.db_path)
     if not db.exists():
