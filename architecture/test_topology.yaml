@@ -35,6 +35,7 @@ test_trust_policy:
     # topology_doctor_digest.py:759 reads `trusted_tests:` keys ONLY
     # for the trust check. Both registrations are required.
     tests/test_authority_strict_learning.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_backtest_purpose_contract.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -121,6 +122,7 @@ categories:
     - tests/test_assumptions_validation.py
     - tests/test_authority_gate.py
     - tests/test_backtest_outcome_comparison.py
+    - tests/test_backtest_purpose_contract.py
     - tests/test_backtest_settlement_value_outcome.py
     - tests/test_backtest_trade_subject_identity.py
     - tests/test_calibration_bins_canonical.py
