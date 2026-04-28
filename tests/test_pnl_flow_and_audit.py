@@ -1,3 +1,6 @@
+# Created: 2026-04-28
+# Last reused/audited: 2026-04-28
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md first-four gate.
 """Cross-module P&L flow, CI-threshold, and hardcoded-audit tests."""
 
 from __future__ import annotations
@@ -56,6 +59,100 @@ def _ensure_auth_verified(conn) -> None:
     """Mark all calibration_pairs rows VERIFIED (init_schema now creates the column)."""
     conn.execute("UPDATE calibration_pairs SET authority = 'VERIFIED'")
     conn.commit()
+
+
+def _allow_entry_gates_for_cycle_test(monkeypatch) -> None:
+    """Open only test-local runtime gates needed to exercise entry materialization."""
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "is_strategy_enabled", lambda strategy: True)
+    monkeypatch.setattr(cycle_runner.cutover_guard, "summary", lambda: {"state": "READY", "entry": {"allow_submit": True}})
+    monkeypatch.setattr(
+        "src.control.heartbeat_supervisor.summary",
+        lambda: {"health": "OK", "entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr(
+        "src.control.ws_gap_guard.summary",
+        lambda: {
+            "subscription_state": "CONNECTED",
+            "gap_reason": "",
+            "m5_reconcile_required": False,
+            "entry": {"allow_submit": True},
+        },
+    )
+    monkeypatch.setattr(
+        "src.risk_allocator.refresh_global_allocator",
+        lambda *args, **kwargs: {"entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
+
+
+def _insert_source_correct_harvester_obs(
+    conn,
+    *,
+    city: City | None = None,
+    target_date: str = "2026-04-01",
+    high_temp: float = 40.0,
+) -> None:
+    """Seed a source-family-correct observation row for harvester live tests."""
+    city = city or NYC
+    conn.execute(
+        """
+        INSERT INTO observations (
+            city, target_date, source, high_temp, unit, fetched_at, authority
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            city.name,
+            target_date,
+            "wu_icao_history",
+            high_temp,
+            city.settlement_unit,
+            "2026-04-01T23:00:00Z",
+            "VERIFIED",
+        ),
+    )
+
+
+def _enable_live_harvester_test_path(monkeypatch, *, mock_lookup: bool = False) -> None:
+    """Enable flag-gated harvester tests without depending on Batch-A schema parity."""
+    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "1")
+
+    def _assert_source_family_and_skip_schema_write(
+        conn,
+        city,
+        target_date,
+        pm_bin_lo,
+        pm_bin_hi,
+        *,
+        event_slug="",
+        obs_row=None,
+    ):
+        assert obs_row is not None
+        assert obs_row["source"] == "wu_icao_history"
+        return {
+            "authority": "VERIFIED",
+            "settlement_value": obs_row["high_temp"],
+            "winning_bin": f"{int(pm_bin_lo)}-{int(pm_bin_hi)}°{city.settlement_unit}",
+            "reason": None,
+        }
+
+    monkeypatch.setattr(
+        harvester_module,
+        "_write_settlement_truth",
+        _assert_source_family_and_skip_schema_write,
+    )
+    if mock_lookup:
+        monkeypatch.setattr(
+            harvester_module,
+            "_lookup_settlement_obs",
+            lambda conn, city, target_date: {
+                "id": 1,
+                "source": "wu_icao_history",
+                "high_temp": 40.0,
+                "unit": city.settlement_unit,
+                "fetched_at": "2026-04-01T23:00:00Z",
+            },
+        )
 
 
 NYC = City(
@@ -1203,7 +1300,7 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{"city": NYC}])
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: True)
@@ -3062,11 +3159,12 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
             pass
 
     calls: list[dict] = []
+    _allow_entry_gates_for_cycle_test(monkeypatch)
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     _market_list = [{
@@ -3075,6 +3173,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
         "outcomes": [],
         "hours_since_open": 2.0,
         "hours_to_resolution": 30.0,
+        "temperature_metric": "high",
     }]
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: _market_list)
     monkeypatch.setattr("src.data.market_scanner.find_weather_markets", lambda **kwargs: _market_list)
@@ -3121,7 +3220,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cycle_runner,
         "execute_intent",
-        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35, shares=14.29),
+        lambda *args, **kwargs: OrderResult(trade_id="trade-1", status="filled", fill_price=0.35, shares=14.29, command_state="FILLED"),
     )
     monkeypatch.setattr(
         "src.state.strategy_tracker.StrategyTracker.record_entry",
@@ -3192,6 +3291,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         edge_source="center_buy",
         settled_at="2026-04-01T23:00:00Z",
     )])
+    _insert_source_correct_harvester_obs(conn)
     conn.commit()
     _ensure_auth_verified(conn)
     conn.close()
@@ -3204,14 +3304,18 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
                 "question": "39-40°F",
                 "winningOutcome": "Yes",
                 "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps([1.0, 0.0]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m1",
             },
             {
                 "question": "41-42°F",
                 "winningOutcome": "No",
                 "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps([0.0, 1.0]),
+                "outcomePrices": json.dumps(["0", "1"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m2",
             },
         ],
@@ -3225,10 +3329,11 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
         "load_portfolio",
         lambda: PortfolioState(bankroll=150.0, positions=[]),
     )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    _enable_live_harvester_test_path(monkeypatch)
     refit_calls = []
     monkeypatch.setattr(
         harvester_module,
@@ -3262,7 +3367,9 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
                 "question": "39-40°F",
                 "winningOutcome": "Yes",
                 "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps([1.0, 0.0]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m1",
             }
         ],
@@ -3286,7 +3393,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
             ],
         ),
     )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
@@ -3321,6 +3428,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
         "store_settlement_records",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("decision_log writer must be skipped")),
     )
+    _enable_live_harvester_test_path(monkeypatch, mock_lookup=True)
 
     with caplog.at_level(logging.ERROR):
         result = harvester_module.run_harvester()
@@ -3343,6 +3451,7 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
     init_schema(conn)
 
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
+    _insert_source_correct_harvester_obs(conn)
     conn.commit()
     conn.close()
 
@@ -3354,14 +3463,18 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
                 "question": "39-40°F",
                 "winningOutcome": "Yes",
                 "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps([1.0, 0.0]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m1",
             },
             {
                 "question": "41-42°F",
                 "winningOutcome": "No",
                 "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps([0.0, 1.0]),
+                "outcomePrices": json.dumps(["0", "1"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m2",
             },
         ],
@@ -3383,10 +3496,11 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
             )],
         ),
     )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    _enable_live_harvester_test_path(monkeypatch)
 
     result = harvester_module.run_harvester()
 
@@ -3444,6 +3558,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
             settled_at="2026-04-01T23:00:00Z",
         )
     ])
+    _insert_source_correct_harvester_obs(conn)
     conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
@@ -3455,14 +3570,18 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
                 "question": "39-40°F",
                 "winningOutcome": "Yes",
                 "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps([1.0, 0.0]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m1",
             },
             {
                 "question": "41-42°F",
                 "winningOutcome": "No",
                 "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps([0.0, 1.0]),
+                "outcomePrices": json.dumps(["0", "1"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m2",
             },
         ],
@@ -3484,10 +3603,11 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
             )],
         ),
     )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    _enable_live_harvester_test_path(monkeypatch)
 
     result = harvester_module.run_harvester()
 
@@ -3497,7 +3617,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
     rows = conn.execute(
         """
         SELECT range_label, p_raw
-        FROM calibration_pairs
+        FROM calibration_pairs_v2
         WHERE city = ? AND target_date = ?
         ORDER BY range_label ASC
         """,
@@ -3576,6 +3696,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
                "pnl": 15.0,
                "exit_reason": "SETTLEMENT",
            })))
+    _insert_source_correct_harvester_obs(conn)
     conn.commit()
     conn.close()
 
@@ -3587,14 +3708,18 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
                 "question": "39-40°F",
                 "winningOutcome": "Yes",
                 "clobTokenIds": json.dumps(["yes1", "no1"]),
-                "outcomePrices": json.dumps([1.0, 0.0]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m1",
             },
             {
                 "question": "41-42°F",
                 "winningOutcome": "No",
                 "clobTokenIds": json.dumps(["yes2", "no2"]),
-                "outcomePrices": json.dumps([0.0, 1.0]),
+                "outcomePrices": json.dumps(["0", "1"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
                 "conditionId": "m2",
             },
         ],
@@ -3616,10 +3741,11 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
             )],
         ),
     )
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    _enable_live_harvester_test_path(monkeypatch)
 
     result = harvester_module.run_harvester()
 
@@ -3629,7 +3755,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     rows = conn.execute(
         """
         SELECT range_label, p_raw
-        FROM calibration_pairs
+        FROM calibration_pairs_v2
         WHERE city = ? AND target_date = ?
         ORDER BY range_label ASC
         """,
@@ -3719,6 +3845,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
             settled_at="2026-04-01T23:00:00Z",
         ),
     ])
+    _insert_source_correct_harvester_obs(conn)
     conn.commit()
     conn.close()
 
@@ -3726,8 +3853,24 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
         "title": "Highest temperature in New York City on April 1 2026",
         "slug": "highest-temperature-in-new-york-city-on-april-1-2026",
         "markets": [
-            {"question": "39-40°F", "winningOutcome": "Yes", "clobTokenIds": json.dumps(["yes1", "no1"]), "outcomePrices": json.dumps([1.0, 0.0]), "conditionId": "m1"},
-            {"question": "41-42°F", "winningOutcome": "No", "clobTokenIds": json.dumps(["yes2", "no2"]), "outcomePrices": json.dumps([0.0, 1.0]), "conditionId": "m2"},
+            {
+                "question": "39-40°F",
+                "winningOutcome": "Yes",
+                "clobTokenIds": json.dumps(["yes1", "no1"]),
+                "outcomePrices": json.dumps(["1", "0"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
+                "conditionId": "m1",
+            },
+            {
+                "question": "41-42°F",
+                "winningOutcome": "No",
+                "clobTokenIds": json.dumps(["yes2", "no2"]),
+                "outcomePrices": json.dumps(["0", "1"]),
+                "outcomes": json.dumps(["Yes", "No"]),
+                "umaResolutionStatus": "resolved",
+                "conditionId": "m2",
+            },
         ],
     }
 
@@ -3735,10 +3878,11 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
     monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
     monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0, positions=[]))
-    monkeypatch.setattr(harvester_module, "save_portfolio", lambda state: None)
+    monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(harvester_module, "_fetch_settled_events", lambda: [event])
+    _enable_live_harvester_test_path(monkeypatch)
 
     result = harvester_module.run_harvester()
     assert result["pairs_created"] == 2

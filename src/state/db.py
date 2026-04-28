@@ -371,6 +371,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             settlement_source TEXT,
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            pm_bin_lo REAL,
+            pm_bin_hi REAL,
+            unit TEXT,
+            settlement_source_type TEXT,
             -- REOPEN-2 inline: INV-14 identity spine is part of the fresh-DB
             -- schema so UNIQUE(city, target_date, temperature_metric) can
             -- reference temperature_metric without a second migration pass.
@@ -1301,6 +1305,10 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     # All columns are nullable (pre-P-E rows may carry NULL); NOT-NULL enforcement is
     # deferred to P-E DELETE+INSERT reconstruction writers.
     for ddl in [
+        "ALTER TABLE settlements ADD COLUMN pm_bin_lo REAL;",
+        "ALTER TABLE settlements ADD COLUMN pm_bin_hi REAL;",
+        "ALTER TABLE settlements ADD COLUMN unit TEXT;",
+        "ALTER TABLE settlements ADD COLUMN settlement_source_type TEXT;",
         "ALTER TABLE settlements ADD COLUMN temperature_metric TEXT "
         "CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low'));",
         "ALTER TABLE settlements ADD COLUMN physical_quantity TEXT;",

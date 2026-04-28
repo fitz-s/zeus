@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-28
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch C Day0Signal fixture alignment.
 """MATH-004: Sigma Floor Evaluation Tests.
 
 Evaluate whether the quantization noise floor in day0_post_peak_sigma is appropriate.
@@ -18,6 +21,7 @@ from src.signal.forecast_uncertainty import (
     QUANTIZATION_NOISE_FLOOR_C,
 )
 from src.signal.ensemble_signal import sigma_instrument
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 
 class TestSigmaFloorBehavior:
@@ -125,6 +129,7 @@ class TestSigmaFloorCalibration:
                 observation_time=now.isoformat(),
                 current_utc_timestamp=now.isoformat(),
                 daylight_progress=0.5,  # Mid-day
+                temperature_metric=HIGH_LOCALDAY_MAX,
             )
 
             p_vec = sig.p_vector(bins, n_mc=10000)
@@ -182,6 +187,7 @@ class TestSigmaFloorCalibration:
                 observation_source="wu",
                 observation_time=now.isoformat(),
                 current_utc_timestamp=now.isoformat(),
+                temperature_metric=HIGH_LOCALDAY_MAX,
             )
 
             p_vec = sig.p_vector(bins, n_mc=10000)

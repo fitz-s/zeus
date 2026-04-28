@@ -1,3 +1,6 @@
+# Created: 2026-03-30
+# Last reused/audited: 2026-04-28
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -38,6 +41,21 @@ def _bootstrap_policy_tables(conn: sqlite3.Connection) -> None:
     from src.state.db import apply_architecture_kernel_schema
 
     apply_architecture_kernel_schema(conn)
+
+
+def _init_empty_canonical_portfolio_schema(
+    db_path,
+    *,
+    drop_risk_actions: bool = False,
+) -> None:
+    """Create canonical DB tables with an empty, healthy position_current view."""
+
+    conn = get_connection(db_path)
+    init_schema(conn)
+    if drop_risk_actions:
+        conn.execute("DROP TABLE IF EXISTS risk_actions")
+    conn.commit()
+    conn.close()
 
 
 def _insert_risk_action(
@@ -403,7 +421,7 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 1
-        assert details["portfolio_capital_source"] == "working_state_metadata"
+        assert details["portfolio_capital_source"] == "dual_source_blended"
         assert details["initial_bankroll"] == pytest.approx(150.0)
         assert details["daily_baseline_total"] == pytest.approx(151.0)
         assert details["weekly_baseline_total"] == pytest.approx(152.0)
@@ -436,21 +454,8 @@ class TestRiskGuardSettlementSource:
             lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events", "metric_ready": True}],
         )
 
-        riskguard_module.tick()
-        row = get_connection(risk_db).execute(
-            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        details = json.loads(row["details_json"])
-
-        assert details["portfolio_truth_source"] == "working_state_fallback"
-        assert details["portfolio_loader_status"] == "missing_table"
-        assert details["portfolio_fallback_active"] is True
-        assert details["portfolio_fallback_reason"] == "canonical snapshot unavailable: missing_table"
-        assert details["portfolio_position_count"] == 0
-        assert details["portfolio_capital_source"] == "working_state_metadata"
-        assert details["initial_bankroll"] == pytest.approx(150.0)
-        assert details["daily_baseline_total"] == pytest.approx(149.0)
-        assert details["weekly_baseline_total"] == pytest.approx(148.0)
+        with pytest.raises(RuntimeError, match="riskguard requires canonical truth source.*json_fallback"):
+            riskguard_module.tick()
 
     def test_get_current_level_fails_closed_when_risk_state_has_no_rows(self, monkeypatch, tmp_path):
         risk_db = tmp_path / "risk_state.db"
@@ -473,6 +478,7 @@ class TestRiskGuardSettlementSource:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(
@@ -501,6 +507,7 @@ class TestRiskGuardSettlementSource:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(
@@ -528,6 +535,7 @@ class TestRiskGuardSettlementSource:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(
@@ -632,6 +640,7 @@ class TestRiskGuardSettlementSource:
             "settlement_capture": {"trades": 0, "pnl": 0.0},
         }
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
@@ -781,11 +790,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "degraded:insufficient_history"
-        assert details["daily_loss_level"] == RiskLevel.RED.value
+        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -820,11 +829,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "degraded:inconsistent_history"
-        assert details["daily_loss_level"] == RiskLevel.RED.value
+        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss_reference"] is None
 
     def test_tick_marks_no_reference_row_when_risk_history_is_empty(self, monkeypatch, tmp_path):
@@ -851,10 +860,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "degraded:no_reference_row"
+        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -877,7 +887,7 @@ class TestRiskGuardTrailingLossSemantics:
             total_pnl=-6.0,
             effective_bankroll=149.0,
         )
-        _insert_risk_state_row(
+        stale_reference_id = _insert_risk_state_row(
             risk_conn,
             checked_at=(datetime.now(timezone.utc) - timedelta(hours=27)).isoformat(),
             total_pnl=-8.0,
@@ -899,9 +909,10 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "degraded:inconsistent_history"
-        assert details["daily_loss_reference"] is None
+        assert details["daily_loss"] == pytest.approx(2.0)
+        assert details["daily_loss_status"] == "stale_reference"
+        assert details["daily_loss_source"] == "risk_state_history"
+        assert details["daily_loss_reference"]["row_id"] == stale_reference_id
 
     def test_tick_uses_trustworthy_reference_within_freshness_window(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -1125,8 +1136,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
         assert details["execution_quality_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "tighten_risk" in details["recommended_controls"]
@@ -1149,6 +1160,7 @@ class TestStrategyPolicyResolver:
         tracker = strategy_tracker_module.StrategyTracker()
         tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
@@ -1164,8 +1176,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["recommended_strategy_gates"] == ["center_buy"]
         assert "review_strategy_gates" in details["recommended_controls"]
@@ -1344,6 +1356,7 @@ class TestStrategyPolicyResolver:
         tracker = strategy_tracker_module.StrategyTracker()
         tracker.edge_compression_check = lambda window_days=30: ["EDGE_COMPRESSION: center_buy edge shrinking"]
 
+        _init_empty_canonical_portfolio_schema(zeus_db, drop_risk_actions=True)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
@@ -1374,6 +1387,7 @@ class TestStrategyPolicyResolver:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(riskguard_module, "load_tracker", lambda: (_ for _ in ()).throw(RuntimeError("tracker unavailable")))
@@ -1389,8 +1403,8 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.RED
-        assert row["level"] == RiskLevel.RED.value
+        assert level == RiskLevel.YELLOW
+        assert row["level"] == RiskLevel.YELLOW.value
         assert details["strategy_signal_level"] == "YELLOW"
         assert details["strategy_tracker_error"] == "tracker unavailable"
         assert details["recommended_strategy_gates"] == []
@@ -1404,6 +1418,7 @@ class TestStrategyPolicyResolver:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(
@@ -1457,6 +1472,7 @@ class TestStrategyPolicyResolver:
                 return get_connection(risk_db)
             return get_connection(zeus_db)
 
+        _init_empty_canonical_portfolio_schema(zeus_db)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
         monkeypatch.setattr(

@@ -1,3 +1,6 @@
+# Created: 2026-04-12
+# Last reused/audited: 2026-04-28
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch B source-family rebuild gate.
 """K4 rebuild pipeline end-to-end test.
 
 Exercises the full rebuild pipeline on a synthetic fixture:
@@ -600,3 +603,85 @@ def test_rebuild_multi_city_one_unknown_unit_one_valid(tmp_path):
     assert summary["rows_skipped"] == 1, (
         f"Expected 1 skipped (unknown unit), got {summary['rows_skipped']}"
     )
+
+
+def test_rebuild_settlements_writes_source_family_data_versions(tmp_path):
+    """HKO and NOAA-proxy rows keep their city source-family provenance."""
+    conn, db_path = _make_tmp_db(tmp_path)
+
+    conn.execute(
+        "INSERT INTO observations "
+        "(city, target_date, source, high_temp, low_temp, unit, authority) "
+        "VALUES ('Hong Kong', '2025-07-01', 'hko_daily_api', 28.8, 24.0, 'C', 'VERIFIED')"
+    )
+    conn.execute(
+        "INSERT INTO observations "
+        "(city, target_date, source, high_temp, low_temp, unit, authority) "
+        "VALUES ('Istanbul', '2025-07-01', 'ogimet_metar_v1', 29.4, 20.0, 'C', 'VERIFIED')"
+    )
+    conn.commit()
+    conn.close()
+
+    from scripts.rebuild_settlements import rebuild_settlements
+
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.row_factory = sqlite3.Row
+    summary = rebuild_settlements(conn2, dry_run=False)
+    conn2.commit()
+
+    rows = conn2.execute(
+        """
+        SELECT city, settlement_value, winning_bin, data_version,
+               settlement_source_type, unit
+        FROM settlements
+        WHERE city IN ('Hong Kong', 'Istanbul')
+        ORDER BY city
+        """
+    ).fetchall()
+    conn2.close()
+
+    assert summary["rows_written"] == 2
+    assert summary["rows_skipped"] == 0
+    by_city = {row["city"]: dict(row) for row in rows}
+    assert by_city["Hong Kong"]["settlement_value"] == 28
+    assert by_city["Hong Kong"]["winning_bin"] == "28°C"
+    assert by_city["Hong Kong"]["data_version"] == "hko_daily_api_v1"
+    assert by_city["Hong Kong"]["settlement_source_type"] == "hko"
+    assert by_city["Hong Kong"]["unit"] == "C"
+    assert by_city["Istanbul"]["settlement_value"] == 29
+    assert by_city["Istanbul"]["winning_bin"] == "29°C"
+    assert by_city["Istanbul"]["data_version"] == "ogimet_metar_v1"
+    assert by_city["Istanbul"]["settlement_source_type"] == "noaa"
+    assert by_city["Istanbul"]["unit"] == "C"
+
+
+def test_rebuild_settlements_skips_hong_kong_wu_source_aliases(tmp_path):
+    """Hong Kong/HKO has no WU ICAO path; both WU aliases must fail closed."""
+    conn, db_path = _make_tmp_db(tmp_path)
+    for source in ("wu_icao_history", "wu_icao"):
+        conn.execute(
+            "INSERT INTO observations "
+            "(city, target_date, source, high_temp, low_temp, unit, authority) "
+            "VALUES ('Hong Kong', '2025-07-01', ?, 28.8, 24.0, 'C', 'VERIFIED')",
+            (source,),
+        )
+    conn.commit()
+    conn.close()
+
+    from scripts.rebuild_settlements import rebuild_settlements
+
+    conn2 = sqlite3.connect(str(db_path))
+    conn2.row_factory = sqlite3.Row
+    summary = rebuild_settlements(conn2, dry_run=False, city_filter="Hong Kong")
+    conn2.commit()
+
+    settlements = conn2.execute(
+        "SELECT COUNT(*) FROM settlements WHERE city='Hong Kong'"
+    ).fetchone()[0]
+    conn2.close()
+
+    assert settlements == 0
+    assert summary["rows_seen"] == 2
+    assert summary["rows_written"] == 0
+    assert summary["rows_skipped"] == 2
+    assert summary["rows_skipped_by_reason"] == {"source_family_mismatch": 2}

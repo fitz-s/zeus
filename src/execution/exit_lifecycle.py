@@ -207,15 +207,36 @@ def _next_canonical_sequence_no(conn: sqlite3.Connection, position_id: str) -> i
     return int(row[0] or 0) + 1
 
 
-def _has_canonical_position_history(conn: sqlite3.Connection, position_id: str) -> bool:
+_CANONICAL_ENTRY_EVENT_TYPES = (
+    "POSITION_OPEN_INTENT",
+    "ENTRY_ORDER_POSTED",
+    "ENTRY_ORDER_FILLED",
+)
+
+
+def _existing_canonical_entry_event_types(conn: sqlite3.Connection, position_id: str) -> set[str]:
     try:
-        row = conn.execute(
-            "SELECT 1 FROM position_events WHERE position_id = ? LIMIT 1",
+        rows = conn.execute(
+            """
+            SELECT event_type
+            FROM position_events
+            WHERE position_id = ?
+              AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED', 'ENTRY_ORDER_FILLED')
+            """,
             (position_id,),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.OperationalError:
-        return False
-    return row is not None
+        return set()
+    return {str(row[0]) for row in rows}
+
+
+def _append_sequence_numbers(events: list[dict], *, start_sequence_no: int) -> list[dict]:
+    resequenced: list[dict] = []
+    for offset, event in enumerate(events):
+        updated = dict(event)
+        updated["sequence_no"] = start_sequence_no + offset
+        resequenced.append(updated)
+    return resequenced
 
 
 def _canonical_phase_before_for_economic_close(position: Position) -> str:
@@ -237,13 +258,24 @@ def _dual_write_canonical_economic_close_if_available(
     from src.state.db import append_many_and_project
 
     trade_id = getattr(position, "trade_id", "")
-    has_history = _has_canonical_position_history(conn, trade_id)
+    existing_entry_types = _existing_canonical_entry_event_types(conn, trade_id)
+    missing_entry_types = [
+        event_type
+        for event_type in _CANONICAL_ENTRY_EVENT_TYPES
+        if event_type not in existing_entry_types
+    ]
 
-    if not has_history:
-        # Backfill canonical entry events for positions that only exist in
-        # the legacy table.  Create an entry-phase snapshot so
-        # build_entry_canonical_write produces the standard three-event
-        # sequence (OPEN_INTENT / ORDER_POSTED / ORDER_FILLED → active).
+    next_sequence_no = _next_canonical_sequence_no(conn, trade_id)
+
+    if missing_entry_types:
+        # Backfill missing canonical entry events for positions that predate
+        # full canonical entry history. Existing canonical events are
+        # append-only history: even a DAY0_WINDOW_ENTERED row must not suppress
+        # entry backfill, and no existing row may be renumbered or mutated.
+        # Create an entry-phase snapshot so build_entry_canonical_write
+        # produces the standard sequence (OPEN_INTENT / ORDER_POSTED /
+        # ORDER_FILLED → active), filter to only missing event types, then
+        # resequence the filtered events after the current max sequence.
         #
         # T4.1b 2026-04-23 (D4 Option E): these legacy positions have no
         # captured `DecisionEvidence` (the decision frame predates the
@@ -257,7 +289,7 @@ def _dual_write_canonical_economic_close_if_available(
         entry_snapshot.state = "entered"
         entry_snapshot.exit_state = ""
         try:
-            entry_events, _ = build_entry_canonical_write(
+            generated_entry_events, _ = build_entry_canonical_write(
                 entry_snapshot,
                 source_module="src.execution.exit_lifecycle:backfill",
                 decision_evidence_reason="backfill_legacy_position",
@@ -267,10 +299,19 @@ def _dual_write_canonical_economic_close_if_available(
                 "Canonical entry backfill failed for %s: %s", trade_id, exc,
             )
             return False
-        exit_seq = len(entry_events) + 1
+        entry_events = [
+            event
+            for event in generated_entry_events
+            if event.get("event_type") in missing_entry_types
+        ]
+        entry_events = _append_sequence_numbers(
+            entry_events,
+            start_sequence_no=next_sequence_no,
+        )
+        exit_seq = next_sequence_no + len(entry_events)
     else:
         entry_events = []
-        exit_seq = _next_canonical_sequence_no(conn, trade_id)
+        exit_seq = next_sequence_no
 
     try:
         exit_events, projection = build_economic_close_canonical_write(
