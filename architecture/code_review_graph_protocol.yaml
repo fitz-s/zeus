@@ -1,11 +1,23 @@
 schema_version: 1
+# DEPRECATED 2026-04-28 per round2_verdict.md §1.1 #9 (both proponent + opponent
+# endorsed inlining the 6-line summary into root AGENTS.md "Code Review Graph"
+# section as authoritative). This file is retained as a stub to preserve the
+# topology_doctor `--code-review-graph-protocol` validator (5 scripts depend on
+# the field shape: scripts/topology_doctor*.py + architecture/topology_schema.yaml
+# issue codes `code_review_graph_protocol_*`). Full removal requires patching
+# those 5 scripts (~150 LOC) and is deferred to a separate script-aware batch.
+# READ AGENTS.md root §Code Review Graph for the authoritative 6-line summary.
 metadata:
   created: "2026-04-23"
+  deprecated: "2026-04-28"
+  superseded_by: "AGENTS.md root §Code Review Graph (inline 6-line summary)"
   owner_packet: "Guidance Kernel Semantic Boot"
   purpose: >
-    Two-stage protocol for Code Review Graph use in Zeus. Graph output is a
-    structural context asset for impact, callers, tests, and review order; it
-    never supplies semantic truth or authority rank.
+    DEPRECATED stub. Authoritative summary is now inline in root AGENTS.md
+    §Code Review Graph. This file remains only to satisfy the topology_doctor
+    --code-review-graph-protocol validator until a script-aware batch removes
+    the dependent code paths in scripts/topology_doctor_policy_checks.py and
+    related modules. Field shape preserved verbatim from pre-deprecation HEAD.
   authority_status: derived_context_protocol_not_authority
 
 required_sections:

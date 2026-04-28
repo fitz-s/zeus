@@ -16,7 +16,7 @@ invariants:
     enforced_by:
       spec_sections: [3, P2]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
   - id: INV-03
     zones: [K0_frozen_kernel]
     statement: Canonical authority is append-first and projection-backed.
@@ -24,7 +24,7 @@ invariants:
     enforced_by:
       spec_sections: [3, P1, 19]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
       scripts:
         - scripts/replay_parity.py
   - id: INV-04
@@ -34,7 +34,7 @@ invariants:
     enforced_by:
       spec_sections: [3, P0.2, P3, 18]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
       tests:
         - tests/test_architecture_contracts.py::test_strategy_key_manifest_is_frozen
   - id: INV-05
@@ -61,7 +61,7 @@ invariants:
     enforced_by:
       spec_sections: [3, P5, 18]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
       semgrep_rule_ids: [zeus-no-direct-phase-assignment]
   - id: INV-08
     zones: [K0_frozen_kernel]
@@ -78,7 +78,7 @@ invariants:
     enforced_by:
       spec_sections: [3, P0.4, P4]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
   - id: INV-10
     zones: [K1_governance]
     statement: LLM output is never authority.
@@ -107,7 +107,7 @@ invariants:
       spec_sections: [13]
       negative_constraints: [NC-11, NC-12]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
   - id: INV-15
     zones: [K2_runtime]
     statement: Forecast rows lacking canonical cycle identity may serve runtime degrade paths but must not enter canonical training.
@@ -115,8 +115,9 @@ invariants:
     enforced_by:
       spec_sections: [14]
       schema:
-        - migrations/2026_04_02_architecture_kernel.sql
+        - architecture/2026_04_02_architecture_kernel.sql
   - id: INV-16
+    # PRUNE_CANDIDATE 2026-04-28 (pure prose-as-law on HEAD: only spec_sections + negative_constraints, both prose pointers; no test, semgrep, schema, or script enforcement). See docs/operations/task_2026-04-27_harness_debate/verdict.md §6.1 — both debate sides agree this should be deleted, rewritten with concrete enforcement, or upgraded with transitive NC-12 verification test.
     zones: [K2_runtime]
     statement: Day0 low slots with causality_status != 'OK' must not route through historical Platt lookup; low Day0 uses nowcast path only.
     why: Causality preservation — routing a slot that is already partly historical through a forecast Platt model produces incorrect probability estimates.
@@ -124,6 +125,7 @@ invariants:
       spec_sections: [15]
       negative_constraints: [NC-12]
   - id: INV-17
+    # PRUNE_CANDIDATE 2026-04-28 (pure prose-as-law on HEAD: only spec_sections + negative_constraints, both prose pointers; no test, semgrep, schema, or script enforcement). See docs/operations/task_2026-04-27_harness_debate/verdict.md §6.1 — both debate sides agree this should be deleted, rewritten with concrete enforcement, or upgraded with transitive NC-13 verification test.
     zones: [K0_frozen_kernel, K2_runtime]
     statement: DB authority writes (event append + projection fold) must COMMIT before any derived JSON export is updated.
     why: On a mid-step crash the DB wins and JSON is rebuilt from projection; a JSON write that races the commit can leave exports ahead of authority, making recovery ambiguous.
@@ -215,11 +217,61 @@ invariants:
     statement: VenueCommand and IdempotencyKey are frozen dataclasses; CommandState,
       CommandEventType, and IntentKind are closed string enums; their string values
       must match the venue_commands schema state column and venue_command_events
-      event_type column without drift.
+      event_type column without drift. R3 M1's grammar-additive command states
+      and event types are incorporated by the 2026-04-27 amendment below; any
+      future enum expansion requires a new planning-lock amendment.
     why: A drifting type surface breaks the command journal's grammar guarantees.
       Frozen types at the kernel boundary let all callers (executor, repo, recovery,
       reconciliation) trust the same definitions. Catching drift at test time
       prevents the kind of silent translation loss flagged in Fitz Constraint #2.
+    amendment:
+      id: R3-M1-INV-29-2026-04-27
+      status: incorporated
+      receipt: docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/inv_29_amendment_2026-04-27.md
+      scope: >
+        Approves only the M1 grammar-additive command-side states/events that
+        were implemented and reviewed at COMPLETE_AT_GATE. It does not authorize
+        M2 unknown-side-effect runtime resolution, order/trade fact grammar
+        collapse, RESTING/MATCHED/MINED/CONFIRMED in CommandState, live venue
+        submission, or CLOB v2 cutover.
+      command_state_values:
+        - INTENT_CREATED
+        - SNAPSHOT_BOUND
+        - SUBMITTING
+        - SIGNED_PERSISTED
+        - POSTING
+        - POST_ACKED
+        - ACKED
+        - UNKNOWN
+        - SUBMIT_UNKNOWN_SIDE_EFFECT
+        - PARTIAL
+        - FILLED
+        - CANCEL_PENDING
+        - CANCELLED
+        - EXPIRED
+        - SUBMIT_REJECTED
+        - REJECTED
+        - REVIEW_REQUIRED
+      command_event_type_values:
+        - INTENT_CREATED
+        - SNAPSHOT_BOUND
+        - SIGNED_PERSISTED
+        - POSTING
+        - POST_ACKED
+        - SUBMIT_REQUESTED
+        - SUBMIT_ACKED
+        - SUBMIT_REJECTED
+        - SUBMIT_UNKNOWN
+        - SUBMIT_TIMEOUT_UNKNOWN
+        - CLOSED_MARKET_UNKNOWN
+        - PARTIAL_FILL_OBSERVED
+        - FILL_CONFIRMED
+        - CANCEL_REQUESTED
+        - CANCEL_ACKED
+        - CANCEL_FAILED
+        - CANCEL_REPLACE_BLOCKED
+        - EXPIRED
+        - REVIEW_REQUIRED
     enforced_by:
       tests:
         - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_is_frozen

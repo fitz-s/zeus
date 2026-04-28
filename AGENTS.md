@@ -239,10 +239,18 @@ it is not a current per-city truth table.
 
 ### Code Review Graph
 
-Follows `architecture/code_review_graph_protocol.yaml`: Stage 1 is semantic
-boot; Stage 2 is graph context. Prefer official upstream graph operations
-(`code-review-graph status/update/watch`) over repo-local inventions. Graph
-output is derived context — never authority.
+Two stages. Stage 1 (required): semantic boot via
+`python3 scripts/topology_doctor.py semantic-bootstrap --task-class <class>
+--task "<task>" --files <files> --json` — locks task class, current facts,
+fatal misreads, and required proof questions. Stage 2 (optional): graph
+context via `python3 scripts/topology_doctor.py --code-review-graph-status
+--changed-files <files> --json` — file discovery, callers, impacted tests,
+blast radius, review order. Stage 2 NEVER supplies semantic truth, source
+validity, current facts, or authority rank. Prefer official upstream
+operations (`code-review-graph status/update/watch`) over repo-local
+inventions. Manifest at `architecture/code_review_graph_protocol.yaml` is
+DEPRECATED — kept as validator stub only; this section is the authoritative
+summary.
 
 ### High-risk zero-context work
 
