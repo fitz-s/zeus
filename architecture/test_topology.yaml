@@ -116,6 +116,7 @@ test_trust_policy:
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_settlements_verified_row_integrity.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_settlement_semantics.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
     tests/test_zpkt.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -182,6 +183,7 @@ categories:
     - tests/test_exit_safety.py
     - tests/test_exchange_reconcile.py
     - tests/test_settlement_commands.py
+    - tests/test_settlement_semantics.py
     - tests/test_fake_polymarket_venue.py
     - tests/test_strategy_benchmark.py
     - tests/test_risk_allocator.py
@@ -523,6 +525,7 @@ law_gate:
       - tests/test_temperature.py
       - tests/test_instrument_invariants.py
       - tests/test_no_bare_float_seams.py
+      - tests/test_settlement_semantics.py
     protects:
       - src/types/temperature.py
       - src/types/market.py
