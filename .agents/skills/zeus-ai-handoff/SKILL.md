@@ -28,7 +28,7 @@ This SKILL selects which **execution mode** fits the task, then applies mode-spe
 
 When pipeline/architecture/governance work:
 5. `docs/operations/current_state.md`
-6. `docs/methodology/adversarial_debate_for_project_evaluation.md` (if mode D)
+6. `docs/methodology/adversarial_debate_for_project_evaluation.md` (REQUIRED for mode D; RECOMMENDED for mode C with critic-gate; auto-loaded via `.claude/skills/zeus-methodology-bootstrap/SKILL.md` on session boot for any architecture/governance/contamination work)
 7. `.claude/skills/zeus-phase-discipline/SKILL.md` (if mode C / multi-batch)
 
 If navigation is blocked by pre-existing registry issues, record that as workspace state and keep the handoff change narrow.
