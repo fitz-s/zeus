@@ -144,6 +144,8 @@ test_trust_policy:
     tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
 
 categories:
   core_law_antibody:
