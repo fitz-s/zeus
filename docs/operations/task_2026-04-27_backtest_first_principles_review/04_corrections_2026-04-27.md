@@ -94,7 +94,7 @@ def ecmwf_ens_available_at(base_time: datetime, lead_day: int) -> datetime:
 
 1. **WU API vs WU website daily summary divergence** (forensic F9, narrow): Zeus reads WU API `max(hourly)`, Polymarket reads WU website daily summary. Both are "WU" but different code paths. ~19 mismatches on SZ/Seoul/SP/KL/Chengdu per [known_gaps.md](../known_gaps.md). NARROW issue.
 2. **Taipei period switching** (known_gaps): 03-16~03-22 used CWA → 03-23~04-04 used NOAA Taoyuan → 04-05+ used WU/RCSS Songshan. This IS the only period where Polymarket genuinely used NOAA. Specific to Taipei.
-3. **HK 03-13/14**: Polymarket used WU/VHHH (HK Airport), Zeus has HKO Observatory data — still WU, different station.
+3. **HK 03-13/14**: unresolved HKO source/audit mismatch. Correction 2026-04-28: Hong Kong has no WU ICAO route in Zeus; do not treat this as WU/VHHH or `wu_icao` without fresh operator-approved primary-source evidence.
 4. **HKO floor rounding** (known_gaps HK): HK alone uses `oracle_truncate`, not `wmo_half_up`.
 
 **Impact on backtest design:** my claim "Zeus has structural settlement-source mismatch with Polymarket" is RETRACTED. The actual state is "Zeus model matches reality; narrow per-city / per-period exceptions are tracked in known_gaps.md". The blocker_handling_plan §3.B and data_layer_issues §2.6 must be rewritten to reflect this.

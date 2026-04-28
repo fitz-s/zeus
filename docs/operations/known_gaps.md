@@ -104,9 +104,9 @@ alpha_overrides / harvester bias correction archived to
 **Fix scope:** Change `rounding_rule` to `"floor"` for `settlement_source_type == "hko"` in `SettlementSemantics.for_city()`. Requires system constitution review since WMO half-up is stated as universal law in AGENTS.md line 49 and line 117.
 **Blocked by:** System constitution review — AGENTS.md says "Settlement: WMO asymmetric half-up rounding" as universal. HKO is an exception where PM uses containment semantics instead.
 
-### [OPEN] HK 03-13, 03-14: PM used WU/VHHH Airport Station, we have HKO Observatory data
-**Problem:** PM early markets (before 03-16) resolved from `wunderground.com/history/daily/hk/hong-kong/VHHH` (Airport Station). We only have HKO Observatory data. Values wildly different (HKO=21.8 vs PM≤15 on 03-13). These 2 dates need WU/VHHH observations.
-**Impact:** 2 mismatches. Cannot fix without WU/VHHH historical data for those dates.
+### [OPEN] HK 03-13, 03-14: unresolved HKO source/audit mismatch; no WU ICAO route
+**Problem:** Earlier packet language claimed a WU/VHHH Airport route. Operator correction 2026-04-28 supersedes that: Hong Kong has no WU ICAO route in Zeus. We have HKO Observatory data and the two early dates remain unresolved source/audit mismatches until fresh operator-approved primary-source evidence proves the settlement source.
+**Impact:** 2 mismatches. Do not resolve by adding HK WU/VHHH/`wu_icao` aliases; keep quarantined/fail-closed pending HKO-specific audit evidence.
 
 ### [OPEN] WU cities (SZ/Seoul/SP/KL/etc.): API max(hourly) ≠ website daily summary high
 **Problem:** PM resolves from WU website daily summary page (e.g., `wunderground.com/history/daily/cn/shenzhen/ZGSZ`). We compute `max(hourly_temp_C)` from WU v1 API. These are different values. Tested on 10 SZ mismatch dates: neither floor(F→C) nor WMO(F→C) from API hourly data explains PM values (1/10 and 3/10 respectively). Additionally, the WU API returns obs from "Lau Fau Shan" (HK station) for ZGSZ, while PM reads the Bao'an Airport page.

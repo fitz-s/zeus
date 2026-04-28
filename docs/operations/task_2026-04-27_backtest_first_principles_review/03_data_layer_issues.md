@@ -194,7 +194,7 @@ SELECT temperature_metric, COUNT(*) FROM settlements GROUP BY temperature_metric
 
 1. Per-market resolution-source classifier: `RESOLUTION_SOURCE_AGREED` vs `RESOLUTION_SOURCE_DIVERGED`.
 2. For DIVERGED markets: either ingest the matching observation source (NOAA for US), OR exclude from training.
-3. The HK 2026-03-13/14 case (per `known_gaps.md`) is the canonical instance: Polymarket used WU/VHHH airport, Zeus has HKO observatory.
+3. The HK 2026-03-13/14 case (per `known_gaps.md`) is the canonical unresolved source/audit instance. Correction 2026-04-28: Hong Kong has no WU ICAO route in Zeus; do not treat it as WU/VHHH without fresh operator-approved primary-source evidence.
 
 **Required research (operator):** per-city, per-period source authority audit. Forensic Q4 ("What Polymarket high/low market universe is in scope?") is a precondition.
 
