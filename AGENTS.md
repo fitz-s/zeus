@@ -353,6 +353,14 @@ adds supplemental reads the digest cannot provide:
 - Historical failure context: `architecture/history_lore.yaml` (the digest
   includes matched lore cards; read the full file only when investigating
   failure patterns)
+- **Adversarial debate / multi-agent / contamination remediation**:
+  add `docs/methodology/adversarial_debate_for_project_evaluation.md`
+  (5-cycle methodology with §5.X-Z3 case-study antibodies + §5.Z3.1
+  quantitative erratum-frequency trigger + 5th outcome category). The
+  methodology load is REQUIRED for any cycle ≥ 2 of debate, any task
+  invoking 5+ teammates, or any remediation triggered by drift items
+  ≥ 3. Auto-loaded via `.claude/skills/zeus-methodology-bootstrap/SKILL.md`
+  on matching task descriptions; manual read otherwise.
 
 ### Git safety
 
