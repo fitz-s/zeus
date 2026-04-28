@@ -1,0 +1,357 @@
+{
+  "generated_at": "2026-04-28T07:12:44.716755+00:00",
+  "db_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db",
+  "gates": {
+    "high": {
+      "gate_3": {
+        "gate": "observations.verified_without_provenance",
+        "metric": "high",
+        "total": 39431,
+        "by_city_source": [
+          {
+            "city": "Taipei",
+            "source": "wu_icao_history",
+            "n": 845
+          },
+          {
+            "city": "Amsterdam",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Guangzhou",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Helsinki",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Jakarta",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Karachi",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "London",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Manila",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Ankara",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Auckland",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Austin",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Beijing",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Buenos Aires",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Busan",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Chengdu",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Chongqing",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Jeddah",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Kuala Lumpur",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Los Angeles",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Madrid",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Mexico City",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Milan",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Munich",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Paris",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "San Francisco",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Sao Paulo",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Seoul",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Shanghai",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Shenzhen",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Singapore",
+            "source": "wu_icao_history",
+            "n": 840
+          }
+        ]
+      },
+      "gate_4": {
+        "gate": "observations.wu_empty_provenance",
+        "metric": "high",
+        "total": 39431
+      },
+      "gate_2": {
+        "gate": "observations.hko_requires_fresh_source_audit",
+        "metric": "high",
+        "total": 821,
+        "note": "operator-blocked: no promotion mechanism in code today (Gate 2)"
+      }
+    },
+    "low": {
+      "gate_3": {
+        "gate": "observations.verified_without_provenance",
+        "metric": "low",
+        "total": 39431,
+        "by_city_source": [
+          {
+            "city": "Taipei",
+            "source": "wu_icao_history",
+            "n": 845
+          },
+          {
+            "city": "Amsterdam",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Guangzhou",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Helsinki",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Jakarta",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Karachi",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "London",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Manila",
+            "source": "wu_icao_history",
+            "n": 841
+          },
+          {
+            "city": "Ankara",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Auckland",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Austin",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Beijing",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Buenos Aires",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Busan",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Chengdu",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Chongqing",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Jeddah",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Kuala Lumpur",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Los Angeles",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Madrid",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Mexico City",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Milan",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Munich",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Paris",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "San Francisco",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Sao Paulo",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Seoul",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Shanghai",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Shenzhen",
+            "source": "wu_icao_history",
+            "n": 840
+          },
+          {
+            "city": "Singapore",
+            "source": "wu_icao_history",
+            "n": 840
+          }
+        ]
+      },
+      "gate_4": {
+        "gate": "observations.wu_empty_provenance",
+        "metric": "low",
+        "total": 39431
+      },
+      "gate_2": {
+        "gate": "observations.hko_requires_fresh_source_audit",
+        "metric": "low",
+        "total": 821,
+        "note": "operator-blocked: no promotion mechanism in code today (Gate 2)"
+      }
+    },
+    "instants_v2": {
+      "gate_1": {
+        "gate": "observation_instants_v2.training_role_unsafe",
+        "total": 0,
+        "by_source_role": []
+      },
+      "gate_5": {
+        "gate": "payload_identity_missing",
+        "total": 1813662
+      }
+    }
+  }
+}
