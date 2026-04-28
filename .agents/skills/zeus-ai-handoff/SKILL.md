@@ -1,97 +1,235 @@
 ---
 name: zeus-ai-handoff
-description: Use when adapting an AI handoff workflow to Zeus, converting a broad Zeus change into a packet-ready plan, or preparing a handoff bundle for downstream coding agents.
+description: General-purpose handoff workflow for Zeus — covers any AI-to-AI or session-to-session handoff. Selects the right execution mode (direct / subagent / longlast multi-batch / adversarial debate) per task scale + risk; preserves Zeus authority surfaces; encodes proven discipline (disk-first, critic-gate, bidirectional grep, co-tenant git hygiene, verdict erratum). Use when adapting a Zeus change of any size, converting a request into a packet-ready plan, preparing a handoff bundle, or starting a multi-batch execution across longlast teammates. Replaces v1 single-mode workflow with a 4-mode playbook validated by Tier 1 + 3-round debate cycle 2026-04-27.
 ---
 
-# Zeus AI Handoff
+# Zeus AI Handoff (v2)
 
 ## Purpose
 
-Convert a broad or cross-surface Zeus request into stable handoff truth without
-overriding Zeus authority files or treating a zip bundle as code truth.
+Convert a Zeus task — at any scale, from quick fix to multi-week refactor — into structured handoff truth without overriding Zeus authority files or treating any single artifact (zip, doc, debate verdict) as canonical truth.
 
-This skill adapts the external AI handoff starter kit to Zeus. It is an outer
-workflow layer only. Zeus authority remains rooted in root `AGENTS.md`,
-`workspace_map.md`, scoped `AGENTS.md` files, `architecture/**`, and
-`docs/authority/**`.
+This is the **outer workflow layer** for Zeus. The inner authority remains:
+- Root `AGENTS.md` + `workspace_map.md`
+- Scoped `AGENTS.md` files per package
+- `architecture/**` machine manifests
+- `docs/authority/**` constitutional surfaces
 
-## Required Reads
+This SKILL selects which **execution mode** fits the task, then applies mode-specific discipline.
 
-1. `AGENTS.md`
+---
+
+## §1 Required Reads (always)
+
+1. `AGENTS.md` (root)
 2. `workspace_map.md`
-3. `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md`
-4. `docs/operations/current_state.md` when a concrete packet is involved
-5. `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+3. `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md` (handoff context)
+4. `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 
-If navigation is blocked by pre-existing registry issues, record that as
-workspace state and keep the handoff change narrow.
+When pipeline/architecture/governance work:
+5. `docs/operations/current_state.md`
+6. `docs/methodology/adversarial_debate_for_project_evaluation.md` (if mode D)
+7. `.claude/skills/zeus-phase-discipline/SKILL.md` (if mode C / multi-batch)
 
-## Zeus Mapping
+If navigation is blocked by pre-existing registry issues, record that as workspace state and keep the handoff change narrow.
 
-- Do not copy a generic starter-kit `AGENTS.md` over Zeus root `AGENTS.md`.
-- Do not copy starter `src/` or `tests/` placeholder directories into Zeus.
-- Do not put generic starter docs directly under `docs/`; use an active
-  packet folder under `docs/operations/task_YYYY-MM-DD_slug/` for concrete
-  work, or a runbook/reference route when the artifact is procedural context.
-- Do not add top-level `scripts/` helpers without updating
-  `architecture/script_manifest.yaml` and satisfying script freshness rules.
-- Treat handoff zips as guidance bundles, not source snapshots or canonical
-  truth.
+---
 
-## Requirement Tribunal
+## §2 Zeus Mapping (do-NOTs from v1, preserved)
 
-Use this phase when the user's request is broad, underspecified, or likely to
-touch architecture, governance, source truth, lifecycle, DB authority, or more
-than one zone.
+- Do NOT copy a generic starter-kit `AGENTS.md` over Zeus root `AGENTS.md`
+- Do NOT copy starter `src/` or `tests/` placeholder directories
+- Do NOT put generic starter docs directly under `docs/`; use an active packet folder under `docs/operations/task_YYYY-MM-DD_slug/` or a runbook/reference route
+- Do NOT add top-level `scripts/` helpers without updating `architecture/script_manifest.yaml`
+- Treat handoff zips/bundles as guidance, not source snapshots or canonical truth
+
+---
+
+## §3 Mode selection (the new decision branch)
+
+Before choosing artifacts or dispatching, pick ONE mode based on task profile:
+
+| Task profile | Mode | Rationale |
+|---|---|---|
+| Single file edit, ≤30 min, reversible | **A. Direct** | No handoff overhead needed |
+| 1-3 files, clear spec, ≤2h, low stakes | **B. Subagent** | One-shot Agent dispatch with explicit task |
+| Multi-batch (4+ items), implementation pipeline, K0/K1 zone touched | **C. Longlast executor + critic-gate** | Tier 1 pattern; per-batch critic verdict before next |
+| High-stakes architecture/strategy decision; multiple valid approaches; team disagreement | **D. Adversarial debate** | 3-round methodology in `docs/methodology/adversarial_debate_for_project_evaluation.md` |
+
+**Default if uncertain**: B (subagent) for mid-size; C if >4 files or multi-week.
+
+**Anti-pattern**: using D (full debate) for what should be A or B is the most common mistake — wastes 70+ min on a 30-min decision. Use methodology §11 ROI signals to check.
+
+---
+
+## §4 Requirement Tribunal (applies to all modes ≥ B)
+
+When the request is broad, underspecified, or likely to touch architecture / governance / source truth / lifecycle / DB authority / cross-zone:
 
 Maintain four buckets:
+- **Facts** (what is true on HEAD)
+- **Decisions** (what we choose given the facts)
+- **Open Questions** (unresolved; need operator or empirical resolution)
+- **Risks** (what could go wrong + mitigation)
 
-- Facts
-- Decisions
-- Open Questions
-- Risks
+End this phase only when the next artifact can state: objective, non-goals, invariants, likely-touched surfaces, verification commands, rollback note, authority/truth boundaries.
 
-End this phase only when the next artifact can state the objective, non-goals,
-invariants, likely touched surfaces, verification commands, rollback note, and
-authority/truth boundaries.
+---
 
-## Handoff Document Set
+## §5 Handoff Document Set (per mode)
 
-For a concrete Zeus task, create or update files inside the active packet
-folder, not in generic root template locations:
+**Mode A (Direct)**: no handoff docs; just edit + commit + verify.
 
-- `project_brief.md`
-- `prd.md`
-- `architecture_note.md`
-- `implementation_plan.md`
-- `task_packet.md`
-- `verification_plan.md`
-- `decisions.md`
-- `not_now.md`
-- `work_log.md`
+**Mode B (Subagent)**: `task_packet.md` in active packet folder; include the 7-item Execution Prompt Shape (§7).
 
-Use only the subset that the task actually needs. These documents are planning
-and execution context unless a deeper authority file explicitly promotes them.
+**Mode C (Longlast multi-batch)**: full set:
+- `project_brief.md` — context + goal
+- `prd.md` — requirements
+- `architecture_note.md` — design choices
+- `implementation_plan.md` — phased breakdown (which batches, dependencies)
+- `task_packet.md` — operator-facing summary
+- `verification_plan.md` — per-phase + final acceptance criteria
+- `decisions.md` — rationale ledger
+- `not_now.md` — explicit out-of-scope
+- `work_log.md` — chronological execution record
 
-## Execution Prompt Shape
+**Mode D (Adversarial debate)**: per `docs/methodology/adversarial_debate_for_project_evaluation.md` §2: TOPIC.md + judge_ledger.md + per-round evidence + verdict.md.
 
-When handing a task to a coding surface, include:
+Use only the subset the task actually needs.
 
-1. Current Zeus authority reads and topology command.
-2. The single task objective.
-3. Files and zones likely involved.
-4. Invariants that must not move.
-5. Not-now list.
-6. Required verification and rollback note.
-7. Instruction to preserve unrelated dirty work.
+---
 
-## Completion Gate
+## §6 Execution mode mechanics
 
-Before calling the handoff ready:
+### §6.A Direct
+1. Edit / commit / verify
+2. `git add` specific files (NEVER `-A` with co-tenant active per memory `feedback_no_git_add_all_with_cotenant`)
+3. Commit message via HEREDOC; verify with `git log -1`
 
-- Open questions are either resolved or explicitly blocking.
-- Not-now items are explicit.
-- Verification commands are concrete.
-- Rollback or blast radius is stated.
-- Any new file is registered in the scoped mesh when required.
-- The handoff bundle contains only current, non-conflicting truth surfaces.
+### §6.B Subagent
+1. Spawn Agent (general-purpose, model per CLAUDE.md routing)
+2. Provide §7 Execution Prompt Shape verbatim
+3. Receive output; verify; commit per §6.A
+
+### §6.C Longlast executor + critic-gate (Tier 1 pattern)
+1. Spawn `executor-<topic>` (longlast, model=opus for HIGH risk else sonnet, team_name)
+2. Spawn `critic-<topic>` (longlast, opus, team_name) — independent, gates each batch
+3. Per batch:
+   - Executor: write changes; SendMessage `BATCH_X_DONE`
+   - Critic: independent review (10-attack template); SendMessage `BATCH_X_REVIEW APPROVE/REVISE/BLOCK`
+   - Team-lead: dispatch next batch only after critic APPROVE
+4. Honor methodology §5 critic-gate workflow
+
+### §6.D Adversarial debate (if Mode D selected)
+Follow `docs/methodology/adversarial_debate_for_project_evaluation.md` end-to-end (§2 setup → §3 mechanics → §8 verdict structure). Mode D is reserved for high-stakes multi-valid-approach decisions; methodology §0 has the ROI signals.
+
+---
+
+## §7 Execution Prompt Shape (for Mode B / batch dispatch in Mode C)
+
+When handing a task to a coding surface:
+
+1. Current Zeus authority reads + topology command
+2. Single task objective (one sentence)
+3. Files and zones likely involved
+4. Invariants that must NOT move
+5. Not-now list
+6. Required verification + rollback note
+7. Instruction to preserve unrelated dirty work (co-tenant safe staging)
+
+**Mode C addition**: also specify (a) which batch this is in the multi-batch plan, (b) the SendMessage status format expected, (c) the critic that will review.
+
+---
+
+## §8 Discipline patterns (apply across all modes ≥ B)
+
+These are PROVEN patterns from Tier 1 + 3-round debate cycle 2026-04-27. Bake into every handoff:
+
+### §8.1 Disk-first
+Every artifact lands on disk BEFORE SendMessage notification. SendMessage delivery is asymmetric and can drop silently (memory `feedback_converged_results_to_disk`); disk is canonical record. Recovery: if a teammate goes idle without SendMessage, **disk-poll** the expected output file path; if found, treat as delivered.
+
+### §8.2 file:line citations grep-verified within 10 min
+Before any "lock" event (concession, contract, dispatch, commit), every file:line reference must be grep-re-verified. Citations rot fast (~20-30% premise mismatch in 1 week per memory `feedback_zeus_plan_citations_rot_fast`). Use symbol-anchored citations (function name + sentinel comment) where possible — surveys line-number drift.
+
+### §8.3 Bidirectional grep before "X% of Y lack Z" claims
+Forward grep (manifest cites field?) AND reverse grep (target system back-cites identity?). Schema-citation gap (forward only) ≠ enforcement gap (both). Apply to ANY % claim. See `.claude/skills/zeus-phase-discipline/SKILL.md` "During implementation" + methodology §5.X case study.
+
+### §8.4 Co-tenant git staging
+With multiple agents/sessions active in shared repo:
+- `git add` SPECIFIC files; never `-A` or `.`
+- `git diff --cached --name-only` before commit; verify scope
+- `git restore --staged <file>` for anything unintentionally staged
+- HEREDOC commit message; verify with `git log -1` after
+
+### §8.5 Per-batch critic-gate
+Executor must NOT self-approve over multi-batch work. Independent critic dispatched in parallel. Team-lead waits for critic APPROVE before next dispatch. Memory `feedback_executor_commit_boundary_gate`.
+
+### §8.6 Idle-only bootstrap
+Spawn longlast teammates with idle-only boot prompt: read context → write boot evidence → SendMessage BOOT_ACK → idle. Substantive work only after team-lead dispatches. Memory `feedback_idle_only_bootstrap`.
+
+### §8.7 Verdict-level erratum pattern
+When implementation discovers prior debate / verdict / plan was based on incomplete evidence:
+- Do NOT silently fix
+- Append explicit POST-IMPLEMENTATION ERRATUM to the verdict noting: original claim, what audit found, what changes (and what doesn't change)
+- Update referenced artifacts with CITATION_REPAIR comments
+- Add to methodology if pattern is reusable
+
+Methodological transparency compounds across cycles.
+
+---
+
+## §9 Common failure modes (recovery procedures)
+
+| # | Symptom | Cause | Recovery |
+|---|---|---|---|
+| F1 | Teammate idle, no SendMessage | SendMessage dropped | Disk-poll expected output path |
+| F2 | Teammate flags MISROUTE_FLAG | Judge meta-tasks polluted team task list | Delete misleading tasks; track meta in judge_ledger only |
+| F3 | Teammate idle without producing | Role unclear in dispatch | Re-dispatch with explicit "YOUR ROLE" + numbered steps + literal SendMessage template |
+| F4 | Path corrections from teammate | Dispatch cited paths that moved | Acknowledge corrections; adopt teammate paths as canonical |
+| F5 | Co-tenant staged work absorbed into commit | `git add -A` or `.` used | `git diff --cached --name-only` BEFORE commit; `git restore --staged` to fix |
+| F6 | Documented baseline ≠ live | Baseline drifted between docs and now | Critic re-measures LIVE at boot; uses LIVE for checks; documents drift |
+| F7 | Verdict claim falsified post-implementation | Debate-stage audit was incomplete | Erratum pattern §8.7 |
+| F8 | Implementation drift from documented design | Execution copy of "obvious choice" diverges from documented choice | Cross-batch arithmetic equivalence audit (critic role); fix to match documented design |
+
+---
+
+## §10 Completion Gate
+
+Before calling the handoff ready (any mode):
+
+- [ ] Open questions resolved or explicitly blocking
+- [ ] Not-now items explicit
+- [ ] Verification commands concrete
+- [ ] Rollback / blast radius stated
+- [ ] Any new file registered in scoped mesh (`architecture/script_manifest.yaml` for scripts, `architecture/source_rationale.yaml` for src/, `architecture/test_topology.yaml` for tests/, scoped AGENTS.md for routers)
+- [ ] Handoff bundle contains only current, non-conflicting truth surfaces
+- [ ] **Mode C/D additions**: critic-gate dispatched per batch; verdict (if D) committed; per-phase boot evidence on disk
+- [ ] **Discipline checks**: §8.1 disk-first verified; §8.2 cites grep-fresh; §8.3 bidirectional grep run on any % claim; §8.4 git staging clean
+- [ ] If implementation discovered prior-stage error: §8.7 erratum applied
+
+---
+
+## §11 When to NOT use this SKILL
+
+- Trivial task (typo, single comment fix, obvious one-liner): just do it
+- Task already covered by another SKILL (`.claude/skills/zeus-phase-discipline/SKILL.md` for r3 phase work; `zeus-task-boot-*` for specific task classes): use that instead
+- Task is purely investigation / research with no commit at the end: use Agent with `explore` subagent_type directly
+
+---
+
+## §12 Maintenance
+
+This SKILL is **living**. Update after each cycle that surfaces new patterns. Cite this SKILL in `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md` and methodology doc as the operational entry point. Cross-reference invariants:
+
+- Methodology doc: `docs/methodology/adversarial_debate_for_project_evaluation.md` (Mode D specifics)
+- Phase discipline SKILL: `.claude/skills/zeus-phase-discipline/SKILL.md` (Mode C per-batch)
+- Task-boot SKILLs: `.claude/skills/zeus-task-boot-*/SKILL.md` (per-task-class boot profiles)
+
+When promoting to OMC/global skill: copy to `~/.claude/skills/zeus-ai-handoff/SKILL.md` and adjust paths.
+
+---
+
+## Lineage
+
+v1 (2026-04-19): single-mode workflow adapted from external starter kit.
+v2 (2026-04-28): 4-mode playbook + discipline patterns + failure recovery + erratum pattern. Distilled from Tier 1 batch execution + 3-round adversarial debate cycle 2026-04-27. Validates pattern reusability beyond debate-specific use.
