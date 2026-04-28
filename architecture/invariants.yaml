@@ -81,6 +81,7 @@ invariants:
       scripts:
         - scripts/check_kernel_manifests.py
   - id: INV-09
+    # CITATION_REPAIR 2026-04-28: tests added per R3 verdict round3_verdict.md §1 #5 LOCKED CALIBRATION_HARDENING (Week 13) precondition. Existing tests across 3 files already enforce the "missing data → first-class fact" invariant via 4 distinct enforcement surfaces: (a) data_coverage table status='MISSING' as queryable state with allowed transitions (src/state/data_coverage.py); (b) trace_status='degraded_missing_vectors' as explicit row-level fact (src/state/db.py:2164); (c) opportunity_loss_without_availability separation count (src/state/db.py:4455+ via summary["separation"]); (d) AuthorityTier='DEGRADED' CHECK constraint enforcement (src/state/collateral_ledger.py:46). This commit adds the tests: block — BATCH D pattern (schema-citation gap, not enforcement gap; methodology §5.X case study; same as INV-15 + INV-16/17 reverts).
     zones: [K2_runtime, K3_extension]
     statement: Missing data is first-class truth.
     why: Opportunity loss and degraded reliability must be explicit facts, not log noise.
@@ -88,6 +89,15 @@ invariants:
       spec_sections: [3, P0.4, P4]
       schema:
         - architecture/2026_04_02_architecture_kernel.sql
+      tests:
+        - tests/test_db.py::test_log_opportunity_fact_preserves_missing_snapshot_without_latest_fallback
+        - tests/test_db.py::test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly
+        - tests/test_db.py::test_query_p4_fact_smoke_summary_separates_layers
+        - tests/test_k2_live_ingestion_relationships.py::test_R6_scanner_missing_flipped_to_written_by_append
+        - tests/test_k2_live_ingestion_relationships.py::test_R9_written_cannot_be_downgraded_to_missing
+        - tests/test_runtime_guards.py::test_day0_missing_observation_is_pre_vector_traceable
+        - tests/test_runtime_guards.py::test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded
+        - tests/test_runtime_guards.py::test_partial_stale_policy_uses_degraded_json_fallback
   - id: INV-10
     zones: [K1_governance]
     statement: LLM output is never authority.
