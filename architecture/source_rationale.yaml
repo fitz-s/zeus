@@ -1033,6 +1033,40 @@ files:
     why: Represents selection family for statistical testing.
     downstream:
     - src/engine/evaluator.py
+  src/backtest/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks src/backtest as importable package.
+  src/backtest/purpose.py:
+    zone: K3_extension
+    authority_role: backtest_purpose_contract
+    why: Typed BacktestPurpose / Sizing / Selection / PurposeContract contracts (D1+D3 antibodies).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/decision_time_truth.py:
+    zone: K3_extension
+    authority_role: decision_time_provenance_contract
+    why: AvailabilityProvenance enum + per-purpose hindsight-leakage gate (D4 antibody, INV-06 enforcement).
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/economics.py:
+    zone: K3_extension
+    authority_role: backtest_economics_tombstone
+    why: ECONOMICS purpose tombstone — refuses to run until market_events_v2 + parity contracts unblock.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/skill.py:
+    zone: K3_extension
+    authority_role: backtest_skill_orchestrator
+    why: Purpose-typed wrapper around src.engine.replay.run_wu_settlement_sweep enforcing purpose=SKILL contract.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - src/engine/replay.py
   src/state/AGENTS.md:
     zone: docs
     authority_role: registry
