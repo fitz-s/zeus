@@ -1,0 +1,1325 @@
+{
+  "args": {
+    "cities": null,
+    "start_date": "2024-01-01",
+    "end_date": null,
+    "apply": true,
+    "tolerance": 0.5,
+    "limit": null,
+    "chunk_days": 31,
+    "sleep": 1.0
+  },
+  "snapshot_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db.pre-gate5-ogimet-fill-2026-04-28",
+  "quarantine_count": 215,
+  "quarantine": [
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2136053,
+      "city": "Moscow",
+      "utc_timestamp": "2023-12-31T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2136054,
+      "city": "Moscow",
+      "utc_timestamp": "2023-12-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2136055,
+      "city": "Moscow",
+      "utc_timestamp": "2023-12-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116107,
+      "city": "Moscow",
+      "utc_timestamp": "2024-01-31T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116108,
+      "city": "Moscow",
+      "utc_timestamp": "2024-01-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116109,
+      "city": "Moscow",
+      "utc_timestamp": "2024-01-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116872,
+      "city": "Moscow",
+      "utc_timestamp": "2024-03-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116873,
+      "city": "Moscow",
+      "utc_timestamp": "2024-03-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2116874,
+      "city": "Moscow",
+      "utc_timestamp": "2024-03-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2117616,
+      "city": "Moscow",
+      "utc_timestamp": "2024-04-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2117617,
+      "city": "Moscow",
+      "utc_timestamp": "2024-04-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2117618,
+      "city": "Moscow",
+      "utc_timestamp": "2024-04-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2118381,
+      "city": "Moscow",
+      "utc_timestamp": "2024-05-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2118382,
+      "city": "Moscow",
+      "utc_timestamp": "2024-05-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2118383,
+      "city": "Moscow",
+      "utc_timestamp": "2024-05-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119125,
+      "city": "Moscow",
+      "utc_timestamp": "2024-06-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119126,
+      "city": "Moscow",
+      "utc_timestamp": "2024-06-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119127,
+      "city": "Moscow",
+      "utc_timestamp": "2024-06-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119890,
+      "city": "Moscow",
+      "utc_timestamp": "2024-07-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119891,
+      "city": "Moscow",
+      "utc_timestamp": "2024-07-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2119892,
+      "city": "Moscow",
+      "utc_timestamp": "2024-07-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2120633,
+      "city": "Moscow",
+      "utc_timestamp": "2024-08-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2120634,
+      "city": "Moscow",
+      "utc_timestamp": "2024-08-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2120635,
+      "city": "Moscow",
+      "utc_timestamp": "2024-08-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2121398,
+      "city": "Moscow",
+      "utc_timestamp": "2024-09-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2121399,
+      "city": "Moscow",
+      "utc_timestamp": "2024-09-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2121400,
+      "city": "Moscow",
+      "utc_timestamp": "2024-09-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122142,
+      "city": "Moscow",
+      "utc_timestamp": "2024-10-05T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122143,
+      "city": "Moscow",
+      "utc_timestamp": "2024-10-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122144,
+      "city": "Moscow",
+      "utc_timestamp": "2024-10-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122907,
+      "city": "Moscow",
+      "utc_timestamp": "2024-11-05T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122908,
+      "city": "Moscow",
+      "utc_timestamp": "2024-11-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2122909,
+      "city": "Moscow",
+      "utc_timestamp": "2024-11-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2123651,
+      "city": "Moscow",
+      "utc_timestamp": "2024-12-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2123652,
+      "city": "Moscow",
+      "utc_timestamp": "2024-12-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2123653,
+      "city": "Moscow",
+      "utc_timestamp": "2024-12-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2124416,
+      "city": "Moscow",
+      "utc_timestamp": "2025-01-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2124417,
+      "city": "Moscow",
+      "utc_timestamp": "2025-01-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2124418,
+      "city": "Moscow",
+      "utc_timestamp": "2025-01-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125160,
+      "city": "Moscow",
+      "utc_timestamp": "2025-02-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125161,
+      "city": "Moscow",
+      "utc_timestamp": "2025-02-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125162,
+      "city": "Moscow",
+      "utc_timestamp": "2025-02-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125925,
+      "city": "Moscow",
+      "utc_timestamp": "2025-03-09T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125926,
+      "city": "Moscow",
+      "utc_timestamp": "2025-03-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2125927,
+      "city": "Moscow",
+      "utc_timestamp": "2025-03-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2126669,
+      "city": "Moscow",
+      "utc_timestamp": "2025-04-09T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2126670,
+      "city": "Moscow",
+      "utc_timestamp": "2025-04-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2126671,
+      "city": "Moscow",
+      "utc_timestamp": "2025-04-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2127434,
+      "city": "Moscow",
+      "utc_timestamp": "2025-05-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2127435,
+      "city": "Moscow",
+      "utc_timestamp": "2025-05-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2127436,
+      "city": "Moscow",
+      "utc_timestamp": "2025-05-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128178,
+      "city": "Moscow",
+      "utc_timestamp": "2025-06-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128179,
+      "city": "Moscow",
+      "utc_timestamp": "2025-06-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128180,
+      "city": "Moscow",
+      "utc_timestamp": "2025-06-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128943,
+      "city": "Moscow",
+      "utc_timestamp": "2025-07-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128944,
+      "city": "Moscow",
+      "utc_timestamp": "2025-07-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2128945,
+      "city": "Moscow",
+      "utc_timestamp": "2025-07-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2129687,
+      "city": "Moscow",
+      "utc_timestamp": "2025-08-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2129688,
+      "city": "Moscow",
+      "utc_timestamp": "2025-08-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2129689,
+      "city": "Moscow",
+      "utc_timestamp": "2025-08-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2130452,
+      "city": "Moscow",
+      "utc_timestamp": "2025-09-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2130453,
+      "city": "Moscow",
+      "utc_timestamp": "2025-09-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2130454,
+      "city": "Moscow",
+      "utc_timestamp": "2025-09-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131217,
+      "city": "Moscow",
+      "utc_timestamp": "2025-10-12T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131218,
+      "city": "Moscow",
+      "utc_timestamp": "2025-10-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131219,
+      "city": "Moscow",
+      "utc_timestamp": "2025-10-12T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131961,
+      "city": "Moscow",
+      "utc_timestamp": "2025-11-12T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131962,
+      "city": "Moscow",
+      "utc_timestamp": "2025-11-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2131963,
+      "city": "Moscow",
+      "utc_timestamp": "2025-11-12T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2132726,
+      "city": "Moscow",
+      "utc_timestamp": "2025-12-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2132727,
+      "city": "Moscow",
+      "utc_timestamp": "2025-12-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2132728,
+      "city": "Moscow",
+      "utc_timestamp": "2025-12-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2133470,
+      "city": "Moscow",
+      "utc_timestamp": "2026-01-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2133471,
+      "city": "Moscow",
+      "utc_timestamp": "2026-01-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2133472,
+      "city": "Moscow",
+      "utc_timestamp": "2026-01-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134235,
+      "city": "Moscow",
+      "utc_timestamp": "2026-02-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134236,
+      "city": "Moscow",
+      "utc_timestamp": "2026-02-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134237,
+      "city": "Moscow",
+      "utc_timestamp": "2026-02-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134979,
+      "city": "Moscow",
+      "utc_timestamp": "2026-03-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134980,
+      "city": "Moscow",
+      "utc_timestamp": "2026-03-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2134981,
+      "city": "Moscow",
+      "utc_timestamp": "2026-03-16T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2135744,
+      "city": "Moscow",
+      "utc_timestamp": "2026-04-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2135745,
+      "city": "Moscow",
+      "utc_timestamp": "2026-04-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 2135746,
+      "city": "Moscow",
+      "utc_timestamp": "2026-04-16T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1215957,
+      "city": "Istanbul",
+      "utc_timestamp": "2023-12-31T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1215958,
+      "city": "Istanbul",
+      "utc_timestamp": "2023-12-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1215959,
+      "city": "Istanbul",
+      "utc_timestamp": "2023-12-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1171351,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-01-31T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1171352,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-01-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1171353,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-01-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172116,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-03-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172117,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-03-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172118,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-03-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172860,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-04-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172861,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-04-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1172862,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-04-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1173625,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-05-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1173626,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-05-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1173627,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-05-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1174369,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-06-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1174370,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-06-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1174371,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-06-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175134,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-07-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175135,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-07-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175136,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-07-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175877,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-08-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175878,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-08-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1175879,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-08-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1176642,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-09-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1176643,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-09-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1176644,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-09-04T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1177386,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-10-05T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1177387,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-10-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1177388,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-10-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178151,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-11-05T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178152,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-11-05T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178153,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-11-05T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178895,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-12-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178896,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-12-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1178897,
+      "city": "Istanbul",
+      "utc_timestamp": "2024-12-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1179653,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-01-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1179654,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-01-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1179655,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-01-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1180397,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-02-06T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1180398,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-02-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1180399,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-02-06T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181162,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-03-09T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181163,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-03-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181164,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-03-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181906,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-04-09T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181907,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-04-09T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1181908,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-04-09T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1182671,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-05-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1182672,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-05-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1182673,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-05-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1183415,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-06-10T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1183416,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-06-10T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1183417,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-06-10T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184180,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-07-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184181,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-07-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184182,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-07-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184924,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-08-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184925,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-08-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1184926,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-08-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1185689,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-09-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1185690,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-09-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1185691,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-09-11T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1186454,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-10-12T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1186455,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-10-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1186456,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-10-12T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187198,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-11-12T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187199,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-11-12T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187200,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-11-12T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187963,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-12-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187964,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-12-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1187965,
+      "city": "Istanbul",
+      "utc_timestamp": "2025-12-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1188707,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-01-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1188708,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-01-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1188709,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-01-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1189472,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-02-13T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1189473,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-02-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1189474,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-02-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190216,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-03-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190217,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-03-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190218,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-03-16T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190981,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-04-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190982,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-04-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1190983,
+      "city": "Istanbul",
+      "utc_timestamp": "2026-04-16T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1191841,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-01-31T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1191842,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-01-31T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1192607,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-03-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1192608,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-03-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193350,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193351,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1193352,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-04-02T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194115,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194116,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194117,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-05-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194859,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194860,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1194861,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-06-03T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195624,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195625,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1195626,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2024-07-04T23:00:00+00:00"
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2024-08-05",
+      "chunk_end": "2024-09-04",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2024-09-05",
+      "chunk_end": "2024-10-05",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2024-10-06",
+      "chunk_end": "2024-11-05",
+      "row_count": 725
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2024-11-06",
+      "chunk_end": "2024-12-06",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2024-12-07",
+      "chunk_end": "2025-01-06",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-01-07",
+      "chunk_end": "2025-02-06",
+      "row_count": 744
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200874,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-02-06T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1200875,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-02-06T23:00:00+00:00"
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-03-10",
+      "chunk_end": "2025-04-09",
+      "row_count": 743
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-04-10",
+      "chunk_end": "2025-05-10",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-05-11",
+      "chunk_end": "2025-06-10",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-06-11",
+      "chunk_end": "2025-07-11",
+      "row_count": 743
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204656,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204657,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1204658,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-07-11T23:00:00+00:00"
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-08-12",
+      "chunk_end": "2025-09-11",
+      "row_count": 744
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-09-12",
+      "chunk_end": "2025-10-12",
+      "row_count": 721
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-10-13",
+      "chunk_end": "2025-11-12",
+      "row_count": 745
+    },
+    {
+      "kind": "api_empty",
+      "city": "Tel Aviv",
+      "chunk_start": "2025-11-13",
+      "chunk_end": "2025-12-13",
+      "row_count": 744
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1208418,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-12-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1208419,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2025-12-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209162,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-01-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209163,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-01-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209928,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-02-13T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1209929,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-02-13T23:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1210670,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-03-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1210671,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-03-16T23:00:00+00:00"
+    },
+    {
+      "kind": "value_mismatch",
+      "row_id": 1211251,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-09T06:00:00+00:00",
+      "row_max": 18.0,
+      "api_max": 19.0,
+      "row_min": 18.0,
+      "api_min": 18.0,
+      "tolerance": 0.5
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211434,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T21:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211435,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T22:00:00+00:00"
+    },
+    {
+      "kind": "no_bucket_for_utc_hour",
+      "row_id": 1211436,
+      "city": "Tel Aviv",
+      "utc_timestamp": "2026-04-16T23:00:00+00:00"
+    }
+  ]
+}
