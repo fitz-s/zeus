@@ -103,9 +103,10 @@ Implications:
 - **Gate 1 already clean**: existing `source_role` assignments are all `historical_hourly` for training-eligible rows. P1 #4 (recompute) becomes maintenance only, not blocker fix.
 - **Gate 2 stays operator-blocked**: 821 HKO rows untouched until RFC for promotion mechanism.
 
-Evidence: `evidence/gap_diagnostic_2026-04-28.json`
-
-## P0–P3 action checklist
+Evidence: `evidence/gap_diagnostic_2026-04-28.json` (pre-synthesis baseline);
+`evidence/gap_diagnostic_post_apply_STALE_pre_demolition_2026-04-28.json`
+(historical record showing synthesis-era zeros — STALE, retained as forensic
+audit only).
 
 ## Application result (state of 2026-04-28T04:30Z, post-demolition)
 
