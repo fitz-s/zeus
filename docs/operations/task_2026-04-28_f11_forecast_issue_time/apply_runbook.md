@@ -3,7 +3,7 @@
 Created: 2026-04-28
 Last reused/audited: 2026-04-28
 Authority basis: `docs/operations/task_2026-04-28_f11_forecast_issue_time/plan.md`, packet 2026-04-27 §01 §3 design decisions Q1-Q4 (operator-confirmed by allowing F11.2-F11.5 to land at HEAD `5b1b05d`).
-Status: operator runbook for applying F11.2 schema migration + F11.4 backfill on canonical `state/zeus-world.db`.
+Status: **PHASES 1+2 APPLIED 2026-04-28 — see [evidence/canonical_apply_2026-04-28.md](evidence/canonical_apply_2026-04-28.md) for verbatim apply outputs + SHA chain.** Phases 3-5 deferred to operator (live resume + backup retirement).
 
 ---
 
