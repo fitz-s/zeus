@@ -315,9 +315,7 @@ class ReplayContext:
         # IS NULL clause so the existing diagnostic_non_promotion replay
         # behavior on un-migrated DBs continues unchanged.
         from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
-        try:
-            rows = self.conn.execute(
-                f"""
+        query_with_provenance = f"""
                 SELECT source, forecast_basis_date, forecast_issue_time, lead_days,
                        forecast_high, forecast_low, temp_unit
                 FROM {self._sp}forecasts
@@ -326,7 +324,29 @@ class ReplayContext:
                   AND {_forecast_col} IS NOT NULL
                   AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
                 ORDER BY lead_days ASC, source ASC, forecast_basis_date ASC
-                """,
+                """
+        query_legacy = f"""
+                SELECT source, forecast_basis_date, forecast_issue_time, lead_days,
+                       forecast_high, forecast_low, temp_unit
+                FROM {self._sp}forecasts
+                WHERE city = ?
+                  AND target_date = ?
+                  AND {_forecast_col} IS NOT NULL
+                ORDER BY lead_days ASC, source ASC, forecast_basis_date ASC
+                """
+        try:
+            rows = self.conn.execute(
+                query_with_provenance,
+                (city_name, target_date),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # Pre-F11 fixture/legacy DBs may not have the provenance column at
+            # all. The F11 filter applies when the column exists; no-column
+            # schemas keep the earlier diagnostic replay behavior.
+            if "availability_provenance" not in str(exc):
+                return []
+            rows = self.conn.execute(
+                query_legacy,
                 (city_name, target_date),
             ).fetchall()
         except Exception:
