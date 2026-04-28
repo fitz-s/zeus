@@ -284,3 +284,22 @@ The methodology critic-gate caught this verdict-level drift; see `docs/methodolo
 Corrected approach: audit tools per `architecture/topology.yaml` metadata.audit_cadence (added Phase 2). The audit IS the antibody — run before commits to catch drift; operator decides per-PR which lifecycle-header gaps are acceptable. **DON'T flip 3 registries to auto-gen.**
 
 This is the SECOND verdict-level erratum (after §9 INV-16/17). Both follow the same pattern: **apparent gap may be intentional, not drift**. Methodology updated at `docs/methodology/adversarial_debate_for_project_evaluation.md` §5.Z with the generalization.
+
+### §9.3 THIRD POST-IMPLEMENTATION ERRATUM (added 2026-04-28 after Tier 2 Phase 3 audit)
+
+§9.2 covered `docs_registry.yaml` + `script_manifest.yaml` + `test_topology.yaml` but did NOT explicitly name `module_manifest.yaml`. Tier 2 Phase 3 module_manifest audit (`scripts/module_manifest_audit.py`) closes this gap with the same finding:
+
+- **module_manifest verdict**: 21 KEEP_AS_YAML / 4 HYBRID / **0 REPLACE_WITH_INIT_PY**
+- DEEP_PLAN §4.2 #11 originally said "Python registries for active packages; ~150 LOC YAML for cross-package metadata" — this prescription is empirically FALSIFIED for module_manifest
+- 21 modules have no `__init__.py` runtime registry that could absorb their hand-curated metadata; the YAML IS the curation
+- 4 HYBRID modules (`contracts`, `risk_allocator`, `strategy`, `types`) have `__all__` declared and ARE candidates for partial migration in Phase 3.5 (auto-derive path/scoped_agents/module_book + retain hand-curated fields in YAML appendix)
+- Same root cause as §9.2: debate audit measured "naive count cited-vs-fs" not "intentional curation depth"
+
+This is the THIRD verdict-level erratum (after §9 INV-16/17 and §9.2 3 registries). The pattern now has 3-for-3 confirmation across distinct manifests:
+- INV-16/17: schema-citation gap ≠ enforcement gap
+- 3 registries: naive count gap ≠ intent-vs-fs drift
+- module_manifest: same as 3 registries
+
+**Methodology generalization (§5.Z updated)**: the audit-first methodology is now codified across 3 case studies. Any future "X is drifted / X should be auto-generated / X is incomplete" claim must pass bidirectional + intent-aware audit BEFORE becoming a LOCKED concession or DEEP_PLAN action.
+
+**Cumulative impact on the harness pruning roadmap**: 0 of the 4 manifest-replacement items in DEEP_PLAN §4.2 #11 (3 registries + module_manifest) are now active replacement work. ALL became "audit-and-keep with PR-gate" instead. Architectural target stands (~5K-6K LOC short-term harness) but achieved differently than originally planned: less REPLACE, more PRUNE-WITHIN-MANIFEST + AUDIT-AS-ANTIBODY.

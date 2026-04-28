@@ -354,6 +354,43 @@ Both case studies were caught by the longlast critic during execution, NOT by th
 
 **Updated methodology recommendation** (extends §5 critic-gate workflow): always include in critic boot prompt the explicit attack vector "for any 'X% lack Y' claim from debate verdict, re-audit with intent-aware methodology before approving any DELETE/REPLACE action."
 
+### §5.Z2 Pattern confirmation — 3 case studies in one cycle
+
+Updated 2026-04-28 after Tier 2 Phase 3 audit. The "apparent gap may be intentional" pattern now has 3-for-3 confirmation in a single execution cycle:
+
+| Case | Verdict claimed | Audit script | Empirical reality | Erratum |
+|---|---|---|---|---|
+| BATCH D INV-16/17 | "33% INVs are pure prose-as-law; DELETE INV-16/17" | grep `tests:` field only | 9 hidden tests in repo; INV-16/17 fully enforced | round1 verdict §10 |
+| Phase 2 (3 registries) | "auto-gen registries from filesystem walk" | naive count cited-vs-fs | 99% cited; 95% load-bearing curation; auto-gen would discard intent | round2 verdict §9.2 |
+| Phase 3 (module_manifest) | "Python registries for active packages" | naive count cited-vs-fs | 21/25 modules have no __init__.py to absorb metadata; YAML IS the curation | round2 verdict §9.3 |
+
+**Same root cause across all 3**: debate-stage audit measured surface-level metric (forward-grep count) without examining INTENT (what is the surface supposed to contain?).
+
+**Same root prevention**: critic-gate during execution + bidirectional grep + intent-aware audit. All 3 catches happened in the SAME execution cycle; methodology pattern is now reliable.
+
+**Cost-benefit calibration based on 3 case studies**:
+- Each erratum took ~1-2h to write + commit + amend related artifacts
+- Each AVOIDED deletion would have lost: 9 hidden tests (case 1) / 95% curation intent (cases 2 & 3)
+- Cost asymmetry strongly favors audit-first; cumulative empirical data now > pre-debate intuitive recommendations
+
+**Codified pattern for FUTURE debates** (add to TOPIC.md framing template):
+
+When a debate makes any of these claims:
+- "X% of [items] lack [enforcement]"
+- "[surface] should be auto-generated from [filesystem/runtime/other source]"
+- "[surface] is drifted vs [target] and should be replaced"
+- "[items] are unused/deprecated and should be deleted"
+
+The claim MUST pass these gates BEFORE locking:
+1. **Bidirectional grep** (forward + reverse) per §5.Y
+2. **Intent inquiry**: "is the surface supposed to be COMPREHENSIVE or CURATED?"
+3. **Spot-check**: 3+ items at random; verify the audit method classifies them correctly
+4. **Stratification**: separate strong-evidence from marginal cases per §5.Y
+
+If any gate fails, the % rate is suspect and DELETE/REPLACE/AUTO-GEN actions cannot be locked as concessions.
+
+**This pattern applies BEYOND adversarial debate** — any audit-driven decision (CI gate, refactor planning, deprecation review) should follow it.
+
 ---
 
 ## §6 Common failure modes + recovery
