@@ -306,6 +306,15 @@ class ReplayContext:
         # LOW replay filters on forecast_low; HIGH (default) on forecast_high.
         # The v2→legacy translator at L286-295 already populates both columns.
         _forecast_col = "forecast_low" if temperature_metric == "low" else "forecast_high"
+        # F11.6 (2026-04-28): wire SKILL_ELIGIBLE_SQL into the replay forecasts
+        # read so the typed gate from src.backtest.training_eligibility actually
+        # filters at the SQL layer. RECONSTRUCTED rows (heuristic timestamp)
+        # are excluded; backfilled rows whose availability_provenance is
+        # populated as DERIVED/RECORDED/FETCH_TIME pass through. Pre-F11
+        # legacy DBs (no availability_provenance column) are tolerated via the
+        # IS NULL clause so the existing diagnostic_non_promotion replay
+        # behavior on un-migrated DBs continues unchanged.
+        from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
         try:
             rows = self.conn.execute(
                 f"""
@@ -315,6 +324,7 @@ class ReplayContext:
                 WHERE city = ?
                   AND target_date = ?
                   AND {_forecast_col} IS NOT NULL
+                  AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
                 ORDER BY lead_days ASC, source ASC, forecast_basis_date ASC
                 """,
                 (city_name, target_date),
