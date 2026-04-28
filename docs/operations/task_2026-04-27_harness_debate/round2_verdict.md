@@ -255,3 +255,18 @@ The ~110-150h of gradualist migration in §4.3 is the synthesized plan.
 Round-3 is not recommended unless operator wants a narrow question litigated. The substantive disagreement has been narrowed to the operator-decision residue.
 
 End of round-2 verdict.
+
+---
+
+## §9 POST-IMPLEMENTATION ERRATUM (added 2026-04-28 after critic-harness cross-batch audit)
+
+§1.1 #11 (DELETE INV-16 + INV-17) and §4.2 #9 (judge recommendation: DELETE) were based on the round-1 verdict's "33% pure LARP" empirical claim. Both were INVALIDATED by post-implementation audit:
+
+- INV-16 has 3 hidden tests in `tests/test_phase6_causality_status.py` (all PASS)
+- INV-17 has 6 hidden tests in `tests/test_dt1_commit_ordering.py` (all PASS)
+- Same pattern for INV-02 + INV-14: 6 hidden tests, all PASS
+- True LARP rate (no enforcement at all) is ~0-7%, not 33%
+
+BATCH D was RE-SCOPED to REVERT + ADD tests: blocks rather than DELETE. See round-1 verdict §10 erratum for the complete root-cause analysis. The synthesized harness target (~5K-6K LOC short-term, ~1.5-2K LOC asymptote) is UNCHANGED — the erratum corrects the LARP-rate empirical claim, not the architectural decisions.
+
+The methodology critic-gate caught this verdict-level drift; see `docs/methodology/adversarial_debate_for_project_evaluation.md` §5 case study for how.

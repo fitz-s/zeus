@@ -220,3 +220,17 @@ If operator wants further adversarial debate, the natural round-4 topics are:
 - Round-3 producers a less-controversial verdict than R1+R2 because the convergence was so dramatic. The substantive answer is now operationally clear.
 
 End of round-3 verdict.
+
+---
+
+## §9 POST-IMPLEMENTATION ERRATUM (added 2026-04-28 after critic-harness cross-batch audit)
+
+§1 LOCKED concession #12 (referenced as "Process-fault rate observation window" in §3.1) and §1 LOCKED concession #14 (Fowler HIGH/LOW interest classification) operate on the assumption that the schema-citation gap from round-1 was a real enforcement gap. Post-implementation audit found this was wrong:
+
+- 4 INVs (16, 17, 02, 14) had hidden tests not cited via YAML field
+- 15 tests added across these 4 INVs in BATCH D + SIDECAR-2
+- True enforcement-gap-LARP rate ~0-7%, not 33%
+
+For the round-3 capital allocation (synthesized ~37/63 H/E over 6 months), the erratum's implication is: the harness pruning ROI on Tier 2/3 yaml work may be slightly LESS than the round-3 inputs assumed (since less "actually broken" enforcement to fix), shifting the optimal allocation 2-5pp further toward EDGE. This is within the uncertainty bounds of the round-3 synthesis and does not change the operational schedule.
+
+See round-1 verdict §10 erratum for full root-cause + corrected metrics. Methodology updated at `docs/methodology/adversarial_debate_for_project_evaluation.md` §5 case study.

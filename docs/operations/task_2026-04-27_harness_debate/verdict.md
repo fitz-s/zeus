@@ -198,4 +198,56 @@ The same finding can be cited by both sides. That is the honest texture of this 
 
 ---
 
+## §10 POST-IMPLEMENTATION ERRATUM (added 2026-04-28 after critic-harness cross-batch audit)
+
+### What the verdict claimed
+
+§1 LOCKED concession #5 (and round-2 §1 #5 + round-3 implicit) cited opponent's "33% pure LARP rate" empirical finding for INV-16 + INV-17, derived from the grep `grep -c "tests:" architecture/invariants.yaml = 20`. §6.1 #1 + §4.2 #9 (round-2) recommended DELETE for INV-16/17 on this basis.
+
+### What empirical audit found
+
+During BATCH D execution, critic-harness ran a longlast cross-batch audit and discovered:
+- INV-16 has 3 relationship tests in `tests/test_phase6_causality_status.py` (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement") — all PASSING
+- INV-17 has 6 relationship tests in `tests/test_dt1_commit_ordering.py` (file docstring: "Relationship tests for DT#1 / INV-17: DB authority writes commit BEFORE...") — all PASSING
+
+Subsequent grep-first SIDECAR-2 audit found:
+- INV-02 has 2 hidden tests in `test_architecture_contracts.py` (lifecycle_phase_kernel_*)
+- INV-14 has 4 hidden tests across `test_canonical_position_current_schema_alignment.py` (3) + `test_dual_track_law_stubs.py` (1)
+- Spot-check found INV-03 + INV-07 also have hidden tests
+
+### Corrected empirical assessment
+
+| Metric | Original verdict claim | Empirical reality (post-audit) |
+|---|---|---|
+| LARP rate (pure prose-as-law) | 33% (10/30 INVs) | ~0-7% (0-2/30 truly unsupported) |
+| Schema-citation gap (YAML field doesn't cite tests:) | conflated with LARP | ~20% (6/30) and dropping |
+| Test-citation completeness | 67% (20/30) | 80% (24/30) after BATCH D + SIDECAR-2 added 15 hidden test citations |
+| INV-16/17 fate | DELETE (verdict §6.1 #1) | KEEP — 9 active tests would orphan |
+
+### Root-cause analysis
+
+Opponent's R1 audit used `grep -c "tests:" architecture/invariants.yaml` which only counts INVs whose `enforced_by:` block CITES `tests:` field. The audit DID NOT search the broader test suite for actual relationship tests. The 9 tests for INV-16/17 + 6 for INV-02/14 + spot-checked INV-03/07 hidden tests EXIST in the repo, just not cited via the YAML field.
+
+The schema-citation gap (YAML doesn't cite the existing tests) was a real maintenance issue. The enforcement gap (no tests at all) was largely imaginary. These are categorically different — the original verdict conflated them.
+
+### What this verdict gets RIGHT despite the erratum
+
+- The mixed-tilt direction stands: Axis 1 (file cleanliness) net-negative is empirically confirmed
+- The synthesized harness target stands (per round-2)
+- The LOCKED concessions are not invalidated; they were correctly framed as "what both sides agreed on" given the evidence available at the time
+- The methodology of debate worked: the longlast critic during execution caught the verdict-level error precisely because the methodology mandates critic-gate during implementation
+
+### Action taken
+
+- BATCH D was RE-SCOPED from "DELETE INV-16/17" to "REVERT PRUNE markers + ADD tests: blocks" — preserving real enforcement
+- SIDECAR-2 was RE-SCOPED to grep-first audit before any test design — preventing 4 more bad deletes
+- This erratum cited in BATCH D + SIDECAR-2 commit message (executor maintains CITATION_REPAIR comments inline in invariants.yaml)
+- Methodology updated with case study (see `docs/methodology/adversarial_debate_for_project_evaluation.md` §5 case study)
+
+### Lesson for future rounds
+
+When a debate cites "X% LARP rate" derived from a single grep on a single file, the audit should be EXTENDED with a search of related repository surfaces BEFORE the claim becomes a LOCKED concession. The critic-gate during execution is a backstop; the better fix is to run the cross-repo audit at debate-time.
+
+---
+
 End of verdict.

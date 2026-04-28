@@ -256,6 +256,46 @@ If BLOCK → executor must fix specific defects before next batch
 
 Per memory `feedback_executor_commit_boundary_gate`: "If executor autocommits before critic review, team-lead MUST run wide-review-before-push." Adding critic-gate prevents executor self-approval drift over multi-batch work.
 
+### §5.X Case study — critic-gate catches verdict-level drift
+
+**Context (zeus harness-debate cycle 2026-04-27)**: round-1 + round-2 + round-3 verdicts all cited opponent's empirical finding "33% of INVs are pure prose-as-law" derived from a single grep: `grep -c "tests:" architecture/invariants.yaml = 20`. Round-2 §6.1 #1 LOCKED "DELETE INV-16 + INV-17" as a both-sides-agreed action. By the time the executor reached BATCH D ("DELETE INV-16/17"), this had survived:
+- 3 rounds of debate
+- Multi-source external evidence cross-checks
+- Both sides' face-value retractions
+- Judge's verdict synthesis
+- DEEP_PLAN consolidation
+
+It was a LOCKED concession by every methodological standard the debate had.
+
+**The catch**: critic-harness, while reviewing BATCH C (a different batch), ran a cross-batch arithmetic equivalence audit AND ALSO a longlast cross-batch INV-deletion-impact preview for the upcoming BATCH D. The preview discovered:
+- `tests/test_phase6_causality_status.py` exists with 3 PASSING tests; file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"
+- `tests/test_dt1_commit_ordering.py` exists with 6 PASSING tests; file docstring: "Relationship tests for DT#1 / INV-17: DB authority writes commit BEFORE..."
+
+The 9 tests EXIST in the repo. The opponent's grep audit only counted INVs whose `enforced_by:` block CITES `tests:` field. The hidden tests were never searched for.
+
+**Subsequent grep-first audit on the other 8 "untested" INVs**:
+- INV-02 has 2 hidden tests in test_architecture_contracts.py
+- INV-14 has 4 hidden tests across test_canonical_position_current_schema_alignment + test_dual_track_law_stubs
+- Spot-check on INV-03 + INV-07: also have hidden tests
+
+**True LARP rate**: ~0-7%, not 33%. **Empirical claim was 5x overcount.**
+
+**What the methodology preserved**: BATCH D was RE-SCOPED from DELETE to REVERT-PRUNE-MARKERS + ADD tests: blocks. SIDECAR-2 was RE-SCOPED to grep-first audit. **Zero invariants were lost.** The erratum was added to all 3 verdicts (verdict.md §10, round2_verdict.md §9, round3_verdict.md §9) preserving methodological honesty without invalidating the architectural conclusions.
+
+**Lessons for future debates**:
+
+1. **When a debate cites "X% rate" derived from a single grep on a single file**, ALWAYS extend the audit with a cross-repo search BEFORE the claim becomes a LOCKED concession. Better: at debate-time, run the cross-repo audit; failing that, the critic-gate during execution is the backstop.
+
+2. **Schema-citation gap ≠ enforcement gap**. The YAML field not citing tests does NOT mean tests don't exist. Both sides' grep was "necessary but not sufficient" evidence; the verdict treated it as sufficient.
+
+3. **Critic-gate during execution is HIGH ROI**. In this case it prevented a verdict-blessed DELETE that would have orphaned 9 active tests + lost real invariant law. Without the critic-gate, the executor would have followed the verdict and shipped the bad delete.
+
+4. **Empirical retraction in implementation-stage erratum is healthy**. Methodology §7 "self-discovered errors" applies to debate phase; this case study extends the pattern to implementation phase. Both are signs of healthy adversarial discipline.
+
+5. **Update verdicts with empirical errata**. Don't silently fix; explicitly amend with what the original claim was, what audit found, and what changes (or doesn't change) as a result. Methodological transparency compounds across cycles.
+
+6. **The METHODOLOGY itself is improvable**. This case study was added to §5 after the cycle; the next cycle should bake "extend grep audits with repo-wide search" into the dispatch templates BEFORE the verdict locks. See §12 future extensions.
+
 ---
 
 ## §6 Common failure modes + recovery
