@@ -52,9 +52,10 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 # TEST_FILES widened in BATCH C to include the 3 new settlement-semantics
 # relationship tests (HKO+WMO type-encoded antibody). Per dispatch OP-FOLLOWUP-1
 # baseline bumped 73 → 76 (73 from test_architecture_contracts + 3 from
-# test_settlement_semantics).
+# test_settlement_semantics). SIDECAR-3 added 3 more negative-half regression
+# tests for C4 fix (76 → 79).
 TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py"
-BASELINE_PASSED=76
+BASELINE_PASSED=79
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then

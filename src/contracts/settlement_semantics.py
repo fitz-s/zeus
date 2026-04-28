@@ -217,11 +217,28 @@ class SettlementRoundingPolicy(ABC):
 
 
 class WMO_HalfUp(SettlementRoundingPolicy):
-    """WMO half-up: 74.45 → 74; 74.50 → 75. WU/NOAA/CWA settlement chains."""
+    """WMO asymmetric half-up: 74.45 → 74; 74.50 → 75. WU/NOAA/CWA chains.
+
+    Negative half-values round toward +∞ (asymmetric): -3.5 → -3, NOT -4.
+    Matches legacy round_wmo_half_up_value at line 16. Differs from Python's
+    Decimal ROUND_HALF_UP (which is half-away-from-zero, -3.5 → -4) and from
+    Python/NumPy banker's rounding (which is half-to-even).
+
+    Per WMO No. 306 METAR convention + the file-level docstring at line 19
+    ("WMO half-up on the number line: floor(x + 0.5)") + the repo doc warning
+    at docs/reference/modules/contracts.md:89 ("wrong negative-half handling
+    yields systematic settlement drift"). Critic batch_C_review §C4 caught a
+    silent divergence in the original Decimal ROUND_HALF_UP version: SIDECAR-3
+    fix replaces it with np.floor(float(x) + 0.5) to match legacy byte-for-byte.
+    """
     name: ClassVar[str] = "wmo_half_up"
 
     def round_to_settlement(self, raw_temp_c: Decimal) -> int:
-        return int(raw_temp_c.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        # Asymmetric half-up "on the number line" (toward +∞), matching legacy
+        # round_wmo_half_up_values + WMO No. 306 METAR convention. -3.5 → -3
+        # (NOT -4). See settlement_semantics.py:16-27 docstring + docs/reference/
+        # modules/contracts.md:89 warning + critic batch_C_review §C4.
+        return int(np.floor(float(raw_temp_c) + 0.5))
 
     def source_authority(self) -> str:
         return "WMO"

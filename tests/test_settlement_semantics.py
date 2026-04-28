@@ -63,3 +63,38 @@ def test_invalid_policy_type_rejected():
 
     with pytest.raises(TypeError, match=r"requires a SettlementRoundingPolicy"):
         settle_market("New York", Decimal("74.5"), FakePolicy())  # type: ignore[arg-type]
+
+
+# SIDECAR-3 (2026-04-28): C4 negative-half regression tests. Critic batch_C_review
+# caught silent divergence between WMO_HalfUp (originally Decimal ROUND_HALF_UP =
+# half-away-from-zero, -3.5→-4) and legacy round_wmo_half_up_value (np.floor(x+0.5) =
+# asymmetric toward +∞, -3.5→-3). Legacy is the documented choice (file docstring
+# settlement_semantics.py:19 + docs/reference/modules/contracts.md:89). DB has
+# 11 negative settled values (-7..-1); raw forecast Monte Carlo can produce -X.5
+# in NYC/Chicago winter — silent drift would have shifted settlement by 1°C on
+# negative-half boundary cases. Three regression tests pin the legacy semantic.
+
+def test_wmo_half_up_negative_half_rounds_toward_positive_infinity():
+    """C4 regression: -3.5 → -3 (asymmetric half-up matches legacy + WMO 306)."""
+    policy = WMO_HalfUp()
+    assert policy.round_to_settlement(Decimal("-3.5")) == -3
+    assert policy.round_to_settlement(Decimal("-0.5")) == 0
+    assert policy.round_to_settlement(Decimal("-100.5")) == -100
+
+
+def test_wmo_half_up_positive_half_rounds_up_unchanged():
+    """Positive half-values unaffected by C4 fix; both semantics agree at +X.5."""
+    policy = WMO_HalfUp()
+    assert policy.round_to_settlement(Decimal("3.5")) == 4
+    assert policy.round_to_settlement(Decimal("100.5")) == 101
+
+
+def test_wmo_half_up_matches_legacy_round_wmo_half_up_value():
+    """C4 regression: ABC must match legacy round_wmo_half_up_value byte-for-byte."""
+    from src.contracts.settlement_semantics import round_wmo_half_up_value
+    policy = WMO_HalfUp()
+    test_cases = [3.5, -3.5, 0.5, -0.5, 28.5, -28.5, -100.5, 28.7, -28.7]
+    for x in test_cases:
+        legacy = int(round_wmo_half_up_value(x))
+        new = policy.round_to_settlement(Decimal(str(x)))
+        assert legacy == new, f"divergence at {x}: legacy={legacy} new={new}"
