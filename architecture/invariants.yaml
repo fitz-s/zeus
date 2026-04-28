@@ -98,6 +98,7 @@ invariants:
         - tests/test_runtime_guards.py::test_day0_missing_observation_is_pre_vector_traceable
         - tests/test_runtime_guards.py::test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded
         - tests/test_runtime_guards.py::test_partial_stale_policy_uses_degraded_json_fallback
+        - tests/test_collateral_ledger.py::test_authority_tier_DEGRADED_when_chain_unreachable
   - id: INV-10
     zones: [K1_governance]
     statement: LLM output is never authority.
