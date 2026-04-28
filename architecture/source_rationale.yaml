@@ -1531,6 +1531,14 @@ files:
     - DERIVED_ONLY
     downstream:
     - scripts/edge_observation_weekly.py
+  src/state/attribution_drift.py:
+    zone: K2_runtime
+    authority_role: derived_attribution_drift_projection
+    why: "K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time _strategy_key_for dispatch rule (src/engine/evaluator.py L420-441) on persisted row attributes and flags label/semantics mismatch. ATTRIBUTION_DRIFT packet BATCH 1 per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L305-308 (no detector existed for silent attribution drift). Reuses canonical surface (query_authoritative_settlement_rows) + STRATEGY_KEYS list + metric_ready filter from edge_observation.py. KNOWN LIMITATIONS in module docstring: discovery_mode not currently surfaced by _normalize_position_settlement_event so clauses 1-2 of dispatch rule cannot be applied (insufficient_signal); bin.is_shoulder inferred heuristically from persisted bin_label string (per AGENTS.md L66 antibody, classifier conservatively returns unknown rather than guess). Recall-limited but precision-favored — every drift it reports is a real label/semantics mismatch on at least one of clauses 3-5."
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - scripts/attribution_drift_weekly.py
   src/state/truth_files.py:
     zone: K2_runtime
     authority_role: truth_file_helpers
