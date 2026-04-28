@@ -23,7 +23,7 @@ Both sides converged in 2 rounds (no R3 needed). Real disagreement narrowed to 4
 | **Stage 1** | TIER-1 4-commit revert (`575f435 + 7027247 + 0a4bae3 + 1ffef77`) | ~6-10h | **YES — git history change on plan-pre5** |
 | **Stage 2** | Per-commit critic disposition for remaining 5 commits + bidirectional-grep sample on contested hunks | ~10-20h | No (read-only) |
 | **Stage 3** | Independent critic-gate per in-flight fix (6 fixes) + cross-session coordination | ~25-35h | **YES — cross-session brokerage required** |
-| **Stage 4** | Process gates A-E parallel from Stage 0 | ~15-25h | No (judge can encode) |
+| **Stage 4** | Process gates A-E parallel from Stage 0 | ~13-25h (sub-totals 13-20h + 2-5h integration testing buffer; per critic DRIFT-V1 fix) | No (judge can encode) |
 | **Stage 5** | Restoration verification + DB cleanup (815k polluted rows + 17 mislabeled stations) | ~10-15h | **YES — production data change** |
 
 **Total ~68-107h (midpoint ~85h).** Slightly above both R2 SYNTHESIZED MIDDLE estimates (~50-75h) because honest accounting of process gates A-E (gate B worktree-merge protocol + gate D methodology cross-session propagation require real engineering, not just docs) + cross-session coordination realism per opponent §2 W3.
@@ -196,7 +196,9 @@ git commit -m "Revert TIER-1 contamination commits (4 commits)..."
 
 Cost ~6-10h (revert + conflict resolution + pytest baseline preservation + ledger documentation). **Requires operator authorization** — alters plan-pre5 git history; affects branch state for subsequent merges.
 
-Tests after revert: re-run `tests/test_architecture_contracts.py + test_settlement_semantics.py + test_inv_prototype.py + test_digest_profiles_equivalence.py` baseline; expect ≥87 pass (original 90 minus tests that depended on reverted code). Critic-harness gates the revert outcome before declaring Stage 1 complete.
+**Pre-revert step (REQUIRED per critic NUANCE-V2)**: produce explicit test inventory distinguishing (a) tests INTRODUCED in the 4 reverted commits (deleted with source) vs (b) tests DEPENDING on reverted source code (will fail on import after revert). Inventory artifact: `evidence/executor/stage1_pre_revert_test_inventory.md`. This gives operator informed consent before authorizing the revert.
+
+Tests after revert: re-run `tests/test_architecture_contracts.py + test_settlement_semantics.py + test_inv_prototype.py + test_digest_profiles_equivalence.py` baseline; the 4-file critic baseline (per critic ATTACK 8 cross-check) has ZERO grep hits for meteostat/tier_resolver/verify_truth_surfaces/fill_obs_v2_meteostat — baseline 90/22/0 should SURVIVE Stage 1 revert. Broader test surface (tests importing tier_resolver or meteostat) WILL drop per pre-revert inventory; documented expectation per inventory. Critic-harness gates the revert outcome before declaring Stage 1 complete.
 
 ### Stage 2 — Per-commit critic disposition (judge can dispatch; read-only)
 
@@ -220,7 +222,7 @@ Cost ~25-35h (5-6h × 6 fixes + ~5h cross-session coordination overhead). **Requ
 | D. Methodology cross-session propagation | Root `AGENTS.md` Required Reads + `.agents/skills/zeus-ai-handoff/SKILL.md` Required Reads → methodology doc; consider new `.claude/skills/zeus-methodology-bootstrap/SKILL.md` | ~3-5h |
 | E. Erratum-frequency trigger | Methodology §5.Z3 quantitative add: ≥3 errata/cycle → audit-first mandate for subsequent verdicts | ~1-2h |
 
-Total Stage 4 cost ~13-20h (slightly tighter than judge §0 estimate; honest range ~15-25h with integration testing).
+Total Stage 4 cost: **sub-totals 13-20h** (sum of A+B+C+D+E per-gate honest minimum) **+ 2-5h integration testing buffer** = **honest aggregate range 13-25h** (matches §0 TL;DR after DRIFT-V1 fix per critic verdict_review §3 + §10). Critic NUANCE-V3 (Gate B may need 6-10h if r3_drift_check integration required) + NUANCE-V4 (Gate E erratum counter may need 2-4h if automated) are tracked-forward; current plan minimal-hook + manual counter, both within sub-total range.
 
 ### Stage 5 — Restoration verification + DB cleanup (operator authorization required)
 
@@ -283,3 +285,37 @@ Critic verdict outcomes:
 **Verdict LOCKED 2026-04-28 at HEAD `170e6b1`. Pending critic-harness REVIEW_VERDICT_REMEDIATION gate.**
 
 This verdict is the canonical synthesis for the contamination remediation cycle. Any erratum required by implementation findings should be appended as §11+ per methodology §5.Z3 erratum pattern (see prior verdicts for §10 erratum / §9.2 erratum / §9.3 erratum precedents).
+
+---
+
+## §11 Critic-driven verdict revision (2026-04-28 ~05:21Z)
+
+Per critic-harness REVIEW_VERDICT_REMEDIATION at `evidence/critic-harness/verdict_review_2026-04-28.md`: **APPROVE-WITH-CAVEATS** (5 caveats; 0 BLOCK; verdict-direction stands).
+
+### DRIFT-V1 fixed (MED severity)
+
+Critic finding (verdict_review §3 ATTACK 3): §0 TL;DR Stage 4 cost "~15-25h" contradicted §6 sub-totals "13-20h" — same stage, two cost ranges, same doc.
+
+Fix applied: §0 TL;DR Stage 4 row now reads "~13-25h (sub-totals 13-20h + 2-5h integration testing buffer; per critic DRIFT-V1 fix)". §6 Stage 4 closing line clarifies: sub-totals 13-20h + 2-5h integration testing buffer = honest aggregate range 13-25h. Math now transparent.
+
+### NUANCE-V2 fixed (LOW severity)
+
+Critic finding (verdict_review §8 ATTACK 8): §6 Stage 1 "≥87 pass" prediction conflated "tests deleted with source" vs "tests depending on reverted source".
+
+Fix applied: §6 Stage 1 now requires explicit pre-revert test inventory artifact (`evidence/executor/stage1_pre_revert_test_inventory.md`) distinguishing (a) tests-introduced-in-revert-set from (b) tests-depending-on-reverted-source. Operator authorization for Stage 1 carries informed consent via this inventory.
+
+### Tracked-forward caveats (LOW severity; non-blocking)
+
+- **NUANCE-V1**: opponent R2 §2 "1ffef77 RECENT (post-53a21ad)" framing chronologically inverted (1ffef77=2026-04-25; 53a21ad=2026-04-28). Verdict didn't carry over the error. Stage 2 per-commit disposition for 1ffef77 should weigh content (verify_truth_surfaces drift-#5 candidate) not chronology.
+- **NUANCE-V3**: Gate B worktree-merge protocol may need 6-10h vs verdict's 4-6h IF r3_drift_check integration required. Current STAGE4_PROCESS_GATES_AE_PLAN.md §2 design is minimal hook (file-list grep + drift-keyword cross-check); within sub-total range.
+- **NUANCE-V4**: Gate E erratum-counter implementation may need 2-4h vs verdict's 1-2h IF automated counter required. Current STAGE4_PROCESS_GATES_AE_PLAN.md §5 design is text-only quantitative trigger (manual application); within sub-total range.
+
+### Critic anti-rubber-stamp validation
+
+Critic verdict_review §"Anti-rubber-stamp self-check" notes: this is the 12th critic cycle (BATCH A-D + SIDECAR 1-3 + Tier 2 P1-P4 + this VERDICT review); same discipline applied; opponent's verifiable factual error (1ffef77 chronology) was flagged independently — proves not rubber-stamping opponent-favorable adjudications.
+
+### Stage 4 Plan cross-reference
+
+Detailed encoding plan for gates A-E is at `STAGE4_PROCESS_GATES_AE_PLAN.md` (~607 lines, 5 gates with concrete templates: AGENTS.md insertions + SKILL.md additions + new YAML schema + new hook script + new bootstrap SKILL + methodology §5.Z3.1 quantitative trigger).
+
+Verdict + critic gate complete. Stage 4 (judge unilateral) ready for execution; Stages 1+3+5 (Group B) await operator authorization per §6.
