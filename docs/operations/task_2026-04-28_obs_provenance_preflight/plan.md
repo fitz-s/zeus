@@ -136,7 +136,7 @@ The 42,749 figure is the count of rows with `low_temp IS NOT NULL` (and equivale
 
 ### What needs to be done RIGHT, not synthesized
 
-- **Gates 3+4 (39,431 WU rows)**: re-fetch from WU API or otherwise restore real provenance metadata. The existing script `scripts/backfill_obs_v2.py` (zeus-canonical, A1-validated) is the proper tool; ~58 hour wallclock estimated. Synthesis is forbidden.
+- **Gates 3+4 (39,431 WU rows)**: re-fetch from WU API or otherwise restore real provenance metadata. **CORRECTION 2026-04-28**: the earlier "`scripts/backfill_obs_v2.py` is the proper tool" claim was wrong — that script writes to `observation_instants_v2` (hourly, Gate 5) NOT `observations` (daily, Gates 3+4). Additionally `daily_observation_writer.write_daily_observation_with_revision` preserves existing rows by design (audit-trail protection), so backfill_wu_daily_all.py also cannot fill in-place. The correct tool is `docs/operations/task_2026-04-28_obs_provenance_preflight/scripts/fill_observations_provenance_existing.py` (created 2026-04-28; UPDATE-only, real WU API verify-then-fill). Wallclock corrected: **~65 min daily-granularity**, not 58h. Synthesis is forbidden.
 - **Gate 5 (993,400 obs_v2 rows)**: same — re-import through A1 writer, OR explicitly accept legacy rows are not training-eligible (set training_allowed=0 for them).
 - **Gate 2 (HKO 821)**: separate RFC for HKO audit promotion mechanism. Architecture-defined gap city; not solvable by data work alone.
 
