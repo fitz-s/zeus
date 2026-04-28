@@ -164,6 +164,24 @@ The durable workspace kernel is:
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
 
+### Cross-session merge protocol
+
+Any merge from another worktree/session into a Zeus branch (`plan-pre5`,
+`main`, etc.) requires a **critic-opus dispatch on the merging branch's
+diff against the target branch BEFORE the merge commits**. The critic
+verdict (APPROVE / REVISE / BLOCK) is mandatory; merging without it is a
+process violation regardless of how clean the diff appears.
+
+Mechanism: see `.agents/skills/zeus-ai-handoff/SKILL.md` §8.8 for the
+operational protocol; `.claude/hooks/pre-merge-contamination-check.sh`
+provides the deterministic gate (`MERGE_AUDIT_EVIDENCE` env var pointing
+to the critic verdict file).
+
+This protocol exists because of the 2026-04-28 contamination event: a
+parallel session merged 9 commits into `plan-pre5` without independent
+critic gate; 6 drift items resulted, including 815k mislabeled
+production rows. See `docs/operations/task_2026-04-28_contamination_remediation/`.
+
 ## 3. Navigation & Task Routing
 
 **Step 1 — Run the topology digest for your task.** This is not optional. The
