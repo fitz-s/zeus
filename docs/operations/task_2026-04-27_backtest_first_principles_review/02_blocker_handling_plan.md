@@ -103,7 +103,7 @@ Recommended: **C (both)**. Subgraph for backfill of historical trade events; Web
 
 **Real per-period exceptions to the WU resolution rule** (these are narrow and already in `known_gaps.md`, NOT structural):
 - **Taipei** switched 03-16~03-22 (CWA) → 03-23~04-04 (NOAA Taoyuan) → 04-05+ (WU/RCSS Songshan) — the only city with multi-period source switching
-- **HK 03-13/14**: WU/VHHH (HK Airport) used by Polymarket; Zeus has HKO Observatory
+- **HK 03-13/14**: unresolved HKO source/audit mismatch. Correction 2026-04-28: Hong Kong has no WU ICAO route in Zeus; do not model this as WU/VHHH without fresh operator-approved primary-source evidence.
 - **WU API vs WU website daily summary** divergence: ~19 mismatches on SZ/Seoul/SP/KL/Chengdu — Zeus reads WU API `max(hourly)`, Polymarket reads WU website daily summary. Both WU, different code paths.
 
 These are the **real F9 footprint**: narrow per-city / per-period exceptions, not "Polymarket uses NOAA universally". My earlier framing was retracted in 04 §C3.
