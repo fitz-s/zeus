@@ -7,7 +7,7 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-28; last_reused=2026-04-28
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
 # Reuse: When adding a new profile, add adversarial cases here first.
@@ -443,6 +443,104 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "scripts/live_readiness_check.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_readiness_gates.py" in digest["admission"]["admitted_files"]
+
+
+def test_batch_h_legacy_day0_backfill_routes_to_contamination_profile():
+    """The contamination remediation Batch H profile must beat broad R3
+    file-pattern profiles and admit only the planned implementation surfaces."""
+    digest = build_digest(
+        "Batch H legacy Day0-only canonical history entry backfill remediation",
+        [
+            "src/execution/exit_lifecycle.py",
+            "tests/test_runtime_guards.py",
+            "architecture/test_topology.yaml",
+            "docs/operations/task_2026-04-28_contamination_remediation/plan.md",
+            "docs/operations/task_2026-04-28_contamination_remediation/work_log.md",
+            "docs/operations/task_2026-04-28_contamination_remediation/evidence/critic-harness/batch_h_current_diff_2026-04-28.md",
+        ],
+    )
+
+    assert digest["profile"] == "batch h legacy day0 canonical history backfill remediation"
+    assert digest["profile"] not in {
+        "r3 live readiness gates implementation",
+        "r3 cancel replace exit safety implementation",
+        "r3 exchange reconciliation sweep implementation",
+    }
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/exit_lifecycle.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
+    assert digest["admission"]["out_of_scope_files"] == []
+
+
+def test_batch_h_profile_law_names_real_canonical_entry_events_only():
+    """The machine-readable Batch H law must not reintroduce invented events."""
+    digest = build_digest(
+        "Batch H legacy Day0-only canonical history entry backfill remediation",
+        ["src/execution/exit_lifecycle.py"],
+    )
+    required_law = "\n".join(digest["required_law"])
+
+    assert "POSITION_OPEN_INTENT" in required_law
+    assert "ENTRY_ORDER_POSTED" in required_law
+    assert "ENTRY_ORDER_FILLED" in required_law
+    assert "ENTRY_ORDER_PLACED" not in required_law
+
+
+def test_batch_h_profile_does_not_select_from_exit_lifecycle_file_alone():
+    """File evidence alone must not route to the Batch H contamination profile."""
+    digest = build_digest(
+        "fix exit_lifecycle backfill bug",
+        ["src/execution/exit_lifecycle.py"],
+    )
+
+    assert digest["profile"] != "batch h legacy day0 canonical history backfill remediation"
+
+
+def test_batch_h_downstream_files_remain_context_only():
+    digest = build_digest(
+        "Batch H legacy Day0-only canonical history entry backfill remediation",
+        [
+            "src/engine/lifecycle_events.py",
+            "src/state/ledger.py",
+            "src/engine/cycle_runtime.py",
+            "tests/test_entry_exit_symmetry.py",
+            "tests/test_day0_exit_gate.py",
+        ],
+    )
+
+    assert digest["profile"] == "batch h legacy day0 canonical history backfill remediation"
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert digest["admission"]["admitted_files"] == []
+    assert set(digest["admission"]["out_of_scope_files"]) == {
+        "src/engine/lifecycle_events.py",
+        "src/state/ledger.py",
+        "src/engine/cycle_runtime.py",
+        "tests/test_entry_exit_symmetry.py",
+        "tests/test_day0_exit_gate.py",
+    }
+
+
+def test_batch_h_forbidden_surfaces_are_blocked():
+    digest = build_digest(
+        "Batch H legacy Day0-only canonical history entry backfill remediation",
+        [
+            "architecture/history_lore.yaml",
+            "docs/authority/zeus_current_architecture.md",
+            "src/supervisor_api/contracts.py",
+            "src/contracts/settlement_semantics.py",
+            "state/zeus-world.db",
+        ],
+    )
+
+    assert digest["profile"] == "batch h legacy day0 canonical history backfill remediation"
+    assert digest["admission"]["status"] == "blocked"
+    assert set(digest["admission"]["forbidden_hits"]) == {
+        "architecture/history_lore.yaml",
+        "docs/authority/zeus_current_architecture.md",
+        "src/supervisor_api/contracts.py",
+        "src/contracts/settlement_semantics.py",
+        "state/zeus-world.db",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """Tests for topology_doctor compiled topology gates."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-21; last_reused=2026-04-21
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-28; last_reused=2026-04-28
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
 # Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
 

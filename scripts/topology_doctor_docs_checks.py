@@ -4,7 +4,7 @@ This module intentionally receives the topology_doctor module as `api` instead
 of importing its internals. That keeps this first checker-family split small and
 preserves the existing public helper surface during migration.
 """
-# Lifecycle: created=2026-04-16; last_reviewed=2026-04-21; last_reused=2026-04-21
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-28; last_reused=2026-04-28
 # Purpose: Docs-tree, operations-registry, runtime-plan, and docs-registry checks for topology_doctor.
 # Reuse: Keep docs-specific policy checks here; route root/state/source checks through their checker modules.
 
@@ -147,7 +147,7 @@ def check_hidden_docs(api: Any, topology: dict[str, Any]) -> list[Any]:
     visible_docs_files = [
         api.ROOT / rel
         for rel in api._git_visible_files()
-        if rel.startswith("docs/") and (api.ROOT / rel).is_file()
+        if rel.startswith("docs/")
     ]
     allowed_root_files = set(topology.get("docs_root_allowed_files") or {"docs/AGENTS.md", "docs/README.md", "docs/archive_registry.md"})
     for path in sorted(visible_docs_files):

@@ -1,5 +1,5 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-28
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T5.b TickSize typed contract + exit-path NaN closure for T5.a-LOW follow-up)
 
 """T5.b TickSize typed contract antibodies.
@@ -204,3 +204,19 @@ class TestExitPathNaNGuard:
         result = execute_exit_order(intent)
         assert result.status == "rejected"
         assert "malformed_limit_price" in result.reason
+
+    def test_valid_exit_still_hits_cutover_guard_before_side_effects(self):
+        """Valid exit intents must still pass CutoverGuard before live side effects."""
+        from src.control.cutover_guard import CutoverPending
+        from src.execution.executor import ExitOrderIntent, execute_exit_order
+
+        intent = ExitOrderIntent(
+            trade_id="t-valid-cutover",
+            token_id="tok-x",
+            shares=5.0,
+            current_price=0.50,
+            best_bid=None,
+        )
+
+        with pytest.raises(CutoverPending):
+            execute_exit_order(intent)

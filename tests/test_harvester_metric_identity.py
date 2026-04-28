@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-24; last_reviewed=2026-04-24; last_reused=never
+# Lifecycle: created=2026-04-24; last_reviewed=2026-04-28; last_reused=2026-04-28
 # Purpose: INV-14 identity spine antibody for harvester settlement writes —
 #          pins temperature_metric / physical_quantity / observation_field to
 #          canonical HIGH_LOCALDAY_MAX.* so regression to the legacy literal
@@ -66,29 +66,18 @@ def _make_city(name: str = "testville") -> City:
 
 @pytest.fixture()
 def harvester_conn():
-    """In-memory settlements schema parity with live DB.
-
-    init_schema creates the modern INV-14 columns but does not add the
-    pre-INV-14 bin-evidence columns (pm_bin_lo/pm_bin_hi/unit/
-    settlement_source_type) via ALTER — those were created by an older
-    schema version. Live DBs already carry them; fresh test DBs don't.
-    Extend fresh schema here so the harvester INSERT path can bind all
-    columns.
-    """
+    """In-memory settlements schema parity with the harvester live write path."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    for ddl in [
-        "ALTER TABLE settlements ADD COLUMN pm_bin_lo REAL;",
-        "ALTER TABLE settlements ADD COLUMN pm_bin_hi REAL;",
-        "ALTER TABLE settlements ADD COLUMN unit TEXT;",
-        "ALTER TABLE settlements ADD COLUMN settlement_source_type TEXT;",
-    ]:
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass
     return conn
+
+
+def test_fresh_schema_supplies_harvester_live_columns(harvester_conn):
+    columns = {
+        row["name"] for row in harvester_conn.execute("PRAGMA table_info(settlements)")
+    }
+    assert {"pm_bin_lo", "pm_bin_hi", "unit", "settlement_source_type"} <= columns
 
 
 def test_harvester_settlement_uses_canonical_high_identity(harvester_conn):

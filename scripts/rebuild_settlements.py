@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-28
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/evidence/full_suite_blocker_plan_2026-04-27.md
 """Rebuild high-temperature settlement rows from VERIFIED daily observations.
 
@@ -12,26 +12,86 @@ Callers own transaction boundaries; dry-run is the default for CLI use.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.config import cities_by_name
+from src.contracts.exceptions import SettlementPrecisionError
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.rebuild_validators import (
+    ImpossibleTemperatureError,
+    UnknownUnitError,
+    validate_observation_for_settlement,
+)
 from src.state.db import get_world_connection
 
 HIGH_PHYSICAL_QUANTITY = "mx2t6_local_calendar_day_max"
 HIGH_OBSERVATION_FIELD = "high_temp"
-HIGH_DATA_VERSION = "wu_icao_history_v1"
+SETTLEMENT_DATA_VERSION_BY_SOURCE_TYPE = {
+    "wu_icao": "wu_icao_history_v1",
+    "hko": "hko_daily_api_v1",
+    "noaa": "ogimet_metar_v1",
+    "cwa_station": "cwa_no_collector_v0",
+}
 
 
-def _round_high_value(raw_value: float, unit: str, city: str) -> float:
-    sem = (
-        SettlementSemantics.default_wu_celsius(city)
-        if str(unit).upper() == "C"
-        else SettlementSemantics.default_wu_fahrenheit(city)
+class SettlementRebuildSkip(ValueError):
+    """Expected row-level skip for rebuild_settlements."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _city_for_observation(row: sqlite3.Row):
+    city_name = str(row["city"])
+    city = cities_by_name.get(city_name)
+    if city is None:
+        raise SettlementRebuildSkip("unknown_city")
+    return city
+
+
+def _validate_source_family(row: sqlite3.Row, city) -> None:
+    source = str(row["source"] or "")
+    source_type = city.settlement_source_type
+
+    if source_type == "wu_icao":
+        # Legacy fixture alias `wu_icao` is WU-family only. It must never
+        # leak into HKO/Hong Kong or other source families.
+        if source in {"wu_icao_history", "wu_icao"}:
+            return
+        raise SettlementRebuildSkip("source_family_mismatch")
+
+    if source_type == "hko":
+        if source == "hko_daily_api":
+            return
+        raise SettlementRebuildSkip("source_family_mismatch")
+
+    if source_type == "noaa":
+        if source.startswith("ogimet_metar_"):
+            return
+        raise SettlementRebuildSkip("source_family_mismatch")
+
+    if source_type == "cwa_station":
+        raise SettlementRebuildSkip("unsupported_source_family")
+
+    raise SettlementRebuildSkip("unsupported_source_family")
+
+
+def _round_high_value(row: sqlite3.Row, conn: sqlite3.Connection) -> tuple[float, Any]:
+    city = _city_for_observation(row)
+    _validate_source_family(row, city)
+    converted_value = validate_observation_for_settlement(dict(row), city, conn)
+    sem = SettlementSemantics.for_city(city)
+    settlement_value = sem.assert_settlement_value(
+        converted_value,
+        context=f"rebuild_settlements/{city.name}/{row['target_date']}",
     )
-    return sem.assert_settlement_value(raw_value, context="rebuild_settlements")
+    return settlement_value, city
 
 
 def rebuild_settlements(
@@ -83,27 +143,46 @@ def rebuild_settlements(
 
     rows_written = 0
     rows_skipped = 0
+    rows_skipped_by_reason: Counter[str] = Counter()
     now = datetime.now(timezone.utc).isoformat()
     for row in rows:
         try:
-            settlement_value = _round_high_value(
-                float(row["high_temp"]), str(row["unit"]), str(row["city"])
-            )
-        except Exception:
+            settlement_value, city = _round_high_value(row, conn)
+        except SettlementRebuildSkip as exc:
             rows_skipped += 1
+            rows_skipped_by_reason[exc.reason] += 1
+            continue
+        except (ImpossibleTemperatureError, UnknownUnitError, SettlementPrecisionError):
+            rows_skipped += 1
+            rows_skipped_by_reason["invalid_observation"] += 1
             continue
 
         if dry_run:
             rows_written += 1
             continue
 
+        data_version = SETTLEMENT_DATA_VERSION_BY_SOURCE_TYPE.get(
+            city.settlement_source_type,
+            "unknown_v0",
+        )
+        provenance_json = json.dumps(
+            {
+                "source": "scripts/rebuild_settlements.py",
+                "authority": "VERIFIED",
+                "obs_source": row["source"],
+                "settlement_source_type": city.settlement_source_type,
+                "data_version": data_version,
+            },
+            sort_keys=True,
+        )
+
         conn.execute(
             """
             INSERT INTO settlements
             (city, target_date, winning_bin, settlement_value, settlement_source, settled_at,
              authority, temperature_metric, physical_quantity, observation_field,
-             data_version, provenance_json)
-            VALUES (?, ?, ?, ?, ?, ?, 'VERIFIED', 'high', ?, ?, ?, ?)
+             data_version, provenance_json, unit, settlement_source_type)
+            VALUES (?, ?, ?, ?, ?, ?, 'VERIFIED', 'high', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city, target_date, temperature_metric) DO UPDATE SET
                 winning_bin = excluded.winning_bin,
                 settlement_value = excluded.settlement_value,
@@ -113,19 +192,23 @@ def rebuild_settlements(
                 physical_quantity = excluded.physical_quantity,
                 observation_field = excluded.observation_field,
                 data_version = excluded.data_version,
-                provenance_json = excluded.provenance_json
+                provenance_json = excluded.provenance_json,
+                unit = excluded.unit,
+                settlement_source_type = excluded.settlement_source_type
             """,
             (
                 row["city"],
                 row["target_date"],
-                f"{int(settlement_value)}°{str(row['unit']).upper()}",
+                f"{int(settlement_value)}°{city.settlement_unit}",
                 settlement_value,
                 row["source"] or "verified_observation_rebuild",
                 now,
                 HIGH_PHYSICAL_QUANTITY,
                 HIGH_OBSERVATION_FIELD,
-                HIGH_DATA_VERSION,
-                '{"source":"scripts/rebuild_settlements.py","authority":"VERIFIED"}',
+                data_version,
+                provenance_json,
+                city.settlement_unit,
+                city.settlement_source_type,
             ),
         )
         rows_written += 1
@@ -136,6 +219,7 @@ def rebuild_settlements(
         "rows_seen": len(rows),
         "rows_written": rows_written,
         "rows_skipped": rows_skipped,
+        "rows_skipped_by_reason": dict(rows_skipped_by_reason),
         "unverified_ignored": unverified_ignored,
     }
 

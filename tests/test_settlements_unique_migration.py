@@ -1,5 +1,5 @@
 # Created: 2026-04-24
-# Last reused/audited: 2026-04-24
+# Last reused/audited: 2026-04-28
 # Authority basis: REOPEN-2 data-readiness-tail UNIQUE migration
 # (docs/operations/task_2026-04-23_midstream_remediation/); closure of
 # forensic-audit C3+C4 — settlements UNIQUE(city, target_date) blocks
@@ -41,11 +41,22 @@ import pytest
 
 from src.state.db import init_schema
 
+_HARVESTER_LIVE_SETTLEMENT_COLUMNS = {
+    "pm_bin_lo",
+    "pm_bin_hi",
+    "unit",
+    "settlement_source_type",
+}
+
 
 def _fresh() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     return conn
+
+
+def _settlement_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(settlements)")}
 
 
 def _seed_legacy_pre_reopen2_schema(conn: sqlite3.Connection) -> None:
@@ -64,6 +75,42 @@ def _seed_legacy_pre_reopen2_schema(conn: sqlite3.Connection) -> None:
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
             UNIQUE(city, target_date)
+        )
+        """
+    )
+
+
+def _seed_legacy_post_reopen2_without_harvester_live_columns(
+    conn: sqlite3.Connection,
+) -> None:
+    """Build a post-REOPEN-2 settlements table that predates DR-33 harvester
+    bin/source-family columns.
+
+    This shape already has UNIQUE(city, target_date, temperature_metric), so
+    the table-rebuild migration must not be required for the four nullable
+    harvester-live columns. The generic ALTER loop must add them.
+    """
+    conn.execute(
+        """
+        CREATE TABLE settlements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            market_slug TEXT,
+            winning_bin TEXT,
+            settlement_value REAL,
+            settlement_source TEXT,
+            settled_at TEXT,
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            temperature_metric TEXT
+                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT
+                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
+            data_version TEXT,
+            provenance_json TEXT,
+            UNIQUE(city, target_date, temperature_metric)
         )
         """
     )
@@ -99,6 +146,20 @@ def test_fresh_db_has_new_unique_constraint():
             "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
         ).fetchone()[0]
         assert "UNIQUE(city, target_date, temperature_metric)" in sql
+    finally:
+        conn.close()
+
+
+def test_fresh_db_has_harvester_live_schema_parity_columns():
+    """Fresh schema must accept harvester live settlement writes.
+
+    `src.execution.harvester._write_settlement_truth()` inserts
+    pm_bin_lo/pm_bin_hi/unit/settlement_source_type. Fresh DBs must carry the
+    same nullable columns as legacy live DBs and rebuilt REOPEN-2 DBs.
+    """
+    conn = _fresh()
+    try:
+        assert _HARVESTER_LIVE_SETTLEMENT_COLUMNS <= _settlement_columns(conn)
     finally:
         conn.close()
 
@@ -218,6 +279,51 @@ def test_legacy_db_migration_idempotent():
             "SELECT COUNT(*) FROM settlements"
         ).fetchone()[0]
         assert count_after_first == count_after_second == 1
+    finally:
+        conn.close()
+
+
+def test_legacy_new_unique_schema_gets_harvester_live_columns_via_alter():
+    """Legacy DBs that already have the new UNIQUE still need nullable
+    harvester-live columns.
+
+    This pins the non-rebuild ALTER path: a DB can have the REOPEN-2
+    UNIQUE(city,target_date,temperature_metric) shape while still lacking
+    pm_bin_lo/pm_bin_hi/unit/settlement_source_type.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        _seed_legacy_post_reopen2_without_harvester_live_columns(conn)
+        conn.execute(
+            """
+            INSERT INTO settlements (
+                city, target_date, authority, temperature_metric,
+                physical_quantity, observation_field, data_version,
+                provenance_json
+            )
+            VALUES (
+                'london', '2026-04-20', 'VERIFIED', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp',
+                'wu_icao_history_v1', '{}'
+            )
+            """
+        )
+        conn.commit()
+        pre_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
+        ).fetchone()[0]
+        assert "UNIQUE(city, target_date, temperature_metric)" in pre_sql
+        assert not (_HARVESTER_LIVE_SETTLEMENT_COLUMNS <= _settlement_columns(conn))
+
+        init_schema(conn)
+
+        post_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
+        ).fetchone()[0]
+        assert "UNIQUE(city, target_date, temperature_metric)" in post_sql
+        assert _HARVESTER_LIVE_SETTLEMENT_COLUMNS <= _settlement_columns(conn)
+        post_count = conn.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
+        assert post_count == 1
     finally:
         conn.close()
 

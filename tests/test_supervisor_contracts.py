@@ -1,3 +1,6 @@
+# Created: 2026-04-28
+# Last reused/audited: 2026-04-28
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md first-four gate.
 """Tests for supervisor_api.contracts env enforcement (K1-A4, Bug #28)."""
 
 import pytest
@@ -20,7 +23,7 @@ from src.supervisor_api.contracts import (
     (BeliefMismatch, dict(category="drift", expected="x", observed="y")),
     (Gap, dict(gap_id="G1", title="t", category="semantic", description="d")),
     (Proposal, dict(proposal_id="P1", kind="test", title="t", rationale="r")),
-    (SupervisorCommand, dict(command="pause_entries", reason="test")),
+    (SupervisorCommand, dict(command="pause_entries", reason="test", timestamp="2026-01-01T00:00:00Z")),
     (ChangeOutcome, dict(change_id="C1", verdict="PENDING")),
     (Antibody, dict(antibody_id="A1", source_gap_id="G1", antibody_type="test", target_surface="s", recurrence_class="r")),
 ])
@@ -31,10 +34,10 @@ def test_empty_env_raises(cls, kwargs):
 
 @pytest.mark.parametrize("cls,kwargs", [
     (Observation, dict(kind="heartbeat", severity="INFO", payload={}, observed_at="2026-01-01T00:00:00Z", env="live")),
-    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="paper")),
+    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="unknown_env")),
     (Gap, dict(gap_id="G1", title="t", category="semantic", description="d", env="test")),
     (Proposal, dict(proposal_id="P1", kind="test", title="t", rationale="r", env="test")),
-    (SupervisorCommand, dict(command="pause_entries", reason="test", env="paper")),
+    (SupervisorCommand, dict(command="pause_entries", reason="test", env="unknown_env", timestamp="2026-01-01T00:00:00Z")),
     (ChangeOutcome, dict(change_id="C1", verdict="PENDING", env="live")),
     (Antibody, dict(antibody_id="A1", source_gap_id="G1", antibody_type="test", target_surface="s", recurrence_class="r", env="test")),
 ])
@@ -47,9 +50,9 @@ def test_nonempty_env_passes(cls, kwargs):
 # B006 relationship tests: env must be one of the Literal enum values
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("env_value", ["prod", "PROD", "staging", "Live", "  paper  ", "dev"])
+@pytest.mark.parametrize("env_value", ["prod", "PROD", "staging", "Live", "  unknown_env  ", "dev"])
 def test_b006_env_rejects_value_outside_literal(env_value):
-    """env must be exactly one of ("live","paper","test"); any other
+    """env must be exactly one of ("live","test","unknown_env"); any other
     spelling (case, whitespace, unknown envs) must be rejected."""
     with pytest.raises(SupervisorContractError, match="is not one of"):
         Observation(
@@ -61,7 +64,7 @@ def test_b006_env_rejects_value_outside_literal(env_value):
         )
 
 
-@pytest.mark.parametrize("env_value", ["live", "paper", "test"])
+@pytest.mark.parametrize("env_value", ["live", "test", "unknown_env"])
 def test_b006_env_accepts_all_literal_values(env_value):
     o = Observation(
         kind="heartbeat",
@@ -96,7 +99,7 @@ def test_b006_env_reject_message_names_offending_value():
 
 @pytest.mark.parametrize("cls,base_kwargs", [
     (Observation, dict(kind="heartbeat", severity="INFO", payload={}, observed_at="t", env="live")),
-    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="paper")),
+    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="unknown_env")),
     (Gap, dict(gap_id="G1", title="t", category="semantic", description="d", env="test")),
     (Proposal, dict(proposal_id="P1", kind="test", title="t", rationale="r", env="test")),
     (ChangeOutcome, dict(change_id="C1", verdict="PENDING", env="live")),
@@ -113,7 +116,7 @@ def test_b005_provenance_ref_field_exists_on_all_classes(cls, base_kwargs):
 
 @pytest.mark.parametrize("cls,base_kwargs", [
     (Observation, dict(kind="heartbeat", severity="INFO", payload={}, observed_at="t", env="live")),
-    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="paper")),
+    (BeliefMismatch, dict(category="drift", expected="x", observed="y", env="unknown_env")),
     (Gap, dict(gap_id="G1", title="t", category="semantic", description="d", env="test")),
     (Proposal, dict(proposal_id="P1", kind="test", title="t", rationale="r", env="test")),
     (ChangeOutcome, dict(change_id="C1", verdict="PENDING", env="live")),
@@ -148,7 +151,7 @@ def test_b074_unknown_env_is_accepted_by_contract():
 @pytest.mark.parametrize("env_value,expected", [
     ("unknown_env", True),
     ("live", False),
-    ("paper", False),
+    ("unknown_env", True),
     ("test", False),
 ])
 def test_b074_is_unverified_env(env_value, expected):
