@@ -130,7 +130,7 @@ invariants:
         - tests/test_canonical_position_current_schema_alignment.py::test_canonical_constants_match_kernel_sql_position_current_columns
         - tests/test_dual_track_law_stubs.py::test_settlements_metric_identity_requires_non_null_and_unique_per_metric
   - id: INV-15
-    # CITATION_REPAIR 2026-04-28: tests added per R3 verdict round3_verdict.md §1 #5 LOCKED CALIBRATION_HARDENING (Week 13) precondition. Existing tests in tests/test_phase4_rebuild.py (TestINV15SourceWhitelistGate) + tests/test_harvester_high_calibration_v2_route.py already enforce the source whitelist gate at src/calibration/store.py:117 (_resolve_training_allowed checks data_version prefix against _TRAINING_ALLOWED_SOURCES = {'tigge', 'ecmwf_ens'}). This commit adds the tests: block — BATCH D pattern (schema-citation gap, not enforcement gap; methodology §5.X case study).
+    # CITATION_REPAIR 2026-04-28: tests added per R3 verdict round3_verdict.md §1 #5 LOCKED CALIBRATION_HARDENING (Week 13) precondition. Existing tests in tests/test_phase4_rebuild.py (TestINV15SourceWhitelistGate) + tests/test_harvester_high_calibration_v2_route.py already enforce the source whitelist gate at src/calibration/store.py:117 (_resolve_training_allowed checks data_version prefix against _TRAINING_ALLOWED_SOURCES = {'tigge', 'ecmwf_ens'} + normalization of whitespace/case per docstring 'TIGGE_' or ' tigge_...' don't bypass). This commit adds the tests: block — BATCH D pattern (schema-citation gap, not enforcement gap; methodology §5.X case study). NUANCE: INV-15 statement is about canonical cycle identity; tests verify the source whitelist gate which transitively enforces cycle identity (only whitelisted sources carry verified issue_time provenance per spec §14). Indirect proxy relationship; acceptable per round-2 verdict §K3 antibody-contract retention.
     zones: [K2_runtime]
     statement: Forecast rows lacking canonical cycle identity may serve runtime degrade paths but must not enter canonical training.
     why: Training purity requires every training row to carry verified provenance; fallback rows without reliable issue_time are not training evidence.
@@ -144,6 +144,8 @@ invariants:
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_ecmwf_ens_data_version_preserves_training_allowed_true
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_unknown_data_version_prefix_forces_training_allowed_false
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_uppercase_non_whitelisted_source_forces_training_allowed_false
+        - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_source_with_trailing_space_is_normalized
+        - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_data_version_with_leading_space_is_rejected
         - tests/test_harvester_high_calibration_v2_route.py::test_v2_pair_training_allowed_respects_inv15
   - id: INV-16
     # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit (docs/operations/task_2026-04-27_harness_debate/evidence/critic-harness/batch_C_review_2026-04-28.md §INV-16 finding). The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 3 relationship tests for this invariant ALREADY EXIST in tests/test_phase6_causality_status.py (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"). The schema-citation gap was real; the enforcement gap was imaginary.
