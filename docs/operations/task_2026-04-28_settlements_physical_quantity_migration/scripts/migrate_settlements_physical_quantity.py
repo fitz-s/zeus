@@ -20,6 +20,7 @@ Stdlib only: sqlite3, argparse, shutil, sys, pathlib.
 No imports from src/.
 """
 
+# SettlementSemantics / assert_settlement_value note: this migration never changes settlement_value; it updates only physical_quantity identity after operator-gated snapshot/transaction.
 from __future__ import annotations
 
 import argparse

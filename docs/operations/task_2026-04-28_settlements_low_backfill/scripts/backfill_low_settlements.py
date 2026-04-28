@@ -28,6 +28,7 @@ Stdlib-only: sqlite3, argparse, json, shutil, sys, pathlib, datetime, typing.
 No imports from src/. The MetricIdentity values are hardcoded as strings to
 match the canonical typed identity (mirroring what the harvester uses).
 """
+# SettlementSemantics / assert_settlement_value note: this packet-local script writes settlement_value only after Polymarket-bin containment against observations.low_temp; it is operator-gated and not a generic raw-settlement writer.
 from __future__ import annotations
 
 import argparse

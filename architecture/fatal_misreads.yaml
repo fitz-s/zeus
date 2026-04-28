@@ -197,4 +197,4 @@ misreads:
       not from logs/archives that pre-date the 2026-04-28 audit.
     tests:
       - python3 scripts/topology_doctor.py --fatal-misreads --json
-    task_classes: [settlement_backfill, market_scanner, source_routing, low_track]
+    task_classes: [settlement_semantics, source_routing, calibration]
