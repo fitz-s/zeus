@@ -20,8 +20,9 @@ Methodology: `docs/methodology/adversarial_debate_for_project_evaluation.md` (th
 | Boot (re-cast) | _boot_proponent (18KB) | _boot_opponent (14KB/129L) | _boot_critic (13KB/210L) | standby | COMPLETE 04:25-04:27Z |
 | R1 opening | R1_opening (220L; STAGE-GATED SURGICAL ~33-50h) | R1_opening (~280L; STAGE-GATED REVERT ~65-105h) | n/a (gates verdict) | n/a | COMPLETE 04:35Z |
 | R2 rebuttal | R2_rebuttal (29KB / 04:41Z; SYNTHESIZED MIDDLE ~53-92h; 10 concessions / 8 holds / 3 unresolvable) | R2_rebuttal (22KB / 05:06Z; SYNTHESIZED MIDDLE ~50-75h; 10 concessions / 8 holds / 3 unresolvable; TIER-1 expanded to 4 commits per proponent's own §0; +DB cleanup explicit) | n/a | n/a | COMPLETE (both R2 LOCKED 04:41-05:06Z) |
-| Final verdict | — | — | gates | — | not_started |
-| Post-verdict implementation | — | — | gates | — | not_started |
+| Final verdict | — | — | gates | — | COMPLETE 09:15Z (verdict.md ~340L; STAGE-GATED REVERT synthesized middle ~70-100h; opponent stance wins 4 bounded items; commit-revert mechanic from proponent) |
+| Critic gate verdict | — | — | REVIEW_VERDICT pending | — | dispatched |
+| Post-verdict implementation | — | — | gates | — | not_started (awaits critic APPROVE + operator authorization for Group B) |
 
 ## Proponent R2 headline (for handoff)
 
