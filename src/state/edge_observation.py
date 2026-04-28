@@ -31,8 +31,9 @@ Realized edge formula (per AGENTS.md L114-126 + boot §6 #2):
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from src.state.db import query_authoritative_settlement_rows
 
@@ -176,3 +177,158 @@ def compute_realized_edge_per_strategy(
         rec["sample_quality"] = _classify_sample_quality(n)
 
     return per_strategy
+
+
+# =====================================================================
+# BATCH 2 — detect_alpha_decay + DriftVerdict
+# =====================================================================
+# Per round3_verdict.md §1 #2 + boot §2 (BATCH 2). Pure-Python statistical
+# detector consuming a list of weekly windows from BATCH 1's
+# compute_realized_edge_per_strategy. K1-compliant: in-memory only; no DB
+# writes; no cache.
+#
+# Algorithm choice — RATIO TEST (current window vs trailing N-window mean)
+# rather than linear regression. Reasons:
+# - Weekly edge series is short (4-12 windows typical) and noisy; OLS slope
+#   has low statistical power on small N; ratio is more interpretable.
+# - The trading-domain question is "is the recent window much worse than
+#   the recent baseline?" not "what is the slope?". Ratio answers it
+#   directly.
+# - When trailing_mean <= 0 (early-data flukes), ratio is undefined; we
+#   handle that case explicitly (insufficient_data verdict) rather than
+#   produce false alpha_decay alarms.
+# Imports for dataclass / field / Literal consolidated to top of file per
+# critic-harness BATCH 2 review LOW-CAVEAT-EO-2-1 (mid-file imports with
+# noqa:E402 are unusual; top-of-file is the conventional location).
+
+DriftKind = Literal["alpha_decay_detected", "within_normal_range", "insufficient_data"]
+DriftSeverity = Literal["info", "warn", "critical"]
+
+
+@dataclass
+class DriftVerdict:
+    """Result of detect_alpha_decay for one strategy_key.
+
+    kind:
+      - alpha_decay_detected: current edge is significantly below trailing mean
+      - within_normal_range: ratio inside acceptable band
+      - insufficient_data: not enough windows OR trailing_mean is non-positive
+
+    severity (only set when kind == alpha_decay_detected):
+      - warn: 0.3 <= ratio < threshold (between hard and soft cutoffs)
+      - critical: ratio < 0.3 (severe drop; recommend pause)
+
+    evidence carries the numeric inputs to the decision so reviewers can
+    audit without re-running.
+    """
+    kind: DriftKind
+    strategy_key: str
+    severity: DriftSeverity | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+# Default thresholds. Operator can override per call.
+DEFAULT_DECAY_RATIO_THRESHOLD: float = 0.5
+DEFAULT_MIN_WINDOWS: int = 4
+CRITICAL_RATIO_CUTOFF: float = 0.3
+
+
+def _is_window_usable_for_decay(window: dict[str, Any]) -> bool:
+    """A window is usable for decay detection iff edge_realized is computable
+    AND sample_quality is at least 'low' (>=10 trades). insufficient samples
+    would otherwise produce noise-dominated detections."""
+    if window.get("edge_realized") is None:
+        return False
+    if window.get("sample_quality") == "insufficient":
+        return False
+    return True
+
+
+def detect_alpha_decay(
+    edge_history: list[dict[str, Any]],
+    strategy_key: str,
+    *,
+    decay_ratio_threshold: float = DEFAULT_DECAY_RATIO_THRESHOLD,
+    min_windows: int = DEFAULT_MIN_WINDOWS,
+) -> DriftVerdict:
+    """Detect alpha decay for one strategy via ratio test on weekly edges.
+
+    Args:
+        edge_history: list of per-window dicts (each is one strategy's
+            value from compute_realized_edge_per_strategy). MUST be in
+            chronological order: edge_history[0] = oldest, edge_history[-1]
+            = current week.
+        strategy_key: the strategy this history belongs to (for the verdict).
+        decay_ratio_threshold: alpha_decay triggered when current_edge <
+            threshold * trailing_mean. Default 0.5.
+        min_windows: minimum total window count to attempt detection.
+            Default 4 (1 current + 3 trailing).
+
+    Returns:
+        DriftVerdict. See dataclass docstring for kind/severity semantics.
+    """
+    n = len(edge_history)
+    if n < min_windows:
+        return DriftVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={"reason": "n_windows_below_min", "n_windows": n, "min_required": min_windows},
+        )
+
+    # Filter to usable windows (computable edge + non-insufficient sample).
+    usable = [w for w in edge_history if _is_window_usable_for_decay(w)]
+    if len(usable) < min_windows:
+        return DriftVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={
+                "reason": "usable_windows_below_min",
+                "n_total": n,
+                "n_usable": len(usable),
+                "min_required": min_windows,
+            },
+        )
+
+    # Current window = last usable; trailing = all earlier usable.
+    current = usable[-1]
+    trailing = usable[:-1]
+    current_edge = float(current["edge_realized"])
+    trailing_edges = [float(w["edge_realized"]) for w in trailing]
+    trailing_mean = sum(trailing_edges) / len(trailing_edges)
+
+    # If trailing baseline is non-positive, ratio is undefined / misleading.
+    # A strategy that never had positive edge cannot meaningfully "decay".
+    if trailing_mean <= 0:
+        return DriftVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={
+                "reason": "trailing_mean_non_positive",
+                "trailing_mean": trailing_mean,
+                "current_edge": current_edge,
+                "n_trailing": len(trailing_edges),
+            },
+        )
+
+    ratio = current_edge / trailing_mean
+    evidence = {
+        "current_edge": current_edge,
+        "trailing_mean": trailing_mean,
+        "ratio": ratio,
+        "decay_ratio_threshold": decay_ratio_threshold,
+        "n_usable_windows": len(usable),
+        "n_trailing_windows": len(trailing_edges),
+    }
+    if ratio < decay_ratio_threshold:
+        severity: DriftSeverity = "critical" if ratio < CRITICAL_RATIO_CUTOFF else "warn"
+        return DriftVerdict(
+            kind="alpha_decay_detected",
+            strategy_key=strategy_key,
+            severity=severity,
+            evidence=evidence,
+        )
+    return DriftVerdict(
+        kind="within_normal_range",
+        strategy_key=strategy_key,
+        evidence=evidence,
+    )

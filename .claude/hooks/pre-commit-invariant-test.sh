@@ -55,8 +55,10 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   Tier 2 Phase 3 (digest_profiles equivalence): 79 → 83 (+4)
 #   Tier 2 Phase 4 (@enforced_by prototype): 83 → 90 (+7)
 #   EDGE_OBSERVATION BATCH 1 (realized-edge per strategy_key): 90 → 96 (+6)
+#   EDGE_OBSERVATION BATCH 2 (detect_alpha_decay ratio test): 96 → 104 (+8)
+#   BATCH 2 LOW-CAVEAT-EO-2-2 (critical-cutoff boundary test): 104 → 105 (+1)
 TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py"
-BASELINE_PASSED=96
+BASELINE_PASSED=105
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
