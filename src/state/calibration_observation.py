@@ -83,8 +83,9 @@ bootstrap-spread surfacing):
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from src.calibration.store import (
     list_active_platt_models_legacy,
@@ -288,9 +289,11 @@ def compute_platt_parameter_snapshot_per_bucket(
         }
 
     Coverage: v2 + legacy with explicit `source` tag. Mirrors
-    src/calibration/manager.py L42-62 v2-then-legacy fallback dedup
-    pattern. v2 rows take precedence when same logical bucket exists in
-    both (legacy collision is uncommon post-migration but possible).
+    src/calibration/manager.py L172-189 v2-then-legacy fallback model-load
+    pattern (NOT the L42-62 warning dedup helper — per LOW-CITATION-
+    CALIBRATION-1-1 fix from critic 27th cycle review). v2 rows take
+    precedence when same logical bucket exists in both (legacy collision
+    is uncommon post-migration but possible).
     """
     window_start, window_end, window_start_dt, window_end_dt = _resolve_window(window_days, end_date)
 
@@ -314,7 +317,10 @@ def compute_platt_parameter_snapshot_per_bucket(
         bucket_key = raw["bucket_key"]
         if bucket_key in out:
             # v2 already covered this bucket key — skip the legacy duplicate.
-            # (Sibling-coherent with manager.py:L42-62 fallback warning dedup.)
+            # Sibling-coherent with manager.py L172-189 v2-then-legacy
+            # model-fallback-load (per LOW-CITATION-CALIBRATION-1-1 fix:
+            # the L42-62 helper in manager.py is the WARNING dedup, NOT the
+            # model-load; this comment cites the model-load precedent).
             continue
         out[bucket_key] = _build_snapshot_record(
             bucket_key=bucket_key,
@@ -327,3 +333,232 @@ def compute_platt_parameter_snapshot_per_bucket(
         )
 
     return out
+
+
+# =====================================================================
+# CALIBRATION_HARDENING packet — BATCH 2 detect_parameter_drift detector
+# =====================================================================
+# Per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md §4 #2 + GO_BATCH_2 dispatch.
+# Pure-Python statistical detector consuming the per-bucket parameter history
+# from BATCH 1's compute_platt_parameter_snapshot_per_bucket. K1-compliant:
+# in-memory only; no DB writes; no caches.
+#
+# Algorithm choice — RATIO TEST mirroring EO BATCH 2 detect_alpha_decay +
+# WP BATCH 2 detect_reaction_gap (per GO_BATCH_2 §3 ACCEPT-DEFAULT):
+# for EACH coefficient (A, B, C) independently:
+#     ratio = |current - trailing_mean| / trailing_std
+# drift_detected if ANY of A/B/C ratios > drift_threshold_multiplier.
+# Severity 'critical' if ANY ratio >= critical_ratio_cutoff (per GO_BATCH_2
+# §4 ACCEPT-DEFAULT: per-coefficient drift with per-coefficient evidence).
+#
+# Reasons (per EO BATCH 2 + WP BATCH 2 + GO_BATCH_2 sibling-coherence):
+# - Weekly Platt-refit cadence is short (4-12 windows typical) and noisy;
+#   OLS slope has low statistical power on small N; ratio is interpretable.
+# - Trading-domain question is "is the recent fit much DIFFERENT than the
+#   recent baseline?" — ratio answers it directly.
+# - When trailing_std <= 0 (all-equal history — synthetic regression-test
+#   data or genuine no-movement period), ratio is undefined; emit
+#   insufficient_data rather than false drift_detected.
+#
+# Per-coefficient surfacing (per GO_BATCH_2 §4 + WP BATCH 2 multi-axis
+# precedent): the verdict carries per-(A,B,C) ratios + per-(A,B,C) trailing
+# means/stds in evidence so the operator sees WHICH coefficient drifted.
+# This is the WP BATCH 2 multi-axis pattern applied here.
+#
+# Sibling-coherence with src/calibration/drift.py (the existing detector):
+# drift.py is the Hosmer-Lemeshow chi-squared test on (forecast, outcome) pairs
+# — measures FORECAST-CALIBRATION drift (output drift). detect_parameter_drift
+# here measures PARAMETER-TRAJECTORY drift over consecutive refits — they
+# are parametrically different signals; both are valuable; neither subsumes
+# the other (per BATCH 1 boot §1 KEY OPEN QUESTION #3).
+
+DriftKind = Literal["drift_detected", "within_normal", "insufficient_data"]
+DriftSeverity = Literal["warn", "critical"]
+
+
+@dataclass
+class ParameterDriftVerdict:
+    """Result of detect_parameter_drift for one bucket_key.
+
+    kind:
+      - drift_detected: at least one of (A, B, C) coefficients moved
+        significantly above the trailing baseline (ratio > multiplier)
+      - within_normal: all coefficients within ratio band
+      - insufficient_data: not enough usable windows OR trailing_std <= 0
+        for ALL coefficients (no movement substrate to detect drift against)
+
+    severity (only set when kind == drift_detected):
+      - warn: drift_threshold_multiplier <= max(ratios) < critical_ratio_cutoff
+      - critical: max(ratios) >= critical_ratio_cutoff (severe degradation;
+        recommend operator triage of the BATCH 2 candidate refit)
+
+    evidence carries per-coefficient ratios + trailing means/stds + the
+    drifting_coefficients list so operators see WHICH coefficient drifted
+    (sibling-coherent with WP BATCH 2 multi-axis surfacing pattern).
+    """
+    kind: DriftKind
+    bucket_key: str
+    severity: DriftSeverity | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+# Default thresholds. Operator can override per call (BATCH 3 will expose
+# per-bucket-override CLI flag mirroring WP BATCH 3 LOW-DESIGN-WP-2-2 lesson).
+DEFAULT_DRIFT_THRESHOLD_MULTIPLIER: float = 1.5
+DEFAULT_CRITICAL_RATIO_CUTOFF: float = 2.0
+DEFAULT_DRIFT_MIN_WINDOWS: int = 4
+
+
+def _coefficient_ratio(
+    coeff_history: list[float],
+) -> tuple[float | None, float | None, float | None]:
+    """Compute (current, trailing_mean, ratio) for one coefficient.
+
+    Args:
+        coeff_history: chronological list of one coefficient's values
+            (oldest -> newest). Last entry is the current window.
+
+    Returns:
+        (current, trailing_mean, ratio):
+          - current: float — last entry
+          - trailing_mean: float — mean of all-but-last entries
+          - ratio: float | None — abs(current - trailing_mean) / trailing_std
+            of trailing entries; None if trailing_std <= 0 (no spread to
+            normalize against).
+
+    Insufficient-trailing case: returns (current, trailing_mean, None) when
+    trailing_std == 0 (all trailing values identical — typical for early
+    fits or synthetic test data). Caller emits insufficient_data.
+    """
+    if len(coeff_history) < 2:
+        return (None, None, None)
+    current = float(coeff_history[-1])
+    trailing = [float(v) for v in coeff_history[:-1]]
+    trailing_mean = sum(trailing) / len(trailing)
+    trailing_std = _stddev(trailing)
+    if trailing_std is None or trailing_std <= 0:
+        return (current, trailing_mean, None)
+    ratio = abs(current - trailing_mean) / trailing_std
+    return (current, trailing_mean, ratio)
+
+
+def detect_parameter_drift(
+    parameter_history: list[dict[str, Any]],
+    bucket_key: str,
+    *,
+    drift_threshold_multiplier: float = DEFAULT_DRIFT_THRESHOLD_MULTIPLIER,
+    critical_ratio_cutoff: float = DEFAULT_CRITICAL_RATIO_CUTOFF,
+    min_windows: int = DEFAULT_DRIFT_MIN_WINDOWS,
+) -> ParameterDriftVerdict:
+    """Detect Platt parameter trajectory drift via per-coefficient ratio test.
+
+    For each of (A, B, C) coefficients independently:
+      ratio = |current - trailing_mean| / trailing_std
+    drift_detected when ANY ratio > drift_threshold_multiplier (strict >;
+    sibling-coherent with WP BATCH 2 strict-greater-than threshold semantics).
+    Severity 'critical' when max(ratios) >= critical_ratio_cutoff.
+
+    Args:
+        parameter_history: chronological list of per-window dicts (each is
+            one bucket's snapshot from compute_platt_parameter_snapshot_per_bucket
+            re-run on shifted-back end_date). MUST be in chronological
+            order: parameter_history[0] = oldest, parameter_history[-1] =
+            current week. Each dict carries param_A / param_B / param_C.
+        bucket_key: the bucket this history belongs to (for the verdict).
+        drift_threshold_multiplier: drift_detected when any per-coefficient
+            ratio > multiplier. Default 1.5; BATCH 3 weekly runner will
+            expose per-bucket override (sibling WP LOW-DESIGN-WP-2-2 pattern).
+        critical_ratio_cutoff: severity bumps to critical when max(ratios)
+            >= this value. Default 2.0 (sibling-coherent with WP).
+        min_windows: minimum total window count to attempt detection.
+            Default 4 (1 current + 3 trailing).
+
+    Returns:
+        ParameterDriftVerdict. See dataclass docstring for kind/severity.
+
+    Edge cases:
+      - n < min_windows: insufficient_data
+      - all 3 coefficients have trailing_std <= 0: insufficient_data
+        (no movement substrate; cannot meaningfully detect drift)
+      - partial: A has trailing_std > 0 but B+C don't: still proceed
+        (only A's ratio counted for the max(); B+C contribute to evidence
+        as "ratio: None")
+
+    Strict greater-than threshold semantics: ratio == multiplier is
+    within_normal (matches WP BATCH 2 boundary contract; pinned by
+    test_drift_threshold_boundary_at_multiplier in BATCH 2 tests).
+    """
+    n = len(parameter_history)
+    if n < min_windows:
+        return ParameterDriftVerdict(
+            kind="insufficient_data",
+            bucket_key=bucket_key,
+            evidence={
+                "reason": "n_windows_below_min",
+                "n_windows": n,
+                "min_required": min_windows,
+            },
+        )
+
+    # Extract per-coefficient series in chronological order.
+    a_series = [float(w.get("param_A", 0.0) or 0.0) for w in parameter_history]
+    b_series = [float(w.get("param_B", 0.0) or 0.0) for w in parameter_history]
+    c_series = [float(w.get("param_C", 0.0) or 0.0) for w in parameter_history]
+
+    a_curr, a_mean, a_ratio = _coefficient_ratio(a_series)
+    b_curr, b_mean, b_ratio = _coefficient_ratio(b_series)
+    c_curr, c_mean, c_ratio = _coefficient_ratio(c_series)
+
+    # Per-coefficient evidence (operator sees WHICH coefficient moved).
+    evidence: dict[str, Any] = {
+        "param_A": {"current": a_curr, "trailing_mean": a_mean, "ratio": a_ratio},
+        "param_B": {"current": b_curr, "trailing_mean": b_mean, "ratio": b_ratio},
+        "param_C": {"current": c_curr, "trailing_mean": c_mean, "ratio": c_ratio},
+        "drift_threshold_multiplier": drift_threshold_multiplier,
+        "critical_ratio_cutoff": critical_ratio_cutoff,
+        "n_windows": n,
+        "n_trailing_windows": n - 1,
+    }
+
+    valid_ratios = [r for r in (a_ratio, b_ratio, c_ratio) if r is not None]
+    if not valid_ratios:
+        # All 3 coefficients have trailing_std <= 0 — no movement substrate
+        # for ratio test (typical for synthetic all-equal history).
+        evidence["reason"] = "all_trailing_stds_non_positive"
+        return ParameterDriftVerdict(
+            kind="insufficient_data",
+            bucket_key=bucket_key,
+            evidence=evidence,
+        )
+
+    # Identify drifting coefficients (ratio > multiplier; strict >).
+    drifting = []
+    if a_ratio is not None and a_ratio > drift_threshold_multiplier:
+        drifting.append("param_A")
+    if b_ratio is not None and b_ratio > drift_threshold_multiplier:
+        drifting.append("param_B")
+    if c_ratio is not None and c_ratio > drift_threshold_multiplier:
+        drifting.append("param_C")
+
+    evidence["drifting_coefficients"] = drifting
+    evidence["max_ratio"] = max(valid_ratios)
+
+    if not drifting:
+        return ParameterDriftVerdict(
+            kind="within_normal",
+            bucket_key=bucket_key,
+            evidence=evidence,
+        )
+
+    # Severity tier per WP BATCH 2 precedent: critical if max(ratios) >=
+    # critical_ratio_cutoff (>= cutoff, NOT strict >; sibling-coherent with
+    # ws_poll_reaction.py:447 critical-tier threshold).
+    severity: DriftSeverity = (
+        "critical" if max(valid_ratios) >= critical_ratio_cutoff else "warn"
+    )
+    return ParameterDriftVerdict(
+        kind="drift_detected",
+        bucket_key=bucket_key,
+        severity=severity,
+        evidence=evidence,
+    )
