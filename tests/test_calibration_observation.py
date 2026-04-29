@@ -376,10 +376,41 @@ def test_summarize_bootstrap_empty():
     """RELATIONSHIP unit: empty bootstrap → all stats None, count=0."""
     summary = _summarize_bootstrap([])
     assert summary["bootstrap_count"] == 0
+    assert summary["bootstrap_usable_count"] == 0
     for ch in ("A", "B", "C"):
         assert summary[f"bootstrap_{ch}_std"] is None
         assert summary[f"bootstrap_{ch}_p5"] is None
         assert summary[f"bootstrap_{ch}_p95"] is None
+
+
+def test_summarize_bootstrap_usable_count_distinguishes_skipped_rows():
+    """RELATIONSHIP: LOW-NUANCE-CALIBRATION-1-2 fix (critic 27th cycle).
+    bootstrap_usable_count distinguishes raw row count from validly-
+    aggregated count. Non-iterable entries (scalars, None) are silently
+    skipped by the isinstance guard but COUNTED separately so the operator
+    sees the gap.
+
+    Setup: 5 valid 3-tuples + 2 non-iterable entries (a scalar 99 + a
+    None) + 1 valid 2-tuple. bootstrap_count=8 (raw len), but
+    bootstrap_usable_count=6 (5 valid 3-tuples + 1 valid 2-tuple).
+    """
+    bootstrap = [
+        (1.0, 0.5, 0.1),
+        (1.1, 0.51, 0.11),
+        99,                # non-iterable scalar — skipped
+        (1.2, 0.52, 0.12),
+        None,              # non-iterable None — skipped
+        (1.3, 0.53, 0.13),
+        (1.4, 0.54, 0.14),
+        (2.0, 1.0),        # valid 2-tuple (no C value)
+    ]
+    summary = _summarize_bootstrap(bootstrap)
+    assert summary["bootstrap_count"] == 8         # raw list length
+    assert summary["bootstrap_usable_count"] == 6  # validly aggregated rows
+    # A stats computed from 6 values (5 3-tuples + 1 2-tuple).
+    assert summary["bootstrap_A_std"] is not None
+    # C stats computed from 5 values only (2-tuple contributes no C).
+    assert summary["bootstrap_C_std"] is not None
 
 
 # ===========================================================================
