@@ -51,9 +51,9 @@ companion metric.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from src.state.edge_observation import STRATEGY_KEYS, _classify_sample_quality
 
@@ -289,3 +289,170 @@ def compute_reaction_latency_per_strategy(
         rec["sample_quality"] = _classify_sample_quality(n)
 
     return per_strategy
+
+
+# =====================================================================
+# BATCH 2 — detect_reaction_gap + ReactionGapVerdict
+# =====================================================================
+# Per round3_verdict.md §1 #2 + boot §2 BATCH 2 + dispatch GO_BATCH_2. Pure-
+# Python statistical detector consuming the per-window latency stats from
+# BATCH 1's compute_reaction_latency_per_strategy. K1-compliant: in-memory
+# only; no DB writes; no caches.
+#
+# Algorithm choice — RATIO TEST mirroring EO BATCH 2 detect_alpha_decay:
+# compare current window p95 latency vs trailing N-window mean p95. The
+# ratio current_p95 / trailing_mean_p95 > gap_threshold_multiplier triggers
+# gap_detected. Reasons (per EO BATCH 2 boundary-pin precedent):
+# - Weekly latency series is short (4-12 windows typical) and noisy; OLS
+#   slope has low statistical power on small N; ratio is more interpretable.
+# - Trading-domain question is "is the recent p95 latency much WORSE than
+#   the recent baseline?" — ratio answers it directly.
+# - When trailing_mean_p95 <= 0 (early-data flukes or all-zero histories),
+#   ratio is undefined; emit insufficient_data rather than false gap_detected.
+#
+# Severity tiers (per dispatch GO_BATCH_2 hint + opening_inertia tighter
+# discipline note): warn at 1.5-2.0× ratio, critical at >2.0× ratio.
+# Operator-tunable per call via decay_ratio_threshold + critical_ratio_cutoff
+# kwargs (defaults: 1.5 / 2.0).
+
+GapKind = Literal["gap_detected", "within_normal", "insufficient_data"]
+GapSeverity = Literal["info", "warn", "critical"]
+
+
+@dataclass
+class ReactionGapVerdict:
+    """Result of detect_reaction_gap for one strategy_key.
+
+    kind:
+      - gap_detected: current p95 is significantly above trailing mean p95
+      - within_normal: ratio inside acceptable band
+      - insufficient_data: not enough usable windows OR trailing_mean_p95 <= 0
+
+    severity (only set when kind == gap_detected):
+      - warn: gap_threshold_multiplier <= ratio < critical_ratio_cutoff
+      - critical: ratio >= critical_ratio_cutoff (severe degradation;
+        recommend operator triage)
+
+    evidence carries the numeric inputs to the decision so reviewers can
+    audit without re-running. Mirrors EO BATCH 2 DriftVerdict shape.
+    """
+    kind: GapKind
+    strategy_key: str
+    severity: GapSeverity | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+# Default thresholds. Operator can override per call.
+DEFAULT_GAP_THRESHOLD_MULTIPLIER: float = 1.5
+DEFAULT_CRITICAL_RATIO_CUTOFF: float = 2.0
+DEFAULT_GAP_MIN_WINDOWS: int = 4
+
+
+def _is_window_usable_for_gap(window: dict[str, Any]) -> bool:
+    """A window is usable for gap detection iff latency_p95_ms is computable
+    AND sample_quality is at least 'low' (>=10 ticks). Insufficient samples
+    would otherwise produce noise-dominated detections (mirror EO pattern)."""
+    if window.get("latency_p95_ms") is None:
+        return False
+    if window.get("sample_quality") == "insufficient":
+        return False
+    return True
+
+
+def detect_reaction_gap(
+    latency_history: list[dict[str, Any]],
+    strategy_key: str,
+    *,
+    gap_threshold_multiplier: float = DEFAULT_GAP_THRESHOLD_MULTIPLIER,
+    critical_ratio_cutoff: float = DEFAULT_CRITICAL_RATIO_CUTOFF,
+    min_windows: int = DEFAULT_GAP_MIN_WINDOWS,
+) -> ReactionGapVerdict:
+    """Detect reaction-time gap for one strategy via ratio test on weekly
+    p95 latencies.
+
+    Args:
+        latency_history: list of per-window dicts (each is one strategy's
+            value from compute_reaction_latency_per_strategy). MUST be in
+            chronological order: latency_history[0] = oldest,
+            latency_history[-1] = current week.
+        strategy_key: the strategy this history belongs to (for the verdict).
+        gap_threshold_multiplier: gap_detected when current_p95 >
+            multiplier * trailing_mean_p95. Default 1.5; opening_inertia
+            could pass 1.2 for tighter discipline.
+        critical_ratio_cutoff: severity bumps to critical above this ratio.
+            Default 2.0.
+        min_windows: minimum total window count to attempt detection.
+            Default 4 (1 current + 3 trailing).
+
+    Returns:
+        ReactionGapVerdict. See dataclass docstring for kind/severity semantics.
+    """
+    n = len(latency_history)
+    if n < min_windows:
+        return ReactionGapVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={"reason": "n_windows_below_min", "n_windows": n, "min_required": min_windows},
+        )
+
+    # Filter to usable windows (computable p95 + non-insufficient sample).
+    usable = [w for w in latency_history if _is_window_usable_for_gap(w)]
+    if len(usable) < min_windows:
+        return ReactionGapVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={
+                "reason": "usable_windows_below_min",
+                "n_total": n,
+                "n_usable": len(usable),
+                "min_required": min_windows,
+            },
+        )
+
+    # Current window = last usable; trailing = all earlier usable.
+    current = usable[-1]
+    trailing = usable[:-1]
+    current_p95 = float(current["latency_p95_ms"])
+    trailing_p95s = [float(w["latency_p95_ms"]) for w in trailing]
+    trailing_mean_p95 = sum(trailing_p95s) / len(trailing_p95s)
+
+    # If trailing baseline is non-positive, ratio is undefined / misleading.
+    # All-zero latency (e.g., test data with synthetic skew clipped to 0)
+    # cannot meaningfully "gap-up". Emit insufficient_data rather than
+    # produce false gap_detected.
+    if trailing_mean_p95 <= 0:
+        return ReactionGapVerdict(
+            kind="insufficient_data",
+            strategy_key=strategy_key,
+            evidence={
+                "reason": "trailing_mean_p95_non_positive",
+                "trailing_mean_p95": trailing_mean_p95,
+                "current_p95": current_p95,
+                "n_trailing": len(trailing_p95s),
+            },
+        )
+
+    ratio = current_p95 / trailing_mean_p95
+    evidence = {
+        "current_p95_ms": current_p95,
+        "trailing_mean_p95_ms": trailing_mean_p95,
+        "ratio": ratio,
+        "gap_threshold_multiplier": gap_threshold_multiplier,
+        "critical_ratio_cutoff": critical_ratio_cutoff,
+        "n_usable_windows": len(usable),
+        "n_trailing_windows": len(trailing_p95s),
+    }
+    if ratio > gap_threshold_multiplier:
+        # Strict greater-than: ratio == gap_threshold_multiplier is within_normal.
+        severity: GapSeverity = "critical" if ratio >= critical_ratio_cutoff else "warn"
+        return ReactionGapVerdict(
+            kind="gap_detected",
+            strategy_key=strategy_key,
+            severity=severity,
+            evidence=evidence,
+        )
+    return ReactionGapVerdict(
+        kind="within_normal",
+        strategy_key=strategy_key,
+        evidence=evidence,
+    )

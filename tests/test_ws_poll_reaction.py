@@ -422,3 +422,221 @@ def test_multi_position_different_strategy_same_token_per_strategy_count():
     # Other strategies untouched.
     for sk in ("settlement_capture", "shoulder_sell"):
         assert result[sk]["n_signals"] == 0
+
+
+# =====================================================================
+# BATCH 2 — detect_reaction_gap tests + 30s ACTION_WINDOW boundary test
+# =====================================================================
+# Per dispatch GO_BATCH_2 + boot §2: 6-8 tests covering the ratio-test
+# detector. Mirrors EO BATCH 2 detect_alpha_decay test surface (synthetic
+# patterns + threshold + insufficient + non-positive baseline + per-call
+# override + critical-cutoff boundary).
+#
+# Plus ACTION_WINDOW_SECONDS=30s boundary test (LOW caveat carry-forward
+# from critic 22nd cycle): pins inclusive-on-both-ends semantics.
+#
+# THRESHOLD DISCIPLINE (per dispatch GO_BATCH_2):
+# - gap_detected when current_p95 > gap_threshold_multiplier * trailing_mean_p95
+#   (strict greater-than: ratio == multiplier is within_normal)
+# - severity warn at multiplier <= ratio < critical_ratio_cutoff
+# - severity critical at ratio >= critical_ratio_cutoff
+# - non-positive trailing_mean_p95 → insufficient_data graceful
+# Tests pin these so a future refactor cannot silently drift.
+
+from src.state.ws_poll_reaction import (
+    DEFAULT_CRITICAL_RATIO_CUTOFF,
+    DEFAULT_GAP_THRESHOLD_MULTIPLIER,
+    ReactionGapVerdict,
+    detect_reaction_gap,
+)
+
+
+def _window(p95: float | None, n_signals: int = 50) -> dict:
+    """Build one synthetic per-window record as compute_reaction_latency_per_strategy
+    would emit. n_signals=50 → sample_quality='adequate' (>=30, <100)."""
+    if p95 is None:
+        return {
+            "latency_p50_ms": None, "latency_p95_ms": None,
+            "n_signals": 0, "n_with_action": 0,
+            "sample_quality": "insufficient",
+            "window_start": "x", "window_end": "x",
+        }
+    if n_signals < 10:
+        sq = "insufficient"
+    elif n_signals < 30:
+        sq = "low"
+    elif n_signals < 100:
+        sq = "adequate"
+    else:
+        sq = "high"
+    return {
+        "latency_p50_ms": p95 * 0.5,
+        "latency_p95_ms": p95,
+        "n_signals": n_signals,
+        "n_with_action": n_signals,
+        "sample_quality": sq,
+        "window_start": "x", "window_end": "x",
+    }
+
+
+def test_gap_detected_critical_on_severe_p95_jump():
+    """RELATIONSHIP: 4 trailing windows at p95=100ms, current at p95=300ms →
+    ratio = 300/100 = 3.0 > critical_ratio_cutoff 2.0 → critical severity."""
+    history = [_window(100), _window(100), _window(100), _window(100), _window(300)]
+    v = detect_reaction_gap(history, "opening_inertia")
+    assert isinstance(v, ReactionGapVerdict)
+    assert v.kind == "gap_detected"
+    assert v.severity == "critical"
+    assert v.strategy_key == "opening_inertia"
+    assert abs(v.evidence["ratio"] - 3.0) < 1e-9
+    assert abs(v.evidence["trailing_mean_p95_ms"] - 100.0) < 1e-9
+
+
+def test_gap_detected_warn_on_moderate_p95_jump():
+    """RELATIONSHIP: ratio between gap_threshold_multiplier (1.5) and
+    critical_ratio_cutoff (2.0) yields warn, not critical. trailing=100ms,
+    current=180ms → ratio=1.8 → warn."""
+    history = [_window(100), _window(100), _window(100), _window(100), _window(180)]
+    v = detect_reaction_gap(history, "shoulder_sell")
+    assert v.kind == "gap_detected"
+    assert v.severity == "warn"
+    assert abs(v.evidence["ratio"] - 1.8) < 1e-9
+
+
+def test_within_normal_when_steady_latency():
+    """RELATIONSHIP: 4 trailing at 100ms, current at 110ms → ratio=1.1 → within."""
+    history = [_window(100), _window(100), _window(100), _window(100), _window(110)]
+    v = detect_reaction_gap(history, "center_buy")
+    assert v.kind == "within_normal"
+    assert v.severity is None
+    assert abs(v.evidence["ratio"] - 1.1) < 1e-9
+
+
+def test_threshold_boundary_exactly_at_multiplier():
+    """RELATIONSHIP: at ratio == gap_threshold_multiplier the verdict is
+    within_normal (strict greater-than triggers gap). trailing=100ms,
+    current=150ms → ratio=1.5 == threshold → within_normal."""
+    history = [_window(100), _window(100), _window(100), _window(100), _window(150)]
+    v = detect_reaction_gap(history, "settlement_capture")
+    assert v.kind == "within_normal", \
+        f"strict greater-than should NOT trigger at exactly threshold; got {v.kind}"
+
+
+def test_critical_cutoff_boundary_exactly_at_2x():
+    """RELATIONSHIP: at ratio == critical_ratio_cutoff (2.0) severity is
+    'critical' (>= cutoff). Per implementation:
+    `severity = "critical" if ratio >= critical_ratio_cutoff else "warn"`.
+    Symmetric to the EO BATCH 2 LOW-CAVEAT-EO-2-2 boundary test pattern.
+
+    trailing=100ms, current=200ms → ratio=2.0 → gap_detected with critical
+    severity (because 2.0 >= 2.0 critical cutoff).
+    """
+    history = [_window(100), _window(100), _window(100), _window(100), _window(200)]
+    v = detect_reaction_gap(history, "opening_inertia")
+    assert v.kind == "gap_detected"
+    assert v.severity == "critical", \
+        f"ratio == critical_ratio_cutoff (2.0) should be critical (>=); got {v.severity!r}"
+    assert abs(v.evidence["ratio"] - 2.0) < 1e-9
+
+
+def test_insufficient_history_below_min_windows():
+    """RELATIONSHIP: 3 windows when min_windows=4 → insufficient_data."""
+    history = [_window(100), _window(100), _window(100)]
+    v = detect_reaction_gap(history, "settlement_capture")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "n_windows_below_min"
+    assert v.evidence["n_windows"] == 3
+    assert v.evidence["min_required"] == 4
+
+
+def test_insufficient_when_too_many_low_sample_windows():
+    """RELATIONSHIP: 5 windows but 3 are sample_quality='insufficient' (n<10)
+    → only 2 usable, below min_windows=4 → insufficient_data."""
+    history = [
+        _window(100, n_signals=5),    # insufficient
+        _window(100, n_signals=5),    # insufficient
+        _window(100, n_signals=5),    # insufficient
+        _window(100, n_signals=50),   # usable (adequate)
+        _window(200, n_signals=50),   # usable
+    ]
+    v = detect_reaction_gap(history, "shoulder_sell")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "usable_windows_below_min"
+    assert v.evidence["n_usable"] == 2
+
+
+def test_insufficient_when_trailing_mean_p95_non_positive():
+    """RELATIONSHIP: trailing p95s average to <=0 (e.g., all-zero clipped
+    latencies from clock-skew test data) → ratio undefined →
+    insufficient_data. A strategy with all-zero latency cannot meaningfully
+    'gap-up'."""
+    history = [_window(0), _window(0), _window(0), _window(0), _window(50)]
+    v = detect_reaction_gap(history, "center_buy")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "trailing_mean_p95_non_positive"
+    assert v.evidence["trailing_mean_p95"] <= 0
+
+
+def test_per_call_threshold_override():
+    """RELATIONSHIP: caller can pass tighter threshold for opening_inertia
+    discipline. trailing=100ms, current=130ms → ratio=1.3. Default
+    threshold 1.5 → within_normal. Override threshold=1.2 → gap_detected.
+
+    Per dispatch GO_BATCH_2: opening_inertia could get 1.2 default for
+    tighter discipline. This test pins the override mechanism so the
+    operator can apply per-strategy thresholds at the runner layer.
+    """
+    history = [_window(100), _window(100), _window(100), _window(100), _window(130)]
+    v_default = detect_reaction_gap(history, "opening_inertia")
+    assert v_default.kind == "within_normal"
+    v_strict = detect_reaction_gap(history, "opening_inertia",
+                                   gap_threshold_multiplier=1.2)
+    assert v_strict.kind == "gap_detected"
+    assert v_strict.severity == "warn"  # 1.3 < 2.0 critical cutoff
+    assert abs(v_strict.evidence["gap_threshold_multiplier"] - 1.2) < 1e-9
+
+
+def test_action_window_30s_boundary_inclusive():
+    """RELATIONSHIP (LOW caveat carry-forward from critic 22nd cycle):
+    ACTION_WINDOW_SECONDS=30s boundary is INCLUSIVE on both ends:
+      - tick + position_event at 0s offset → counted (lower bound)
+      - tick + position_event at exactly 30.000s offset → counted
+      - tick + position_event at 30.001s offset → NOT counted
+
+    This pins the n_with_action behavior at the canonical
+    ACTION_WINDOW_SECONDS=30s boundary documented in
+    src/state/ws_poll_reaction.py module docstring.
+    """
+    conn = _make_conn()
+    _insert_position_current(conn, position_id="b1", token_id="tok-bound",
+                             strategy_key="settlement_capture")
+    base_iso = "2026-04-23T12:00:00+00:00"
+    # Tick A at 12:00:00 with event at 0s offset (12:00:00.100, immediate)
+    _insert_tick(conn, token_id="tok-bound", source_ts=base_iso,
+                 zeus_ts="2026-04-23T12:00:00.100000+00:00")
+    _insert_event(conn, position_id="b1",
+                  occurred_at="2026-04-23T12:00:00.100000+00:00",
+                  strategy_key="settlement_capture", suffix="A")
+    # Tick B at 12:01:00 with event at exactly 30.000s offset (12:01:30.000)
+    _insert_tick(conn, token_id="tok-bound",
+                 source_ts="2026-04-23T12:01:00+00:00",
+                 zeus_ts="2026-04-23T12:01:00.000000+00:00")
+    _insert_event(conn, position_id="b1",
+                  occurred_at="2026-04-23T12:01:30.000000+00:00",
+                  strategy_key="settlement_capture", seq_no=2, suffix="B")
+    # Tick C at 12:02:00 with event at 30.001s offset (12:02:30.001) — outside
+    _insert_tick(conn, token_id="tok-bound",
+                 source_ts="2026-04-23T12:02:00+00:00",
+                 zeus_ts="2026-04-23T12:02:00.000000+00:00")
+    _insert_event(conn, position_id="b1",
+                  occurred_at="2026-04-23T12:02:30.001000+00:00",
+                  strategy_key="settlement_capture", seq_no=3, suffix="C")
+    conn.commit()
+
+    result = compute_reaction_latency_per_strategy(conn, window_days=7, end_date="2026-04-28")
+    sc = result["settlement_capture"]
+    assert sc["n_signals"] == 3
+    # Ticks A + B count; Tick C does not (30.001s > 30s window).
+    assert sc["n_with_action"] == 2, \
+        f"30s boundary inclusive lower + at-exactly-30s; 30.001s excluded; " \
+        f"got n_with_action={sc['n_with_action']}, expected 2"
