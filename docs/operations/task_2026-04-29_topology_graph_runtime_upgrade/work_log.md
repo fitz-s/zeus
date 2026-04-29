@@ -82,6 +82,20 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - subagents are only guidance for explicitly authorized independent lanes or
     active OMX team runtime
   - prompt-shape guidance is generated context, not authority
+- Implemented P5 warning lifecycle:
+  - typed issue schema now carries optional lifecycle owner/state/date and
+    invalidation-condition metadata
+  - closeout reads packet-local `warning_deferrals` from receipts
+  - expired deferrals promote to blockers only when the same warning is active
+    in the matching changed-file scope or explicitly requested claim scope
+  - open-ended deferrals without owner, invalidation condition, or bounded date
+    are invalid closeout evidence
+- Implemented P10 adoption/deprecation:
+  - closeout emits generated runtime migration notes
+  - module guidance points future runtime-oriented work at the composed
+    `runtime` command first
+  - legacy commands stay supported; no deprecation warning is emitted before
+    receipt-backed adoption evidence exists
 - Verification:
   - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'route_card or typed_intent or invalid_typed or runtime_claim or graph_claim or graph_impact_claim or closeout_without_graph_claim or closeout_graph_claim or cli_json_parity_for_closeout or navigation_route_card_only or navigation'` -> 26 passed, 272 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'impact or context_pack or module_book or module_manifest'` -> 23 passed, 238 deselected
@@ -91,8 +105,10 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - `python -m pytest -q tests/test_topology_doctor.py -k 'code_review_graph_status or graph_health or graph_claim or live_side_effect or runtime_claim or route_card'` -> 16 passed, 248 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'context_pack or role_context or graph_health or live_side_effect or code_review_graph_status'` -> 18 passed, 247 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'graph_health or code_review_graph_status'` -> 6 passed, 260 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'warning_lifecycle or warning_deferral or migration_notes or issue_schema_drift_guard or issue_v2_emits_warning_lifecycle or closeout_promotes or closeout_does_not_promote or closeout_rejects_open_ended'` -> 6 passed, 265 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'closeout or issue_schema or runtime_command or route_card or warning_lifecycle or warning_deferral or migration_notes'` -> 27 passed, 244 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'runtime_command or dispatch_guidance or role_context or context_pack'` -> 13 passed, 252 deselected
-  - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command or dispatch_guidance or graph_health or live_side_effect'` -> 133 passed, 171 deselected
+  - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command or dispatch_guidance or graph_health or live_side_effect or warning_lifecycle or warning_deferral or migration_notes or issue_schema'` -> 139 passed, 170 deselected
   - `python scripts/digest_profiles_export.py --check` -> ok
   - `python scripts/topology_doctor.py --schema --json` -> ok true
   - `python scripts/topology_doctor.py --context-packs --json` -> ok true
@@ -101,4 +117,5 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - `python scripts/topology_doctor.py --navigation ... --intent "topology graph agent runtime upgrade"` -> ok true
   - `python scripts/topology_doctor.py closeout ... --json` -> ok true, risk_tier T3
   - `python scripts/topology_doctor.py --schema/--context-packs/--task-boot-profiles/runtime/--navigation/--change-receipts/--work-record/--map-maintenance closeout/closeout` after P4/P6/P8/P9 -> all ok true
+  - `python scripts/topology_doctor.py --schema/--context-packs/--task-boot-profiles/runtime/--navigation/--change-receipts/--work-record/--map-maintenance closeout/closeout` after P5/P10 -> all ok true
   - `git diff --check` -> clean

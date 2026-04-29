@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,169 @@ def issue_in_scope(issue_path: str, changed_files: list[str]) -> bool:
         if normalized.startswith(f"{scoped}/"):
             return True
     return False
+
+
+def receipt_payload(api: Any, receipt_path: str | None) -> dict[str, Any]:
+    if not receipt_path:
+        return {}
+    target = Path(receipt_path)
+    if not target.is_absolute():
+        target = api.ROOT / receipt_path
+    if not target.exists() or not target.is_file():
+        return {}
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_iso_date(value: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _warning_deferral_matches_issue(deferral: dict[str, str], issue: dict[str, Any]) -> bool:
+    if deferral["code"] != str(issue.get("code") or ""):
+        return False
+    issue_path = normalized_issue_path(str(issue.get("path") or ""))
+    deferral_path = normalized_issue_path(deferral["path"])
+    return issue_path == deferral_path or issue_in_scope(issue_path, [deferral_path])
+
+
+def warning_lifecycle(
+    api: Any,
+    *,
+    receipt_path: str | None,
+    changed_files: list[str],
+    claims: list[str],
+    scoped_warning_issues: list[dict[str, Any]],
+    global_warning_issues: list[dict[str, Any]],
+    issue_schema_version: str = "1",
+) -> dict[str, Any]:
+    payload = receipt_payload(api, receipt_path)
+    raw_deferrals = payload.get("warning_deferrals") or []
+    result: dict[str, Any] = {
+        "authority_status": "packet_local_warning_lifecycle_not_authority",
+        "receipt_path": receipt_path,
+        "deferrals": [],
+        "expired_promotions": [],
+        "invalid_deferrals": [],
+        "blocking_issues": [],
+    }
+    if not raw_deferrals:
+        return result
+    if not isinstance(raw_deferrals, list):
+        issue = api.blocking(
+            "warning_deferral_invalid",
+            receipt_path or "<receipt>",
+            "warning_deferrals must be a list",
+            lane="warning_lifecycle",
+            scope="changed_file",
+            owner_manifest=receipt_path,
+            repair_kind="none",
+            authority_status="evidence",
+        )
+        result["invalid_deferrals"].append({"index": None, "reason": issue.message})
+        result["blocking_issues"].append({"lane": "warning_lifecycle", **api._issue_to_json(issue, issue_schema_version)})
+        return result
+
+    today = date.today()
+    claim_set = set(claims or [])
+    for index, entry in enumerate(raw_deferrals):
+        if not isinstance(entry, dict):
+            issue = api.blocking(
+                "warning_deferral_invalid",
+                receipt_path or "<receipt>",
+                f"warning_deferrals[{index}] must be an object",
+                lane="warning_lifecycle",
+                scope="changed_file",
+                owner_manifest=receipt_path,
+                repair_kind="none",
+                authority_status="evidence",
+            )
+            result["invalid_deferrals"].append({"index": index, "reason": issue.message})
+            result["blocking_issues"].append({"lane": "warning_lifecycle", **api._issue_to_json(issue, issue_schema_version)})
+            continue
+
+        deferral = {
+            "code": str(entry.get("code") or ""),
+            "path": str(entry.get("path") or ""),
+            "state": str(entry.get("state") or "acknowledged"),
+            "scope": str(entry.get("scope") or "changed_file"),
+            "claim": str(entry.get("claim") or ""),
+            "owner": str(entry.get("owner") or ""),
+            "invalidation_condition": str(entry.get("invalidation_condition") or ""),
+            "deferred_until": str(entry.get("deferred_until") or ""),
+            "expires_at": str(entry.get("expires_at") or ""),
+        }
+        result["deferrals"].append(deferral)
+
+        invalid_reasons = []
+        for field in ("code", "path", "owner", "invalidation_condition"):
+            if not deferral[field]:
+                invalid_reasons.append(f"missing {field}")
+        if deferral["state"] not in api.ISSUE_LIFECYCLE_STATES:
+            invalid_reasons.append(f"invalid state {deferral['state']!r}")
+        if deferral["scope"] not in {"changed_file", "global", "claim"}:
+            invalid_reasons.append(f"invalid scope {deferral['scope']!r}")
+        if deferral["state"] != "retired" and not (deferral["expires_at"] or deferral["deferred_until"]):
+            invalid_reasons.append("missing expires_at or deferred_until")
+        expiry = _parse_iso_date(deferral["expires_at"] or deferral["deferred_until"])
+        if (deferral["expires_at"] or deferral["deferred_until"]) and expiry is None:
+            invalid_reasons.append("invalid ISO date")
+        if invalid_reasons:
+            issue = api.blocking(
+                "warning_deferral_invalid",
+                receipt_path or "<receipt>",
+                f"warning_deferrals[{index}] invalid: {', '.join(invalid_reasons)}",
+                lane="warning_lifecycle",
+                scope=deferral["scope"] if deferral["scope"] in {"changed_file", "global", "claim"} else "changed_file",
+                owner_manifest=receipt_path,
+                repair_kind="none",
+                authority_status="evidence",
+            )
+            result["invalid_deferrals"].append({"index": index, "reason": issue.message})
+            result["blocking_issues"].append({"lane": "warning_lifecycle", **api._issue_to_json(issue, issue_schema_version)})
+            continue
+        if deferral["state"] == "retired" or expiry is None or today <= expiry:
+            continue
+        if deferral["claim"] and deferral["claim"] not in claim_set:
+            continue
+        if deferral["scope"] in {"global", "claim"} and not deferral["claim"]:
+            continue
+
+        issue_pool = global_warning_issues if deferral["scope"] in {"global", "claim"} else scoped_warning_issues
+        if not any(_warning_deferral_matches_issue(deferral, issue) for issue in issue_pool):
+            continue
+        if deferral["scope"] == "changed_file" and not issue_in_scope(deferral["path"], changed_files):
+            continue
+
+        promoted = api.blocking(
+            "warning_deferral_expired",
+            deferral["path"],
+            f"expired warning deferral for {deferral['code']} owned by {deferral['owner']}",
+            lane="warning_lifecycle",
+            scope=deferral["scope"],
+            owner_manifest=receipt_path,
+            repair_kind="none",
+            lifecycle_state="promoted_to_blocker",
+            lifecycle_owner=deferral["owner"],
+            deferred_until=deferral["deferred_until"] or None,
+            expires_at=deferral["expires_at"] or None,
+            invalidation_condition=deferral["invalidation_condition"],
+            authority_status="evidence",
+        )
+        promoted_payload = {"lane": "warning_lifecycle", **api._issue_to_json(promoted, "2")}
+        result["expired_promotions"].append(promoted_payload)
+        result["blocking_issues"].append(
+            {"lane": "warning_lifecycle", **api._issue_to_json(promoted, issue_schema_version)}
+        )
+    return result
 
 
 def scoped_result(api: Any, result: Any, changed_files: list[str]) -> Any:
@@ -241,6 +405,12 @@ def run_closeout(
         for issue in result.issues
         if issue.severity == "warning"
     ]
+    global_warning_issues = [
+        {"lane": lane, **api._issue_to_json(issue, issue_schema_version)}
+        for lane, result in unscoped_lanes.items()
+        for issue in result.issues
+        if issue.severity == "warning"
+    ]
     claim_evaluation = api.build_runtime_claim_evaluation(
         claims,
         graph_result=unscoped_lanes["code_review_graph"],
@@ -249,6 +419,16 @@ def run_closeout(
     )
     claim_blocking_issues = api.runtime_claim_issues(claim_evaluation)
     blocking_issues = blocking_issues + claim_blocking_issues
+    warning_lifecycle_result = warning_lifecycle(
+        api,
+        receipt_path=receipt_path,
+        changed_files=actual_changed,
+        claims=claims or [],
+        scoped_warning_issues=warning_issues,
+        global_warning_issues=global_warning_issues,
+        issue_schema_version=issue_schema_version,
+    )
+    blocking_issues = blocking_issues + warning_lifecycle_result["blocking_issues"]
     compiled = api.build_compiled_topology()
     telemetry = compiled.get("telemetry") or {}
     return {
@@ -262,10 +442,17 @@ def run_closeout(
             "repo_health": "global_health is reported separately from changed-file closeout",
             "receipts": "receipt/work-record/planning-lock remain blocking for governed changed files",
         },
+        "migration_notes": {
+            "runtime_path_first": "python scripts/topology_doctor.py runtime --task '<task>' --files <files> --intent '<intent>' --task-class <class> --write-intent <intent>",
+            "legacy_commands_supported": ["--navigation", "digest", "closeout"],
+            "deprecation_policy": "do not emit deprecation warnings until two packet receipts record successful runtime-command usage",
+            "default_read_docs": "no new default-read docs are required for normal future tasks",
+        },
         "claim_evaluation": claim_evaluation,
         "claims_evaluated": claim_evaluation["evaluated"],
         "claims_blocked": claim_evaluation["blocked"],
         "claims_advisory": claim_evaluation["advisory"],
+        "warning_lifecycle": warning_lifecycle_result,
         "selected_lanes": selected,
         "lanes": {lane: lane_summary(api, result, issue_schema_version=issue_schema_version) for lane, result in lanes.items()},
         "global_health": {lane: global_health_summary(result) for lane, result in unscoped_lanes.items()},

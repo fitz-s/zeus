@@ -71,6 +71,9 @@ bounded impact summary without pretending every file is source.
 - Use `--route-card-only` for quick orientation and `--claim <claim_id>` when
   the completion statement depends on graph, repo-health, semantic boot, packet
   closeout, or live authorization evidence.
+- Start future runtime-oriented work with the composed command when the caller
+  needs one packet rather than separate digest/bootstrap/context invocations:
+  `python scripts/topology_doctor.py runtime --task "<task>" --files <files> --intent "<intent>" --task-class <class> --write-intent <intent>`.
 - Use `python3 scripts/topology_doctor.py runtime ...` when a caller needs the
   composed agent-runtime packet: route card, optional semantic boot, optional
   role context, claims, dispatch guidance, gate budget, and artifact-treatment
