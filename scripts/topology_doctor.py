@@ -549,6 +549,7 @@ def build_runtime_claim_evaluation(
     claims: list[str] | tuple[str, ...] | None,
     *,
     admission_status: str | None = None,
+    semantic_bootstrap: dict[str, Any] | None = None,
     graph_result: StrictResult | None = None,
     global_health: dict[str, Any] | None = None,
     closeout_ok: bool | None = None,
@@ -576,8 +577,10 @@ def build_runtime_claim_evaluation(
         }
         if claim == "admission_valid" and admission_status != "admitted":
             blocked.append({**entry, "reason": f"admission_status={admission_status or 'unknown'}"})
-        elif claim == "semantic_boot_answered" and not task_class:
-            blocked.append({**entry, "reason": "task_class was not supplied"})
+        elif claim == "semantic_boot_answered" and not semantic_bootstrap:
+            blocked.append({**entry, "reason": "semantic bootstrap was not evaluated"})
+        elif claim == "semantic_boot_answered" and not semantic_bootstrap.get("ok"):
+            blocked.append({**entry, "reason": "semantic bootstrap has blocking issues"})
         elif claim == "graph_impact_validated" and _graph_result_invalidates_claim(graph_result):
             blocked.append({**entry, "reason": "code review graph is unavailable, stale, or has blocking issues"})
         elif claim == "repo_health_clean" and _global_health_has_blockers(global_health):
@@ -586,7 +589,7 @@ def build_runtime_claim_evaluation(
             blocked.append({**entry, "reason": "closeout has blocking issues"})
         elif claim == "packet_closeout_complete" and closeout_ok is None:
             advisory.append({**entry, "reason": "closeout was not evaluated in this command"})
-        elif claim == "live_side_effect_authorized" and (write_intent or "").lower() in {"apply", "live", "production", "prod"}:
+        elif claim == "live_side_effect_authorized":
             blocked.append({**entry, "reason": "explicit operator-go evidence is not present"})
         else:
             evaluated.append(entry)
@@ -1416,13 +1419,25 @@ def build_package_review_context_pack(task: str, files: list[str]) -> dict[str, 
     return _context_pack_checks().build_package_review_context_pack(sys.modules[__name__], task, files)
 
 
-def build_context_pack(pack_type: str, *, task: str, files: list[str], task_class: str | None = None) -> dict[str, Any]:
+def build_context_pack(
+    pack_type: str,
+    *,
+    task: str,
+    files: list[str],
+    task_class: str | None = None,
+    intent: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
+) -> dict[str, Any]:
     return _context_pack_checks().build_context_pack(
         sys.modules[__name__],
         pack_type,
         task=task,
         files=files,
         task_class=task_class,
+        intent=intent,
+        write_intent=write_intent,
+        claims=claims,
     )
 
 
@@ -1533,12 +1548,12 @@ def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | 
     normalized = [path.strip().removeprefix("./") for path in files if path and path.strip()]
     intent = (write_intent or "").strip().lower()
     task_l = task.lower()
-    if intent in {"read_only", "read-only", "none"} or not normalized:
-        return "T0"
     if intent in {"live", "production", "prod", "apply"} or any(
         token in task_l for token in ("live deploy", "production db", "prod db", "live venue", "apply mutation")
     ):
         return "T4"
+    if intent in {"read_only", "read-only", "none"} or not normalized:
+        return "T0"
     if any(
         path.startswith(("architecture/", "docs/authority/", "src/state/", "src/control/", "src/supervisor_api/"))
         or path in {"AGENTS.md", "workspace_map.md"}
@@ -1780,9 +1795,15 @@ def run_navigation(
         if "graph_impact_validated" in requested_claims
         else None
     )
+    semantic_bootstrap = (
+        build_semantic_bootstrap(task_class, task=task, files=requested_paths)
+        if "semantic_boot_answered" in requested_claims and task_class
+        else None
+    )
     claim_evaluation = build_runtime_claim_evaluation(
         requested_claims,
         admission_status=admission_status,
+        semantic_bootstrap=semantic_bootstrap,
         graph_result=graph_result,
         global_health=_global_health_counts(checks),
         task_class=task_class,
@@ -1839,6 +1860,7 @@ def run_navigation(
         "claims_evaluated": claim_evaluation["evaluated"],
         "claims_blocked": claim_evaluation["blocked"],
         "claims_advisory": claim_evaluation["advisory"],
+        "semantic_bootstrap": semantic_bootstrap,
         "context_assumption": digest.get("context_assumption", {}),
         "checks": {
             lane: {
@@ -1892,7 +1914,15 @@ def build_runtime_packet(
     )
     role_context = None
     if role and target_files:
-        role_context = build_context_pack(role, task=task, files=target_files, task_class=task_class)
+        role_context = build_context_pack(
+            role,
+            task=task,
+            files=target_files,
+            task_class=task_class,
+            intent=intent,
+            write_intent=write_intent,
+            claims=claims,
+        )
 
     route_card = navigation.get("route_card") or {}
     dispatch_guidance = {
