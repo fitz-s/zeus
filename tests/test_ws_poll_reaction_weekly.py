@@ -371,3 +371,58 @@ def test_negative_latency_count_surfaced(tmp_path: Path):
 
     report = run_weekly(db_path, end_date=end, window_days=7)
     assert report["negative_latency_count"] == 5
+
+
+def test_canonical_cli_invocation_from_foreign_cwd(tmp_path: Path):
+    """RELATIONSHIP regression for LOW-OPERATIONAL-WP-3-1: canonical CLI
+    invocation `python3 scripts/<name>_weekly.py` MUST work from any cwd
+    without requiring PYTHONPATH=. or `python -m scripts.X` workarounds.
+
+    Pins the sys.path.insert(0, REPO_ROOT) bootstrap added at the top of
+    all 3 sibling weekly runners. Subprocess-invokes each from /tmp (a
+    foreign cwd) with --db-path pointing to a temp DB and --report-out
+    to a temp file. Exit must be 0 (empty DB → no decay/drift/gap).
+
+    Covers ALL 3 sibling weekly runners coherently in one test (one
+    fix, one regression test). If any runner regresses to the
+    pre-fix ModuleNotFoundError state, this single test fails and
+    points to the load-bearing line.
+    """
+    import subprocess
+
+    db_path = _make_temp_db(tmp_path)
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        pytest.skip(f"venv python not found at {venv_python}")
+
+    runners = [
+        ("edge_observation_weekly.py",   ["--n-windows", "4"]),
+        ("attribution_drift_weekly.py",  []),
+        ("ws_poll_reaction_weekly.py",   ["--n-windows", "4"]),
+    ]
+    for runner_name, extra_flags in runners:
+        runner = REPO_ROOT / "scripts" / runner_name
+        out_file = tmp_path / f"{runner_name}.json"
+        result = subprocess.run(
+            [
+                str(venv_python), str(runner),
+                "--db-path", str(db_path),
+                "--end-date", "2026-04-28",
+                "--report-out", str(out_file),
+                *extra_flags,
+            ],
+            cwd="/tmp",  # foreign cwd; the bug pre-fix only manifested off-repo-root
+            capture_output=True, text=True,
+        )
+        # No ModuleNotFoundError; exit clean (empty DB → no decay/drift/gap → 0).
+        assert "ModuleNotFoundError" not in result.stderr, (
+            f"{runner_name} regressed LOW-OPERATIONAL-WP-3-1: {result.stderr[:500]}"
+        )
+        assert result.returncode == 0, (
+            f"{runner_name} exit {result.returncode} (expected 0); "
+            f"stderr={result.stderr[:500]}"
+        )
+        # Report written + parseable JSON.
+        assert out_file.exists(), f"{runner_name} did not write report to {out_file}"
+        re_loaded = json.loads(out_file.read_text())
+        assert re_loaded.get("end_date") == "2026-04-28"

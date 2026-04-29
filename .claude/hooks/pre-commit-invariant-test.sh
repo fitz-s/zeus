@@ -65,8 +65,9 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   BATCH 1 MED-REVISE-WP-1-1 (row-multiplication regression tests): 137 → 139 (+2)
 #   WS_OR_POLL_TIGHTENING BATCH 2 (detect_reaction_gap ratio + 30s boundary): 139 → 149 (+10)
 #   WS_OR_POLL_TIGHTENING BATCH 3 (weekly runner e2e + per-strategy threshold + negative_latency_count): 149 → 155 (+6)
+#   LOW-OPERATIONAL-WP-3-1 fix (3 sibling sys.path bootstrap + 1 regression test covering all 3): 155 → 156 (+1)
 TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py"
-BASELINE_PASSED=155
+BASELINE_PASSED=156
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
