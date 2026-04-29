@@ -179,6 +179,33 @@ over many weeks).
 - Append-only Platt history table for genuine multi-fit trajectory
   reconstruction (deferred; potential future PATH-D packet).
 
+## CORRECTION (LEARNING_LOOP cycle-31 cross-link)
+
+**The "Append-only Platt history table for genuine multi-fit trajectory
+reconstruction (deferred; potential future PATH-D packet)" item above is
+WRONG.** The append-only history exists at `calibration_params_versions`
+(`src/calibration/retrain_trigger.py:242-264` schema) — autoincrement
+`version_id`, `promoted_at` + `retired_at` lifecycle columns, INSERT on
+every retrain attempt (PASS → promoted; FAIL → COMPLETE_DRIFT_DETECTED,
+kept for audit), UPDATE only sets `retired_at` (never DELETE).
+
+The CALIBRATION_HARDENING BATCH 3 boot evidence + this AGENTS.md misread
+the substrate by claiming "no append-only Platt history table." That
+claim was based on `platt_models_v2 UNIQUE (..., is_active=1)` reasoning
+WITHOUT grep-tracing the FULL retrain pipeline.
+
+LEARNING_LOOP packet BATCH 1 (commit 1014ff2) caught this misread during
+boot evidence reading and added the
+`src.calibration.retrain_trigger.list_recent_retrain_versions` pure-SELECT
+reader in BATCH 1 to leverage the actual append-only history. See
+`docs/operations/learning_loop_observation/AGENTS.md` §"HONEST DISCLOSURE
+cross-link" for the full disclosure note.
+
+This correction is a textbook dividend of the LOW-CITATION-CALIBRATION-3-1
+cycle-29 sustained discipline lesson: **grep-verify CONTENT not just line
+ranges**. The cite to `platt_models_v2 UNIQUE on is_active=1` was correct
+at the line level but incomplete at the system level.
+
 ## See also
 
 - `src/state/calibration_observation.py` — the K1-compliant projection

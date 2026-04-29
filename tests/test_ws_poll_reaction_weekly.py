@@ -379,14 +379,20 @@ def test_canonical_cli_invocation_from_foreign_cwd(tmp_path: Path):
     without requiring PYTHONPATH=. or `python -m scripts.X` workarounds.
 
     Pins the sys.path.insert(0, REPO_ROOT) bootstrap added at the top of
-    all 3 sibling weekly runners. Subprocess-invokes each from /tmp (a
+    all 5 sibling weekly runners. Subprocess-invokes each from /tmp (a
     foreign cwd) with --db-path pointing to a temp DB and --report-out
-    to a temp file. Exit must be 0 (empty DB → no decay/drift/gap).
+    to a temp file. Exit must be 0 (empty DB → no decay/drift/gap/stall).
 
-    Covers ALL 3 sibling weekly runners coherently in one test (one
+    Covers ALL 5 sibling weekly runners coherently in one test (one
     fix, one regression test). If any runner regresses to the
     pre-fix ModuleNotFoundError state, this single test fails and
     points to the load-bearing line.
+
+    LOW-DOCSTRING-CALIBRATION-3-2 fix (cycle-29 carry-forward, applied
+    in LEARNING_LOOP BATCH 3): docstring updated from "all 3 sibling
+    weekly runners" → "all 5 sibling weekly runners" + runners list
+    extended to include calibration_observation_weekly +
+    learning_loop_observation_weekly.
     """
     import subprocess
 
@@ -400,10 +406,13 @@ def test_canonical_cli_invocation_from_foreign_cwd(tmp_path: Path):
         ("attribution_drift_weekly.py",         []),
         ("ws_poll_reaction_weekly.py",          ["--n-windows", "4"]),
         # CALIBRATION_HARDENING BATCH 3 (cycle-29 carry-forward of LOW-
-        # OPERATIONAL-WP-3-1): the new calibration_observation_weekly.py
-        # also pre-applies the sys.path bootstrap fix; this test now
-        # covers ALL 4 sibling weekly runners coherently.
+        # OPERATIONAL-WP-3-1): pre-applies the sys.path bootstrap fix.
         ("calibration_observation_weekly.py",   ["--n-windows", "4"]),
+        # LEARNING_LOOP BATCH 3 (cycle-31/32 carry-forward, LOW-DOCSTRING-
+        # CALIBRATION-3-2 fix): the new learning_loop_observation_weekly.py
+        # also pre-applies the sys.path bootstrap fix; this test now
+        # covers ALL 5 sibling weekly runners coherently.
+        ("learning_loop_observation_weekly.py", ["--n-windows", "4"]),
     ]
     for runner_name, extra_flags in runners:
         runner = REPO_ROOT / "scripts" / runner_name
