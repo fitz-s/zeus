@@ -155,6 +155,101 @@ Encoded in `config/cities.json::cities[].weighted_low_calibration_eligible: bool
 4. **NEVER skip per-city heterogeneity check** when introducing a new weight scheme. Aggregate Brier improvement does NOT imply per-city Pareto dominance.
 5. **NEVER apply LOW weighting law to HIGH track**. HIGH (mx2t6) is 100% training_allowed=True today; no boundary-ambiguity dimension exists. The LAW applies to LOW only unless future evidence extends it.
 
+### LAW 4: n_mc tuning has context-dependent precision floor
+
+`rebuild_calibration_pairs_v2.py:578` defaults `n_mc=ensemble_n_mc()=10,000`. This default is mathematically justified for the **live runtime path** (single-snapshot p_raw used to size a single trade decision) but is **mathematically excess for the batch-rebuild path** (aggregate Platt fit across millions of pairs). Two distinct operational contexts have different precision floors.
+
+#### Math derivation
+
+Let $p_{\text{raw}}^{(\text{MC})}(r)$ be the bin probability for snapshot $r$ estimated from $n$ MC draws. Standard error of this single-snapshot estimate:
+
+$$
+\mathrm{SE}\bigl(p_{\text{raw}}^{(\text{MC})}\bigr) \;\approx\; \sqrt{\frac{p(1-p)}{n}}
+$$
+
+Concrete values at $p=0.5$ (worst case):
+
+| n_mc | SE(per-snapshot p_raw) | Comment |
+|---|---|---|
+| 10,000 | 0.005 | live runtime appropriate (single-trade precision) |
+| 1,000 | 0.016 | batch-fit appropriate (~3× SE, but averaged across N_pairs) |
+| 100 | 0.050 | too coarse for either context |
+| 32 | 0.088 | PoC v4 used this — still produced sig OOS Brier diff because of N_pairs leverage |
+
+Now the Platt-fit parameter SE depends on **N_pairs**, not on per-snapshot SE alone:
+
+$$
+\mathrm{SE}\bigl(\hat{A}, \hat{B}, \hat{C}\bigr) \;\approx\; \sqrt{\frac{\sigma^2_{\text{label-noise}} + \mathrm{SE}^2(p_{\text{raw}}^{(\text{MC})})}{N_{\text{pairs}}}}
+$$
+
+For zeus's batch-rebuild scale: $N_{\text{pairs}} \approx 4\,\text{M}$, $\sigma^2_{\text{label-noise}} \approx 0.25$ (Bernoulli outcome noise). The MC-induced contribution to aggregate parameter SE is:
+
+$$
+\frac{\mathrm{SE}^2_{\text{MC}}}{N_{\text{pairs}}} \;\le\; \frac{0.016^2}{4\times10^6} \;\approx\; 6 \times 10^{-11} \quad (\text{at } n_{\text{mc}}=1000)
+$$
+
+vs label-noise contribution $\approx 6 \times 10^{-8}$ — **MC noise is 1000× smaller than label noise at the aggregate level**. Going from $n_{\text{mc}}=10000$ to $n_{\text{mc}}=1000$ changes aggregate Platt fit quality by $< 10^{-3}\sigma$ in $A, B, C$. Empirically below detection.
+
+#### Production rule
+
+For **batch-rebuild path** (`rebuild_calibration_pairs_v2.py` invoked via cron / operator command / drift-trigger):
+
+```
+default --n-mc = 1000  (was 10,000)
+```
+
+This produces ~10× wallclock speedup with no detectable Platt fit quality loss.
+
+For **live runtime path** (`evaluator.py::_fetch_ens_for_market` MC of a single snapshot for trade decision):
+
+```
+n_mc stays at 10,000  (live precision matters per-trade)
+```
+
+These are configured separately. The change applies ONLY to the rebuild script's CLI default, not to runtime MC.
+
+### LAW 5: HIGH/LOW SAVEPOINT separation for rebuild
+
+`rebuild_calibration_pairs_v2.py:38` documents "Entire rebuild runs inside one SAVEPOINT". Empirical impact (rebuild observed 2026-04-29):
+
+- HIGH track (342k snapshots) + LOW track (74k eligible) processed serially in one SAVEPOINT
+- WAL grows to 7+ GB before commit
+- DB write-lock held for entire rebuild (~6-10 hours at n_mc=10000, ~30-50 min at n_mc=1000)
+- Live daemon (`src.main`) cannot `init_schema(conn)` during rebuild → daemon crashes if respawned mid-rebuild ("database is locked")
+
+Operational fix: split SAVEPOINT per metric:
+
+```python
+for spec in METRIC_SPECS:
+    conn.execute("BEGIN")
+    process_track(spec)
+    conn.commit()           # release lock between tracks
+    # daemon can init_schema and read latest HIGH coefficients while LOW rebuilds
+```
+
+This requires a ~5-line code change to `rebuild_calibration_pairs_v2.rebuild_all_v2`. Effect:
+- HIGH commits when HIGH done (daemon picks up HIGH coefficients while LOW continues)
+- LOW commits when LOW done
+- Maximum daemon-blocked window halved
+- Aggregate Brier fit unaffected (HIGH and LOW Platt models are independent per `INV-15`)
+
+### Operational acceleration impact
+
+Combined: `--n-mc 1000` + per-track SAVEPOINT split:
+
+| Configuration | Wallclock (rebuild) | Daemon-blocked window | DB WAL peak |
+|---|---|---|---|
+| Current (n_mc=10000, single SAVEPOINT) | 6-10 hours | 6-10 hours | 7-10 GB |
+| `--n-mc 1000` only | 30-50 min | 30-50 min | ~700 MB |
+| `--n-mc 1000` + per-track split | 30-50 min | 15-25 min (HIGH OR LOW at a time) | ~500 MB peak |
+
+Cumulative speedup: **12-20× wallclock**, **disk WAL pressure 14-20× lower**, **daemon-coexistence enabled**. Daily retrain cadence becomes operationally feasible (current 6-10h cadence makes weekly the minimum practical).
+
+#### Forbidden moves (extends LAW 3)
+
+6. **NEVER use n_mc < 100 in batch rebuild path.** SE(per-snapshot p_raw) > 0.05 starts to bias the Platt fit at small N_pairs subsets (e.g., per-city per-bucket OOS Brier evaluation on test set holdouts).
+7. **NEVER use n_mc < 5000 in live runtime evaluator.** Per-trade precision needs tighter SE; single-snapshot decisions cannot rely on N_pairs leverage.
+
 ## Antibody requirements (must be tests, not lore)
 
 | Antibody | What it tests | Status |
@@ -164,6 +259,9 @@ Encoded in `config/cities.json::cities[].weighted_low_calibration_eligible: bool
 | `tests/test_no_temp_delta_weight_in_production.py` | grep production code for $\Delta T$-magnitude weight forms; fail if any found | TBD |
 | `tests/test_weight_floor_nonzero_for_ambig_only.py` | for any row with boundary_ambiguous=True AND causality_pure=True AND horizon_satisfied=True, assert `precision_weight ≥ WEIGHT_FLOOR` | TBD |
 | `tests/test_high_track_unaffected_by_low_law.py` | HIGH calibration_pairs_v2 rows have precision_weight=1 always | TBD |
+| `tests/test_rebuild_n_mc_default_bounded.py` | `rebuild_calibration_pairs_v2`'s default `n_mc` arg ≤ 2000; CLI override allowed but default reflects LAW 4 | TBD |
+| `tests/test_runtime_n_mc_floor.py` | `evaluator.py` MC paths use n_mc ≥ 5000 (per LAW 4 forbidden move 7) | TBD |
+| `tests/test_rebuild_per_track_savepoint.py` | rebuild emits per-metric `BEGIN`/`COMMIT` (LAW 5); inspectable via mocked conn or git-log of code structure | TBD |
 
 ## Future research (NOT current scope)
 
