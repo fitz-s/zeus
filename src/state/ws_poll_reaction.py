@@ -36,6 +36,18 @@ KNOWN LIMITATIONS (per BATCH 1 boot §1 + GO_BATCH_1 PATH A operator decision):
   - Rows with NULL source_timestamp or unparsable timestamps are excluded
     (they cannot contribute a valid latency).
 
+UPSTREAM-CLIPPING INVARIANT (LOW-NUANCE-WP-2-1, critic 24th cycle):
+  compute_reaction_latency_per_strategy clips negative latencies at the
+  source (line `latency_ms = max(0.0, ...)` inside the per-tick loop).
+  By the time per-window dicts reach detect_reaction_gap downstream,
+  latency_p95_ms is GUARANTEED non-negative. detect_reaction_gap therefore
+  treats current_p95 as already non-negative; if a future caller bypasses
+  compute_reaction_latency_per_strategy and feeds raw negative-p95 windows
+  directly, that is an upstream contract violation (not a defect of the
+  detector). The detector still treats trailing_mean_p95 <= 0 as
+  insufficient_data so a malformed history cannot produce a false
+  gap_detected, but per-call current_p95 negativity is left to the caller.
+
 Latency formula (per AGENTS.md L114-126 + boot §6 #2 PATH A):
   latency_ms = (zeus_timestamp_ms - source_timestamp_ms) per tick, clipped
                to [0, ∞). p50 + p95 reported per strategy_key over the
