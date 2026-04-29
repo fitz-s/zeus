@@ -5,6 +5,7 @@
 
 import pytest
 import json
+import sqlite3
 from contextlib import redirect_stdout
 from io import StringIO
 
@@ -131,6 +132,9 @@ def test_cli_json_parity_for_runtime_command():
     )
     assert payload["role_context"]["pack_type"] == "executor"
     assert payload["semantic_bootstrap"]["task_class"] == "agent_runtime"
+    assert payload["dispatch_guidance"]["authority_status"] == "generated_dispatch_guidance_not_authority"
+    assert payload["dispatch_guidance"]["default_mode"] == "solo"
+    assert "explicitly authorized" in payload["dispatch_guidance"]["parallelism_rule"]
 
 
 def test_cli_json_parity_for_runtime_route_card_only():
@@ -489,6 +493,18 @@ def test_code_review_graph_status_reports_path_mode_and_absent_sidecar(monkeypat
         "tracked": False,
         "parity_status": "absent",
     }
+    health = result.details["graph_health"]
+    assert health["authority_status"] == "derived_graph_health_not_authority"
+    assert health["db"] == {
+        "path": ".code-review-graph/graph.db",
+        "present": True,
+        "tracked": True,
+        "ignore_guard_present": True,
+    }
+    assert health["branch"]["matches"] is True
+    assert health["head"]["matches"] is True
+    assert health["sidecar"]["parity_status"] == "absent"
+    assert health["usable_for_claims"] is True
 
 
 @pytest.mark.live_topology
@@ -533,6 +549,12 @@ def test_code_review_graph_status_warns_on_dirty_file_hash_mismatch(monkeypatch,
 
     assert result.ok
     assert any(issue.code == "code_review_graph_dirty_file_stale" for issue in result.issues)
+    health = result.details["graph_health"]
+    assert health["changed_file_coverage"]["checked"] == 1
+    assert health["changed_file_coverage"]["stale_hash"] == ["scripts/example.py"]
+    assert health["usable_for_claims"] is False
+    assert "graph_impact_validated" in health["invalidates_claims"]
+    assert "official code-review-graph" in health["refresh_instruction"]
 
 
 def test_code_review_graph_status_blocks_untracked_graph_db(monkeypatch, tmp_path):
@@ -550,6 +572,34 @@ def test_code_review_graph_status_blocks_untracked_graph_db(monkeypatch, tmp_pat
 
     assert not result.ok
     assert any(issue.code == "code_review_graph_untracked_db" for issue in result.issues)
+
+
+def test_code_review_graph_health_marks_unreadable_graph_unusable(monkeypatch, tmp_path):
+    root = tmp_path
+    graph_db = root / ".code-review-graph" / "graph.db"
+    graph_db.parent.mkdir()
+    graph_db.write_text("not sqlite", encoding="utf-8")
+    (root / ".gitignore").write_text(".code-review-graph/*\n!.code-review-graph/graph.db\n", encoding="utf-8")
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [".code-review-graph/graph.db"])
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {})
+    from scripts import topology_doctor_code_review_graph
+
+    monkeypatch.setattr(topology_doctor_code_review_graph, "current_git_metadata", lambda api: ("data-improve", "HEADSHA"))
+    monkeypatch.setattr(
+        topology_doctor_code_review_graph,
+        "open_graph_db",
+        lambda api: (_ for _ in ()).throw(sqlite3.Error("broken graph")),
+    )
+
+    result = topology_doctor.run_code_review_graph_status()
+
+    assert result.ok
+    assert any(issue.code == "code_review_graph_unreadable" for issue in result.issues)
+    health = result.details["graph_health"]
+    assert health["usable_for_claims"] is False
+    assert "graph_impact_validated" in health["invalidates_claims"]
+    assert "official code-review-graph" in health["refresh_instruction"]
 
 
 def test_code_impact_graph_is_not_applicable_for_docs_only():
@@ -4309,6 +4359,39 @@ def test_navigation_without_graph_claim_does_not_touch_graph_status(monkeypatch)
     assert payload["claims_blocked"] == []
 
 
+def test_live_side_effect_claim_blocks_without_operator_evidence(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation(
+        "agent runtime live apply guard",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        write_intent="live",
+        claims=["live_side_effect_authorized"],
+    )
+
+    assert payload["ok"] is False
+    assert payload["route_card"]["risk_tier"] == "T4"
+    assert payload["claims_blocked"][0]["claim"] == "live_side_effect_authorized"
+    assert "explicit operator-go" in payload["claims_blocked"][0]["reason"]
+
+
 def test_navigation_route_card_only_human_output_skips_appendices(monkeypatch):
     payload = {
         "ok": True,
@@ -4385,6 +4468,24 @@ def test_executor_context_pack_contains_runtime_guidance_and_semantic_bootstrap(
     assert packet["role_sections"]["admission_status"] == "admitted"
     assert packet["semantic_bootstrap"]["task_class"] == "agent_runtime"
     assert packet["semantic_bootstrap"]["graph_usage"]["stage"] == "not_required"
+
+
+def test_role_context_packs_encode_work_ethic_and_skill_policy_without_authority():
+    for role in ("explorer", "executor", "critic", "verifier"):
+        packet = topology_doctor.build_context_pack(
+            role,
+            task="agent runtime role policy",
+            files=["scripts/topology_doctor_cli.py"],
+            task_class="agent_runtime",
+        )
+
+        assert packet["authority_status"].startswith(f"generated_{role}_packet")
+        assert packet["authority_status"].endswith("_not_authority")
+        assert packet["runtime_guidance"]["work_ethic"]
+        assert packet["runtime_guidance"]["anti_bureaucracy"]
+        assert packet["workflow_policy"]["first_action"]
+        assert packet["skill_policy"]["use_skills_when"]
+        assert packet["skill_policy"]["avoid_skills_when"]
 
 
 def test_runtime_route_card_keeps_t0_read_only_lightweight():

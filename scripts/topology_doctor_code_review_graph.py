@@ -180,6 +180,73 @@ def graph_meta_status(api: Any, *, db_meta: dict[str, str], counts: dict[str, in
     }
 
 
+def graph_health_card(
+    *,
+    db_present: bool,
+    db_tracked: bool,
+    ignore_guard_present: bool,
+    current_branch: str = "",
+    graph_branch: str = "",
+    current_head: str = "",
+    graph_head: str = "",
+    graph_meta: dict[str, Any] | None = None,
+    changed_checked: int = 0,
+    changed_represented: list[str] | None = None,
+    changed_missing: list[str] | None = None,
+    changed_stale_hash: list[str] | None = None,
+    issues: list[Any] | None = None,
+) -> dict[str, Any]:
+    issue_codes = {str(issue.code) for issue in (issues or [])}
+    unusable = bool(
+        any(issue.severity == "error" for issue in (issues or []))
+        or issue_codes & GRAPH_UNUSABLE_WARNING_CODES
+    )
+    refresh_instruction = ""
+    if unusable or not db_present:
+        refresh_instruction = (
+            "Refresh with official code-review-graph update/watch tooling before "
+            "claiming graph impact; do not use graph output for semantic truth."
+        )
+    return {
+        "authority_status": "derived_graph_health_not_authority",
+        "db": {
+            "path": GRAPH_DB,
+            "present": db_present,
+            "tracked": db_tracked,
+            "ignore_guard_present": ignore_guard_present,
+        },
+        "branch": {
+            "current": current_branch,
+            "graph": graph_branch,
+            "matches": bool(current_branch and graph_branch and current_branch == graph_branch),
+        },
+        "head": {
+            "current": current_head,
+            "graph": graph_head,
+            "matches": bool(current_head and graph_head and current_head == graph_head),
+        },
+        "changed_file_coverage": {
+            "checked": changed_checked,
+            "represented": sorted(changed_represented or []),
+            "missing": sorted(changed_missing or []),
+            "stale_hash": sorted(changed_stale_hash or []),
+        },
+        "sidecar": graph_meta or {
+            "path": GRAPH_META,
+            "present": False,
+            "tracked": False,
+            "parity_status": "not_checked",
+        },
+        "usable_for_claims": not unusable and db_present,
+        "invalidates_claims": (
+            ["graph_impact_validated", "graph_review_order", "graph_test_selection"]
+            if unusable or not db_present
+            else []
+        ),
+        "refresh_instruction": refresh_instruction,
+    }
+
+
 def effective_changes(api: Any, changed_files: list[str] | None) -> dict[str, str]:
     try:
         return api._map_maintenance_changes(changed_files or [])
@@ -210,6 +277,14 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
             "parity_status": "not_checked",
         },
     }
+    db_tracked = graph_db_tracked(api)
+    ignore_guard = graph_ignore_guard_present(api)
+    details["graph_health"] = graph_health_card(
+        db_present=db_path.exists(),
+        db_tracked=db_tracked,
+        ignore_guard_present=ignore_guard,
+        graph_meta=details["graph_meta"],
+    )
     if changed_files and include_appendix:
         details["appendix"] = build_graph_appendix(api, changed_files, task=None)
 
@@ -226,7 +301,7 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
             details=details,
         )
 
-    if not graph_db_tracked(api):
+    if not db_tracked:
         issues.append(
             api._issue(
                 "code_review_graph_untracked_db",
@@ -234,7 +309,7 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                 "graph.db is the tracked derived online-context artifact; stage it or rebuild before relying on online graph context",
             )
         )
-    if not graph_ignore_guard_present(api):
+    if not ignore_guard:
         issues.append(
             api._issue(
                 "code_review_graph_ignore_missing",
@@ -252,12 +327,22 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
     try:
         conn = open_graph_db(api)
     except sqlite3.Error as exc:
+        unreadable_issues = [
+            *issues,
+            api._warning("code_review_graph_unreadable", GRAPH_DB, f"could not read graph DB: {exc}"),
+        ]
+        details["graph_health"] = graph_health_card(
+            db_present=db_path.exists(),
+            db_tracked=db_tracked,
+            ignore_guard_present=ignore_guard,
+            current_branch=branch,
+            current_head=head,
+            graph_meta=details.get("graph_meta"),
+            issues=unreadable_issues,
+        )
         return api.StrictResult(
             ok=True,
-            issues=[
-                *issues,
-                api._warning("code_review_graph_unreadable", GRAPH_DB, f"could not read graph DB: {exc}"),
-            ],
+            issues=unreadable_issues,
             details=details,
         )
 
@@ -278,6 +363,10 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
         )
         graph_head = meta.get("git_head_sha", "")
         graph_branch = meta.get("git_branch", "")
+        changed_checked = 0
+        changed_represented: list[str] = []
+        changed_missing: list[str] = []
+        changed_stale_hash: list[str] = []
         if head and graph_head and graph_head != head:
             issues.append(
                 api._warning(
@@ -329,9 +418,11 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
             file_path = api.ROOT / rel_path
             if not file_path.exists() or not file_path.is_file():
                 continue
+            changed_checked += 1
             abs_path = file_path.resolve().as_posix()
             stored_hash = graph_file_hash(conn, abs_path)
             if not stored_hash:
+                changed_missing.append(rel_path)
                 issues.append(
                     api._warning(
                         "code_review_graph_partial_coverage",
@@ -342,6 +433,7 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                 continue
             current_hash = sha256_file(file_path)
             if current_hash != stored_hash:
+                changed_stale_hash.append(rel_path)
                 issues.append(
                     api._warning(
                         "code_review_graph_dirty_file_stale",
@@ -349,9 +441,26 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
                         "changed code file hash differs from graph DB; update graph before relying on code-impact evidence",
                     )
                 )
+            else:
+                changed_represented.append(rel_path)
     finally:
         conn.close()
 
+    details["graph_health"] = graph_health_card(
+        db_present=db_path.exists(),
+        db_tracked=db_tracked,
+        ignore_guard_present=ignore_guard,
+        current_branch=branch,
+        graph_branch=details.get("git_branch", ""),
+        current_head=head,
+        graph_head=details.get("git_head_sha", ""),
+        graph_meta=details.get("graph_meta"),
+        changed_checked=changed_checked,
+        changed_represented=changed_represented,
+        changed_missing=changed_missing,
+        changed_stale_hash=changed_stale_hash,
+        issues=issues,
+    )
     blocking = [issue for issue in issues if issue.severity == "error"]
     return api.StrictResult(ok=not blocking, issues=issues, details=details)
 

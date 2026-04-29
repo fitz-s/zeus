@@ -1867,6 +1867,23 @@ def build_runtime_packet(
         role_context = build_context_pack(role, task=task, files=target_files, task_class=task_class)
 
     route_card = navigation.get("route_card") or {}
+    dispatch_guidance = {
+        "authority_status": "generated_dispatch_guidance_not_authority",
+        "default_mode": "solo",
+        "parallelism_rule": (
+            "Use subagents only for independent bounded tasks when explicitly "
+            "authorized by the user or when OMX team runtime is active."
+        ),
+        "role_prompt_shape": [
+            "authority reads and topology command",
+            "single task objective",
+            "owned files and non-goals",
+            "invariants that must not move",
+            "required verification and rollback note",
+            "preserve unrelated dirty work",
+        ],
+        "team_threshold": "consider team mode only for four or more independent lanes with shared verification",
+    }
     return {
         "ok": navigation["ok"],
         "authority_status": "generated_runtime_packet_not_authority",
@@ -1877,6 +1894,7 @@ def build_runtime_packet(
         "claim_evaluation": navigation.get("claim_evaluation", {}),
         "semantic_bootstrap": semantic_bootstrap,
         "role_context": role_context,
+        "dispatch_guidance": dispatch_guidance,
         "gate_budget": route_card.get("gate_budget"),
         "artifact_treatment_hints": [
             "keep scratch analysis out of authority surfaces",

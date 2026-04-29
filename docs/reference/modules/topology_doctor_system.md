@@ -63,6 +63,9 @@ bounded impact summary without pretending every file is source.
 - Use `repair_kind: add_registry_row` when a tracked file lacks its owning registry row.
 - Use `repair_kind: update_companion` when a file change requires a scoped AGENTS, registry, or map update.
 - Use `repair_kind: refresh_graph` only for graph freshness/coverage debt; do not use it for semantic proof.
+- Read `code_review_graph_status.details.graph_health` to see which graph
+  freshness/coverage facts invalidate graph claims; it is generated health
+  context, not semantic authority.
 - Use `repair_kind: propose_owner_manifest` when ownership is ambiguous and P3/P4-level planning is required.
 - Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` before edits and `closeout` with changed files before closure.
 - Use `--route-card-only` for quick orientation and `--claim <claim_id>` when
@@ -70,7 +73,8 @@ bounded impact summary without pretending every file is source.
   closeout, or live authorization evidence.
 - Use `python3 scripts/topology_doctor.py runtime ...` when a caller needs the
   composed agent-runtime packet: route card, optional semantic boot, optional
-  role context, claims, gate budget, and artifact-treatment hints.
+  role context, claims, dispatch guidance, gate budget, and artifact-treatment
+  hints.
 - Use role context packs (`explorer`, `executor`, `critic`, `verifier`) when the
   next agent needs a bounded runtime contract rather than the full packet.
 

@@ -26,6 +26,9 @@ Graph usage has two stages. Stage 1 is semantic boot: identify task class, autho
 - Graph edges do not determine settlement semantics, source truth, calibration identity, or lifecycle legality.
 - Textual extracts must be bounded; the binary graph is not a default human-readable context source.
 - P4 graph appendices are capped at 2 KB and carry `graph_freshness`, limitations, changed nodes, likely tests, impacted files, and missing coverage.
+- Graph status includes a generated health card with DB tracking, branch/head
+  parity, changed-file coverage, sidecar parity, claim invalidation, and refresh
+  instruction fields.
 - `requires_graph_evidence` stays `false` on existing context-pack profiles; stale or missing graph is advisory unless a future profile explicitly opts in.
 - Closeout may pass with stale graph when the packet does not claim graph
   impact and does not directly change graph artifacts. Passing
