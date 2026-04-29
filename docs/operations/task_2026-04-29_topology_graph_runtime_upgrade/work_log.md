@@ -61,12 +61,38 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
 - Implemented a P7 `runtime` subcommand that composes route card, semantic
   boot, optional role context, claim evaluation, gate budget, and artifact
   treatment hints without duplicating underlying logic.
+- After committing the first implementation batch as `1bd7be6`, rechecked
+  remaining phases. `plan-pre5` remained checked out in the original worktree
+  with unrelated dirty work, so direct merge into that worktree was not safe.
+- Implemented the remaining P4 rehearsal gap for T4/live side-effect claims:
+  `live_side_effect_authorized` now blocks without explicit operator evidence.
+- Implemented P6 graph health cards:
+  - graph status reports DB tracking, ignore guard, branch/head parity,
+    changed-file coverage, sidecar parity, claim invalidation, and refresh
+    instructions
+  - graph health remains generated derived context, not semantic authority
+  - unreadable graph DB status now marks graph claims unusable in the health
+    card instead of returning an optimistic derived status
+- Confirmed P8 skill/work-ethic policy as generated role context:
+  explorer/executor/critic/verifier packs carry work ethic, anti-bureaucracy,
+  workflow policy, and skill-use boundaries while preserving generated-not-
+  authority status.
+- Implemented P9 dispatch guidance in runtime packets:
+  - default mode remains solo
+  - subagents are only guidance for explicitly authorized independent lanes or
+    active OMX team runtime
+  - prompt-shape guidance is generated context, not authority
 - Verification:
   - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'route_card or typed_intent or invalid_typed or runtime_claim or graph_claim or graph_impact_claim or closeout_without_graph_claim or closeout_graph_claim or cli_json_parity_for_closeout or navigation_route_card_only or navigation'` -> 26 passed, 272 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'impact or context_pack or module_book or module_manifest'` -> 23 passed, 238 deselected
   - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest'` -> 128 passed, 171 deselected
   - `python -m pytest -q tests/test_topology_doctor.py -k 'runtime_command or runtime_route_card_only or route_card or runtime_claim or impact'` -> 15 passed, 248 deselected
   - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command'` -> 130 passed, 171 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'code_review_graph_status or graph_health or graph_claim or live_side_effect or runtime_claim or route_card'` -> 16 passed, 248 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'context_pack or role_context or graph_health or live_side_effect or code_review_graph_status'` -> 18 passed, 247 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'graph_health or code_review_graph_status'` -> 6 passed, 260 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'runtime_command or dispatch_guidance or role_context or context_pack'` -> 13 passed, 252 deselected
+  - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command or dispatch_guidance or graph_health or live_side_effect'` -> 133 passed, 171 deselected
   - `python scripts/digest_profiles_export.py --check` -> ok
   - `python scripts/topology_doctor.py --schema --json` -> ok true
   - `python scripts/topology_doctor.py --context-packs --json` -> ok true
@@ -74,4 +100,5 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - `python scripts/topology_doctor.py runtime --task "agent runtime executor packet" --files scripts/topology_doctor_cli.py --intent "topology graph agent runtime upgrade" --task-class agent_runtime --write-intent edit --role executor --json` -> ok true
   - `python scripts/topology_doctor.py --navigation ... --intent "topology graph agent runtime upgrade"` -> ok true
   - `python scripts/topology_doctor.py closeout ... --json` -> ok true, risk_tier T3
+  - `python scripts/topology_doctor.py --schema/--context-packs/--task-boot-profiles/runtime/--navigation/--change-receipts/--work-record/--map-maintenance closeout/closeout` after P4/P6/P8/P9 -> all ok true
   - `git diff --check` -> clean

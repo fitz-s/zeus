@@ -405,6 +405,8 @@ Rollback:
 
 ## Phase P4: Rehearsal Eval Harness
 
+Status: implemented on this branch as focused regression/rehearsal tests.
+
 Goal:
 
 - prove the runtime improves real agent behavior instead of just adding fields.
@@ -499,6 +501,9 @@ Anti-bureaucracy guardrail:
 
 ## Phase P6: Graph Freshness And Sidecar Integration
 
+Status: implemented on this branch for generated graph health cards and
+claim-scoped invalidation.
+
 Goal:
 
 - make graph useful when healthy and harmless when stale.
@@ -583,6 +588,9 @@ Anti-bureaucracy guardrail:
 
 ## Phase P8: Skills / Work Ethic Engineering
 
+Status: implemented on this branch through generated role context pack policy
+and regression coverage.
+
 Goal:
 
 - make skill usage and work ethic runtime-visible without turning them into
@@ -632,6 +640,9 @@ Anti-bureaucracy guardrail:
   require it.
 
 ## Phase P9: Multi-Agent Dispatch Integration
+
+Status: implemented on this branch as generated runtime dispatch guidance that
+does not auto-trigger subagents.
 
 Goal:
 
