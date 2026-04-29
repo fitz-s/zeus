@@ -1617,6 +1617,14 @@ files:
     - DERIVED_ONLY
     downstream:
     - scripts/calibration_observation_weekly.py
+  src/state/learning_loop_observation.py:
+    zone: K2_runtime
+    authority_role: derived_learning_loop_state_projection
+    why: "K1-compliant read-only settlement→pair→retrain pipeline state projection per bucket_key. Reads list_active_platt_models_v2 + list_active_platt_models_legacy + list_recent_retrain_versions (LEARNING_LOOP BATCH 1 read-side addition to retrain_trigger.py) + retrain_trigger.status() (process-level env+filesystem) + get_pairs_count + get_decision_group_count from src/calibration/store.py. Returns per-bucket snapshot covering 4 pipeline stages: calibration-pair (n_pairs_total/verified/canonical + n_decision_groups), retrain (status, attempts/passes/fails in window, last attempted/promoted, days_since_last_promotion), active model (fitted_at + n_samples), provenance (bucket_key, source v2|legacy, temperature_metric/cluster/season/data_version/input_space). LEARNING_LOOP packet BATCH 1 per round3_verdict.md §1 #2 (FIFTH and FINAL edge packet) + ULTIMATE_PLAN.md §4 #4. PATH A per-bucket-key snapshot chosen by operator GO_BATCH_1; PATH B settlement-event JOIN attribution deferred. LEARNING_LOOP_TRIGGERING (would modify retrain_trigger.py arm/trigger paths) EXPLICITLY OUT-OF-SCOPE per dispatch — separate operator-authorized packet. HONEST DISCLOSURE in module docstring: prior CALIBRATION_HARDENING packet BATCH 3 boot misread the substrate by claiming 'no append-only Platt history table' — calibration_params_versions exists at retrain_trigger.py:242-264 schema and IS append-only (autoincrement version_id, promoted_at + retired_at lifecycle, INSERT on every retrain attempt, UPDATE only sets retired_at). LOW-CITATION-CALIBRATION-3-1 cycle-29 sustained discipline lesson reinforced. Imports consolidated to top per LOW-CAVEAT-EO-2-1."
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - scripts/learning_loop_observation_weekly.py
   src/state/truth_files.py:
     zone: K2_runtime
     authority_role: truth_file_helpers

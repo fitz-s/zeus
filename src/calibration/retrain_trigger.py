@@ -505,3 +505,95 @@ def trigger_retrain(
         version_id=version_id,
         message=replay.message,
     )
+
+
+# =====================================================================
+# LEARNING_LOOP packet — BATCH 1 read-only listing function
+# =====================================================================
+# Per round3_verdict.md §1 #2 (FIFTH and FINAL edge packet) + ULTIMATE_PLAN.md §4 #4
+# (settlement-corpus → calibration update → parameter-drift → re-fit pipeline).
+# PATH A measurement-only framing per LEARNING_LOOP boot §2 BATCH 1 + GO_BATCH_1
+# §1 ACCEPT-DEFAULT.
+#
+# K1 contract: pure SELECT, no INSERT/UPDATE/DELETE, no JSON persistence.
+# Sibling-coherent with CALIBRATION_HARDENING BATCH 1 canonical-read additions
+# (list_active_platt_models_v2 / list_active_platt_models_legacy in store.py).
+# Critic-harness 30th cycle should pay particular attention to this surface
+# since src/calibration/retrain_trigger.py is HIGH per src/calibration/AGENTS.md
+# L19 (operator-gated retrain promotion seam — live calibration promotion
+# control file). The read function below is purely additive: no impact on
+# arm() / trigger_retrain() / _insert_version() / _ensure_versions_table()
+# / load_confirmed_corpus() control flow.
+
+
+def list_recent_retrain_versions(
+    conn: sqlite3.Connection,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """List recent calibration_params_versions rows in fitted_at-DESC order.
+
+    K1-compliant pure-SELECT lister. Read-side counterpart to the writer-side
+    INSERT at trigger_retrain (L368-391) + UPDATE at L443-464 (retired_at).
+    Returns one dict per row covering both PASSED (promoted) and FAILED
+    (drift-detected, blocked from promotion) retrain attempts so operators
+    can audit the full retrain history.
+
+    Args:
+        conn: open sqlite3 connection to a Zeus state DB.
+        limit: max rows to return (most recent first by fitted_at).
+            Default 100 (sibling-coherent with WP/CALIBRATION sample-window
+            rationale: enough history for ~3-month trend without unbounded
+            scan).
+
+    Returns:
+        list of dicts ordered by fitted_at DESC. Each dict carries the full
+        calibration_params_versions row shape suitable for JSON
+        serialization. Empty list when no retrain attempts exist (typical
+        on a fresh DB OR when the calibration_params_versions table has not
+        yet been created — _ensure_versions_table is called lazily inside
+        trigger_retrain, so the table only materializes on first retrain
+        attempt; pre-first-retrain DBs are graceful empty).
+
+    Used by src.state.learning_loop_observation.compute_learning_loop_state_per_bucket
+    (LEARNING_LOOP BATCH 1) to enumerate per-bucket retrain trajectory
+    without re-traversing the canonical surface row-by-row at upper layers.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT version_id, fitted_at, corpus_filter_json, params_json,
+                   fit_loss_metric, confirmed_trade_count, frozen_replay_status,
+                   frozen_replay_evidence_hash, promoted_at, retired_at,
+                   operator_token_hash, temperature_metric, cluster, season,
+                   data_version, input_space
+            FROM calibration_params_versions
+            ORDER BY fitted_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Pre-first-retrain DB without calibration_params_versions table —
+        # mirrors store.py:list_active_platt_models_v2 graceful-empty posture.
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({
+            "version_id": row["version_id"],
+            "fitted_at": row["fitted_at"],
+            "corpus_filter_json": row["corpus_filter_json"],
+            "params_json": row["params_json"],
+            "fit_loss_metric": row["fit_loss_metric"],
+            "confirmed_trade_count": row["confirmed_trade_count"],
+            "frozen_replay_status": row["frozen_replay_status"],
+            "frozen_replay_evidence_hash": row["frozen_replay_evidence_hash"],
+            "promoted_at": row["promoted_at"],
+            "retired_at": row["retired_at"],
+            "operator_token_hash": row["operator_token_hash"],
+            "temperature_metric": row["temperature_metric"],
+            "cluster": row["cluster"],
+            "season": row["season"],
+            "data_version": row["data_version"],
+            "input_space": row["input_space"],
+        })
+    return out
