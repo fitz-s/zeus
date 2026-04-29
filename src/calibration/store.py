@@ -581,3 +581,127 @@ def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
         UPDATE platt_models SET is_active = 0
         WHERE bucket_key = ?
     """, (bucket_key,))
+
+
+# =====================================================================
+# CALIBRATION_HARDENING packet — BATCH 1 read-only listing functions
+# =====================================================================
+# Per round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md §4 #2
+# (Extended Platt parameter monitoring). PATH A bucket-snapshot framing per
+# CALIBRATION_HARDENING boot §1 KEY OPEN QUESTION #1 (PATH B decision-log
+# JOIN attribution deferred; PATH C writer extension out-of-scope per
+# dispatch).
+#
+# K1 contract: pure SELECT, no INSERT/UPDATE/DELETE, no JSON persistence.
+# Sibling-coherent with EO/AD canonical-read additions (
+# query_authoritative_settlement_rows precedent at src/state/db.py:3429).
+# Critic-harness 27th cycle should pay particular attention to this surface
+# since src/calibration/store.py is HIGH-MEDIUM per src/calibration/AGENTS.md
+# L18 (persistence module on the active routing path).
+
+
+def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
+    """List all currently-active platt_models_v2 rows.
+
+    K1-compliant pure-SELECT lister — counterpart to single-bucket
+    load_platt_model_v2 (L515). Returns one dict per (temperature_metric,
+    cluster, season, data_version, input_space) bucket where is_active=1
+    AND authority='VERIFIED'. Inactive + UNVERIFIED + QUARANTINED rows are
+    excluded so the result reflects only what the live evaluator would
+    actually consult via load_platt_model_v2.
+
+    Returns: list of dicts, each carrying the full v2 row shape for
+    parameter monitoring. Empty list when no active VERIFIED rows exist
+    (including when the platt_models_v2 table has not yet been created on
+    a pre-migration DB — the SELECT returns 0 rows in either case).
+
+    Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket
+    (CALIBRATION_HARDENING BATCH 1) to enumerate Platt parameter
+    trajectories without re-reading the canonical surface row-by-row.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT temperature_metric, cluster, season, data_version,
+                   input_space, model_key, param_A, param_B, param_C,
+                   bootstrap_params_json, n_samples, brier_insample,
+                   fitted_at, authority
+            FROM platt_models_v2
+            WHERE is_active = 1 AND authority = 'VERIFIED'
+            ORDER BY temperature_metric, cluster, season, fitted_at DESC
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Pre-migration DB without platt_models_v2 — same posture as
+        # _has_authority_column at L197 (graceful empty for missing table).
+        return []
+    out: list[dict] = []
+    for row in rows:
+        out.append({
+            "temperature_metric": row["temperature_metric"],
+            "cluster": row["cluster"],
+            "season": row["season"],
+            "data_version": row["data_version"],
+            "input_space": row["input_space"] or "raw_probability",
+            "model_key": row["model_key"],
+            "param_A": row["param_A"],
+            "param_B": row["param_B"],
+            "param_C": row["param_C"],
+            "bootstrap_params": json.loads(row["bootstrap_params_json"]),
+            "n_samples": row["n_samples"],
+            "brier_insample": row["brier_insample"],
+            "fitted_at": row["fitted_at"],
+            "authority": row["authority"],
+        })
+    return out
+
+
+def list_active_platt_models_legacy(conn: sqlite3.Connection) -> list[dict]:
+    """List all currently-active legacy platt_models rows.
+
+    K1-compliant pure-SELECT lister — counterpart to single-bucket
+    load_platt_model (L488). Returns one dict per bucket_key where
+    is_active=1 AND authority='VERIFIED'. Mirrors load_platt_model's read
+    filter (L497) so what shows up here is what the legacy lookup path
+    would actually serve.
+
+    The legacy table has NO temperature_metric column (per Phase 9C L3
+    convention "LOW has never existed in legacy" cited at get_pairs_for_bucket
+    L228), NO data_version, NO input_space-as-key. bucket_key is
+    `f"{cluster}_{season}"` per src/calibration/manager.py:73 (bucket_key
+    helper). Both legacy and v2 readers exist because manager.py's get_calibrator
+    falls back v2→legacy (L42-62 dedup pattern); both surfaces remain
+    observable to the operator until full cutover.
+
+    Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket
+    in conjunction with list_active_platt_models_v2 for full coverage.
+    Each result dict carries an explicit `source: 'legacy'` tag downstream.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT bucket_key, param_A, param_B, param_C,
+                   bootstrap_params_json, n_samples, brier_insample,
+                   fitted_at, input_space, authority
+            FROM platt_models
+            WHERE is_active = 1 AND authority = 'VERIFIED'
+            ORDER BY bucket_key, fitted_at DESC
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out: list[dict] = []
+    for row in rows:
+        out.append({
+            "bucket_key": row["bucket_key"],
+            "param_A": row["param_A"],
+            "param_B": row["param_B"],
+            "param_C": row["param_C"],
+            "bootstrap_params": json.loads(row["bootstrap_params_json"]),
+            "n_samples": row["n_samples"],
+            "brier_insample": row["brier_insample"],
+            "fitted_at": row["fitted_at"],
+            "input_space": row["input_space"] or "raw_probability",
+            "authority": row["authority"],
+        })
+    return out

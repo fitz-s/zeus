@@ -1609,6 +1609,14 @@ files:
     - DERIVED_ONLY
     downstream:
     - scripts/ws_poll_reaction_weekly.py
+  src/state/calibration_observation.py:
+    zone: K2_runtime
+    authority_role: derived_calibration_parameter_projection
+    why: "K1-compliant read-only Platt parameter projection per bucket_key. Reads list_active_platt_models_v2 + list_active_platt_models_legacy from src/calibration/store.py (BATCH 1 read-side additions; pure SELECT; is_active=1 + authority='VERIFIED' filter at source). Returns per-bucket snapshot with param_A/B/C, n_samples, brier_insample, fitted_at, sample_quality (10/30/100 sibling-coherent), bootstrap_count + per-coefficient std + p5/p95 percentile bands (DBS-CI tightness signal WITHOUT tuning per dispatch §NOT-IN-SCOPE on α-fusion + DBS-CI), in_window flag, source: v2|legacy. CALIBRATION_HARDENING packet BATCH 1 per round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md §4 #2. PATH A per-bucket-key snapshot chosen by operator GO_BATCH_1; PATH B decision-log JOIN attribution deferred as future enhancement; PATH C writer-side strategy_key column EXPLICITLY OUT-OF-SCOPE per dispatch ('ANY mutation of platt_models[_v2] tables'). KNOWN LIMITATIONS in module docstring: dispatch's '(city, target_date, strategy_key)' framing is the EVALUATION-TIME identity; persistence is BUCKET-KEYED only (platt_models bucket_key = f'{cluster}_{season}'; platt_models_v2 model_key = f'{temp_metric}:{cluster}:{season}:{data_version}:{input_space}'). drift.py exists at src/calibration/drift.py with HL χ² FORECAST-CALIBRATION drift — parametrically different from BATCH 2 detect_parameter_drift (PARAMETER-TRAJECTORY drift over consecutive refits). Both legacy + v2 surfaces visible with explicit source tag (mirrors manager.py L42-62 v2-then-legacy fallback dedup). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1."
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - scripts/calibration_observation_weekly.py
   src/state/truth_files.py:
     zone: K2_runtime
     authority_role: truth_file_helpers
