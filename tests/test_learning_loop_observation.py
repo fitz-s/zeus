@@ -417,3 +417,174 @@ def test_days_since_unparseable_returns_none():
     assert _days_since(None, end) is None
     assert _days_since("not-a-timestamp", end) is None
     assert _days_since("2026-04-22T00:00:00+00:00", end) in (7, 8)
+
+
+# ===========================================================================
+# BATCH 2 tests — detect_learning_loop_stall (3 composable stall_kinds)
+# ===========================================================================
+# Mirror EO/WP/CALIBRATION BATCH 2 ratio-test test pattern + GO_BATCH_2
+# §Tests spec. 7 tests covering all 3 stall_kinds, composite, steady,
+# insufficient per kind, severity boundaries.
+
+from typing import Any  # noqa: E402
+
+from src.state.learning_loop_observation import (  # noqa: E402
+    CRITICAL_DAYS_DRIFT_NO_REFIT,
+    CRITICAL_DAYS_PAIRS_READY_NO_RETRAIN,
+    CRITICAL_PAIR_GROWTH_RATIO_CUTOFF,
+    DEFAULT_DAYS_DRIFT_NO_REFIT,
+    DEFAULT_DAYS_PAIRS_READY_NO_RETRAIN,
+    DEFAULT_PAIR_GROWTH_THRESHOLD_MULTIPLIER,
+    DEFAULT_STALL_MIN_WINDOWS,
+    ParameterStallVerdict,
+    detect_learning_loop_stall,
+)
+
+
+def _stall_history(
+    *,
+    pair_counts: list[int],
+    days_since_last_promotion: int | None = 5,
+    sample_quality: str = "high",
+) -> list[dict[str, Any]]:
+    """Build per-window stall-detector history list."""
+    return [
+        {
+            "n_pairs_canonical": pc,
+            "days_since_last_promotion": days_since_last_promotion,
+            "sample_quality": sample_quality,
+        }
+        for pc in pair_counts
+    ]
+
+
+def test_stall_corpus_vs_pair_lag_synthetic():
+    """RELATIONSHIP: pair growth ratio drops to 0.1 (way below 1/1.5=0.67)
+    → corpus_vs_pair_lag fires + critical severity (ratio < 1/(2.0*1.5)=0.33)."""
+    # Trailing growths: 10, 10, 10 (mean 10). Current growth: 1. Ratio: 0.1.
+    hist = _stall_history(pair_counts=[0, 10, 20, 30, 31])
+    v = detect_learning_loop_stall(hist, "b", drift_detected=False)
+    assert v.kind == "stall_detected"
+    assert "corpus_vs_pair_lag" in v.stall_kinds
+    assert v.severity == "critical"  # ratio 0.1 < 1/(2*1.5)=0.333
+    ev = v.evidence["per_kind"]["corpus_vs_pair_lag"]
+    assert ev["status"] == "fired"
+    assert ev["ratio"] == pytest.approx(0.1, abs=0.001)
+
+
+def test_stall_pairs_ready_no_retrain_synthetic():
+    """RELATIONSHIP: 40 days_since_last_promotion (> 30 default) +
+    sample_quality='high' → pairs_ready_no_retrain fires."""
+    hist = _stall_history(pair_counts=[100, 100, 100, 100, 100],
+                           days_since_last_promotion=40,
+                           sample_quality="high")
+    v = detect_learning_loop_stall(hist, "b", drift_detected=False)
+    assert v.kind == "stall_detected"
+    assert "pairs_ready_no_retrain" in v.stall_kinds
+    assert v.severity == "warn"  # 40 < 60 critical
+    ev = v.evidence["per_kind"]["pairs_ready_no_retrain"]
+    assert ev["status"] == "fired"
+    assert ev["current_days_since_last_promotion"] == 40
+
+
+def test_stall_drift_no_refit_synthetic():
+    """RELATIONSHIP: drift_detected=True + 20 days_since_last_promotion (>14)
+    → drift_no_refit fires."""
+    hist = _stall_history(pair_counts=[100, 100, 100, 100, 100],
+                           days_since_last_promotion=20,
+                           sample_quality="high")
+    v = detect_learning_loop_stall(hist, "b", drift_detected=True)
+    assert v.kind == "stall_detected"
+    assert "drift_no_refit" in v.stall_kinds
+    assert v.severity == "warn"  # 20 < 30 critical
+    ev = v.evidence["per_kind"]["drift_no_refit"]
+    assert ev["status"] == "fired"
+    assert ev["drift_detected"] is True
+
+
+def test_stall_multi_kind_composite():
+    """RELATIONSHIP: multi-kind composite — corpus_vs_pair_lag (ratio 0.1)
+    + pairs_ready_no_retrain (70 days > 60 critical) + drift_no_refit fire
+    simultaneously → 3 stall_kinds; severity critical (multiple breaches)."""
+    hist = _stall_history(pair_counts=[0, 10, 20, 30, 31],
+                           days_since_last_promotion=70,
+                           sample_quality="high")
+    v = detect_learning_loop_stall(hist, "b", drift_detected=True)
+    assert v.kind == "stall_detected"
+    assert set(v.stall_kinds) >= {"corpus_vs_pair_lag", "pairs_ready_no_retrain", "drift_no_refit"}
+    assert v.severity == "critical"
+
+
+def test_stall_steady_history_within_normal():
+    """RELATIONSHIP: steady pair growth (10/window), low days, no drift
+    → no kind fires → within_normal."""
+    hist = _stall_history(pair_counts=[0, 10, 20, 30, 40],
+                           days_since_last_promotion=5,
+                           sample_quality="high")
+    v = detect_learning_loop_stall(hist, "b", drift_detected=False)
+    assert v.kind == "within_normal"
+    assert v.stall_kinds == []
+    assert v.severity is None
+
+
+def test_stall_insufficient_data_per_kind():
+    """RELATIONSHIP: insufficient_data graceful per kind.
+    Empty history + drift_detected=None + sample_quality=insufficient
+    → all 3 insufficient → kind=insufficient_data overall.
+    """
+    # Empty: all 3 insufficient
+    v = detect_learning_loop_stall([], "b", drift_detected=None)
+    assert v.kind == "insufficient_data"
+    assert v.stall_kinds == []
+
+    # n<min_windows + sample_quality=insufficient + drift_detected=None
+    # → all 3 insufficient
+    hist = _stall_history(pair_counts=[5, 5], sample_quality="insufficient")
+    v = detect_learning_loop_stall(hist, "b", drift_detected=None)
+    assert v.kind == "insufficient_data"
+    assert v.evidence["per_kind"]["corpus_vs_pair_lag"]["status"] == "insufficient_data"
+    assert v.evidence["per_kind"]["pairs_ready_no_retrain"]["status"] == "insufficient_data"
+    assert v.evidence["per_kind"]["drift_no_refit"]["status"] == "insufficient_data"
+
+
+def test_stall_severity_boundaries_critical_thresholds():
+    """RELATIONSHIP: critical-severity boundaries pinned at exactly:
+    - corpus ratio < 1/(2.0*1.5) = 0.333 → critical
+    - pairs_ready days > 60 → critical
+    - drift_no_refit days > 30 → critical
+    Sibling-coherent boundary-test pattern (LOW-CAVEAT-EO-2-2 lesson).
+    """
+    # Boundary 1: pairs_ready days exactly 60 → warn (NOT critical; >, not >=).
+    hist60 = _stall_history(pair_counts=[100, 100, 100, 100, 100],
+                            days_since_last_promotion=60,
+                            sample_quality="high")
+    v = detect_learning_loop_stall(hist60, "b", drift_detected=False)
+    assert v.kind == "stall_detected"
+    assert v.severity == "warn"  # 60 NOT > 60
+
+    # Boundary 1+epsilon: 61 → critical
+    hist61 = _stall_history(pair_counts=[100, 100, 100, 100, 100],
+                             days_since_last_promotion=61,
+                             sample_quality="high")
+    v = detect_learning_loop_stall(hist61, "b", drift_detected=False)
+    assert v.severity == "critical"
+
+    # Boundary 2: drift_no_refit days exactly 30 → warn (NOT critical).
+    hist_drift_30 = _stall_history(pair_counts=[100, 100, 100, 100, 100],
+                                     days_since_last_promotion=30,
+                                     sample_quality="high")
+    v = detect_learning_loop_stall(hist_drift_30, "b", drift_detected=True)
+    assert v.kind == "stall_detected"
+    # drift_no_refit fires (>14 days) but stays warn (NOT >30).
+    # pairs_ready_no_retrain doesn't fire (30 NOT > 30).
+    assert "drift_no_refit" in v.stall_kinds
+    assert v.severity == "warn"
+
+    # Default constants pinned (sibling-coherent with WP/CALIBRATION).
+    assert DEFAULT_PAIR_GROWTH_THRESHOLD_MULTIPLIER == 1.5
+    assert DEFAULT_DAYS_PAIRS_READY_NO_RETRAIN == 30
+    assert DEFAULT_DAYS_DRIFT_NO_REFIT == 14
+    assert DEFAULT_STALL_MIN_WINDOWS == 4
+    assert CRITICAL_PAIR_GROWTH_RATIO_CUTOFF == 2.0
+    assert CRITICAL_DAYS_PAIRS_READY_NO_RETRAIN == 60
+    assert CRITICAL_DAYS_DRIFT_NO_REFIT == 30

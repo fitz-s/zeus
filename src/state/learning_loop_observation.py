@@ -109,8 +109,9 @@ Per-bucket snapshot fields (per BATCH 1 boot §2):
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from src.calibration.retrain_trigger import (
     RetrainStatus,
@@ -448,3 +449,398 @@ def compute_learning_loop_state_per_bucket(
         )
 
     return out
+
+
+# =====================================================================
+# LEARNING_LOOP packet — BATCH 2 detect_learning_loop_stall detector
+# =====================================================================
+# Per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md §4 #4 + GO_BATCH_2 dispatch.
+# Pure-Python statistical detector consuming the per-bucket pipeline-state
+# history from BATCH 1's compute_learning_loop_state_per_bucket. K1-compliant:
+# in-memory only; no DB writes; no caches; no cross-module DB reads
+# (drift_detected is caller-provided per GO_BATCH_2 §3 ACCEPT-DEFAULT).
+#
+# 3 composable stall_kinds (each can fire independently; verdict aggregates):
+#
+# 1. corpus_vs_pair_lag — pair growth in current window << trailing baseline.
+#    ratio = current_pair_growth / trailing_mean_pair_growth
+#    Stall fires if ratio < 1/pair_growth_threshold_multiplier (e.g. 0.67x
+#    = growth dropped to less than 1/1.5 of trailing mean).
+#    insufficient if n_windows < min_windows OR trailing_std<=0.
+#
+# 2. pairs_ready_no_retrain — canonical_pairs_ready=TRUE for > N consecutive
+#    days WITHOUT new entry in calibration_params_versions for this bucket.
+#    Stall fires if max(consecutive_ready_days_no_retrain) >
+#    days_pairs_ready_no_retrain.
+#    insufficient if no canonical_pairs_ready TRUE in window (haven't
+#    reached readiness yet).
+#
+# 3. drift_no_refit — drift_detected (caller-provided) for > N consecutive
+#    days WITHOUT new entry in calibration_params_versions.
+#    Stall fires if drift_detected AND days_since_last_promotion >
+#    days_drift_no_refit.
+#    insufficient if drift_detected==None (caller didn't pass it).
+#
+# Severity (per GO_BATCH_2 §Severity):
+#   - 'warn' if ANY stall_kind fires (default)
+#   - 'critical' if ANY of:
+#       (a) corpus_vs_pair_lag with ratio < 1/(2x multiplier)
+#       (b) pairs_ready_no_retrain with days > 60
+#       (c) drift_no_refit with days > 30
+#
+# Sibling-coherence with prior detectors:
+# - EO BATCH 2 detect_alpha_decay: ratio test on edge series
+# - WP BATCH 2 detect_reaction_gap: ratio test on p95 latency
+# - CALIBRATION BATCH 2 detect_parameter_drift: per-coefficient ratio test
+# - LEARNING BATCH 2 detect_learning_loop_stall: 3 composable stall_kinds
+#   (precedent for multi-kind composable detector design)
+
+StallKind = Literal["stall_detected", "within_normal", "insufficient_data"]
+StallSeverity = Literal["warn", "critical"]
+
+# Default thresholds (per GO_BATCH_2 §5 ACCEPT-DEFAULTS).
+DEFAULT_PAIR_GROWTH_THRESHOLD_MULTIPLIER: float = 1.5
+DEFAULT_DAYS_PAIRS_READY_NO_RETRAIN: int = 30
+DEFAULT_DAYS_DRIFT_NO_REFIT: int = 14
+DEFAULT_STALL_MIN_WINDOWS: int = 4
+
+# Critical-severity boundaries (per GO_BATCH_2 §Severity):
+CRITICAL_PAIR_GROWTH_RATIO_CUTOFF: float = 2.0  # ratio < 1/(2.0*multiplier)
+CRITICAL_DAYS_PAIRS_READY_NO_RETRAIN: int = 60
+CRITICAL_DAYS_DRIFT_NO_REFIT: int = 30
+
+
+@dataclass
+class ParameterStallVerdict:
+    """Result of detect_learning_loop_stall for one bucket_key.
+
+    kind:
+      - stall_detected: at least one stall_kind fires
+      - within_normal: no stall_kind fires AND at least one was checkable
+      - insufficient_data: no stall_kind was checkable (all 3 returned
+        insufficient)
+
+    stall_kinds: list[str] subset of
+      ["corpus_vs_pair_lag", "pairs_ready_no_retrain", "drift_no_refit"]
+      ordered by detection order; empty when kind != "stall_detected"
+
+    severity (only set when kind == "stall_detected"):
+      - "warn": at least one stall_kind fires (default)
+      - "critical": at least one critical boundary breached (per
+        CRITICAL_* constants above)
+
+    evidence carries per-kind details (current_value + trailing_baseline +
+    threshold + verdict_per_kind) so operators see WHY each stall_kind
+    fired or didn't (sibling-coherent with WP BATCH 2 multi-axis +
+    CALIBRATION BATCH 2 per-coefficient surfacing pattern).
+    """
+    kind: StallKind
+    bucket_key: str
+    stall_kinds: list[str] = field(default_factory=list)
+    severity: StallSeverity | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+def _check_corpus_vs_pair_lag(
+    history: list[dict[str, Any]],
+    *,
+    multiplier: float,
+    min_windows: int,
+) -> dict[str, Any]:
+    """Check stall_kind 1: pair growth ratio vs trailing baseline.
+
+    history entries must carry 'n_pairs_canonical' (per-window snapshot from
+    BATCH 1). Returns dict with verdict per kind:
+      - status: 'fired' | 'within_normal' | 'insufficient_data'
+      - current_growth, trailing_mean_growth, ratio
+      - reason (when insufficient)
+    """
+    n = len(history)
+    if n < min_windows:
+        return {
+            "status": "insufficient_data",
+            "reason": "n_windows_below_min",
+            "n_windows": n,
+            "min_required": min_windows,
+        }
+    # Compute per-window pair growth (delta vs prior window).
+    pair_counts = [int(w.get("n_pairs_canonical", 0) or 0) for w in history]
+    growths = [pair_counts[i] - pair_counts[i - 1] for i in range(1, n)]
+    if len(growths) < min_windows - 1:
+        return {
+            "status": "insufficient_data",
+            "reason": "insufficient_growth_deltas",
+            "n_growths": len(growths),
+        }
+    current_growth = float(growths[-1])
+    trailing = [float(g) for g in growths[:-1]]
+    trailing_mean = sum(trailing) / len(trailing)
+    if trailing_mean <= 0:
+        return {
+            "status": "insufficient_data",
+            "reason": "trailing_mean_growth_non_positive",
+            "trailing_mean_growth": trailing_mean,
+            "current_growth": current_growth,
+        }
+    ratio = current_growth / trailing_mean
+    threshold_min = 1.0 / multiplier  # e.g. 1/1.5 = 0.667
+    evidence = {
+        "current_growth": current_growth,
+        "trailing_mean_growth": trailing_mean,
+        "ratio": ratio,
+        "threshold_min": threshold_min,
+        "multiplier": multiplier,
+    }
+    if ratio < threshold_min:
+        evidence["status"] = "fired"
+        return evidence
+    evidence["status"] = "within_normal"
+    return evidence
+
+
+def _check_pairs_ready_no_retrain(
+    history: list[dict[str, Any]],
+    *,
+    days_threshold: int,
+) -> dict[str, Any]:
+    """Check stall_kind 2: canonical pairs ready but no retrain.
+
+    history entries must carry 'days_since_last_promotion' AND
+    'n_pairs_canonical' (or 'sample_quality' >= 'adequate'). The latest
+    window's days_since_last_promotion drives the check.
+    """
+    if not history:
+        return {
+            "status": "insufficient_data",
+            "reason": "empty_history",
+        }
+    current = history[-1]
+    days_since = current.get("days_since_last_promotion")
+    n_canonical = int(current.get("n_pairs_canonical", 0) or 0)
+    sample_quality = current.get("sample_quality", "insufficient")
+
+    # Insufficient if no readiness signal yet (no canonical pairs OR
+    # never-promoted bucket — days_since_last_promotion is None).
+    if sample_quality == "insufficient":
+        return {
+            "status": "insufficient_data",
+            "reason": "current_window_pairs_insufficient",
+            "n_pairs_canonical": n_canonical,
+            "sample_quality": sample_quality,
+        }
+    if days_since is None:
+        # Never promoted — but pairs are canonical-ready. This IS a stall
+        # signal: data exists but no retrain has ever fired.
+        # Use days_threshold * 2 as a proxy (operator-empathetic; never-
+        # promoted is more concerning than "stale promotion").
+        return {
+            "status": "fired",
+            "current_days_since_last_promotion": None,
+            "n_pairs_canonical": n_canonical,
+            "sample_quality": sample_quality,
+            "days_threshold": days_threshold,
+            "reason_detail": "never_promoted_with_canonical_pairs_ready",
+        }
+    days_int = int(days_since)
+    evidence = {
+        "current_days_since_last_promotion": days_int,
+        "n_pairs_canonical": n_canonical,
+        "sample_quality": sample_quality,
+        "days_threshold": days_threshold,
+    }
+    if days_int > days_threshold:
+        evidence["status"] = "fired"
+        return evidence
+    evidence["status"] = "within_normal"
+    return evidence
+
+
+def _check_drift_no_refit(
+    history: list[dict[str, Any]],
+    *,
+    days_threshold: int,
+    drift_detected: bool | None,
+) -> dict[str, Any]:
+    """Check stall_kind 3: drift detected but no refit.
+
+    drift_detected is caller-provided (BATCH 3 weekly runner orchestrates
+    the join with detect_parameter_drift output).
+    """
+    if drift_detected is None:
+        return {
+            "status": "insufficient_data",
+            "reason": "drift_detected_not_provided",
+            "days_threshold": days_threshold,
+        }
+    if not history:
+        return {
+            "status": "insufficient_data",
+            "reason": "empty_history",
+            "drift_detected": False,
+        }
+    current = history[-1]
+    days_since = current.get("days_since_last_promotion")
+    if not drift_detected:
+        return {
+            "status": "within_normal",
+            "drift_detected": False,
+            "current_days_since_last_promotion": days_since,
+            "days_threshold": days_threshold,
+        }
+    # drift_detected is True; now check days threshold
+    if days_since is None:
+        return {
+            "status": "fired",
+            "drift_detected": True,
+            "current_days_since_last_promotion": None,
+            "days_threshold": days_threshold,
+            "reason_detail": "drift_detected_never_promoted",
+        }
+    days_int = int(days_since)
+    evidence = {
+        "drift_detected": True,
+        "current_days_since_last_promotion": days_int,
+        "days_threshold": days_threshold,
+    }
+    if days_int > days_threshold:
+        evidence["status"] = "fired"
+        return evidence
+    evidence["status"] = "within_normal"
+    return evidence
+
+
+def _resolve_severity(
+    fired_kinds: list[str],
+    per_kind_evidence: dict[str, dict[str, Any]],
+    *,
+    multiplier: float,
+) -> StallSeverity:
+    """Resolve severity based on which kind(s) fired and per-kind details.
+
+    'critical' iff ANY of the GO_BATCH_2 §Severity boundaries are breached:
+      (a) corpus_vs_pair_lag with ratio < 1/(2.0 * multiplier)
+      (b) pairs_ready_no_retrain with days > CRITICAL_DAYS_PAIRS_READY_NO_RETRAIN (60)
+      (c) drift_no_refit with days > CRITICAL_DAYS_DRIFT_NO_REFIT (30)
+    Otherwise 'warn'.
+    """
+    critical_threshold_min = 1.0 / (CRITICAL_PAIR_GROWTH_RATIO_CUTOFF * multiplier)
+    if "corpus_vs_pair_lag" in fired_kinds:
+        ratio = per_kind_evidence.get("corpus_vs_pair_lag", {}).get("ratio", 1.0)
+        if ratio < critical_threshold_min:
+            return "critical"
+    if "pairs_ready_no_retrain" in fired_kinds:
+        ev = per_kind_evidence.get("pairs_ready_no_retrain", {})
+        days = ev.get("current_days_since_last_promotion")
+        if days is None or (isinstance(days, int) and days > CRITICAL_DAYS_PAIRS_READY_NO_RETRAIN):
+            return "critical"
+    if "drift_no_refit" in fired_kinds:
+        ev = per_kind_evidence.get("drift_no_refit", {})
+        days = ev.get("current_days_since_last_promotion")
+        if days is None or (isinstance(days, int) and days > CRITICAL_DAYS_DRIFT_NO_REFIT):
+            return "critical"
+    return "warn"
+
+
+def detect_learning_loop_stall(
+    history: list[dict[str, Any]],
+    bucket_key: str,
+    *,
+    pair_growth_threshold_multiplier: float = DEFAULT_PAIR_GROWTH_THRESHOLD_MULTIPLIER,
+    days_pairs_ready_no_retrain: int = DEFAULT_DAYS_PAIRS_READY_NO_RETRAIN,
+    days_drift_no_refit: int = DEFAULT_DAYS_DRIFT_NO_REFIT,
+    min_windows: int = DEFAULT_STALL_MIN_WINDOWS,
+    drift_detected: bool | None = None,
+) -> ParameterStallVerdict:
+    """Detect learning-loop stall via 3 composable stall_kinds.
+
+    Args:
+        history: chronological list of per-window pipeline-state snapshots
+            (each is one bucket's value from
+            compute_learning_loop_state_per_bucket re-run on shifted-back
+            end_date). MUST be in chronological order: history[0] = oldest,
+            history[-1] = current week. Each dict must carry
+            'n_pairs_canonical', 'days_since_last_promotion',
+            'sample_quality' fields.
+        bucket_key: the bucket this history belongs to.
+        pair_growth_threshold_multiplier: corpus_vs_pair_lag fires when
+            ratio < 1/multiplier. Default 1.5 (sibling-coherent with WP +
+            CALIBRATION 1.5 ratio precedent).
+        days_pairs_ready_no_retrain: pairs_ready_no_retrain fires when
+            consecutive ready days > this. Default 30.
+        days_drift_no_refit: drift_no_refit fires when drift detected AND
+            days > this. Default 14.
+        min_windows: min history length for corpus_vs_pair_lag check.
+            Default 4 (1 current + 3 trailing).
+        drift_detected: caller-provided (BATCH 3 weekly runner orchestrates
+            the join with calibration_observation.detect_parameter_drift
+            output). None means "not yet checked"; insufficient_data per kind.
+
+    Returns:
+        ParameterStallVerdict. See dataclass docstring for kind/severity.
+
+    Insufficient_data per kind: each stall_kind independently emits
+    'insufficient_data' status when its check can't run. The verdict's
+    overall kind is:
+      - 'stall_detected' if ANY kind fires
+      - 'within_normal' if NO kind fires AND at least one was checkable
+      - 'insufficient_data' if ALL 3 kinds returned insufficient
+    """
+    corpus_check = _check_corpus_vs_pair_lag(
+        history,
+        multiplier=pair_growth_threshold_multiplier,
+        min_windows=min_windows,
+    )
+    pairs_ready_check = _check_pairs_ready_no_retrain(
+        history, days_threshold=days_pairs_ready_no_retrain,
+    )
+    drift_check = _check_drift_no_refit(
+        history,
+        days_threshold=days_drift_no_refit,
+        drift_detected=drift_detected,
+    )
+
+    per_kind = {
+        "corpus_vs_pair_lag": corpus_check,
+        "pairs_ready_no_retrain": pairs_ready_check,
+        "drift_no_refit": drift_check,
+    }
+    fired_kinds: list[str] = []
+    for kind_name, ev in per_kind.items():
+        if ev.get("status") == "fired":
+            fired_kinds.append(kind_name)
+
+    evidence = {
+        "per_kind": per_kind,
+        "thresholds": {
+            "pair_growth_threshold_multiplier": pair_growth_threshold_multiplier,
+            "days_pairs_ready_no_retrain": days_pairs_ready_no_retrain,
+            "days_drift_no_refit": days_drift_no_refit,
+            "min_windows": min_windows,
+        },
+        "n_history_windows": len(history),
+    }
+
+    if fired_kinds:
+        severity = _resolve_severity(fired_kinds, per_kind,
+                                      multiplier=pair_growth_threshold_multiplier)
+        return ParameterStallVerdict(
+            kind="stall_detected",
+            bucket_key=bucket_key,
+            stall_kinds=fired_kinds,
+            severity=severity,
+            evidence=evidence,
+        )
+
+    # No kind fired. Check if at least one was checkable.
+    n_checkable = sum(1 for ev in per_kind.values() if ev.get("status") != "insufficient_data")
+    if n_checkable == 0:
+        return ParameterStallVerdict(
+            kind="insufficient_data",
+            bucket_key=bucket_key,
+            evidence=evidence,
+        )
+    return ParameterStallVerdict(
+        kind="within_normal",
+        bucket_key=bucket_key,
+        evidence=evidence,
+    )
