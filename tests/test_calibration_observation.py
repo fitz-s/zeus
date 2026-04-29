@@ -380,3 +380,196 @@ def test_summarize_bootstrap_empty():
         assert summary[f"bootstrap_{ch}_std"] is None
         assert summary[f"bootstrap_{ch}_p5"] is None
         assert summary[f"bootstrap_{ch}_p95"] is None
+
+
+# ===========================================================================
+# BATCH 2 tests — detect_parameter_drift ratio detector
+# ===========================================================================
+# Mirror EO BATCH 2 + WP BATCH 2 ratio-test test pattern. 11 tests covering
+# the cross-module relationship between BATCH 1's per-bucket snapshot dicts
+# (parameter_history list) and BATCH 2's ratio-test verdict (kind + severity
+# + per-coefficient evidence).
+
+from src.state.calibration_observation import (  # noqa: E402
+    DEFAULT_CRITICAL_RATIO_CUTOFF,
+    DEFAULT_DRIFT_MIN_WINDOWS,
+    DEFAULT_DRIFT_THRESHOLD_MULTIPLIER,
+    ParameterDriftVerdict,
+    _coefficient_ratio,
+    detect_parameter_drift,
+)
+
+
+def _hist(a_vals: list[float], b_vals: list[float] | None = None,
+          c_vals: list[float] | None = None) -> list[dict]:
+    """Build a parameter_history list from per-coefficient series.
+
+    Pads B/C to len(a_vals) with zeros when not provided. Last entry is
+    the current window per detect_parameter_drift contract.
+    """
+    n = len(a_vals)
+    b_vals = b_vals if b_vals is not None else [0.0] * n
+    c_vals = c_vals if c_vals is not None else [0.0] * n
+    return [
+        {"param_A": a_vals[i], "param_B": b_vals[i], "param_C": c_vals[i]}
+        for i in range(n)
+    ]
+
+
+def test_drift_insufficient_n_below_min_windows():
+    """RELATIONSHIP: n=3 < min_windows=4 → insufficient_data with reason
+    'n_windows_below_min'."""
+    v = detect_parameter_drift(_hist([1.0, 1.1, 1.2]), "b")
+    assert v.kind == "insufficient_data"
+    assert v.severity is None
+    assert v.evidence["reason"] == "n_windows_below_min"
+    assert v.evidence["n_windows"] == 3
+    assert v.evidence["min_required"] == 4
+
+
+def test_drift_insufficient_all_trailing_stds_non_positive():
+    """RELATIONSHIP: all 3 coefficients constant → trailing_std=0 for all
+    → insufficient_data with reason 'all_trailing_stds_non_positive'.
+    Defensive: prevents division-by-zero false drift_detected."""
+    v = detect_parameter_drift(_hist([1.0, 1.0, 1.0, 1.0]), "b")
+    assert v.kind == "insufficient_data"
+    assert v.evidence["reason"] == "all_trailing_stds_non_positive"
+
+
+def test_drift_within_normal_steady():
+    """RELATIONSHIP: when current == trailing_mean exactly (synthetic
+    steady-state), ratio==0 → within_normal."""
+    trailing = [1.00, 1.05, 1.10, 1.15, 1.20, 1.25]
+    a_vals = trailing + [sum(trailing) / len(trailing)]  # current == mean
+    v = detect_parameter_drift(_hist(a_vals), "b")
+    assert v.kind == "within_normal"
+    assert v.severity is None
+    assert v.evidence["param_A"]["ratio"] == 0.0
+
+
+def test_drift_detected_warn_severity():
+    """RELATIONSHIP: A ratio between multiplier (1.5) and critical_cutoff (2.0)
+    → drift_detected severity warn.
+
+    Setup: trailing = [1.0, 1.0, 1.05, 1.05] → mean=1.025, std=0.025.
+    current = mean + 1.7*std → ratio≈1.7 ∈ [1.5, 2.0).
+    """
+    trailing = [1.0, 1.0, 1.05, 1.05]
+    current = 1.025 + 1.7 * 0.025  # 1.0675
+    v = detect_parameter_drift(_hist(trailing + [current]), "b")
+    assert v.kind == "drift_detected"
+    assert v.severity == "warn"
+    assert "param_A" in v.evidence["drifting_coefficients"]
+    assert 1.5 < v.evidence["param_A"]["ratio"] < 2.0
+
+
+def test_drift_detected_critical_severity():
+    """RELATIONSHIP: A ratio >= critical_cutoff (2.0) → severity critical.
+
+    Setup: same trailing (mean=1.025, std=0.025); current = mean + 3*std.
+    """
+    trailing = [1.0, 1.0, 1.05, 1.05]
+    current = 1.025 + 3.0 * 0.025  # 1.10
+    v = detect_parameter_drift(_hist(trailing + [current]), "b")
+    assert v.kind == "drift_detected"
+    assert v.severity == "critical"
+    assert v.evidence["param_A"]["ratio"] >= 2.0
+
+
+def test_drift_threshold_boundary_at_multiplier_strict_greater_than():
+    """RELATIONSHIP: ratio == multiplier (1.5) is within_normal (strict >;
+    sibling-coherent with WP BATCH 2 boundary contract).
+    Pinned at exactly multiplier=1.5; 1.5+epsilon → drift; 1.5 → within_normal.
+
+    Setup: trailing = [1.0, 1.0, 1.04, 1.04]. mean=1.02, std=0.02.
+    current = 1.02 + 1.5*0.02 = 1.05 → ratio == 1.5 → within_normal.
+    """
+    trailing = [1.0, 1.0, 1.04, 1.04]
+    current_at = 1.02 + 1.5 * 0.02  # exactly 1.5*std above mean
+    v_at = detect_parameter_drift(_hist(trailing + [current_at]), "b")
+    assert v_at.kind == "within_normal", f"ratio == 1.5 must be within_normal; got {v_at}"
+
+    # 1.5 + epsilon → drift_detected (strict-greater-than fires).
+    current_above = 1.02 + 1.51 * 0.02
+    v_above = detect_parameter_drift(_hist(trailing + [current_above]), "b")
+    assert v_above.kind == "drift_detected"
+
+
+def test_drift_critical_cutoff_boundary_at_2x_inclusive():
+    """RELATIONSHIP: ratio >= critical_cutoff (2.0) IS critical (>=, NOT
+    strict >; sibling-coherent with WP BATCH 2 critical-tier contract).
+    Pinned at exactly 2.0.
+
+    Setup: trailing mean=1.025, std=0.025; current = mean + 2.0*std.
+    """
+    trailing = [1.0, 1.0, 1.05, 1.05]
+    current = 1.025 + 2.0 * 0.025  # exactly 2.0x std above mean
+    v = detect_parameter_drift(_hist(trailing + [current]), "b")
+    assert v.kind == "drift_detected"
+    assert v.severity == "critical"  # >= 2.0 fires critical
+    assert v.evidence["param_A"]["ratio"] == pytest.approx(2.0, abs=1e-9)
+
+
+def test_drift_per_coefficient_evidence_surfaces_all_three():
+    """RELATIONSHIP: when ONLY B drifts but A+C stay constant → drift_detected,
+    drifting_coefficients == ['param_B'], A+C ratios appear in evidence
+    with their own values (operator sees WHICH coefficient drifted —
+    sibling-coherent with WP BATCH 2 multi-axis surfacing pattern)."""
+    a_vals = [1.0, 1.0, 1.0, 1.0, 1.0]      # all constant → A_ratio None
+    b_trailing = [0.1, 0.1, 0.15, 0.15]     # mean=0.125, std=0.025
+    b_current = 0.125 + 3.0 * 0.025          # ratio = 3.0
+    b_vals = b_trailing + [b_current]
+    c_vals = [0.0, 0.0, 0.0, 0.0, 0.0]      # all constant → C_ratio None
+    v = detect_parameter_drift(_hist(a_vals, b_vals, c_vals), "b")
+    assert v.kind == "drift_detected"
+    assert v.severity == "critical"
+    assert v.evidence["drifting_coefficients"] == ["param_B"]
+    # A and C ratios are None (trailing_std == 0), but evidence surfaces them.
+    assert v.evidence["param_A"]["ratio"] is None
+    assert v.evidence["param_C"]["ratio"] is None
+    assert v.evidence["param_B"]["ratio"] == pytest.approx(3.0, abs=1e-9)
+
+
+def test_drift_per_call_threshold_override():
+    """RELATIONSHIP: passing tighter drift_threshold_multiplier flips a
+    borderline-ratio history from within_normal to drift_detected.
+    Pins per-call kwarg override mechanism (BATCH 3 will expose
+    --override-bucket CLI flag using this hook)."""
+    trailing = [1.0, 1.0, 1.05, 1.05]
+    current = 1.025 + 1.3 * 0.025  # ratio = 1.3
+    hist = _hist(trailing + [current])
+    # Default threshold 1.5 → 1.3 < 1.5 → within_normal
+    v_default = detect_parameter_drift(hist, "b")
+    assert v_default.kind == "within_normal"
+    # Tighter override 1.2 → 1.3 > 1.2 → drift_detected
+    v_tight = detect_parameter_drift(hist, "b", drift_threshold_multiplier=1.2)
+    assert v_tight.kind == "drift_detected"
+
+
+def test_coefficient_ratio_helper_unit():
+    """RELATIONSHIP unit: _coefficient_ratio computes (current, trailing_mean,
+    ratio) correctly + handles edge cases."""
+    # < 2 entries: all None
+    assert _coefficient_ratio([]) == (None, None, None)
+    assert _coefficient_ratio([1.0]) == (None, None, None)
+    # All trailing constant → ratio None
+    cur, mean, ratio = _coefficient_ratio([1.0, 1.0, 1.0, 5.0])
+    assert cur == 5.0
+    assert mean == 1.0
+    assert ratio is None  # trailing_std == 0
+    # Normal case: trailing [1, 2, 3], current 5
+    # trailing_mean = 2.0, trailing_std = sqrt(2/3) ≈ 0.8165 (population)
+    # ratio = |5 - 2| / 0.8165 ≈ 3.674
+    cur, mean, ratio = _coefficient_ratio([1.0, 2.0, 3.0, 5.0])
+    assert cur == 5.0
+    assert mean == 2.0
+    assert ratio == pytest.approx(3.0 / (2.0 / 3.0) ** 0.5, abs=1e-6)
+
+
+def test_drift_defaults_match_sibling_packets():
+    """RELATIONSHIP: BATCH 2 defaults are sibling-coherent with EO + WP
+    BATCH 2 (per GO_BATCH_2 §3 + §7 ACCEPT-DEFAULT). Pin them so a future
+    refactor that breaks coherence is caught."""
+    assert DEFAULT_DRIFT_THRESHOLD_MULTIPLIER == 1.5  # WP precedent
+    assert DEFAULT_CRITICAL_RATIO_CUTOFF == 2.0       # WP precedent
+    assert DEFAULT_DRIFT_MIN_WINDOWS == 4              # WP precedent
