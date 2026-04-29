@@ -19,6 +19,11 @@ machine manifests, tests, and executable source.
 - `zeus_data_and_replay_reference.md` for data/replay concepts
 - `zeus_failure_modes_reference.md` for failure-class reviews
 - `zeus_math_spec.md` when math fact/spec context matters
+- `zeus_calibration_weighting_authority.md` when working on calibration weight
+  schemes, Platt fit pipelines, or LOW-track training eligibility (binds the
+  binary→continuous training_allowed→precision_weight transition; per-city
+  opt-out for coastal/monsoon physics; forbids ΔT-magnitude weighting in
+  production)
 - `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
   book route
 - `modules/state.md`, `modules/engine.md`, `modules/data.md`,
@@ -54,6 +59,7 @@ which module reference matters.
 | `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay diagnostic status |
 | `zeus_failure_modes_reference.md` | Code-grounded failure modes with invariant anchors: settlement/rounding, probability chain, lifecycle/state, data ingestion, execution — each with exact failure mechanism, preventing contract, and code anchor |
 | `zeus_math_spec.md` | Deep math/specification reference; executable law and authority manifests win on disagreement |
+| `zeus_calibration_weighting_authority.md` | Mathematical authority for calibration weight semantics (LOW track binary→continuous, per-city eligibility, ΔT-magnitude forbidden in production); empirical basis PoC v4+v5 on 1.7M pairs |
 | `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |
 | `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |
