@@ -50,6 +50,11 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# LOW-OPERATIONAL-WP-3-1 fix: ensure `from src.state.X import ...` works when
+# this script is invoked as `python3 scripts/attribution_drift_weekly.py` from
+# any cwd, without requiring PYTHONPATH=. or `python -m scripts.X`.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "attribution_drift"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"
 DEFAULT_DRIFT_RATE_THRESHOLD = 0.05   # per boot §6 #3 + dispatch GO_BATCH_1 default 3
