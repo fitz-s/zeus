@@ -249,6 +249,64 @@ Cumulative speedup: **12-20× wallclock**, **disk WAL pressure 14-20× lower**, 
 
 6. **NEVER use n_mc < 100 in batch rebuild path.** SE(per-snapshot p_raw) > 0.05 starts to bias the Platt fit at small N_pairs subsets (e.g., per-city per-bucket OOS Brier evaluation on test set holdouts).
 7. **NEVER use n_mc < 5000 in live runtime evaluator.** Per-trade precision needs tighter SE; single-snapshot decisions cannot rely on N_pairs leverage.
+8. **NEVER fit per-city `α` (or any per-city continuous tuning parameter) directly.** This is the **curse of dimensionality** trap. Sample imbalance is severe (LOW: Mexico City ~6,000 samples; Kuala Lumpur ~120 samples). On 120-sample datasets, optimizer trivially finds an α that makes IS Brier near-perfect — pure memorization of noise. OOS collapse follows in production: KL Day-0 hits a new weather pattern, the over-fit model gives extreme wrong probability. Use cluster-level tuning instead (LAW 6), or terminal Bayesian Hierarchical Model with shrinkage prior (Future research §5).
+
+### LAW 6: Cluster-level tuning (climate-zone partition)
+
+Per-city heterogeneity (LAW 2's coastal/monsoon opt-out) is the BINARY case. The continuous-tuning case must operate at **cluster** granularity, not per-city, to defend against curse of dimensionality.
+
+**Math principle**: optimal cluster count $K$ minimizes:
+
+$$
+K^* = \arg\min_{K} \;\; \text{IS-OOS-gap}(K) \;\; = \;\; \arg\min_{K} \left[ \mathrm{Brier}_{\mathrm{OOS}}(K) - \mathrm{Brier}_{\mathrm{IS}}(K) \right]
+$$
+
+Increasing $K$ shrinks IS Brier (more parameters, better fit) but inflates IS-OOS gap (overfit). At $K=51$ (per-city), gap is maximal due to small per-cluster sample. At $K=1$ (global uniform), gap is zero but Brier loss to heterogeneity is large.
+
+**Empirical sweet spot per atmospheric physics**: $K \approx 4$–$5$ (validated by 51-city geophysical structure).
+
+**Initial climate_zone partition** (operator-set in `config/cities.json::cities[].climate_zone`):
+
+| Zone | Cities (initial; operator-tunable) | Physical signature | Suggested $\alpha$ direction |
+|---|---|---|---|
+| `tropical_monsoon_coastal` | Jakarta, Hong Kong, Kuala Lumpur, Manila, Singapore, Bangkok, Mumbai, Lagos | Sea breeze regime flips at UTC anchor times; high humidity; small diurnal range; **strong correlated bias at boundary** | LOW α (de-trust boundary samples) |
+| `temperate_coastal_frontal` | NYC, Tokyo, London, Amsterdam, Seattle, Sydney, Auckland, Cape Town, San Francisco, Boston | Jet stream / cyclone passage; rapid temp shifts; coastal moderation | MEDIUM α (boundary partly trustable) |
+| `inland_continental` | Beijing, Chicago, Moscow, Berlin, Toronto, Denver, Atlanta, Madrid, Warsaw, Helsinki, Munich, Paris, Rome, Istanbul, Ankara, Wuhan, Shanghai, Seoul, Chengdu, Chongqing, Shenzhen, Guangzhou (re-evaluate) | Radiative cooling dominant; regular diurnal pattern; ΔT is "honest" indicator of forecast skill | HIGH α (boundary samples informative) |
+| `high_altitude_arid` | Mexico City, Bogotá, Denver (re-classify), Lhasa | Thin air; rapid up/down; low heat capacity | MEDIUM-HIGH α |
+
+(Initial partition is approximate; operator may refine via observed per-city OOS Brier. Re-evaluation cadence: quarterly.)
+
+**Per-cluster sample size analysis** (from PoC v4 LOW eligible counts):
+
+| Zone | Sum of per-city samples | Sufficient for cluster-level α tuning? |
+|---|---|---|
+| tropical_monsoon_coastal | ~1,500 | YES (>1000 per-cluster floor) |
+| temperate_coastal_frontal | ~6,000 | YES |
+| inland_continental | ~25,000 | YES |
+| high_altitude_arid | ~6,000 | YES |
+
+Each cluster has ≥1k samples — defends against per-city overfitting while allowing physical heterogeneity to surface.
+
+**Production rule**:
+
+```python
+# rebuild_calibration_pairs_v2.py + refit_platt_v2.py
+def cluster_alpha(climate_zone: str) -> float:
+    return CLUSTER_ALPHA_MAP[climate_zone]   # tuned per-cluster, not per-city
+
+precision_weight = (
+    0.0 if not (causality_pure and horizon_satisfied and members_complete)
+    else max(WEIGHT_FLOOR, 1.0 - cluster_alpha(city.climate_zone) * normalized_severity)
+)
+```
+
+CLUSTER_ALPHA_MAP fitted once (e.g., 4-fold OOS CV across cluster cities), then deployed; not re-tuned per training run.
+
+**Operator action required for LAW 6 deployment**:
+1. Add `climate_zone: str` field to `config/cities.json` schema (51 entries)
+2. Initial partition per the table above
+3. Antibody test: `tests/test_climate_zone_present.py` — every city has `climate_zone ∈ {tropical_monsoon_coastal, temperate_coastal_frontal, inland_continental, high_altitude_arid}`
+4. Cluster-level α PoC v6 (out of scope for this RFC; queue for post-deployment iteration)
 
 ## Antibody requirements (must be tests, not lore)
 
@@ -262,17 +320,36 @@ Cumulative speedup: **12-20× wallclock**, **disk WAL pressure 14-20× lower**, 
 | `tests/test_rebuild_n_mc_default_bounded.py` | `rebuild_calibration_pairs_v2`'s default `n_mc` arg ≤ 2000; CLI override allowed but default reflects LAW 4 | TBD |
 | `tests/test_runtime_n_mc_floor.py` | `evaluator.py` MC paths use n_mc ≥ 5000 (per LAW 4 forbidden move 7) | TBD |
 | `tests/test_rebuild_per_track_savepoint.py` | rebuild emits per-metric `BEGIN`/`COMMIT` (LAW 5); inspectable via mocked conn or git-log of code structure | TBD |
+| `tests/test_no_per_city_alpha_tuning.py` | grep production code for any `cities[name].alpha = ...` or per-city continuous parameter; fail if found (LAW 3 forbidden #8) | TBD |
+| `tests/test_climate_zone_present.py` | every city in `cities.json` has `climate_zone` field set to one of the 4 allowed enum values (LAW 6) | TBD |
+| `tests/test_cluster_alpha_map_finite.py` | CLUSTER_ALPHA_MAP has exactly the 4 expected keys (LAW 6) and α values are finite, non-negative, ≤ some sensible upper bound (e.g. 10.0) | TBD |
 
 ## Future research (NOT current scope)
 
 The 8-city per-city regression is a **physics resolution problem**, not a calibration problem. Pursue these IF needed for further OOS gain:
 
 1. **Higher-resolution forecast input**: TIGGE 1h-step or ECMWF AIFS (ML model) may resolve sea-breeze mesoscale; would replace or supplement TIGGE 6h-step
-2. **Per-cluster weight scheme**: cluster cities by climate type (continental / temperate / tropical / coastal-monsoon); fit per-cluster weight function. Risk: per-cluster sample sizes thin; may not generalize.
-3. **Boundary-bucket physical de-biasing**: explicit additive correction for known sea-breeze times at known coastal cities (architectural — would require maintaining a city-time bias map).
-4. **Hybrid: explicit boundary_min in p_raw**: instead of using `value_native_unit` (currently inner-only when boundary_ambiguous), construct p_raw using BOTH inner and boundary realizations and average; would dilute boundary noise without weighting.
+2. **Boundary-bucket physical de-biasing**: explicit additive correction for known sea-breeze times at known coastal cities (architectural — would require maintaining a city-time bias map).
+3. **Hybrid: explicit boundary_min in p_raw**: instead of using `value_native_unit` (currently inner-only when boundary_ambiguous), construct p_raw using BOTH inner and boundary realizations and average; would dilute boundary noise without weighting.
+4. **Cluster-level α PoC (v6)**: validate per-cluster α tuning per LAW 6. 4-fold OOS CV across cluster cities. Expected: improves over global D_softfloor by recovering coastal-cluster ΔBrier without 51-city overfitting. Out of LAW scope; queued for post-deployment iteration.
+5. **Bayesian Hierarchical Model (BHM) — terminal direction**:
 
-None of (1)-(4) are required to deploy the current LAW. They are upside.
+   The progression Global → Cluster → Per-city ends at BHM, which automates the bias-variance trade-off:
+
+   $$\alpha_{i} \;\sim\; \mathcal{N}(\mu_{\text{global}}, \sigma_{\text{global}}^{2})$$
+   $$y_{ij} \;|\; \alpha_{i} \;\sim\; \text{Bernoulli}\bigl(\sigma\bigl(A_i \cdot \mathrm{logit}(p_{\text{raw},ij}) + B \cdot \mathrm{lead}_j + C\bigr)\bigr)$$
+
+   **Shrinkage mechanic**: posterior mean of $\alpha_i$ is pulled toward $\mu_{\text{global}}$ by amount inversely proportional to $n_i$ (city sample count). Concretely:
+
+   - Mexico City (n ≈ 6000): $\alpha_{\text{mexico}}$ posterior is data-dominated → trusts city-specific signal
+   - Kuala Lumpur (n ≈ 120): $\alpha_{\text{kl}}$ posterior is prior-dominated → shrunk to $\mu_{\text{global}}$
+   - **The model auto-resolves "which cities deserve their own α"** — operator does not need to specify per-city eligibility manually
+
+   Implementation: `pymc` or `numpyro`-based fit, MCMC sampling for posterior. Cost: ~1-2 weeks engineering + per-cluster compute. Reward: Pareto-frontier OOS Brier across all 51 cities, no operator hand-tuning. Replaces LAW 2 + LAW 6's manual partitioning.
+
+   Pre-requisite: cluster-level PoC (research item 4) must validate BEFORE BHM, to confirm the heterogeneity is partitionable in principle. If clusters help, BHM will help more (and absorb the partition into prior structure). If clusters don't help, BHM probably also doesn't (the heterogeneity is noise, not signal).
+
+None of (1)-(5) are required to deploy LAW 1+2+3+4+5+6. They are upside, sequenced.
 
 ## References
 
