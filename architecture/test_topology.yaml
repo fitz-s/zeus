@@ -141,6 +141,7 @@ test_trust_policy:
     tests/test_calibration_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_calibration_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_learning_loop_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
+    tests/test_learning_loop_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_supervisor_contracts.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-28"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
