@@ -131,6 +131,8 @@ def test_cli_json_parity_for_runtime_command():
         role="executor",
     )
     assert payload["role_context"]["pack_type"] == "executor"
+    assert payload["role_context"]["role_sections"]["route_card"]["intent"] == "topology graph agent runtime upgrade"
+    assert payload["role_context"]["role_sections"]["admission_status"] == "admitted"
     assert payload["semantic_bootstrap"]["task_class"] == "agent_runtime"
     assert payload["dispatch_guidance"]["authority_status"] == "generated_dispatch_guidance_not_authority"
     assert payload["dispatch_guidance"]["default_mode"] == "solo"
@@ -901,6 +903,32 @@ def test_docs_mode_rejects_unregistered_operation_task_folder(tmp_path, monkeypa
     current = root / "docs" / "operations" / "current_state.md"
     current.write_text(
         "- Primary packet file: `docs/operations/current_state.md`\n"
+        "- Active backlog:\n"
+        "- Active checklist/evidence:\n"
+        "- Next packet: none\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+
+    issues = topology_doctor._check_operations_task_folders({})
+
+    assert any(issue.code == "operations_task_unregistered" for issue in issues)
+
+
+def test_docs_mode_rejects_current_state_referenced_unregistered_operation_task_folder(tmp_path, monkeypatch):
+    root = tmp_path
+    task_dir = root / "docs" / "operations" / "task_2099-01-01_unlisted"
+    task_dir.mkdir(parents=True)
+    (task_dir / "work_log.md").write_text("Date: 2099-01-01\n", encoding="utf-8")
+    agents = root / "docs" / "operations" / "AGENTS.md"
+    agents.write_text(
+        "# docs/operations AGENTS\n\n## File registry\n\n| File | Purpose |\n|---|---|\n| `current_state.md` | pointer |\n",
+        encoding="utf-8",
+    )
+    current = root / "docs" / "operations" / "current_state.md"
+    current.write_text(
+        "- Primary packet file: `docs/operations/current_state.md`\n"
+        "- Active execution packet: `docs/operations/task_2099-01-01_unlisted/plan.md`\n"
         "- Active backlog:\n"
         "- Active checklist/evidence:\n"
         "- Next packet: none\n",
@@ -4565,6 +4593,62 @@ def test_live_side_effect_claim_blocks_without_operator_evidence(monkeypatch):
     assert "explicit operator-go" in payload["claims_blocked"][0]["reason"]
 
 
+def test_live_side_effect_claim_blocks_even_without_live_write_intent():
+    payload = topology_doctor.build_runtime_claim_evaluation(
+        ["live_side_effect_authorized"],
+        write_intent="edit",
+    )
+
+    assert payload["evaluated"] == []
+    assert payload["blocked"][0]["claim"] == "live_side_effect_authorized"
+    assert "explicit operator-go" in payload["blocked"][0]["reason"]
+
+
+def test_semantic_boot_claim_requires_bootstrap_evidence():
+    payload = topology_doctor.build_runtime_claim_evaluation(
+        ["semantic_boot_answered"],
+        task_class="agent_runtime",
+    )
+
+    assert payload["evaluated"] == []
+    assert payload["blocked"][0]["claim"] == "semantic_boot_answered"
+    assert "semantic bootstrap was not evaluated" in payload["blocked"][0]["reason"]
+
+
+def test_navigation_semantic_boot_claim_includes_bootstrap_when_answered(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation(
+        "agent runtime semantic boot proof",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+        claims=["semantic_boot_answered"],
+    )
+
+    assert payload["ok"] is True
+    assert payload["claims_evaluated"][0]["claim"] == "semantic_boot_answered"
+    assert payload["semantic_bootstrap"]["ok"] is True
+    assert payload["semantic_bootstrap"]["task_class"] == "agent_runtime"
+
+
 def test_navigation_route_card_only_human_output_skips_appendices(monkeypatch):
     payload = {
         "ok": True,
@@ -4673,14 +4757,26 @@ def test_runtime_route_card_keeps_t0_read_only_lightweight():
     assert "do not edit files" in digest["route_card"]["gate_budget"]["stop"]
 
 
+def test_runtime_route_card_treats_live_intent_without_files_as_t4():
+    digest = topology_doctor.build_digest(
+        "operator requested live apply",
+        [],
+        write_intent="live",
+    )
+
+    assert digest["route_card"]["risk_tier"] == "T4"
+    assert "explicit_operator_go" in digest["route_card"]["gate_budget"]["required"]
+
+
 def test_code_review_graph_status_declares_claim_scope():
     result = topology_doctor.run_code_review_graph_status(["scripts/topology_doctor_cli.py"])
 
     assert result.details["claim_scope"]["blocks_claims"] == [
-        "graph_impact",
+        "graph_impact_validated",
         "graph_review_order",
         "graph_test_selection",
     ]
+    assert result.details["claim_scope"]["aliases"]["graph_impact"] == "graph_impact_validated"
     assert "ordinary navigation" in result.details["claim_scope"]["does_not_block"]
 
 

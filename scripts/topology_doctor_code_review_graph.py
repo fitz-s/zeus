@@ -262,7 +262,8 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
         "graph_db": GRAPH_DB,
         "path_mode": "unknown",
         "claim_scope": {
-            "blocks_claims": ["graph_impact", "graph_review_order", "graph_test_selection"],
+            "blocks_claims": ["graph_impact_validated", "graph_review_order", "graph_test_selection"],
+            "aliases": {"graph_impact": "graph_impact_validated"},
             "does_not_block": [
                 "ordinary navigation",
                 "closeout without graph-impact claim",

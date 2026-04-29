@@ -119,3 +119,26 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - `python scripts/topology_doctor.py --schema/--context-packs/--task-boot-profiles/runtime/--navigation/--change-receipts/--work-record/--map-maintenance closeout/closeout` after P4/P6/P8/P9 -> all ok true
   - `python scripts/topology_doctor.py --schema/--context-packs/--task-boot-profiles/runtime/--navigation/--change-receipts/--work-record/--map-maintenance closeout/closeout` after P5/P10 -> all ok true
   - `git diff --check` -> clean
+
+## 2026-04-29 Post-Merge Critic/Review Follow-Up
+
+- Ran independent critic and code-review passes after merging into `plan-pre5`.
+- Fixed review findings:
+  - live/apply write intent now classifies as T4 even without file arguments
+  - `live_side_effect_authorized` now fails closed unless explicit operator-go
+    evidence is modeled and supplied
+  - `semantic_boot_answered` now requires an actual semantic bootstrap payload
+  - runtime role context packs inherit the top-level typed intent/write intent
+    and claims instead of recomputing a generic/advisory route
+  - operations task folders referenced by `current_state.md` still must be
+    registered in `docs/operations/AGENTS.md`
+  - graph claim scope now emits canonical `graph_impact_validated` with
+    `graph_impact` as an alias
+  - removed trailing blank line from `evidence/analysis_index.md`
+- Verification:
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'live_side_effect or runtime_route_card_treats_live_intent_without_files or runtime_route_card_keeps_t0'` -> 4 passed, 269 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'runtime_claim or live_side_effect or runtime_route_card or route_card or closeout_graph_claim or warning_lifecycle or graph_health or dispatch_guidance'` -> 13 passed, 260 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'live_side_effect or semantic_boot_claim or navigation_semantic_boot_claim or runtime_route_card_treats_live_intent_without_files or cli_json_parity_for_runtime_command or code_review_graph_status_declares_claim_scope or operation_task_folder'` -> 10 passed, 266 deselected
+  - `python -m pytest -q tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or runtime_claim or route_card or warning_lifecycle or migration_notes or issue_schema or operation_task_folder'` -> 80 passed, 196 deselected
+  - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command or dispatch_guidance or graph_health or live_side_effect or warning_lifecycle or warning_deferral or migration_notes or issue_schema or operation_task_folder or semantic_boot'` -> 168 passed, 161 deselected
+  - `git diff --check` -> clean

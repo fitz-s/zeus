@@ -28,4 +28,3 @@ Durable extraction targets:
 - `docs/reference/modules/code_review_graph.md`
 - `docs/reference/modules/closeout_and_receipts_system.md`
 - `docs/reference/modules/docs_system.md`
-

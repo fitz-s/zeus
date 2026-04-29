@@ -1169,7 +1169,17 @@ def role_context_sections(role: str, route_card: dict[str, Any], impact: dict[st
     return common
 
 
-def build_role_context_pack(api: Any, role: str, task: str, files: list[str], task_class: str | None = None) -> dict[str, Any]:
+def build_role_context_pack(
+    api: Any,
+    role: str,
+    task: str,
+    files: list[str],
+    task_class: str | None = None,
+    *,
+    intent: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
+) -> dict[str, Any]:
     profile = context_pack_profiles(api).get(role)
     if not profile:
         raise ValueError(f"missing context pack profile: {role}")
@@ -1180,9 +1190,10 @@ def build_role_context_pack(api: Any, role: str, task: str, files: list[str], ta
     digest = api.build_digest(
         task,
         changed_files,
-        intent=profile.get("digest_intent"),
+        intent=intent or profile.get("digest_intent"),
         task_class=task_class,
-        write_intent=profile.get("write_intent"),
+        write_intent=write_intent or profile.get("write_intent"),
+        claims=claims,
     )
     route_card = digest.get("route_card") or {}
     payload = {
@@ -1254,6 +1265,9 @@ def build_context_pack(
     task: str,
     files: list[str],
     task_class: str | None = None,
+    intent: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
 ) -> dict[str, Any]:
     selected = pack_type
     if pack_type == "auto":
@@ -1272,7 +1286,16 @@ def build_context_pack(
         payload["selected_by"] = {"requested": pack_type, "selected": selected}
         return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     if selected in ROLE_CONTEXT_PACKS:
-        payload = build_role_context_pack(api, selected, task, files, task_class=task_class)
+        payload = build_role_context_pack(
+            api,
+            selected,
+            task,
+            files,
+            task_class=task_class,
+            intent=intent,
+            write_intent=write_intent,
+            claims=claims,
+        )
         payload["selected_by"] = {"requested": pack_type, "selected": selected}
         return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     raise ValueError(f"unknown context pack type {pack_type!r}")

@@ -443,17 +443,12 @@ def check_operations_task_folders(api: Any, topology: dict[str, Any]) -> list[An
             or f"{rel}/" in registered
         )
         referenced = rel in current_text or f"{rel}/" in current_text or f"{rel}/plan.md" in current_text
-        if not registered_here and not referenced:
-            missing = []
-            if not registered_here:
-                missing.append("docs/operations/AGENTS.md")
-            if not referenced:
-                missing.append("docs/operations/current_state.md")
+        if not registered_here:
             issues.append(
                 api._issue(
                     "operations_task_unregistered",
                     rel,
-                    f"operation task folder is not registered/referenced by {', '.join(missing)}",
+                    "operation task folder is not registered by docs/operations/AGENTS.md",
                 )
             )
     return issues
