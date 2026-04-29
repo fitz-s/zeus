@@ -29,12 +29,21 @@ A closeout payload has three distinct concepts:
 - `claims_evaluated`, `claims_blocked`, and `claims_advisory`: claim-scoped
   gates requested with `--claim`; these can block the specific completion claim
   without making the same warning universal.
+- `warning_lifecycle`: packet-local receipt deferrals. An expired deferral is
+  promoted only when the same warning is still active in the matching changed
+  file scope or explicitly requested claim scope.
+- `migration_notes`: generated adoption guidance for the runtime path. Legacy
+  commands remain supported; deprecation warnings are not emitted until runtime
+  command usage is proven by two packet receipts.
 
 ## Hidden obligations
 
 - Missing work records and missing receipts are real closeout blockers for repo-changing work.
 - Planning-lock files need plan evidence before implementation closes.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
+- Warning deferrals must name an owner, an invalidation condition, and a bounded
+  date (`expires_at` or `deferred_until`). Open-ended “known issue” buckets are
+  not valid closeout evidence.
 - Global health must remain visible even when scoped closeout passes.
 - Graph freshness is warning-only unless the packet requests a graph-impact
   claim such as `--claim graph_impact_validated`.
@@ -50,6 +59,8 @@ A closeout payload has three distinct concepts:
 - A missing companion is treated as a warning even though changed-file law requires it.
 - A stale graph or unrelated global warning is treated as a universal closeout
   blocker even when no completion claim depends on it.
+- A warning deferral expires but the warning is unrelated to the changed files
+  or the requested claim; it should stay visible and not block the packet.
 
 ## Repair routes
 

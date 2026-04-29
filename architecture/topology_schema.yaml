@@ -42,6 +42,10 @@ issue_json_contract:
     companion_of: string
     maturity: string
     expires_at: string
+    lifecycle_state: string
+    lifecycle_owner: string
+    deferred_until: string
+    invalidation_condition: string
     confidence: string_or_number
     authority_status: string
     repair_hint: string
@@ -58,6 +62,13 @@ issue_json_contract:
       - stable
       - provisional
       - placeholder
+    lifecycle_state:
+      - new
+      - acknowledged
+      - deferred_until
+      - expires_at
+      - promoted_to_blocker
+      - retired
     authority_status:
       - authority
       - derived

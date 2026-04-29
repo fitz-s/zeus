@@ -83,6 +83,10 @@ class TopologyIssue:
     companion_of: str | None = None
     maturity: str | None = None
     expires_at: str | None = None
+    lifecycle_state: str | None = None
+    lifecycle_owner: str | None = None
+    deferred_until: str | None = None
+    invalidation_condition: str | None = None
     confidence: str | float | None = None
     authority_status: str | None = None
     repair_hint: str | None = None
@@ -100,6 +104,10 @@ ISSUE_TYPED_FIELDS = (
     "companion_of",
     "maturity",
     "expires_at",
+    "lifecycle_state",
+    "lifecycle_owner",
+    "deferred_until",
+    "invalidation_condition",
     "confidence",
     "authority_status",
     "repair_hint",
@@ -115,6 +123,14 @@ ISSUE_REPAIR_KINDS = {
 }
 ISSUE_MATURITY_VALUES = {"stable", "provisional", "placeholder"}
 ISSUE_AUTHORITY_STATUSES = {"authority", "derived", "evidence", "unknown"}
+ISSUE_LIFECYCLE_STATES = {
+    "new",
+    "acknowledged",
+    "deferred_until",
+    "expires_at",
+    "promoted_to_blocker",
+    "retired",
+}
 
 
 _NAVIGATION_MODE_POLICY = {
@@ -403,6 +419,10 @@ def _make_issue(
     companion_of: str | None = None,
     maturity: str | None = None,
     expires_at: str | None = None,
+    lifecycle_state: str | None = None,
+    lifecycle_owner: str | None = None,
+    deferred_until: str | None = None,
+    invalidation_condition: str | None = None,
     confidence: str | float | None = None,
     authority_status: str | None = None,
     repair_hint: str | None = None,
@@ -422,6 +442,10 @@ def _make_issue(
                 "companion_of": companion_of,
                 "maturity": maturity,
                 "expires_at": expires_at,
+                "lifecycle_state": lifecycle_state,
+                "lifecycle_owner": lifecycle_owner,
+                "deferred_until": deferred_until,
+                "invalidation_condition": invalidation_condition,
                 "confidence": confidence,
                 "authority_status": authority_status,
                 "repair_hint": repair_hint,
@@ -443,6 +467,10 @@ def _make_issue(
         companion_of=metadata.get("companion_of"),
         maturity=metadata.get("maturity"),
         expires_at=metadata.get("expires_at"),
+        lifecycle_state=metadata.get("lifecycle_state"),
+        lifecycle_owner=metadata.get("lifecycle_owner"),
+        deferred_until=metadata.get("deferred_until"),
+        invalidation_condition=metadata.get("invalidation_condition"),
         confidence=metadata.get("confidence"),
         authority_status=metadata.get("authority_status"),
         repair_hint=metadata.get("repair_hint"),

@@ -1977,6 +1977,25 @@ def test_issue_v2_emits_owner_manifest_when_present():
     assert "navigation" in payload["blocking_modes"]
 
 
+def test_issue_v2_emits_warning_lifecycle_metadata_when_present():
+    issue = topology_doctor.warning(
+        "code_review_graph_stale_head",
+        ".code-review-graph/graph.db",
+        "graph stale",
+        lifecycle_state="acknowledged",
+        lifecycle_owner="runtime-maintainer",
+        deferred_until="2026-05-01",
+        invalidation_condition="graph-impact claim requested",
+    )
+
+    payload = topology_doctor._issue_to_json(issue, "2")
+
+    assert payload["lifecycle_state"] == "acknowledged"
+    assert payload["lifecycle_owner"] == "runtime-maintainer"
+    assert payload["deferred_until"] == "2026-05-01"
+    assert payload["invalidation_condition"] == "graph-impact claim requested"
+
+
 def test_issue_factories_set_blocking_modes():
     advisory = topology_doctor.advisory("docs_registry_missing", "docs/a.md", "advisory")
     blocking = topology_doctor.blocking("script_manifest_missing", "scripts/a.py", "blocking")
@@ -2052,6 +2071,7 @@ def test_issue_schema_drift_guard():
     assert set(topology_doctor.topology_issue_field_names()) == expected
     assert set(schema["enums"]["repair_kind"]) == topology_doctor.ISSUE_REPAIR_KINDS
     assert set(schema["enums"]["maturity"]) == topology_doctor.ISSUE_MATURITY_VALUES
+    assert set(schema["enums"]["lifecycle_state"]) == topology_doctor.ISSUE_LIFECYCLE_STATES
     assert set(schema["enums"]["authority_status"]) == topology_doctor.ISSUE_AUTHORITY_STATUSES
     assert tuple(schema["enums"]["blocking_modes"]) == topology_doctor.ISSUE_BLOCKING_MODES
 
@@ -3831,6 +3851,159 @@ def test_closeout_changed_source_missing_rationale_still_blocks(monkeypatch):
     assert payload["ok"] is False
     assert payload["blocking_issues"][0]["lane"] == "source"
     assert payload["blocking_issues"][0]["code"] == "source_rationale_missing"
+
+
+def _patch_closeout_runtime_lanes(monkeypatch, changed_files, **overrides):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    monkeypatch.setattr(
+        topology_doctor,
+        "_map_maintenance_changes",
+        lambda files: {path: "modified" for path in changed_files},
+    )
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: overrides.get("code_review_graph", ok))
+    monkeypatch.setattr(topology_doctor, "run_docs", lambda: overrides.get("docs", ok))
+    monkeypatch.setattr(topology_doctor, "run_source", lambda: overrides.get("source", ok))
+    monkeypatch.setattr(topology_doctor, "run_tests", lambda: overrides.get("tests", ok))
+    monkeypatch.setattr(topology_doctor, "run_scripts", lambda: overrides.get("scripts", ok))
+    monkeypatch.setattr(topology_doctor, "run_data_rebuild", lambda: overrides.get("data_rebuild", ok))
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: overrides.get("context_budget", ok))
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+
+def test_closeout_promotes_expired_changed_file_warning_deferral(monkeypatch, tmp_path):
+    script_warning = topology_doctor.StrictResult(
+        ok=True,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="script_manifest_soft_drift",
+                path="scripts/topology_doctor.py",
+                message="script manifest warning",
+                severity="warning",
+            )
+        ],
+    )
+    _patch_closeout_runtime_lanes(monkeypatch, ["scripts/topology_doctor.py"], scripts=script_warning)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "warning_deferrals": [
+                    {
+                        "code": "script_manifest_soft_drift",
+                        "path": "scripts/topology_doctor.py",
+                        "scope": "changed_file",
+                        "owner": "runtime-maintainer",
+                        "invalidation_condition": "script warning still active",
+                        "expires_at": "2000-01-01",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = topology_doctor.run_closeout(
+        changed_files=["scripts/topology_doctor.py"],
+        receipt_path=str(receipt),
+        issue_schema_version="2",
+    )
+
+    assert payload["ok"] is False
+    promoted = payload["warning_lifecycle"]["expired_promotions"][0]
+    assert promoted["code"] == "warning_deferral_expired"
+    assert promoted["lifecycle_state"] == "promoted_to_blocker"
+    assert promoted["lifecycle_owner"] == "runtime-maintainer"
+    assert payload["blocking_issues"][0]["lane"] == "warning_lifecycle"
+
+
+def test_closeout_does_not_promote_expired_global_deferral_without_claim(monkeypatch, tmp_path):
+    docs_warning = topology_doctor.StrictResult(
+        ok=True,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="docs_global_warning",
+                path="docs/unrelated.md",
+                message="unrelated global warning",
+                severity="warning",
+            )
+        ],
+    )
+    _patch_closeout_runtime_lanes(monkeypatch, ["docs/README.md"], docs=docs_warning)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "warning_deferrals": [
+                    {
+                        "code": "docs_global_warning",
+                        "path": "docs/unrelated.md",
+                        "scope": "global",
+                        "owner": "docs-owner",
+                        "invalidation_condition": "repo-health-clean claim requested",
+                        "expires_at": "2000-01-01",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["docs/README.md"], receipt_path=str(receipt))
+
+    assert payload["ok"] is True
+    assert payload["warning_lifecycle"]["expired_promotions"] == []
+    assert payload["global_health"]["docs"]["warning_count"] == 1
+
+
+def test_closeout_rejects_open_ended_warning_deferral(monkeypatch, tmp_path):
+    _patch_closeout_runtime_lanes(monkeypatch, ["scripts/topology_doctor.py"])
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "warning_deferrals": [
+                    {
+                        "code": "script_manifest_soft_drift",
+                        "path": "scripts/topology_doctor.py",
+                        "scope": "changed_file",
+                        "owner": "",
+                        "invalidation_condition": "",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["scripts/topology_doctor.py"], receipt_path=str(receipt))
+
+    assert payload["ok"] is False
+    assert payload["warning_lifecycle"]["invalid_deferrals"][0]["index"] == 0
+    assert payload["blocking_issues"][0]["code"] == "warning_deferral_invalid"
+
+
+def test_closeout_includes_runtime_migration_notes_without_deprecation_warning(monkeypatch):
+    _patch_closeout_runtime_lanes(monkeypatch, ["scripts/topology_doctor.py"])
+
+    payload = topology_doctor.run_closeout(changed_files=["scripts/topology_doctor.py"])
+
+    notes = payload["migration_notes"]
+    assert "topology_doctor.py runtime" in notes["runtime_path_first"]
+    assert "--navigation" in notes["legacy_commands_supported"]
+    assert "do not emit deprecation warnings" in notes["deprecation_policy"]
+    assert notes["default_read_docs"] == "no new default-read docs are required for normal future tasks"
+    assert "deprecation_warning" not in payload
 
 
 def test_closeout_synthetic_global_issue_stays_in_global_health(monkeypatch):

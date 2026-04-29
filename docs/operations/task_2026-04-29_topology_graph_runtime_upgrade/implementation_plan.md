@@ -458,6 +458,9 @@ Anti-bureaucracy guardrail:
 
 ## Phase P5: Warning Lifecycle
 
+Status: implemented on this branch for packet-local warning deferrals, scoped
+expiry promotion, and typed lifecycle metadata.
+
 Goal:
 
 - prevent warnings from becoming permanent noise or accidental blockers.
@@ -683,6 +686,9 @@ Anti-bureaucracy guardrail:
 - parallelism is an optimization, not a compliance requirement.
 
 ## Phase P10: Adoption And Deprecation
+
+Status: implemented on this branch as generated migration notes and
+runtime-path-first module guidance, without emitting deprecation warnings.
 
 Goal:
 
