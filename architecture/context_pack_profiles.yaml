@@ -101,3 +101,139 @@ profiles:
       - "Did the failure cross a source_rationale downstream boundary?"
       - "Which provisional relation gap must be read before changing code?"
       - "Which green check proves the fix without broad context loading?"
+
+  - id: explorer
+    purpose: >
+      Read-only scout packet for mapping files, routes, and open questions
+      without granting edit authority.
+    authority_status: generated_explorer_packet_not_authority
+    requires_graph_evidence: false
+    write_intent: read_only
+    trigger_terms: [explore, scout, map, inspect, orient]
+    output_sections:
+      - route_card
+      - inspect_first
+      - do_not_edit
+      - expand_context_if
+      - module_context
+      - coverage_gaps
+      - graph_appendix
+      - context_assumption
+    lore_policy:
+      direct_evidence: "Use only file-pattern lore needed to decide where to read next."
+      broad_relevant: "Task-term lore remains optional until a concrete failure mode appears."
+      expanded_available: "Read full lore only when it changes routing or stop conditions."
+    runtime_guidance:
+      work_ethic: "Map before judging; do not edit or summarize beyond evidence."
+      anti_bureaucracy: "Stop at the smallest route card that makes the next read obvious."
+    workflow_policy:
+      first_action: "read routed files and scoped AGENTS only"
+      handoff: "return files, blockers, and unknowns; do not propose broad rewrites"
+    skill_policy:
+      use_skills_when: "a named workflow or repository-specific skill directly matches the task"
+      avoid_skills_when: "the task is a simple file/symbol lookup"
+    review_questions:
+      - "What files must the next role inspect first?"
+      - "Which scope boundary would make this no longer read-only?"
+      - "Which evidence is missing versus merely stale?"
+
+  - id: executor
+    purpose: >
+      Implementation packet for admitted files, required gates, and minimal
+      runtime evidence.
+    authority_status: generated_executor_packet_not_authority
+    requires_graph_evidence: false
+    write_intent: edit
+    trigger_terms: [execute, implement, patch, change, refactor]
+    output_sections:
+      - route_card
+      - change_boundary
+      - required_gates
+      - tests_required
+      - static_checks
+      - module_context
+      - context_assumption
+    lore_policy:
+      direct_evidence: "Load lore tied to changed files and required tests."
+      broad_relevant: "Use task-term lore to choose tests, not to widen scope."
+      expanded_available: "Expand only when a failing gate points at the lore."
+    runtime_guidance:
+      work_ethic: "Make the smallest reversible change that satisfies the packet."
+      anti_bureaucracy: "Add process only when a test or runtime claim consumes it."
+    workflow_policy:
+      first_action: "verify admission, then edit only admitted files"
+      handoff: "record changed files, gates run, and residual risks"
+    skill_policy:
+      use_skills_when: "the skill supplies required repo workflow or external docs"
+      avoid_skills_when: "it only creates ceremony around a local code change"
+    review_questions:
+      - "Are all edits within the route card boundary?"
+      - "Which tests prove the behavior rather than existence?"
+      - "What rollback is needed?"
+
+  - id: critic
+    purpose: >
+      Independent review packet for attacking scope, authority, behavior, tests,
+      and artifact lifecycle.
+    authority_status: generated_critic_packet_not_authority
+    requires_graph_evidence: false
+    write_intent: read_only
+    trigger_terms: [critic, review, challenge, verify plan]
+    output_sections:
+      - route_card
+      - attack_surface
+      - review_order
+      - proof_claims_touched
+      - coverage_gaps
+      - graph_appendix
+      - context_assumption
+    lore_policy:
+      direct_evidence: "Use high-severity lore for changed files by default."
+      broad_relevant: "Use task-term lore to form attack questions."
+      expanded_available: "Read full lore when it could flip APPROVE/REVISE/BLOCK."
+    runtime_guidance:
+      work_ethic: "Try to falsify the completion claim before accepting it."
+      anti_bureaucracy: "Block claims, not unrelated work, unless authority is at risk."
+    workflow_policy:
+      first_action: "compare changed files to admission and packet non-goals"
+      handoff: "return APPROVE, REVISE, or BLOCK with exact blockers"
+    skill_policy:
+      use_skills_when: "review scope needs a specialized workflow"
+      avoid_skills_when: "manual file review is enough"
+    review_questions:
+      - "Did the change create a parallel authority surface?"
+      - "Does any failing stale check actually invalidate the claim?"
+      - "Are tests relationship-grade?"
+
+  - id: verifier
+    purpose: >
+      Closeout packet for checking claims, gates, receipts, and residual risk
+      without reopening implementation scope.
+    authority_status: generated_verifier_packet_not_authority
+    requires_graph_evidence: false
+    write_intent: read_only
+    trigger_terms: [verify, closeout, receipt, evidence]
+    output_sections:
+      - route_card
+      - completion_claims
+      - evidence_required
+      - route_health
+      - repo_health
+      - context_assumption
+    lore_policy:
+      direct_evidence: "Use lore only when a completion claim touches the failure mode."
+      broad_relevant: "Do not expand lore for green unrelated lanes."
+      expanded_available: "Read full lore only to explain a residual risk."
+    runtime_guidance:
+      work_ethic: "Verify the exact claim and report gaps plainly."
+      anti_bureaucracy: "Do not require graph or full-repo cleanliness for claims that do not depend on them."
+    workflow_policy:
+      first_action: "list completion claims and map each to evidence"
+      handoff: "return evidence, failures, and residual risks"
+    skill_policy:
+      use_skills_when: "a named verifier/check workflow exists for the changed surface"
+      avoid_skills_when: "the required proof is a local command already listed"
+    review_questions:
+      - "Which completion claims are actually proven?"
+      - "Which warnings are residual risk rather than blockers?"
+      - "Can the next agent resume from the receipt?"

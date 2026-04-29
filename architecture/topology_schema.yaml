@@ -121,6 +121,84 @@ admission_envelope:
       tool). It MUST NOT be used as write authorization. Authorization is
       governed by admission.status alone.
 
+agent_runtime_contract:
+  purpose: >
+    Generated topology output should behave like agent runtime UX: short route
+    cards first, appendices only when useful, and blockers scoped to the claim
+    they invalidate. This section documents output shape; it is not a separate
+    authority plane.
+  typed_runtime_inputs:
+    intent: optional digest profile id; overrides free-text profile scoring but never bypasses admission
+    task_class: optional semantic boot task class for proof questions and fatal misread routing
+    write_intent: optional runtime intent such as read_only, edit, apply, live, or production
+    claims: optional completion claims; claim-scoped gates may block only the claim they invalidate
+  route_card_required_fields:
+    - schema_version
+    - authority_status
+    - mode
+    - task
+    - profile
+    - intent
+    - task_class
+    - write_intent
+    - admission_status
+    - risk_tier
+    - gate_budget
+    - next_action
+    - admitted_files
+    - out_of_scope_files
+    - forbidden_hits
+    - hard_stops
+    - claims
+    - expansion_hints
+    - claim_scope
+  risk_tiers:
+    T0: read-only orientation or exploration
+    T1: narrow docs, tests, or tool-local edits
+    T2: source or cross-module behavioral edits
+    T3: architecture, governance, schema, or runtime-tooling edits
+    T4: live side effects or production data mutation
+  claim_scoped_blocking:
+    graph: stale or missing graph blocks graph-impact claims, not semantic/source authority or ordinary closeout
+    repo_health: unrelated repo-health drift is summarized unless strict/global health is the claim
+    admission: non-admitted files block editing because admission.status is the write-authority signal
+  claim_contract:
+    admission_valid:
+      depends_on:
+        - admission
+      required_gates:
+        - navigation_admission
+    semantic_boot_answered:
+      depends_on:
+        - semantic_bootstrap
+      required_gates:
+        - semantic_bootstrap
+    graph_impact_validated:
+      depends_on:
+        - code_review_graph
+      required_gates:
+        - code_review_graph_status
+    repo_health_clean:
+      depends_on:
+        - global_health
+      required_gates:
+        - strict_or_global_health
+    packet_closeout_complete:
+      depends_on:
+        - closeout
+      required_gates:
+        - planning_lock
+        - work_record
+        - change_receipts
+        - map_maintenance
+    live_side_effect_authorized:
+      depends_on:
+        - operator_authority
+      required_gates:
+        - explicit_operator_go
+        - dry_run
+        - apply_guard
+
 ownership:
   maturity_values:
     - stable

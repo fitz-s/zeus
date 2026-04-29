@@ -19,6 +19,7 @@ from typing import Any
 def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--strict", action="store_true", help="Run strict topology checks")
+    parser.add_argument("--schema", action="store_true", help="Run topology schema checks only")
     parser.add_argument("--global-health", action="store_true", help="Alias for --strict full-repo health checks")
     parser.add_argument("--docs", action="store_true", help="Run Packet 3 docs-mesh checks")
     parser.add_argument("--source", action="store_true", help="Run Packet 4 source-rationale checks")
@@ -58,6 +59,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         help="Map-maintenance severity mode",
     )
     parser.add_argument("--navigation", action="store_true", help="Run default navigation health and task digest")
+    parser.add_argument("--route-card-only", action="store_true", help="With --navigation, emit only the first-screen route card")
     parser.add_argument("--strict-health", action="store_true", help="Make --navigation fail on any repo-health error")
     parser.add_argument(
         "--issues-scope",
@@ -89,13 +91,32 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument("--task", default="", help="Task string for --navigation")
     parser.add_argument("--files", nargs="*", default=[], help="Files for --navigation")
+    parser.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
+    parser.add_argument("--task-class", default=None, help="Typed semantic boot task class")
+    parser.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    parser.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate; repeat for multiple claims")
     parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
 
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
     digest.add_argument("--task", required=True)
     digest.add_argument("--files", nargs="*", default=[])
+    digest.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
+    digest.add_argument("--task-class", default=None, help="Typed semantic boot task class")
+    digest.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    digest.add_argument("--claim", action="append", default=[], help="Runtime completion claim to include in the route card")
     digest.add_argument("--json", action="store_true", help="Emit JSON")
+
+    runtime = sub.add_parser("runtime", help="Emit composed agent runtime packet")
+    runtime.add_argument("--task", required=True, help="Task statement")
+    runtime.add_argument("--files", nargs="*", default=[], help="Files in scope")
+    runtime.add_argument("--intent", default=None, help="Typed digest profile id")
+    runtime.add_argument("--task-class", default=None, help="Typed semantic boot task class")
+    runtime.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    runtime.add_argument("--role", choices=["explorer", "executor", "critic", "verifier"], default=None, help="Optional role context pack")
+    runtime.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate")
+    runtime.add_argument("--route-card-only", action="store_true", help="Emit only route card wrapper")
+    runtime.add_argument("--json", action="store_true", help="Emit JSON")
 
     packet = sub.add_parser("packet", help="Emit prefilled packet front matter from topology scope")
     packet.add_argument("--packet-type", default="refactor", choices=["refactor"], help="Packet template type")
@@ -120,6 +141,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     closeout.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path")
     closeout.add_argument("--work-record-path", default=None, help="Work record path")
     closeout.add_argument("--receipt-path", default=None, help="Receipt path")
+    closeout.add_argument("--claim", action="append", default=[], help="Runtime closeout claim to evaluate; repeat for multiple claims")
     closeout.add_argument("--json", action="store_true", help="Emit JSON")
     closeout.add_argument("--summary-only", action="store_true", help="Emit compact lane summary")
     closeout.add_argument(
@@ -130,7 +152,12 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     )
 
     context_pack = sub.add_parser("context-pack", help="Emit task-shaped agent context packet")
-    context_pack.add_argument("--pack-type", default="auto", choices=["auto", "package_review", "debug"], help="Context-pack profile")
+    context_pack.add_argument(
+        "--pack-type",
+        default="auto",
+        choices=["auto", "package_review", "debug", "explorer", "executor", "critic", "verifier"],
+        help="Context-pack profile",
+    )
     context_pack.add_argument("--task", required=True, help="Task statement")
     context_pack.add_argument("--files", nargs="+", required=True, help="Files in the reviewed package")
     context_pack.add_argument("--task-class", default=None, help="Optional semantic boot task class")
@@ -155,13 +182,53 @@ def render_payload(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
         print(api.yaml.safe_dump(payload, sort_keys=False).strip())
 
 
+def _print_route_card(card: dict[str, Any]) -> None:
+    if not card:
+        return
+    print("route_card:")
+    for key in ("schema_version", "admission_status", "risk_tier", "next_action"):
+        print(f"- {key}: {card.get(key)}")
+    if card.get("admitted_files"):
+        print("- admitted_files:")
+        for path in card["admitted_files"]:
+            print(f"  - {path}")
+    if card.get("out_of_scope_files"):
+        print("- out_of_scope_files:")
+        for path in card["out_of_scope_files"]:
+            print(f"  - {path}")
+    budget = card.get("gate_budget") or {}
+    if budget:
+        print(f"- gate_budget: {budget.get('label')}")
+        for gate in budget.get("required") or []:
+            print(f"  required: {gate}")
+    if card.get("claims"):
+        print("- claims:")
+        for claim in card["claims"]:
+            print(f"  - {claim}")
+    if card.get("expansion_hints"):
+        print("- expansion_hints:")
+        for hint in card["expansion_hints"]:
+            print(f"  - {hint}")
+
+
 def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2))
         return
     print(f"Topology digest: {payload['profile']}")
     print(f"Task: {payload['task']}")
-    for key in ("required_law", "allowed_files", "forbidden_files", "gates", "downstream", "stop_conditions"):
+    _print_route_card(payload.get("route_card") or {})
+    admission = payload.get("admission") or {}
+    print("\nadmission:")
+    print(f"- status: {admission.get('status')}")
+    print(f"- profile_id: {admission.get('profile_id')}")
+    print("- admitted_files:")
+    for item in admission.get("admitted_files") or []:
+        print(f"  - {item}")
+    print("- out_of_scope_files:")
+    for item in admission.get("out_of_scope_files") or []:
+        print(f"  - {item}")
+    for key in ("required_law", "forbidden_files", "gates", "downstream", "stop_conditions"):
         print(f"\n{key}:")
         for item in payload[key]:
             print(f"- {item}")
@@ -203,6 +270,7 @@ def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
 def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
     commands = [
         ("strict", api.run_strict),
+        ("schema", api.run_schema),
         ("global_health", api.run_strict),
         ("docs", api.run_docs),
         ("source", api.run_source),
@@ -265,14 +333,28 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         return 0 if result.ok else 1
     if args.navigation:
         navigation_kwargs = {"strict_health": args.strict_health}
+        for field in ("intent", "task_class", "write_intent", "claim"):
+            value = getattr(args, field, None)
+            if field == "claim" and not value:
+                continue
+            if value is not None:
+                navigation_kwargs["claims" if field == "claim" else field] = value
         if args.issue_schema_version != "1":
             navigation_kwargs["issue_schema_version"] = args.issue_schema_version
         payload = api.run_navigation(args.task or "general navigation", args.files, **navigation_kwargs)
+        if args.route_card_only:
+            route_payload = {"ok": payload["ok"], "route_card": payload.get("route_card") or {}}
+            if args.json:
+                print(json.dumps(route_payload, indent=2))
+            else:
+                _print_route_card(route_payload["route_card"])
+            return 0 if payload["ok"] else 1
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
             print(f"navigation ok: {payload['ok']}")
             print(f"profile: {payload['digest']['profile']}")
+            _print_route_card(payload.get("route_card") or {})
             issues_scope = getattr(args, "issues_scope", "task")
             direct_blockers = payload.get("direct_blockers") or []
             repo_health_warnings = payload.get("repo_health_warnings") or []
@@ -316,8 +398,32 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
 
 def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.command == "digest":
-        render_digest(api, api.build_digest(args.task, args.files), as_json=args.json)
+        render_digest(
+            api,
+            api.build_digest(
+                args.task,
+                args.files,
+                intent=args.intent,
+                task_class=args.task_class,
+                write_intent=args.write_intent,
+                claims=args.claim,
+            ),
+            as_json=args.json,
+        )
         return 0
+    if args.command == "runtime":
+        payload = api.build_runtime_packet(
+            task=args.task,
+            files=args.files,
+            intent=args.intent,
+            task_class=args.task_class,
+            write_intent=args.write_intent,
+            role=args.role,
+            claims=args.claim,
+            route_card_only=args.route_card_only,
+        )
+        render_payload(api, payload, as_json=args.json)
+        return 0 if payload.get("ok") else 1
     if args.command == "packet":
         payload = api.build_packet_prefill(
             packet_type=args.packet_type,
@@ -347,6 +453,7 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             plan_evidence=args.plan_evidence,
             work_record_path=args.work_record_path,
             receipt_path=args.receipt_path,
+            claims=args.claim,
             issue_schema_version=args.issue_schema_version,
         )
         if args.json:

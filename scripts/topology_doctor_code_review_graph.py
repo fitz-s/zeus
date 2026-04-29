@@ -194,6 +194,15 @@ def run_code_review_graph_status(api: Any, changed_files: list[str] | None = Non
         "authority_status": "derived_code_impact_not_authority",
         "graph_db": GRAPH_DB,
         "path_mode": "unknown",
+        "claim_scope": {
+            "blocks_claims": ["graph_impact", "graph_review_order", "graph_test_selection"],
+            "does_not_block": [
+                "ordinary navigation",
+                "closeout without graph-impact claim",
+                "semantic/source/current-fact authority claims",
+            ],
+            "operator_rule": "Refresh graph only when the work claims graph impact or directly changes graph artifacts.",
+        },
         "graph_meta": {
             "path": GRAPH_META,
             "present": (api.ROOT / GRAPH_META).exists(),

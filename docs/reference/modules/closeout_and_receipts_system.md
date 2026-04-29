@@ -24,6 +24,11 @@ A closeout payload has three distinct concepts:
 - `blocking_issues`: packet-scope failures that must be resolved or explicitly deferred through authorized evidence.
 - `warning_issues`: scoped advisory findings.
 - `global_health`: full-lane counts for visibility; not a scoped blocker by itself.
+- `risk_tier` and `gate_budget`: generated runtime metadata that explains why
+  the packet needed light or heavy evidence.
+- `claims_evaluated`, `claims_blocked`, and `claims_advisory`: claim-scoped
+  gates requested with `--claim`; these can block the specific completion claim
+  without making the same warning universal.
 
 ## Hidden obligations
 
@@ -31,7 +36,11 @@ A closeout payload has three distinct concepts:
 - Planning-lock files need plan evidence before implementation closes.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
 - Global health must remain visible even when scoped closeout passes.
+- Graph freshness is warning-only unless the packet requests a graph-impact
+  claim such as `--claim graph_impact_validated`.
 - Closeout must not mutate runtime truth or produce canonical DB facts.
+- Receipts should prove the completion claim; they should not become long
+  diaries for unrelated warnings.
 
 ## Failure modes
 
@@ -39,6 +48,8 @@ A closeout payload has three distinct concepts:
 - Closeout hides repo-wide drift after P0 scoping, making reviewers think the whole repo is green.
 - An agent fixes unrelated docs/source registry failures to make closeout pass, widening the packet.
 - A missing companion is treated as a warning even though changed-file law requires it.
+- A stale graph or unrelated global warning is treated as a universal closeout
+  blocker even when no completion claim depends on it.
 
 ## Repair routes
 
@@ -46,6 +57,8 @@ A closeout payload has three distinct concepts:
 - Use `add_registry_row` for newly tracked docs/tests/scripts/source files.
 - Use `propose_owner_manifest` when closeout reveals ambiguous ownership.
 - Record severe blockers in packet work logs and receipts rather than deleting the gate.
+- Record runtime-local artifact treatment: promoted, summarized, discarded, or
+  left local.
 
 ## Cross-links
 

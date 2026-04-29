@@ -7,7 +7,7 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-28; last_reused=2026-04-28
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
 # Reuse: When adding a new profile, add adversarial cases here first.
@@ -594,3 +594,57 @@ def test_legacy_allowed_files_marked_advisory_in_route_context():
     assert "allowed_files" in digest
     # The admission envelope is the new authoritative contract.
     assert "admission" in digest
+
+
+def test_agent_runtime_profile_admits_runtime_surfaces():
+    digest = build_digest(
+        "agent runtime route card typed intent claim-scoped graph workflow",
+        [
+            "scripts/topology_doctor_cli.py",
+            "architecture/context_pack_profiles.yaml",
+            "docs/reference/modules/topology_doctor_system.md",
+        ],
+    )
+
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["route_card"]["risk_tier"] == "T3"
+    assert digest["route_card"]["next_action"].startswith("proceed only with packet plan")
+
+
+def test_typed_intent_overrides_phrase_scoring_without_bypassing_admission():
+    digest = build_digest(
+        "G1 live readiness route card implementation",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+    )
+
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["admission"]["decision_basis"]["selected_by"] == "typed_intent"
+    assert digest["typed_runtime_inputs"]["intent_selected"] is True
+
+
+def test_typed_intent_cannot_admit_forbidden_files():
+    digest = build_digest(
+        "agent runtime route card implementation",
+        ["src/engine/evaluator.py"],
+        intent="topology graph agent runtime upgrade",
+    )
+
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["forbidden_hits"] == ["src/engine/evaluator.py"]
+
+
+def test_invalid_typed_intent_blocks_instead_of_falling_back_to_phrase_route():
+    digest = build_digest(
+        "G1 live readiness route card implementation",
+        ["scripts/topology_doctor_cli.py"],
+        intent="not a real topology profile",
+    )
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "ambiguous"
+    assert digest["admission"]["decision_basis"]["selected_by"] == "typed_intent_invalid"
+    assert digest["typed_runtime_inputs"]["intent_selected"] is False

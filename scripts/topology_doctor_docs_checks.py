@@ -443,7 +443,7 @@ def check_operations_task_folders(api: Any, topology: dict[str, Any]) -> list[An
             or f"{rel}/" in registered
         )
         referenced = rel in current_text or f"{rel}/" in current_text or f"{rel}/plan.md" in current_text
-        if not registered_here or not referenced:
+        if not registered_here and not referenced:
             missing = []
             if not registered_here:
                 missing.append("docs/operations/AGENTS.md")

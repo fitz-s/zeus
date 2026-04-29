@@ -1,5 +1,5 @@
 """Tests for topology_doctor compiled topology gates."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-28; last_reused=2026-04-28
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
 # Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
 
@@ -99,6 +99,59 @@ def test_cli_json_parity_for_digest_command():
         "debug settlement rounding mismatch",
         ["src/contracts/settlement_semantics.py"],
     )
+
+
+def test_cli_json_parity_for_runtime_command():
+    args = [
+        "runtime",
+        "--task",
+        "agent runtime executor packet",
+        "--files",
+        "scripts/topology_doctor_cli.py",
+        "--intent",
+        "topology graph agent runtime upgrade",
+        "--task-class",
+        "agent_runtime",
+        "--write-intent",
+        "edit",
+        "--role",
+        "executor",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_runtime_packet(
+        task="agent runtime executor packet",
+        files=["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+        role="executor",
+    )
+    assert payload["role_context"]["pack_type"] == "executor"
+    assert payload["semantic_bootstrap"]["task_class"] == "agent_runtime"
+
+
+def test_cli_json_parity_for_runtime_route_card_only():
+    args = [
+        "runtime",
+        "--task",
+        "read only agent runtime orientation",
+        "--write-intent",
+        "read_only",
+        "--route-card-only",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.build_runtime_packet(
+        task="read only agent runtime orientation",
+        write_intent="read_only",
+        route_card_only=True,
+    )
+    assert set(payload) == {"ok", "route_card"}
 
 
 def test_cli_json_parity_for_context_pack_command():
@@ -808,6 +861,31 @@ def test_docs_mode_rejects_unregistered_operation_task_folder(tmp_path, monkeypa
     issues = topology_doctor._check_operations_task_folders({})
 
     assert any(issue.code == "operations_task_unregistered" for issue in issues)
+
+
+def test_docs_mode_accepts_registered_non_active_operation_task_folder(tmp_path, monkeypatch):
+    root = tmp_path
+    task_dir = root / "docs" / "operations" / "task_2099-01-01_registered"
+    task_dir.mkdir(parents=True)
+    (task_dir / "work_log.md").write_text("Date: 2099-01-01\n", encoding="utf-8")
+    agents = root / "docs" / "operations" / "AGENTS.md"
+    agents.write_text(
+        "# docs/operations AGENTS\n\n## File registry\n\n| File | Purpose |\n|---|---|\n| `current_state.md` | pointer |\n| `task_2099-01-01_registered/` | packet evidence |\n",
+        encoding="utf-8",
+    )
+    current = root / "docs" / "operations" / "current_state.md"
+    current.write_text(
+        "- Primary packet file: `docs/operations/current_state.md`\n"
+        "- Active backlog:\n"
+        "- Active checklist/evidence:\n"
+        "- Next packet: none\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topology_doctor, "ROOT", root)
+
+    issues = topology_doctor._check_operations_task_folders({})
+
+    assert not any(issue.code == "operations_task_unregistered" for issue in issues)
 
 
 def test_docs_mode_requires_runtime_plan_inventory(tmp_path, monkeypatch):
@@ -1581,6 +1659,47 @@ def test_map_maintenance_requires_docs_mesh_for_top_level_artifact(monkeypatch):
 
     assert not result.ok
     assert any("docs/README.md" in issue.message for issue in result.issues)
+
+
+def test_map_maintenance_allows_registered_operation_packet_file_without_current_state(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: ["docs/operations/AGENTS.md"])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "docs/operations/task_2099-01-01_packet/plan.md":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(
+        [
+            "docs/operations/task_2099-01-01_packet/plan.md",
+            "docs/operations/AGENTS.md",
+        ],
+        mode="closeout",
+    )
+
+    assert_topology_ok(result)
+
+
+def test_map_maintenance_docs_top_level_glob_does_not_match_nested_packet_file(monkeypatch):
+    original_exists = topology_doctor.Path.exists
+    monkeypatch.setattr(topology_doctor, "_git_ls_files", lambda: [])
+
+    def fake_exists(self):
+        if self == topology_doctor.ROOT / "docs/operations/task_2099-01-01_packet/plan.md":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(topology_doctor.Path, "exists", fake_exists)
+    result = topology_doctor.run_map_maintenance(
+        ["docs/operations/task_2099-01-01_packet/plan.md"],
+        mode="closeout",
+    )
+
+    assert not result.ok
+    assert any("docs/operations/AGENTS.md" in issue.message for issue in result.issues)
+    assert all("docs/README.md" not in issue.message for issue in result.issues)
 
 
 @pytest.mark.live_topology
@@ -3548,6 +3667,83 @@ def test_closeout_filters_repo_global_lane_noise(monkeypatch):
     assert "scripts" in payload["global_health"]
 
 
+def test_closeout_without_graph_claim_keeps_stale_graph_warning_only(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    stale_graph = topology_doctor.StrictResult(
+        ok=True,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="code_review_graph_stale_head",
+                path=".code-review-graph/graph.db",
+                message="graph stale",
+                severity="warning",
+            )
+        ],
+    )
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {"scripts/topology_doctor.py": "modified"})
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: stale_graph)
+    monkeypatch.setattr(topology_doctor, "run_scripts", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(changed_files=["scripts/topology_doctor.py"])
+
+    assert payload["ok"] is True
+    assert payload["claims_blocked"] == []
+    assert payload["global_health"]["code_review_graph"]["warning_count"] == 1
+
+
+def test_closeout_graph_claim_blocks_stale_graph(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    stale_graph = topology_doctor.StrictResult(
+        ok=True,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="code_review_graph_stale_head",
+                path=".code-review-graph/graph.db",
+                message="graph stale",
+                severity="warning",
+            )
+        ],
+    )
+    monkeypatch.setattr(topology_doctor, "_map_maintenance_changes", lambda files: {"scripts/topology_doctor.py": "modified"})
+    monkeypatch.setattr(topology_doctor, "run_planning_lock", lambda files, evidence=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_work_record", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_change_receipts", lambda files, path=None: ok)
+    monkeypatch.setattr(topology_doctor, "run_map_maintenance", lambda files, mode="closeout": ok)
+    monkeypatch.setattr(topology_doctor, "run_artifact_lifecycle", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_naming_conventions", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_freshness_metadata", lambda files: ok)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: stale_graph)
+    monkeypatch.setattr(topology_doctor, "run_scripts", lambda: ok)
+    monkeypatch.setattr(topology_doctor, "run_context_budget", lambda: ok)
+    monkeypatch.setattr(
+        topology_doctor,
+        "build_compiled_topology",
+        lambda: {"telemetry": {"dark_write_target_count": 0}},
+    )
+
+    payload = topology_doctor.run_closeout(
+        changed_files=["scripts/topology_doctor.py"],
+        claims=["graph_impact_validated"],
+    )
+
+    assert payload["ok"] is False
+    assert payload["claims_blocked"][0]["claim"] == "graph_impact_validated"
+    assert payload["blocking_issues"][0]["lane"] == "runtime_claims"
+
+
 def test_closeout_changed_source_missing_rationale_still_blocks(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
     source_result = topology_doctor.StrictResult(
@@ -3787,6 +3983,39 @@ def test_impact_reports_write_routes_and_tests_for_store():
     assert impact["context_assumption"]["planning_lock_independent"] is True
 
 
+def test_impact_reports_non_source_manifest_adapters():
+    impact = topology_doctor.build_impact(
+        [
+            "architecture/topology_schema.yaml",
+            "scripts/topology_doctor_cli.py",
+            "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md",
+            "tests/test_topology_doctor.py",
+        ]
+    )
+    by_path = {entry["path"]: entry for entry in impact["entries"]}
+
+    architecture = by_path["architecture/topology_schema.yaml"]
+    assert architecture["kind"] == "architecture_manifest"
+    assert architecture["owner_manifest"] == "architecture/topology_schema.yaml"
+    assert architecture["planning_lock"] is True
+
+    script = by_path["scripts/topology_doctor_cli.py"]
+    assert script["kind"] == "script"
+    assert script["owner_manifest"] == "architecture/script_manifest.yaml"
+    assert script["script_class"] == "utility"
+
+    docs = by_path["docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md"]
+    assert docs["kind"] == "docs"
+    assert docs["owner_manifest"] == "docs/operations/AGENTS.md"
+    assert docs["truth_profile"] == "packet_evidence"
+
+    test = by_path["tests/test_topology_doctor.py"]
+    assert test["kind"] == "test"
+    assert test["owner_manifest"] == "architecture/test_topology.yaml"
+    assert test["test_category"] == "core_law_antibody"
+    assert test["trust"] == "trusted"
+
+
 @pytest.mark.live_topology
 def test_impact_marks_missing_relations_provisional_for_platt():
     impact = topology_doctor.build_impact(["src/calibration/platt.py"])
@@ -3898,6 +4127,287 @@ def test_package_review_separates_route_health_from_repo_health(monkeypatch):
     assert packet["repo_health"]["ok"] is False
     assert packet["repo_health"]["checks"]["core_claims"]["blocking_count"] == 1
     assert packet["blocking_for_this_pack"] == []
+
+
+def test_navigation_route_card_summarizes_admission_and_risk(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation(
+        "agent runtime route card typed intent",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+
+    assert payload["ok"] is True
+    assert payload["route_card"]["authority_status"] == "generated_route_card_not_authority"
+    assert payload["route_card"]["admission_status"] == "admitted"
+    assert payload["route_card"]["risk_tier"] == "T3"
+    assert payload["route_context"]["gate_budget"]["label"] == "architecture_governance_or_runtime_tooling"
+    assert payload["direct_blockers"] == []
+
+
+def test_runtime_route_card_contract_matches_schema():
+    digest = topology_doctor.build_digest(
+        "agent runtime route card contract",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+    required = set(topology_doctor.load_schema()["agent_runtime_contract"]["route_card_required_fields"])
+
+    assert required <= set(card)
+    assert card["schema_version"] == "1"
+    assert card["claims"] == []
+    assert card["intent"] == "topology graph agent runtime upgrade"
+    assert card["task_class"] == "agent_runtime"
+    assert card["write_intent"] == "edit"
+    assert card["expansion_hints"]
+
+
+def test_runtime_claims_appear_in_route_card_and_digest_inputs():
+    digest = topology_doctor.build_digest(
+        "agent runtime route card contract",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        write_intent="edit",
+        claims=["admission_valid", "admission_valid"],
+    )
+
+    assert digest["route_card"]["claims"] == ["admission_valid"]
+    assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
+
+
+def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+
+    payload = topology_doctor.run_navigation(
+        "G1 live readiness route card implementation",
+        ["scripts/topology_doctor_cli.py"],
+        intent="not a real topology profile",
+        write_intent="edit",
+    )
+
+    assert payload["ok"] is False
+    assert payload["digest"]["profile"] == "generic"
+    assert payload["route_card"]["admission_status"] == "ambiguous"
+    assert payload["route_card"]["next_action"] == "stop; pass typed --intent or narrow the task wording"
+    assert payload["direct_blockers"][0]["code"] == "navigation_route_ambiguous"
+
+
+def test_graph_impact_claim_blocks_navigation_when_graph_is_stale(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+    stale_graph = topology_doctor.StrictResult(
+        ok=True,
+        issues=[
+            topology_doctor.TopologyIssue(
+                code="code_review_graph_stale_head",
+                path=".code-review-graph/graph.db",
+                message="graph stale",
+                severity="warning",
+            )
+        ],
+    )
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(topology_doctor, "run_code_review_graph_status", lambda files=None: stale_graph)
+
+    payload = topology_doctor.run_navigation(
+        "agent runtime graph impact claim",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        write_intent="edit",
+        claims=["graph_impact_validated"],
+    )
+
+    assert payload["ok"] is False
+    assert payload["claims_blocked"][0]["claim"] == "graph_impact_validated"
+    assert payload["direct_blockers"][0]["lane"] == "runtime_claims"
+
+
+def test_navigation_without_graph_claim_does_not_touch_graph_status(monkeypatch):
+    ok = topology_doctor.StrictResult(ok=True, issues=[])
+
+    def ok_result():
+        return ok
+
+    for name in (
+        "run_context_budget",
+        "run_docs",
+        "run_source",
+        "run_history_lore",
+        "run_agents_coherence",
+        "run_self_check_coherence",
+        "run_idioms",
+        "run_runtime_modes",
+        "run_reference_replacement",
+    ):
+        monkeypatch.setattr(topology_doctor, name, ok_result)
+    monkeypatch.setattr(
+        topology_doctor,
+        "run_code_review_graph_status",
+        lambda files=None: pytest.fail("graph status should be claim-scoped"),
+    )
+
+    payload = topology_doctor.run_navigation(
+        "agent runtime ordinary navigation",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        write_intent="edit",
+    )
+
+    assert payload["ok"] is True
+    assert payload["claims_blocked"] == []
+
+
+def test_navigation_route_card_only_human_output_skips_appendices(monkeypatch):
+    payload = {
+        "ok": True,
+        "task": "source task",
+        "digest": {"profile": "generic"},
+        "route_card": {
+            "schema_version": "1",
+            "admission_status": "admitted",
+            "risk_tier": "T1",
+            "next_action": "proceed with admitted files and focused verification",
+            "admitted_files": ["docs/example.md"],
+            "gate_budget": {"label": "narrow_docs_tests_or_tooling", "required": ["route_card"]},
+            "claims": [],
+            "expansion_hints": ["use focused context for admitted files"],
+        },
+        "issues": [],
+        "direct_blockers": [],
+        "repo_health_warnings": [{"severity": "error"}],
+        "excluded_lanes": {"strict": "not printed"},
+    }
+    monkeypatch.setattr(topology_doctor, "run_navigation", lambda task, files, strict_health=False: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["--navigation", "--route-card-only", "--task", "source task"])
+    output = buffer.getvalue()
+
+    assert exit_code == 0
+    assert output.startswith("route_card:")
+    assert "schema_version: 1" in output
+    assert "excluded_lanes:" not in output
+    assert "repo_health_warnings:" not in output
+    assert "profile:" not in output
+
+
+def test_navigation_route_card_only_json_is_minimal(monkeypatch):
+    route_card = {
+        "schema_version": "1",
+        "admission_status": "admitted",
+        "risk_tier": "T1",
+        "next_action": "proceed with admitted files and focused verification",
+    }
+    payload = {
+        "ok": True,
+        "route_card": route_card,
+        "digest": {"profile": "generic"},
+        "issues": [{"lane": "docs", "severity": "error"}],
+        "direct_blockers": [],
+        "repo_health_warnings": [],
+        "excluded_lanes": {},
+    }
+    monkeypatch.setattr(topology_doctor, "run_navigation", lambda task, files, strict_health=False: payload)
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(["--navigation", "--route-card-only", "--json", "--task", "source task"])
+
+    assert exit_code == 0
+    assert json.loads(buffer.getvalue()) == {"ok": True, "route_card": route_card}
+
+
+def test_executor_context_pack_contains_runtime_guidance_and_semantic_bootstrap():
+    packet = topology_doctor.build_context_pack(
+        "executor",
+        task="agent runtime route card implementation",
+        files=["scripts/topology_doctor_cli.py"],
+        task_class="agent_runtime",
+    )
+
+    assert packet["pack_type"] == "executor"
+    assert packet["authority_status"] == "generated_executor_packet_not_authority"
+    assert packet["runtime_guidance"]["work_ethic"].startswith("Make the smallest reversible change")
+    assert packet["role_sections"]["risk_tier"] == "T3"
+    assert packet["role_sections"]["admission_status"] == "admitted"
+    assert packet["semantic_bootstrap"]["task_class"] == "agent_runtime"
+    assert packet["semantic_bootstrap"]["graph_usage"]["stage"] == "not_required"
+
+
+def test_runtime_route_card_keeps_t0_read_only_lightweight():
+    digest = topology_doctor.build_digest(
+        "read only agent runtime orientation",
+        [],
+        write_intent="read_only",
+    )
+
+    assert digest["route_card"]["risk_tier"] == "T0"
+    assert digest["route_card"]["gate_budget"]["required"] == ["route_card"]
+    assert "do not edit files" in digest["route_card"]["gate_budget"]["stop"]
+
+
+def test_code_review_graph_status_declares_claim_scope():
+    result = topology_doctor.run_code_review_graph_status(["scripts/topology_doctor_cli.py"])
+
+    assert result.details["claim_scope"]["blocks_claims"] == [
+        "graph_impact",
+        "graph_review_order",
+        "graph_test_selection",
+    ]
+    assert "ordinary navigation" in result.details["claim_scope"]["does_not_block"]
 
 
 def test_package_review_lore_keeps_broad_matches_summary_only(monkeypatch):

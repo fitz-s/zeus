@@ -29,6 +29,7 @@ required_task_classes:
   - calibration
   - docs_authority
   - graph_review
+  - agent_runtime
 
 allowed_graph_stages:
   - not_required
@@ -358,3 +359,49 @@ profiles:
     verification_gates:
       - python3 scripts/topology_doctor.py --code-review-graph-status --json
       - python3 scripts/topology_doctor.py --task-boot-profiles --json
+
+  - id: agent_runtime
+    purpose: >
+      Change topology/graph workflow behavior while keeping agent guidance
+      short, typed, claim-scoped, and non-bureaucratic.
+    trigger_terms: [agent runtime, route card, typed intent, risk tier, claim-scoped, role context pack, work ethic, skill policy]
+    required_reads:
+      - AGENTS.md
+      - workspace_map.md
+      - docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md
+      - architecture/topology_schema.yaml
+      - architecture/context_pack_profiles.yaml
+    current_fact_surfaces:
+      - docs/operations/current_state.md
+    required_proofs:
+      - id: admission_remains_authority
+        question: "Does admission.status remain the sole write-authority signal?"
+        evidence:
+          - architecture/topology_schema.yaml
+          - scripts/topology_doctor_digest.py
+      - id: runtime_guidance_not_authority
+        question: "Is workflow/skill/work-ethic guidance emitted as generated context rather than repo law?"
+        evidence:
+          - architecture/context_pack_profiles.yaml
+          - docs/reference/modules/topology_doctor_system.md
+      - id: claim_scoped_blocking
+        question: "Do stale graph and unrelated repo health block only claims that depend on them?"
+        evidence:
+          - scripts/topology_doctor.py
+          - scripts/topology_doctor_closeout.py
+          - scripts/topology_doctor_code_review_graph.py
+    fatal_misreads:
+      - code_review_graph_answers_where_not_what_settles
+    forbidden_shortcuts:
+      - "Do not make route cards or context packs authority surfaces."
+      - "Do not require graph refresh for tasks that make no graph-impact claim."
+      - "Do not turn skill-use guidance into mandatory ceremony for T0/T1 work."
+    graph_usage:
+      stage: not_required
+      authority_status: derived_not_authority
+      use_for: [optional review order, optional impact hints]
+      not_for: [semantic truth, source validity, packet authority, write authorization]
+    verification_gates:
+      - python3 scripts/topology_doctor.py --context-packs --json
+      - python3 scripts/topology_doctor.py --task-boot-profiles --json
+      - python3 scripts/topology_doctor.py --schema

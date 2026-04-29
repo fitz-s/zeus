@@ -17,14 +17,21 @@ The topology doctor is Zeus's executable routing and closeout compiler. It reads
 
 ## How it works
 
-Topology doctor has four layers:
+Topology doctor has five layers:
 
 1. **Loaders** read `architecture/**`, scoped `AGENTS.md`, docs registries, and current operation pointers.
 2. **Validators** emit `TopologyIssue` objects with legacy fields and optional typed metadata.
 3. **Mode policy** decides whether an issue blocks `navigation`, `closeout`, `strict_full_repo`, or remains `global_health` context.
-4. **Renderers** emit human and JSON outputs for navigation, strict lanes, context packs, and closeout.
+4. **Runtime route cards** summarize admission, risk tier, next action, gate
+   budget, requested claims, and expansion hints before appendices.
+5. **Renderers** emit human and JSON outputs for navigation, strict lanes, context packs, and closeout.
 
 The checker family is intentionally split across `scripts/topology_doctor_*.py`: registry/docs/source/test/script checks report facts; `scripts/topology_doctor.py` and `scripts/topology_doctor_cli.py` expose the public facade; `scripts/topology_doctor_closeout.py` compiles changed-file closeout.
+
+`build_impact()` is adapter-backed. Source files still use
+`architecture/source_rationale.yaml`; architecture manifests, scripts, docs, and
+tests use their owning manifests or scoped routers so non-source work can get a
+bounded impact summary without pretending every file is source.
 
 ## Hidden obligations
 
@@ -33,6 +40,14 @@ The checker family is intentionally split across `scripts/topology_doctor_*.py`:
 - JSON issue compatibility is durable: `code`, `path`, `message`, and `severity` remain present in legacy output.
 - Typed issue metadata is additive and exists to route repair work, not to invent new law.
 - Every new top-level script/test/doc route needs its owning manifest updated when the manifest owns that class of fact.
+- Typed `intent` may select a digest profile, but admission still reconciles
+  files against `allowed_files` and forbidden patterns.
+- `--route-card-only` is the lightweight first-screen path for T0/T1 work; it
+  should not print appendices, repo-health lists, or unrelated drift.
+- `--claim` turns optional evidence into claim-scoped gates. A stale graph
+  blocks `graph_impact_validated`, not ordinary navigation or closeout.
+- Workflow, skill-use, and work-ethic guidance belongs in generated context
+  packs, not new authority documents.
 
 ## Failure modes
 
@@ -40,6 +55,8 @@ The checker family is intentionally split across `scripts/topology_doctor_*.py`:
 - Strict repo-health output is mistaken for scoped closeout and hides packet evidence gaps.
 - Topology issues stay too flat to route repair ownership, causing manifest fixes to become manual guesswork.
 - A graph or context-pack appendix is treated as authority rather than derived context.
+- Process controls become bureaucratic when every stale warning blocks every
+  task instead of only the claim that depends on it.
 
 ## Repair routes
 
@@ -48,6 +65,14 @@ The checker family is intentionally split across `scripts/topology_doctor_*.py`:
 - Use `repair_kind: refresh_graph` only for graph freshness/coverage debt; do not use it for semantic proof.
 - Use `repair_kind: propose_owner_manifest` when ownership is ambiguous and P3/P4-level planning is required.
 - Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` before edits and `closeout` with changed files before closure.
+- Use `--route-card-only` for quick orientation and `--claim <claim_id>` when
+  the completion statement depends on graph, repo-health, semantic boot, packet
+  closeout, or live authorization evidence.
+- Use `python3 scripts/topology_doctor.py runtime ...` when a caller needs the
+  composed agent-runtime packet: route card, optional semantic boot, optional
+  role context, claims, gate budget, and artifact-treatment hints.
+- Use role context packs (`explorer`, `executor`, `critic`, `verifier`) when the
+  next agent needs a bounded runtime contract rather than the full packet.
 
 ## Cross-links
 

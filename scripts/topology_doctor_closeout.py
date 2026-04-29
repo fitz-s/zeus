@@ -180,9 +180,11 @@ def run_closeout(
     plan_evidence: str | None = None,
     work_record_path: str | None = None,
     receipt_path: str | None = None,
+    claims: list[str] | None = None,
     issue_schema_version: str = "1",
 ) -> dict[str, Any]:
     actual_changed = effective_changed_files(api, changed_files, receipt_path=receipt_path)
+    risk_tier = api._runtime_risk_tier(actual_changed, task="closeout", write_intent="edit")
     selected = selected_lanes(api, actual_changed)
     unscoped_lanes: dict[str, Any] = {
         "planning_lock": api.run_planning_lock(actual_changed, plan_evidence),
@@ -239,12 +241,31 @@ def run_closeout(
         for issue in result.issues
         if issue.severity == "warning"
     ]
+    claim_evaluation = api.build_runtime_claim_evaluation(
+        claims,
+        graph_result=unscoped_lanes["code_review_graph"],
+        global_health={lane: global_health_summary(result) for lane, result in unscoped_lanes.items()},
+        closeout_ok=not blocking_issues,
+    )
+    claim_blocking_issues = api.runtime_claim_issues(claim_evaluation)
+    blocking_issues = blocking_issues + claim_blocking_issues
     compiled = api.build_compiled_topology()
     telemetry = compiled.get("telemetry") or {}
     return {
         "ok": not blocking_issues,
         "authority_status": "generated_closeout_not_authority",
         "changed_files": actual_changed,
+        "risk_tier": risk_tier,
+        "gate_budget": api.RUNTIME_RISK_GATE_BUDGETS[risk_tier],
+        "claim_scope": {
+            "graph": "code_review_graph lane blocks closeout only for changed graph paths or explicit graph-impact claims",
+            "repo_health": "global_health is reported separately from changed-file closeout",
+            "receipts": "receipt/work-record/planning-lock remain blocking for governed changed files",
+        },
+        "claim_evaluation": claim_evaluation,
+        "claims_evaluated": claim_evaluation["evaluated"],
+        "claims_blocked": claim_evaluation["blocked"],
+        "claims_advisory": claim_evaluation["advisory"],
         "selected_lanes": selected,
         "lanes": {lane: lane_summary(api, result, issue_schema_version=issue_schema_version) for lane, result in lanes.items()},
         "global_health": {lane: global_health_summary(result) for lane, result in unscoped_lanes.items()},
