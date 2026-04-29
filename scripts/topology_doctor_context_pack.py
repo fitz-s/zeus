@@ -37,9 +37,108 @@ MODULE_MANIFEST_REQUIRED_FIELDS = [
 ]
 
 
+def docs_registry_entry_for_path(api: Any, path: str) -> dict[str, Any] | None:
+    for entry in api.load_docs_registry().get("entries") or []:
+        entry_path = str(entry.get("path") or "")
+        if not entry_path:
+            continue
+        if path == entry_path:
+            return entry
+        if entry.get("coverage_scope") == "descendants" and path.startswith(entry_path.rstrip("/") + "/"):
+            return entry
+    return None
+
+
+def test_category_for_path(api: Any, path: str) -> str | None:
+    for category, paths in (api.load_test_topology().get("categories") or {}).items():
+        if path in (paths or []):
+            return str(category)
+    return None
+
+
+def test_trust_for_path(api: Any, path: str) -> str:
+    trusted = ((api.load_test_topology().get("test_trust_policy") or {}).get("trusted_tests") or {})
+    if path in trusted:
+        return "trusted"
+    return "audit_required"
+
+
+def non_source_impact_entry(api: Any, path: str) -> dict[str, Any] | None:
+    if path.startswith("architecture/"):
+        return {
+            "path": path,
+            "kind": "architecture_manifest",
+            "zone": "architecture_governance",
+            "authority_role": "machine_manifest",
+            "owner_manifest": path,
+            "planning_lock": True,
+            "hazards": ["governance_or_schema_drift"],
+            "write_routes": ["planning_lock"],
+            "tests": ["tests/test_topology_doctor.py"],
+            "relations_complete": True,
+            "confidence": "manifest",
+        }
+    if path.startswith("scripts/"):
+        manifest = api.load_script_manifest()
+        name = path.removeprefix("scripts/")
+        entry = api._effective_script_entry(manifest, name) if name in (manifest.get("scripts") or {}) else {}
+        return {
+            "path": path,
+            "kind": "script",
+            "zone": "script_tooling",
+            "authority_role": entry.get("authority_scope", "script_manifest_entry"),
+            "owner_manifest": "architecture/script_manifest.yaml",
+            "script_class": entry.get("class"),
+            "status": entry.get("status"),
+            "lifecycle": entry.get("lifecycle"),
+            "write_routes": list(entry.get("write_targets") or []),
+            "dangerous_if_run": bool(entry.get("dangerous_if_run", False)),
+            "tests": list(entry.get("required_tests") or []),
+            "relations_complete": bool(entry),
+            "confidence": "manifest" if entry else "provisional",
+        }
+    if path.startswith("docs/"):
+        entry = docs_registry_entry_for_path(api, path)
+        packet_evidence = path.startswith("docs/operations/task_")
+        return {
+            "path": path,
+            "kind": "docs",
+            "zone": "docs_mesh",
+            "authority_role": (entry or {}).get("truth_profile", "operations_packet" if packet_evidence else "docs_surface"),
+            "owner_manifest": "architecture/docs_registry.yaml" if entry else "docs/operations/AGENTS.md",
+            "doc_class": (entry or {}).get("doc_class", "operations" if packet_evidence else "unclassified"),
+            "lifecycle_state": (entry or {}).get("lifecycle_state", "active" if packet_evidence else "unknown"),
+            "truth_profile": (entry or {}).get("truth_profile", "packet_evidence" if packet_evidence else "unknown"),
+            "write_routes": ["docs_registry_or_operations_agents"],
+            "hazards": ["authority_promotion"] if packet_evidence else [],
+            "tests": [],
+            "relations_complete": entry is not None or packet_evidence,
+            "confidence": "manifest" if entry else ("packet_router" if packet_evidence else "provisional"),
+        }
+    if path.startswith("tests/"):
+        category = test_category_for_path(api, path)
+        return {
+            "path": path,
+            "kind": "test",
+            "zone": "test_topology",
+            "authority_role": category or "unclassified_test",
+            "owner_manifest": "architecture/test_topology.yaml",
+            "test_category": category,
+            "trust": test_trust_for_path(api, path),
+            "write_routes": ["test_topology"],
+            "hazards": ["untrusted_test"] if category is None else [],
+            "tests": [path],
+            "relations_complete": category is not None,
+            "confidence": "manifest" if category else "provisional",
+        }
+    return None
+
+
 def build_impact(api: Any, files: list[str]) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
+    source_paths: set[str] = set()
     for entry in api._source_rationale_for(files):
+        source_paths.add(entry["path"])
         upstream = entry.get("upstream") or []
         downstream = entry.get("downstream") or []
         relations_complete = bool(upstream or downstream)
@@ -47,6 +146,8 @@ def build_impact(api: Any, files: list[str]) -> dict[str, Any]:
         entries.append(
             {
                 "path": entry["path"],
+                "kind": "source",
+                "owner_manifest": "architecture/source_rationale.yaml",
                 "zone": entry.get("zone", "unknown"),
                 "authority_role": entry.get("authority_role", ""),
                 "hazards": entry.get("hazards", []),
@@ -60,6 +161,12 @@ def build_impact(api: Any, files: list[str]) -> dict[str, Any]:
                 "missing_relation_reason": None if relations_complete else "source_rationale has no upstream/downstream relation for this file",
             }
         )
+    for path in files:
+        if path in source_paths:
+            continue
+        entry = non_source_impact_entry(api, path)
+        if entry is not None:
+            entries.append(entry)
 
     zones = sorted({entry.get("zone", "unknown") for entry in entries if entry.get("zone")})
     write_routes = sorted({route for entry in entries for route in entry.get("write_routes", [])})
@@ -998,6 +1105,113 @@ def build_package_review_context_pack(api: Any, task: str, files: list[str]) -> 
     return payload
 
 
+ROLE_CONTEXT_PACKS = {"explorer", "executor", "critic", "verifier"}
+
+
+def role_context_sections(role: str, route_card: dict[str, Any], impact: dict[str, Any], claims: list[dict[str, Any]]) -> dict[str, Any]:
+    aggregate = impact.get("aggregate", {})
+    common = {
+        "route_card": route_card,
+        "risk_tier": route_card.get("risk_tier"),
+        "admission_status": route_card.get("admission_status"),
+        "claim_scope": route_card.get("claim_scope", {}),
+    }
+    if role == "explorer":
+        common.update(
+            {
+                "inspect_first": route_card.get("admitted_files") or [],
+                "do_not_edit": route_card.get("out_of_scope_files") or [],
+                "expand_context_if": [
+                    "requested evidence is missing",
+                    "file relation is provisional",
+                    "task touches authority, lifecycle, control, DB, or live side effects",
+                ],
+            }
+        )
+    elif role == "executor":
+        common.update(
+            {
+                "change_boundary": route_card.get("admitted_files") or [],
+                "required_gates": (route_card.get("gate_budget") or {}).get("required", []),
+                "tests_required": aggregate.get("tests_required", []),
+                "static_checks": aggregate.get("static_checks", []),
+            }
+        )
+    elif role == "critic":
+        common.update(
+            {
+                "attack_surface": {
+                    "hard_stops": route_card.get("hard_stops", []),
+                    "proof_claims_touched": [claim.get("claim_id") for claim in claims],
+                    "cross_zone": aggregate.get("cross_zone"),
+                },
+                "review_order": [
+                    "authority/admission",
+                    "behavioral contract",
+                    "test adequacy",
+                    "artifact lifecycle",
+                    "residual risk",
+                ],
+            }
+        )
+    elif role == "verifier":
+        common.update(
+            {
+                "completion_claims": [
+                    "admission matched changed files",
+                    "required gates ran",
+                    "receipt lists residual risks",
+                    "graph-impact claims are absent or graph is fresh",
+                ],
+                "evidence_required": (route_card.get("gate_budget") or {}).get("required", []),
+            }
+        )
+    return common
+
+
+def build_role_context_pack(api: Any, role: str, task: str, files: list[str], task_class: str | None = None) -> dict[str, Any]:
+    profile = context_pack_profiles(api).get(role)
+    if not profile:
+        raise ValueError(f"missing context pack profile: {role}")
+    changed_files = sorted(dict.fromkeys(files))
+    impact = build_impact(api, changed_files)
+    claims = proof_claims_for_files(api, changed_files)
+    route_health = route_health_for_context_pack(api, changed_files)
+    digest = api.build_digest(
+        task,
+        changed_files,
+        intent=profile.get("digest_intent"),
+        task_class=task_class,
+        write_intent=profile.get("write_intent"),
+    )
+    route_card = digest.get("route_card") or {}
+    payload = {
+        "pack_type": role,
+        "authority_status": profile.get("authority_status", f"generated_{role}_packet_not_authority"),
+        "task": task,
+        "target_files": changed_files,
+        "runtime_guidance": profile.get("runtime_guidance", {}),
+        "workflow_policy": profile.get("workflow_policy", {}),
+        "skill_policy": profile.get("skill_policy", {}),
+        "role_sections": role_context_sections(role, route_card, impact, claims),
+        "module_context": module_context_for_files(api, changed_files),
+        "proof_claims_touched": claims,
+        "coverage_gaps": context_pack_coverage_gaps(impact, changed_files),
+        "downstream_risks": context_pack_downstream_risks(impact),
+        "graph_appendix": api.build_graph_appendix(changed_files, task=task),
+        "route_health": route_health,
+        "repo_health": repo_health_for_context_pack(api),
+        "blocking_for_this_pack": route_health.get("issues", []),
+        "context_assumption": api.build_context_assumption(
+            profile=role,
+            profile_kind="context_pack_profile",
+            source_entries=impact.get("entries", []),
+            confidence_basis=["impact_profile", "core_claims", "context_pack_profile", "runtime_role"],
+        ),
+    }
+    return payload
+
+
 def attach_semantic_bootstrap(
     api: Any,
     payload: dict[str, Any],
@@ -1055,6 +1269,10 @@ def build_context_pack(
         return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     if selected == "debug":
         payload = build_debug_context_pack(api, task, files)
+        payload["selected_by"] = {"requested": pack_type, "selected": selected}
+        return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
+    if selected in ROLE_CONTEXT_PACKS:
+        payload = build_role_context_pack(api, selected, task, files, task_class=task_class)
         payload["selected_by"] = {"requested": pack_type, "selected": selected}
         return attach_semantic_bootstrap(api, payload, task_class=task_class, task=task, files=files)
     raise ValueError(f"unknown context pack type {pack_type!r}")

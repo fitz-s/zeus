@@ -25,6 +25,8 @@ Docs are classified by role, default-read posture, truth profile, freshness clas
 - Adding a doc usually requires both a scoped `AGENTS.md` registry entry and a `docs_registry.yaml` entry.
 - `default_read` must stay narrow to protect context budget and authority clarity.
 - Archive-derived claims must be marked `[Archive evidence]` when used.
+- Runtime-local `.omx` analysis artifacts must be mirrored, summarized, or
+  explicitly discarded through packet evidence before they disappear.
 
 ## Failure modes
 
@@ -32,6 +34,8 @@ Docs are classified by role, default-read posture, truth profile, freshness clas
 - Reference docs carry stale current facts or row counts.
 - Root/scoped AGENTS route a file that docs_registry cannot classify.
 - Archives leak into default-read paths and override current law by volume.
+- Analysis artifacts are copied wholesale into reference docs and create a
+  second cognitive layer instead of concise durable extracts.
 
 ## Repair routes
 
@@ -39,6 +43,9 @@ Docs are classified by role, default-read posture, truth profile, freshness clas
 - Use `update_companion` when a docs change requires scoped router or registry maintenance.
 - Use `extract_law_to_book` only when hidden durable cognition needs reference-only explanation.
 - Use operations current-fact surfaces for time-bound state and receipts for evidence.
+- Use `docs/operations/task_YYYY-MM-DD_<slug>/evidence/analysis_index.md` for
+  analysis workbooks, then extract only stable lessons into module books or
+  machine manifests.
 
 ## Cross-links
 

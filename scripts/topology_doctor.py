@@ -128,6 +128,77 @@ _NAVIGATION_MODE_POLICY = {
 
 ISSUE_BLOCKING_MODES = tuple(_NAVIGATION_MODE_POLICY)
 
+RUNTIME_RISK_GATE_BUDGETS = {
+    "T0": {
+        "label": "read_only_or_orientation",
+        "required": ["route_card"],
+        "optional": ["semantic_bootstrap", "context_pack"],
+        "stop": "do not edit files",
+    },
+    "T1": {
+        "label": "narrow_docs_tests_or_tools",
+        "required": ["route_card", "focused_test_or_checker"],
+        "optional": ["map_maintenance"],
+        "stop": "stop if authority, schema, lifecycle, DB, or live behavior appears",
+    },
+    "T2": {
+        "label": "source_or_cross_module_behavior",
+        "required": ["route_card", "scoped_tests", "relationship_test"],
+        "optional": ["context_pack", "graph_appendix_if_fresh"],
+        "stop": "stop if canonical truth, lifecycle grammar, control, or DB authority changes",
+    },
+    "T3": {
+        "label": "architecture_governance_or_runtime_tooling",
+        "required": ["packet_plan", "planning_lock", "focused_tests", "closeout_receipt"],
+        "optional": ["critic_review", "graph_appendix_if_fresh"],
+        "stop": "stop if the change would duplicate authority or widen live permissions",
+    },
+    "T4": {
+        "label": "live_side_effect_or_production_data",
+        "required": ["explicit_operator_go", "dry_run", "apply_guard", "rollback_plan"],
+        "optional": ["independent_verifier"],
+        "stop": "do not proceed without explicit live/prod authorization",
+    },
+}
+
+RUNTIME_CLAIM_CONTRACTS = {
+    "admission_valid": {
+        "depends_on": ["admission"],
+        "required_gates": ["navigation_admission"],
+    },
+    "semantic_boot_answered": {
+        "depends_on": ["semantic_bootstrap"],
+        "required_gates": ["semantic_bootstrap"],
+    },
+    "graph_impact_validated": {
+        "depends_on": ["code_review_graph"],
+        "required_gates": ["code_review_graph_status"],
+    },
+    "repo_health_clean": {
+        "depends_on": ["global_health"],
+        "required_gates": ["strict_or_global_health"],
+    },
+    "packet_closeout_complete": {
+        "depends_on": ["closeout"],
+        "required_gates": ["planning_lock", "work_record", "change_receipts", "map_maintenance"],
+    },
+    "live_side_effect_authorized": {
+        "depends_on": ["operator_authority"],
+        "required_gates": ["explicit_operator_go", "dry_run", "apply_guard"],
+    },
+}
+
+GRAPH_CLAIM_BLOCKING_CODES = {
+    "code_review_graph_missing",
+    "code_review_graph_unreadable",
+    "code_review_graph_stale_head",
+    "code_review_graph_stale_branch",
+    "code_review_graph_partial_coverage",
+    "code_review_graph_dirty_file_stale",
+    "code_review_graph_git_status_failed",
+    "code_review_graph_untracked_db",
+}
+
 
 def topology_issue_field_names() -> tuple[str, ...]:
     return tuple(field.name for field in fields(TopologyIssue))
@@ -414,6 +485,107 @@ def _warning(code: str, path: str, message: str) -> TopologyIssue:
     return warning(code, path, message)
 
 
+def normalize_runtime_claims(claims: list[str] | tuple[str, ...] | None) -> list[str]:
+    if not claims:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in claims:
+        claim = str(raw or "").strip()
+        if not claim or claim in seen:
+            continue
+        seen.add(claim)
+        normalized.append(claim)
+    return normalized
+
+
+def _graph_result_invalidates_claim(result: StrictResult | None) -> bool:
+    if result is None:
+        return True
+    return any(
+        issue.severity == "error" or issue.code in GRAPH_CLAIM_BLOCKING_CODES
+        for issue in result.issues
+    )
+
+
+def _global_health_has_blockers(global_health: dict[str, Any] | None) -> bool:
+    if not global_health:
+        return True
+    return any(
+        (summary.get("blocking_count") or 0) > 0 or summary.get("ok") is False
+        for summary in global_health.values()
+    )
+
+
+def build_runtime_claim_evaluation(
+    claims: list[str] | tuple[str, ...] | None,
+    *,
+    admission_status: str | None = None,
+    graph_result: StrictResult | None = None,
+    global_health: dict[str, Any] | None = None,
+    closeout_ok: bool | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+) -> dict[str, Any]:
+    requested = normalize_runtime_claims(list(claims or []))
+    evaluated: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    advisory: list[dict[str, Any]] = []
+
+    for claim in requested:
+        contract = RUNTIME_CLAIM_CONTRACTS.get(claim)
+        if contract is None:
+            blocked.append({
+                "claim": claim,
+                "reason": "unknown runtime claim",
+                "required_gates": [],
+            })
+            continue
+        entry = {
+            "claim": claim,
+            "depends_on": list(contract["depends_on"]),
+            "required_gates": list(contract["required_gates"]),
+        }
+        if claim == "admission_valid" and admission_status != "admitted":
+            blocked.append({**entry, "reason": f"admission_status={admission_status or 'unknown'}"})
+        elif claim == "semantic_boot_answered" and not task_class:
+            blocked.append({**entry, "reason": "task_class was not supplied"})
+        elif claim == "graph_impact_validated" and _graph_result_invalidates_claim(graph_result):
+            blocked.append({**entry, "reason": "code review graph is unavailable, stale, or has blocking issues"})
+        elif claim == "repo_health_clean" and _global_health_has_blockers(global_health):
+            blocked.append({**entry, "reason": "global health has blocking issues"})
+        elif claim == "packet_closeout_complete" and closeout_ok is False:
+            blocked.append({**entry, "reason": "closeout has blocking issues"})
+        elif claim == "packet_closeout_complete" and closeout_ok is None:
+            advisory.append({**entry, "reason": "closeout was not evaluated in this command"})
+        elif claim == "live_side_effect_authorized" and (write_intent or "").lower() in {"apply", "live", "production", "prod"}:
+            blocked.append({**entry, "reason": "explicit operator-go evidence is not present"})
+        else:
+            evaluated.append(entry)
+
+    return {
+        "requested": requested,
+        "evaluated": evaluated,
+        "blocked": blocked,
+        "advisory": advisory,
+        "contracts": {claim: RUNTIME_CLAIM_CONTRACTS[claim] for claim in requested if claim in RUNTIME_CLAIM_CONTRACTS},
+    }
+
+
+def runtime_claim_issues(claim_evaluation: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "severity": "error",
+            "lane": "runtime_claims",
+            "code": "runtime_claim_blocked",
+            "path": f"<runtime-claim:{item['claim']}>",
+            "message": item["reason"],
+            "blocking_modes": ["navigation", "closeout"],
+        }
+        for item in claim_evaluation.get("blocked", [])
+    ]
+
+
 def _registry_checks():
     try:
         from scripts import topology_doctor_registry_checks
@@ -579,6 +751,11 @@ def run_strict() -> StrictResult:
     result = _registry_checks().run_strict(sys.modules[__name__])
     ownership = run_ownership()
     issues = result.issues + ownership.issues
+    return StrictResult(ok=not issues, issues=issues)
+
+
+def run_schema() -> StrictResult:
+    issues = _check_schema(load_topology(), load_schema())
     return StrictResult(ok=not issues, issues=issues)
 
 
@@ -1105,6 +1282,7 @@ def run_closeout(
     plan_evidence: str | None = None,
     work_record_path: str | None = None,
     receipt_path: str | None = None,
+    claims: list[str] | None = None,
     issue_schema_version: str = "1",
 ) -> dict[str, Any]:
     return _closeout_checks().run_closeout(
@@ -1113,6 +1291,7 @@ def run_closeout(
         plan_evidence=plan_evidence,
         work_record_path=work_record_path,
         receipt_path=receipt_path,
+        claims=claims,
         issue_schema_version=issue_schema_version,
     )
 
@@ -1302,8 +1481,127 @@ def _matched_history_lore(task: str, files: list[str]) -> list[dict[str, Any]]:
     return _digest_checks().matched_history_lore(sys.modules[__name__], task, files)
 
 
-def build_digest(task: str, files: list[str] | None = None) -> dict[str, Any]:
-    return _digest_checks().build_digest(sys.modules[__name__], task, files)
+def build_digest(
+    task: str,
+    files: list[str] | None = None,
+    *,
+    intent: str | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
+) -> dict[str, Any]:
+    return _digest_checks().build_digest(
+        sys.modules[__name__],
+        task,
+        files,
+        intent=intent,
+        task_class=task_class,
+        write_intent=write_intent,
+        claims=claims,
+    )
+
+
+def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | None = None) -> str:
+    normalized = [path.strip().removeprefix("./") for path in files if path and path.strip()]
+    intent = (write_intent or "").strip().lower()
+    task_l = task.lower()
+    if intent in {"read_only", "read-only", "none"} or not normalized:
+        return "T0"
+    if intent in {"live", "production", "prod", "apply"} or any(
+        token in task_l for token in ("live deploy", "production db", "prod db", "live venue", "apply mutation")
+    ):
+        return "T4"
+    if any(
+        path.startswith(("architecture/", "docs/authority/", "src/state/", "src/control/", "src/supervisor_api/"))
+        or path in {"AGENTS.md", "workspace_map.md"}
+        or path.startswith("scripts/topology_doctor")
+        for path in normalized
+    ):
+        return "T3"
+    if any(path.startswith("src/") for path in normalized):
+        return "T2"
+    return "T1"
+
+
+def _route_card_next_action(admission_status: str, risk_tier: str) -> str:
+    if admission_status == "admitted":
+        if risk_tier in {"T3", "T4"}:
+            return "proceed only with packet plan, planning lock, focused gates, and closeout receipt"
+        return "proceed with admitted files and focused verification"
+    if admission_status == "advisory_only":
+        return "read-only orientation only; pass typed intent or narrower files before editing"
+    if admission_status == "scope_expansion_required":
+        return "stop and update packet/profile scope before editing out-of-scope files"
+    if admission_status == "blocked":
+        return "stop; requested files hit forbidden surfaces"
+    if admission_status == "ambiguous":
+        return "stop; pass typed --intent or narrow the task wording"
+    return "stop and inspect admission decision"
+
+
+def _route_card_expansion_hints(admission_status: str, risk_tier: str) -> list[str]:
+    if admission_status not in {"admitted", "advisory_only"}:
+        return [
+            "inspect admission.decision_basis before changing files",
+            "do not edit until requested files are admitted",
+        ]
+    if risk_tier == "T0":
+        return [
+            "stay in read-only orientation unless the user asks for edits",
+            "load appendices only for a claim that depends on them",
+        ]
+    if risk_tier in {"T3", "T4"}:
+        return [
+            "load packet plan and planning-lock evidence before edits",
+            "run role context pack for executor/critic/verifier handoff",
+        ]
+    return [
+        "use focused context for admitted files",
+        "run the smallest checker that proves the completion claim",
+    ]
+
+
+def build_runtime_route_card(
+    *,
+    task: str,
+    files: list[str],
+    digest: dict[str, Any],
+    mode: str,
+    intent: str | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
+) -> dict[str, Any]:
+    admission = digest.get("admission") or {}
+    status = str(admission.get("status") or "advisory_only")
+    risk_tier = _runtime_risk_tier(files, task=task, write_intent=write_intent)
+    gate_budget = RUNTIME_RISK_GATE_BUDGETS[risk_tier]
+    return {
+        "schema_version": "1",
+        "authority_status": "generated_route_card_not_authority",
+        "mode": mode,
+        "task": task,
+        "profile": digest.get("profile", "generic"),
+        "intent": intent,
+        "task_class": task_class,
+        "write_intent": write_intent,
+        "admission_status": status,
+        "risk_tier": risk_tier,
+        "gate_budget": gate_budget,
+        "next_action": _route_card_next_action(status, risk_tier),
+        "admitted_files": list(admission.get("admitted_files") or []),
+        "out_of_scope_files": list(admission.get("out_of_scope_files") or []),
+        "forbidden_hits": list(admission.get("forbidden_hits") or []),
+        "hard_stops": list(digest.get("stop_conditions") or []),
+        "claims": normalize_runtime_claims(claims),
+        "expansion_hints": _route_card_expansion_hints(status, risk_tier),
+        "appendix_policy": "expand appendices only when the task claim depends on them or risk_tier is T3/T4",
+        "claim_scope": {
+            "admission": "blocks editing when status is not admitted",
+            "repo_health": "blocks only requested-file or explicitly strict-health claims",
+            "graph": "blocks graph-impact claims only unless graph files are directly changed",
+        },
+    }
 
 
 def _navigation_issue_path_in_scope(issue_path: str, requested_paths: list[str]) -> bool:
@@ -1410,6 +1708,10 @@ def run_navigation(
     *,
     strict_health: bool = False,
     issue_schema_version: str = "1",
+    intent: str | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
 ) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
@@ -1423,7 +1725,14 @@ def run_navigation(
         "reference_replacement": run_reference_replacement(),
     }
     requested_paths = files or []
-    digest = build_digest(task, requested_paths)
+    digest = build_digest(
+        task,
+        requested_paths,
+        intent=intent,
+        task_class=task_class,
+        write_intent=write_intent,
+        claims=claims,
+    )
     admission = digest.get("admission") or {}
     admission_status = admission.get("status", "advisory_only")
     route_issues = _navigation_requested_file_issues(requested_paths)
@@ -1437,7 +1746,22 @@ def run_navigation(
         for lane, result in checks.items()
         for issue in result.issues
     ]
-    issues = health_issues + route_issues
+    requested_claims = normalize_runtime_claims(claims)
+    graph_result = (
+        run_code_review_graph_status(requested_paths)
+        if "graph_impact_validated" in requested_claims
+        else None
+    )
+    claim_evaluation = build_runtime_claim_evaluation(
+        requested_claims,
+        admission_status=admission_status,
+        graph_result=graph_result,
+        global_health=_global_health_counts(checks),
+        task_class=task_class,
+        write_intent=write_intent,
+    )
+    claim_issues = runtime_claim_issues(claim_evaluation)
+    issues = health_issues + route_issues + claim_issues
     admission_issue = _admission_typed_issue(admission, issue_schema_version)
     if admission_issue is not None:
         issues = issues + [admission_issue]
@@ -1446,7 +1770,7 @@ def run_navigation(
         for index, issue in enumerate(health_policy_issues)
         if issue in _navigation_direct_blockers([issue], requested_paths)
     }
-    direct_blockers = route_issues + [
+    direct_blockers = route_issues + claim_issues + [
         issue for index, issue in enumerate(health_issues) if index in direct_health_blocker_indexes
     ]
     if admission_issue is not None:
@@ -1466,6 +1790,9 @@ def run_navigation(
         "forbidden_files": digest.get("forbidden_files", []),
         "gates": digest.get("gates", []),
         "stop_conditions": digest.get("stop_conditions", []),
+        "route_card": digest.get("route_card", {}),
+        "risk_tier": (digest.get("route_card") or {}).get("risk_tier"),
+        "gate_budget": (digest.get("route_card") or {}).get("gate_budget"),
     }
     admission_ok = admission_status in {"admitted", "advisory_only"}
     if strict_health:
@@ -1479,6 +1806,11 @@ def run_navigation(
         "task": task,
         "digest": digest,
         "admission": admission,
+        "route_card": digest.get("route_card", {}),
+        "claim_evaluation": claim_evaluation,
+        "claims_evaluated": claim_evaluation["evaluated"],
+        "claims_blocked": claim_evaluation["blocked"],
+        "claims_advisory": claim_evaluation["advisory"],
         "context_assumption": digest.get("context_assumption", {}),
         "checks": {
             lane: {
@@ -1499,6 +1831,58 @@ def run_navigation(
             "scripts": "script manifest can be blocked by active package scripts; run explicitly for script work",
             "planning_lock": "requires caller-supplied --changed-files and optional --plan-evidence",
         },
+    }
+
+
+def build_runtime_packet(
+    *,
+    task: str,
+    files: list[str] | None = None,
+    intent: str | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+    role: str | None = None,
+    claims: list[str] | None = None,
+    route_card_only: bool = False,
+) -> dict[str, Any]:
+    target_files = files or []
+    navigation = run_navigation(
+        task,
+        target_files,
+        intent=intent,
+        task_class=task_class,
+        write_intent=write_intent,
+        claims=claims,
+    )
+    if route_card_only:
+        return {"ok": navigation["ok"], "route_card": navigation["route_card"]}
+
+    semantic_bootstrap = (
+        build_semantic_bootstrap(task_class, task=task, files=target_files)
+        if task_class
+        else None
+    )
+    role_context = None
+    if role and target_files:
+        role_context = build_context_pack(role, task=task, files=target_files, task_class=task_class)
+
+    route_card = navigation.get("route_card") or {}
+    return {
+        "ok": navigation["ok"],
+        "authority_status": "generated_runtime_packet_not_authority",
+        "task": task,
+        "files": target_files,
+        "route_card": route_card,
+        "admission": navigation.get("admission", {}),
+        "claim_evaluation": navigation.get("claim_evaluation", {}),
+        "semantic_bootstrap": semantic_bootstrap,
+        "role_context": role_context,
+        "gate_budget": route_card.get("gate_budget"),
+        "artifact_treatment_hints": [
+            "keep scratch analysis out of authority surfaces",
+            "promote stable lessons through manifests, module books, tests, or source",
+            "record durable packet evidence in receipt and work log",
+        ],
     }
 
 

@@ -119,8 +119,7 @@ rules:
     on_change: [added, deleted]
     required_companions:
       - docs/operations/AGENTS.md
-      - docs/operations/current_state.md
-    rationale: active packets and sidecar evidence must remain visible from the live control surface.
+    rationale: active and closed packet evidence must remain visible from the operations router; current_state is required only when the packet becomes the active/live pointer.
   - id: runbook_doc_registry
     path_globs: ["docs/runbooks/*.md"]
     on_change: [added, deleted]

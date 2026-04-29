@@ -114,6 +114,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-28_obs_provenance_preflight/` | packet evidence | Observation provenance preflight packet; apply-capable scripts require explicit operator approval and do not authorize live/prod DB mutation by presence alone |
 | `task_2026-04-28_wu_observations_empty_provenance_triage/` | packet evidence | WU observations empty-provenance triage packet preserved as evidence |
 | `task_2026-04-28_f11_forecast_issue_time/` | packet evidence | Forecast issue_time hindsight-antibody packet, apply runbook, and consumer audit evidence |
+| `task_2026-04-29_topology_graph_runtime_upgrade/` | packet evidence | Topology/graph agent-runtime upgrade packet for route cards, typed intent, role context packs, claim-scoped graph degradation, and artifact lifecycle; no live trading, source-routing, production DB mutation, or authority promotion by presence alone |
 | `task_2026-04-27_harness_debate/` | packet evidence | Harness debate packet evidence and implementation errata preserved from worktree merge |
 | `task_2026-04-27_backtest_first_principles_review/` | packet evidence | Backtest first-principles review packet preserved from worktree merge; planning/evidence only, not live authority |
 | `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |

@@ -426,6 +426,52 @@ def _resolve_profile(
     }
 
 
+def _normalize_intent(value: str) -> str:
+    return " ".join(value.strip().lower().replace("_", " ").split())
+
+
+def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve an explicit caller intent before free-text scoring.
+
+    `intent` is a digest profile id, not write authorization. Admission still
+    reconciles requested files against profile.allowed_files, so explicit intent
+    cannot bypass forbidden-wins or no-echo invariants.
+    """
+    if not intent or not intent.strip():
+        return None
+    wanted = _normalize_intent(intent)
+    profiles = [
+        profile
+        for profile in topology.get("digest_profiles", []) or []
+        if profile.get("id")
+    ]
+    for profile in profiles:
+        profile_id = str(profile["id"])
+        if _normalize_intent(profile_id) == wanted:
+            return {
+                "profile_id": profile_id,
+                "selected_by": "typed_intent",
+                "confidence": 1.0,
+                "candidates": [profile_id],
+                "ambiguous": False,
+                "strong_hits": [profile_id],
+                "file_hits": [],
+                "negative_hits": [],
+                "why": [f"selected by typed intent: {profile_id}"],
+            }
+    return {
+        "profile_id": None,
+        "selected_by": "typed_intent_invalid",
+        "confidence": 0.0,
+        "candidates": [str(profile["id"]) for profile in profiles],
+        "ambiguous": True,
+        "strong_hits": [],
+        "file_hits": [],
+        "negative_hits": [],
+        "why": [f"typed intent did not match a digest profile: {intent!r}"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Admission reconciler
 # ---------------------------------------------------------------------------
@@ -494,7 +540,7 @@ def _reconcile_admission(
                 "task_phrases": [],
                 "file_globs": [],
                 "negative_hits": [],
-                "selected_by": "fallback",
+                "selected_by": resolution.get("selected_by", "fallback"),
                 "candidates": resolution.get("candidates", []),
                 "why": resolution.get("why", []),
             },
@@ -692,7 +738,16 @@ def _resolved_negative_hits(resolution: dict[str, Any]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[str, Any]:
+def build_digest(
+    api: Any,
+    task: str,
+    files: list[str] | None = None,
+    *,
+    intent: str | None = None,
+    task_class: str | None = None,
+    write_intent: str | None = None,
+    claims: list[str] | None = None,
+) -> dict[str, Any]:
     topology = api.load_topology()
     # Normalize at the kernel boundary: drop None/empty/whitespace, strip
     # leading "./" prefixes, dedupe. Every downstream stage (evidence
@@ -701,7 +756,8 @@ def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[st
     requested = _normalize_paths(files)
 
     evidence = _collect_evidence(topology, task, requested)
-    resolution = _resolve_profile(evidence, topology)
+    typed_resolution = _resolve_typed_intent(intent, topology)
+    resolution = typed_resolution or _resolve_profile(evidence, topology)
 
     selected = None
     if resolution["profile_id"]:
@@ -741,6 +797,13 @@ def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[st
         "schema_version": "2",
         "admission": admission,
         "ok_semantics": "command_success_only_not_write_authorization",
+        "typed_runtime_inputs": {
+            "intent": intent,
+            "task_class": task_class,
+            "write_intent": write_intent,
+            "claims": api.normalize_runtime_claims(claims),
+            "intent_selected": bool(typed_resolution and typed_resolution.get("profile_id")),
+        },
         # --- legacy advisory mirrors (do not load-bear write authorization) ---
         "required_law": list(selected.get("required_law", []) or []),
         "allowed_files": profile_suggested,
@@ -786,4 +849,15 @@ def build_digest(api: Any, task: str, files: list[str] | None = None) -> dict[st
     if selected.get("id") == "add or change script":
         payload["script_lifecycle"] = script_lifecycle_digest(api)
     payload["history_lore"] = matched_history_lore(api, task, requested)
+    if hasattr(api, "build_runtime_route_card"):
+        payload["route_card"] = api.build_runtime_route_card(
+            task=task,
+            files=requested,
+            digest=payload,
+            mode="digest",
+            intent=intent,
+            task_class=task_class,
+            write_intent=write_intent,
+            claims=claims,
+        )
     return payload

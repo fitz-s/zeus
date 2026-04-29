@@ -1,4 +1,7 @@
 """Map-maintenance checker family for topology_doctor."""
+# Lifecycle: created=2026-04-14; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Purpose: Check changed-file companion registry requirements for map-maintenance closeout.
+# Reuse: Keep packet-local evidence rules narrow; do not require broad docs companions for covered descendants.
 
 from __future__ import annotations
 
@@ -80,6 +83,10 @@ def path_glob_matches(path: str, pattern: str) -> bool:
             if suffix:
                 return fnmatch.fnmatch(path_parts[-1], suffix)
             return len(path_parts) > prefix_depth
+    # Python fnmatch lets "*" cross "/" boundaries. Map-maintenance rules use
+    # shell-like path intent where docs/*.md means only direct docs children.
+    if path.count("/") != pattern.count("/"):
+        return False
     return fnmatch.fnmatch(path, pattern)
 
 

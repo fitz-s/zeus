@@ -31,6 +31,8 @@ Topology has five interacting layers:
 - Planning lock applies to architecture/governance/control/lifecycle/cross-zone and broad file changes.
 - Machine manifests should stay compact; module books carry explanation.
 - Global health drift must remain visible even when a scoped route is clear.
+- Agent-runtime output should reduce decisions, not add ceremony: route cards
+  summarize admission, risk tier, next action, and gate budget before appendices.
 
 ## Failure modes
 
@@ -42,9 +44,29 @@ Topology has five interacting layers:
 ## Repair routes
 
 - Start with `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`.
+- Prefer typed `--intent`, `--task-class`, and `--write-intent` when free-text
+  routing could collide with live-money or R3 profiles.
+- Use `--route-card-only` for first-screen orientation and `--claim` only when
+  the completion statement depends on a specific gate such as graph impact,
+  repo health, packet closeout, semantic boot, or live authorization.
 - Use typed issue `owner_manifest` and `repair_kind` metadata to select the owning registry.
 - Stop and plan when planning-lock or unknown ownership appears.
 - Close with changed-file `closeout`, targeted tests, and explicit work/receipt evidence.
+
+## Agent runtime posture
+
+Topology is most useful when it behaves like a runtime contract:
+
+- T0 read-only work gets a route card and stops before edits.
+- T1/T2 work gets focused gates, not full-governance ritual.
+- T3 work gets packet evidence, planning lock, and closeout receipts.
+- T4 live/prod work remains blocked without explicit operator authorization.
+- Impact/context output should use the owner manifest for the file class:
+  `source_rationale` for `src/**`, script manifest for `scripts/**`, docs
+  registry or operations router for `docs/**`, and test topology for `tests/**`.
+
+Route cards and context packs are generated guidance. They never replace
+`AGENTS.md`, manifests, tests, or executable source.
 
 ## Cross-links
 
