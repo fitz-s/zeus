@@ -68,8 +68,9 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   LOW-OPERATIONAL-WP-3-1 fix (3 sibling sys.path bootstrap + 1 regression test covering all 3): 155 → 156 (+1)
 #   CALIBRATION_HARDENING BATCH 1 (Platt parameter projection + store.py readers + tests): 156 → 170 (+14)
 #   CALIBRATION_HARDENING BATCH 2 (detect_parameter_drift ratio test + per-coefficient evidence): 170 → 181 (+11)
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py"
-BASELINE_PASSED=181
+#   CALIBRATION_HARDENING BATCH 3 (weekly runner e2e + per-bucket threshold + bootstrap_usable_count fix + sys.path bootstrap regression): 181 → 189 (+8: 7 e2e + 1 LOW-NUANCE-CALIBRATION-1-2 test)
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py"
+BASELINE_PASSED=189
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then

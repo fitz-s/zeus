@@ -178,9 +178,22 @@ def _summarize_bootstrap(bootstrap_params: list) -> dict[str, Any]:
     Per BATCH 1 boot §1 KEY OPEN QUESTION #5: this surfaces DBS-CI
     tightness WITHOUT tuning anything. α-fusion weight tuning + DBS-CI
     tightness adjustment are explicitly OUT-OF-SCOPE per dispatch.
+
+    LOW-NUANCE-CALIBRATION-1-2 fix (critic 27th cycle): the BATCH 1
+    initial implementation surfaced only `bootstrap_count = len(bootstrap_params)`
+    which conflates raw row count with validly-aggregated count. Non-
+    iterable entries (e.g., a malformed JSON row that round-trips as a
+    scalar) are silently skipped by the isinstance guard at the per-tuple
+    loop below, so `bootstrap_count` could be larger than the actual
+    samples that contributed to per-coefficient stats. This commit
+    surfaces a NEW field `bootstrap_usable_count` measuring the count of
+    rows that DID contribute (i.e., passed the isinstance guard with
+    >=1 element). When `bootstrap_count == bootstrap_usable_count`, the
+    bootstrap is fully usable; when they differ, the operator sees the
+    gap and can investigate the source data.
     """
     n = len(bootstrap_params)
-    out: dict[str, Any] = {"bootstrap_count": n}
+    out: dict[str, Any] = {"bootstrap_count": n, "bootstrap_usable_count": 0}
     if n == 0:
         for ch in ("A", "B", "C"):
             out[f"bootstrap_{ch}_std"] = None
@@ -191,15 +204,20 @@ def _summarize_bootstrap(bootstrap_params: list) -> dict[str, Any]:
     a_vals: list[float] = []
     b_vals: list[float] = []
     c_vals: list[float] = []
+    n_usable = 0
     for tup in bootstrap_params:
         if not isinstance(tup, (list, tuple)):
+            # Per LOW-NUANCE-CALIBRATION-1-2: skip non-iterable rows;
+            # they don't contribute to bootstrap_usable_count.
             continue
         if len(tup) >= 1:
             a_vals.append(float(tup[0]))
+            n_usable += 1
         if len(tup) >= 2:
             b_vals.append(float(tup[1]))
         if len(tup) >= 3:
             c_vals.append(float(tup[2]))
+    out["bootstrap_usable_count"] = n_usable
 
     for ch, vals in (("A", a_vals), ("B", b_vals), ("C", c_vals)):
         out[f"bootstrap_{ch}_std"] = _stddev(vals)
@@ -552,7 +570,10 @@ def detect_parameter_drift(
 
     # Severity tier per WP BATCH 2 precedent: critical if max(ratios) >=
     # critical_ratio_cutoff (>= cutoff, NOT strict >; sibling-coherent with
-    # ws_poll_reaction.py:447 critical-tier threshold).
+    # ws_poll_reaction.py:459 critical-tier threshold — per LOW-CITATION-
+    # CALIBRATION-2-1 fix, critic 28th cycle: prior cite to :447 was wrong;
+    # actual `severity = "critical" if ratio >= critical_ratio_cutoff` is
+    # at line 459).
     severity: DriftSeverity = (
         "critical" if max(valid_ratios) >= critical_ratio_cutoff else "warn"
     )

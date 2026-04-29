@@ -396,9 +396,14 @@ def test_canonical_cli_invocation_from_foreign_cwd(tmp_path: Path):
         pytest.skip(f"venv python not found at {venv_python}")
 
     runners = [
-        ("edge_observation_weekly.py",   ["--n-windows", "4"]),
-        ("attribution_drift_weekly.py",  []),
-        ("ws_poll_reaction_weekly.py",   ["--n-windows", "4"]),
+        ("edge_observation_weekly.py",          ["--n-windows", "4"]),
+        ("attribution_drift_weekly.py",         []),
+        ("ws_poll_reaction_weekly.py",          ["--n-windows", "4"]),
+        # CALIBRATION_HARDENING BATCH 3 (cycle-29 carry-forward of LOW-
+        # OPERATIONAL-WP-3-1): the new calibration_observation_weekly.py
+        # also pre-applies the sys.path bootstrap fix; this test now
+        # covers ALL 4 sibling weekly runners coherently.
+        ("calibration_observation_weekly.py",   ["--n-windows", "4"]),
     ]
     for runner_name, extra_flags in runners:
         runner = REPO_ROOT / "scripts" / runner_name
