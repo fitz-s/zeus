@@ -20,17 +20,19 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Optional
+from typing import Mapping, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
 from src.contracts.slippage_bps import SlippageBps
 from src.contracts import (
+    DecisionSourceContext,
     HeldSideProbability,
     NativeSidePrice,
     compute_native_limit_price,
     ExecutionIntent,
     EdgeContext,
+    FinalExecutionIntent,
     Direction,
 )
 from src.contracts.execution_price import (
@@ -859,6 +861,182 @@ def execute_intent(
     )
 
 
+def _coerce_entry_decision_source_context(
+    context: DecisionSourceContext | Mapping[str, object] | None,
+) -> DecisionSourceContext | None:
+    if isinstance(context, DecisionSourceContext):
+        return context
+    if isinstance(context, Mapping):
+        return DecisionSourceContext.from_forecast_context(context)
+    return None
+
+
+def _buy_entry_shares_from_final_intent(intent: FinalExecutionIntent) -> Decimal:
+    if intent.size_kind == "shares":
+        raw_shares = Decimal(intent.size_value)
+    elif intent.size_kind == "notional_usd":
+        raw_shares = Decimal(intent.size_value) / Decimal(intent.final_limit_price)
+    else:
+        raise ValueError(f"unsupported final intent size_kind {intent.size_kind!r}")
+    if raw_shares <= Decimal("0"):
+        raise ValueError("final intent shares must be positive")
+    share_tick = Decimal("0.01")
+    return (
+        (raw_shares / share_tick).to_integral_value(rounding=ROUND_CEILING)
+        * share_tick
+    )
+
+
+def _legacy_entry_intent_from_final_intent(
+    intent: FinalExecutionIntent,
+    *,
+    market_id: str,
+    mode: str,
+    decision_source_context: DecisionSourceContext,
+    event_id: str = "",
+    resolution_window: str = "",
+    correlation_key: str = "",
+    decision_edge: float = 0.0,
+) -> tuple[ExecutionIntent, Decimal]:
+    direction = Direction.YES if intent.direction == "buy_yes" else Direction.NO
+    shares = _buy_entry_shares_from_final_intent(intent)
+    target_size_usd = shares * Decimal(intent.final_limit_price)
+    return (
+        ExecutionIntent(
+            direction=direction,
+            target_size_usd=float(target_size_usd),
+            limit_price=float(intent.final_limit_price),
+            toxicity_budget=0.05,
+            max_slippage=SlippageBps(
+                value_bps=float(intent.max_slippage_bps),
+                direction="adverse",
+            ),
+            is_sandbox=False,
+            market_id=market_id,
+            token_id=intent.selected_token_id,
+            timeout_seconds=MODE_TIMEOUTS[mode],
+            decision_edge=decision_edge,
+            executable_snapshot_id=intent.snapshot_id,
+            executable_snapshot_min_tick_size=intent.tick_size,
+            executable_snapshot_min_order_size=intent.min_order_size,
+            executable_snapshot_neg_risk=intent.neg_risk,
+            event_id=event_id or market_id,
+            resolution_window=resolution_window or "default",
+            correlation_key=correlation_key or event_id or market_id,
+            decision_source_context=decision_source_context,
+            order_type=intent.order_type,
+            post_only=intent.post_only,
+        ),
+        shares,
+    )
+
+
+def execute_final_intent(
+    intent: FinalExecutionIntent,
+    *,
+    market_id: str,
+    mode: str,
+    decision_source_context: DecisionSourceContext | Mapping[str, object] | None,
+    conn: Optional[sqlite3.Connection] = None,
+    decision_id: str = "",
+    trade_id: str = "",
+    event_id: str = "",
+    resolution_window: str = "",
+    correlation_key: str = "",
+    decision_edge: float = 0.0,
+) -> "OrderResult":
+    """Submit an immutable corrected entry intent through the live command path."""
+
+    effective_trade_id = trade_id or str(uuid.uuid4())[:12]
+    if not isinstance(intent, FinalExecutionIntent):
+        raise TypeError(
+            "execute_final_intent requires FinalExecutionIntent; "
+            f"got {type(intent).__name__}"
+        )
+    try:
+        intent.assert_submit_ready()
+        intent.assert_no_recompute_inputs()
+    except (TypeError, ValueError) as exc:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason=f"final_intent_invalid:{exc}",
+            submitted_price=getattr(intent, "final_limit_price", None),
+            order_role="entry",
+        )
+    if intent.direction not in {"buy_yes", "buy_no"}:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason=f"unsupported_final_entry_direction:{intent.direction}",
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    if intent.post_only:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason="post_only_entry_submit_not_supported",
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    normalized_market_id = str(market_id or "").strip()
+    if not normalized_market_id:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason="missing_market_id",
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    if mode not in MODE_TIMEOUTS:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason=f"unknown_execution_mode:{mode}",
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    source_context = _coerce_entry_decision_source_context(decision_source_context)
+    if source_context is None:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason="decision_source_integrity:missing_decision_source_context",
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    source_errors = source_context.integrity_errors()
+    if source_errors:
+        return OrderResult(
+            trade_id=effective_trade_id,
+            status="rejected",
+            reason=(
+                "decision_source_integrity:invalid_decision_source_context:"
+                + ",".join(source_errors)
+            ),
+            submitted_price=float(intent.final_limit_price),
+            order_role="entry",
+        )
+    legacy_intent, shares = _legacy_entry_intent_from_final_intent(
+        intent,
+        market_id=normalized_market_id,
+        mode=mode,
+        decision_source_context=source_context,
+        event_id=event_id,
+        resolution_window=resolution_window,
+        correlation_key=correlation_key,
+        decision_edge=decision_edge,
+    )
+    return _live_order(
+        effective_trade_id,
+        legacy_intent,
+        float(shares),
+        conn=conn,
+        decision_id=decision_id,
+    )
+
+
 def create_exit_order_intent(
     *,
     trade_id: str,
@@ -1668,7 +1846,33 @@ def _live_order(
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
-        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        allocator_order_type = _select_risk_allocator_order_type(
+            conn,
+            intent.executable_snapshot_id,
+        )
+        intent_order_type = str(getattr(intent, "order_type", "") or "").strip()
+        if intent_order_type and intent_order_type != allocator_order_type:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=(
+                    "order_type_authority_mismatch:"
+                    f"intent={intent_order_type}:risk_allocator={allocator_order_type}"
+                ),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
+        if getattr(intent, "post_only", False):
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="post_only_entry_submit_not_supported",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
+        order_type = intent_order_type or allocator_order_type
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
         collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)

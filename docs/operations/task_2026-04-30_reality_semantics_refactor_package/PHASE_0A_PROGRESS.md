@@ -2,6 +2,28 @@
 
 Status: first guardrail slice implemented.
 
+## Worktree Continuation: Corrected Submit Path
+
+Status: first corrected executor bridge landed in
+`worktree/reality-semantics-refactor`.
+
+Additional completed slice:
+
+- added `execute_final_intent()` as the corrected entry submit boundary in
+  `src/execution/executor.py`
+- `execute_final_intent()` consumes `FinalExecutionIntent` plus live submission
+  authority context; it does not accept posterior, VWMP, `BinEdge`, or legacy
+  label inputs
+- corrected bridge maps final token, final limit price, executable snapshot
+  lineage, min tick/min order metadata, `neg_risk`, order type, source context,
+  and quantized BUY shares into the existing `_live_order` command path
+- `_live_order` now rejects corrected entry intents if the final order type
+  conflicts with the allocator-selected venue order type, or if post-only entry
+  submission would otherwise be silently dropped
+- corrected pricing shadow now marks marketable sweep evidence with
+  `depth_proof_source="CLOB_SWEEP"` and only opens PASS-depth construction on
+  that sweep path
+
 ## Slice Completed
 
 Topology admission can now recognize the pricing/reality semantics refactor:
@@ -31,6 +53,8 @@ Passing checks:
 - `python3 -m py_compile src/strategy/market_fusion.py src/contracts/execution_intent.py src/contracts/execution_price.py src/execution/executor.py src/engine/monitor_refresh.py tests/test_no_bare_float_seams.py tests/test_digest_profile_matching.py tests/test_architecture_contracts.py`
 - `pytest -q -p no:cacheprovider tests/test_load_platt_v2_data_version_filter.py tests/test_evaluator_explicit_n_mc.py tests/test_digest_profile_matching.py tests/test_architecture_contracts.py tests/test_no_bare_float_seams.py tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_market_analysis.py tests/test_executor.py tests/test_executor_command_split.py tests/test_exit_safety.py tests/test_harvester_metric_identity.py tests/test_harvester_dr33_live_enablement.py tests/test_collateral_ledger.py tests/test_day0_runtime_observation_context.py tests/test_model_agreement.py tests/test_k3_slice_p.py tests/test_k6_slice_n.py tests/test_k8_slice_r.py tests/test_lifecycle.py tests/test_phase9c_gate_f_prep.py tests/test_riskguard_red_durable_cmd.py tests/test_run_replay_cli.py tests/test_runtime_guards.py tests/test_v2_adapter.py` -> 838 passed, 23 skipped
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py tests/test_digest_profile_matching.py tests/test_evaluator_explicit_n_mc.py tests/test_load_platt_v2_data_version_filter.py --json`
+- `/Users/leofitz/miniconda3/bin/python3 -m compileall -q src/contracts/execution_intent.py src/execution/executor.py src/engine/cycle_runtime.py`
+- `/Users/leofitz/miniconda3/bin/python3 -m pytest tests/test_executor.py tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_runtime_guards.py -q` -> 263 passed, 1 skipped
 
 Review gates:
 
