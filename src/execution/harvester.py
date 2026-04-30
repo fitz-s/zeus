@@ -968,28 +968,172 @@ def _extract_target_date(event: dict) -> Optional[str]:
     return _parse_target_date(event)
 
 
+def _snapshot_table_exists(conn, schema: str, table: str) -> bool:
+    schema_sql = "main" if schema == "" else schema
+    try:
+        return conn.execute(
+            f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _first_snapshot_table(conn, table: str) -> str:
+    if _snapshot_table_exists(conn, "world", table):
+        return f"world.{table}"
+    if _snapshot_table_exists(conn, "", table):
+        return table
+    return ""
+
+
+def _snapshot_table_columns(conn, table: str) -> set[str]:
+    if not table:
+        return set()
+    if "." in table:
+        schema, name = table.split(".", 1)
+    else:
+        schema, name = "main", table
+    try:
+        rows = conn.execute(f"PRAGMA {schema}.table_info({name})").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
+
+
+def _snapshot_identity_predicates(
+    columns: set[str],
+    source: str,
+    *,
+    expected_city: Optional[str] = None,
+    expected_target_date: Optional[str] = None,
+    expected_temperature_metric: Optional[str] = None,
+) -> tuple[str, tuple[str, ...], bool]:
+    predicates: list[str] = []
+    params: list[str] = []
+    if expected_city and "city" in columns:
+        predicates.append("city = ?")
+        params.append(expected_city)
+    if expected_target_date and "target_date" in columns:
+        predicates.append("target_date = ?")
+        params.append(expected_target_date)
+    if expected_temperature_metric:
+        if "temperature_metric" in columns:
+            predicates.append("temperature_metric = ?")
+            params.append(expected_temperature_metric)
+        elif source == "ensemble_snapshots_v2":
+            return "", (), False
+    if not predicates:
+        return "", (), True
+    return " AND " + " AND ".join(predicates), tuple(params), True
+
+
+def _snapshot_row_by_id(
+    conn,
+    snapshot_id: str,
+    *,
+    expected_city: Optional[str] = None,
+    expected_target_date: Optional[str] = None,
+    expected_temperature_metric: Optional[str] = None,
+):
+    for table, source in (
+        (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
+        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
+    ):
+        if not table:
+            continue
+        columns = _snapshot_table_columns(conn, table)
+        identity_sql, identity_params, identity_supported = _snapshot_identity_predicates(
+            columns,
+            source,
+            expected_city=expected_city,
+            expected_target_date=expected_target_date,
+            expected_temperature_metric=expected_temperature_metric,
+        )
+        if not identity_supported:
+            continue
+        row = conn.execute(
+            f"""
+            SELECT p_raw_json, lead_hours, issue_time, available_at,
+                   model_version, data_version, snapshot_id,
+                   {('training_allowed, causality_status' if source == 'ensemble_snapshots_v2' else 'NULL AS training_allowed, NULL AS causality_status')},
+                   ? AS snapshot_source
+            FROM {table}
+            WHERE snapshot_id = ?
+              {identity_sql}
+            LIMIT 1
+            """,
+            (source, snapshot_id, *identity_params),
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def _latest_snapshot_row(
+    conn,
+    city: str,
+    target_date: str,
+    *,
+    temperature_metric: Optional[str] = None,
+):
+    for table, source in (
+        (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
+        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
+    ):
+        if not table:
+            continue
+        columns = _snapshot_table_columns(conn, table)
+        identity_sql, identity_params, identity_supported = _snapshot_identity_predicates(
+            columns,
+            source,
+            expected_temperature_metric=temperature_metric,
+        )
+        if not identity_supported:
+            continue
+        row = conn.execute(
+            f"""
+            SELECT p_raw_json, lead_hours, issue_time, available_at,
+                   model_version, data_version, snapshot_id,
+                   {('training_allowed, causality_status' if source == 'ensemble_snapshots_v2' else 'NULL AS training_allowed, NULL AS causality_status')},
+                   ? AS snapshot_source
+            FROM {table}
+            WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
+              {identity_sql}
+            ORDER BY datetime(fetch_time) DESC
+            LIMIT 1
+            """,
+            (source, city, target_date, *identity_params),
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
 def _get_stored_p_raw(
     conn,
     city: str,
     target_date: str,
     snapshot_id: Optional[str] = None,
+    temperature_metric: Optional[str] = None,
 ) -> Optional[list[float]]:
-    """Get stored P_raw vector from ensemble_snapshots."""
-    if snapshot_id:
-        row = conn.execute(
-            """
-            SELECT p_raw_json FROM ensemble_snapshots
-            WHERE snapshot_id = ?
-            LIMIT 1
-            """,
-            (snapshot_id,),
-        ).fetchone()
-    else:
-        row = conn.execute("""
-            SELECT p_raw_json FROM ensemble_snapshots
-            WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
-            ORDER BY fetch_time DESC LIMIT 1
-        """, (city, target_date)).fetchone()
+    """Get stored P_raw vector from canonical v2 snapshot, then legacy compatibility."""
+    row = (
+        _snapshot_row_by_id(
+            conn,
+            snapshot_id,
+            expected_city=city,
+            expected_target_date=target_date,
+            expected_temperature_metric=temperature_metric,
+        )
+        if snapshot_id
+        else _latest_snapshot_row(
+            conn,
+            city,
+            target_date,
+            temperature_metric=temperature_metric,
+        )
+    )
 
     if row and row["p_raw_json"]:
         try:
@@ -999,13 +1143,22 @@ def _get_stored_p_raw(
     return None
 
 
-def get_snapshot_p_raw(conn, snapshot_id: str) -> Optional[list[float]]:
+def get_snapshot_p_raw(
+    conn,
+    snapshot_id: str,
+    *,
+    expected_city: Optional[str] = None,
+    expected_target_date: Optional[str] = None,
+    expected_temperature_metric: Optional[str] = None,
+) -> Optional[list[float]]:
     """Get the decision-time P_raw vector for a specific snapshot."""
-    row = conn.execute("""
-        SELECT p_raw_json FROM ensemble_snapshots
-        WHERE snapshot_id = ?
-        LIMIT 1
-    """, (snapshot_id,)).fetchone()
+    row = _snapshot_row_by_id(
+        conn,
+        snapshot_id,
+        expected_city=expected_city,
+        expected_target_date=expected_target_date,
+        expected_temperature_metric=expected_temperature_metric,
+    )
 
     if row and row["p_raw_json"]:
         try:
@@ -1015,26 +1168,36 @@ def get_snapshot_p_raw(conn, snapshot_id: str) -> Optional[list[float]]:
     return None
 
 
-def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
+def get_snapshot_context(
+    conn,
+    snapshot_id: str,
+    *,
+    expected_city: Optional[str] = None,
+    expected_target_date: Optional[str] = None,
+    expected_temperature_metric: Optional[str] = None,
+) -> Optional[dict]:
     """Get the decision-time snapshot payload needed for calibration capture."""
-    row = conn.execute(
-        """
-        SELECT p_raw_json, lead_hours, issue_time, available_at,
-               model_version, data_version
-        FROM ensemble_snapshots
-        WHERE snapshot_id = ?
-        LIMIT 1
-        """,
-        (snapshot_id,),
-    ).fetchone()
+    row = _snapshot_row_by_id(
+        conn,
+        snapshot_id,
+        expected_city=expected_city,
+        expected_target_date=expected_target_date,
+        expected_temperature_metric=expected_temperature_metric,
+    )
     if row is None or not row["p_raw_json"]:
         return None
     source_model_version = row["data_version"] or row["model_version"]
     if not source_model_version:
         return None
     issue_time = row["issue_time"]
-    learning_snapshot_ready = bool(issue_time)
-    learning_blocked_reason = "" if learning_snapshot_ready else "missing_forecast_issue_time"
+    training_allowed = row["training_allowed"]
+    learning_snapshot_ready = bool(issue_time) and training_allowed != 0
+    if not issue_time:
+        learning_blocked_reason = "missing_forecast_issue_time"
+    elif training_allowed == 0:
+        learning_blocked_reason = "snapshot_training_not_allowed"
+    else:
+        learning_blocked_reason = ""
     try:
         return {
             "p_raw_vector": json.loads(row["p_raw_json"]),
@@ -1044,6 +1207,8 @@ def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
             "source_model_version": source_model_version,
             "snapshot_learning_ready": learning_snapshot_ready,
             "learning_blocked_reason": learning_blocked_reason,
+            "snapshot_source": row["snapshot_source"],
+            "snapshot_causality_status": row["causality_status"],
         }
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -1101,15 +1266,23 @@ def _snapshot_contexts_for_market(
     elif legacy_rows:
         fallback_reason = "legacy_rows_missing_snapshot_context"
 
-    snapshot_ids: list[str] = []
+    snapshot_refs: list[tuple[str, str]] = []
     for pos in portfolio.positions:
         if pos.city == city and pos.target_date == target_date and pos.decision_snapshot_id:
-            if pos.decision_snapshot_id not in snapshot_ids:
-                snapshot_ids.append(pos.decision_snapshot_id)
+            metric = str(getattr(pos, "temperature_metric", "") or "")
+            ref = (pos.decision_snapshot_id, metric)
+            if ref not in snapshot_refs:
+                snapshot_refs.append(ref)
 
     fallback_contexts: list[dict] = []
-    for snapshot_id in snapshot_ids:
-        context = get_snapshot_context(shared_conn, snapshot_id)
+    for snapshot_id, temperature_metric in snapshot_refs:
+        context = get_snapshot_context(
+            shared_conn,
+            snapshot_id,
+            expected_city=city,
+            expected_target_date=target_date,
+            expected_temperature_metric=temperature_metric or None,
+        )
         if context is None:
             continue
         blocked_reason = str(context.get("learning_blocked_reason") or "")
@@ -1142,7 +1315,13 @@ def _snapshot_contexts_from_rows(trade_conn, shared_conn, rows: list[dict]) -> t
                     "degraded_reason": str(row.get("degraded_reason") or ""),
                 })
             continue
-        context = get_snapshot_context(shared_conn, snapshot_id)
+        context = get_snapshot_context(
+            shared_conn,
+            snapshot_id,
+            expected_city=str(row.get("city") or "") or None,
+            expected_target_date=str(row.get("target_date") or "") or None,
+            expected_temperature_metric=str(row.get("temperature_metric") or "") or None,
+        )
         if context is None:
             dropped_rows.append({
                 "source": str(row.get("source") or "unknown"),

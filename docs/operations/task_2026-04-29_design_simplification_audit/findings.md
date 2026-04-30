@@ -778,6 +778,21 @@ replay/harvester consumers still use legacy compatibility surfaces; those paths
 must stay diagnostic/compatibility unless a later phase promotes them with
 economics/learning gates.
 
+Phase 1L reader follow-up status (2026-04-30): replay and harvester snapshot
+readers now prefer `ensemble_snapshots_v2` when a canonical row exists and fall
+back to legacy `ensemble_snapshots` only as compatibility/diagnostic evidence.
+Replay preserves the `available_at <= decision_time` point-in-time guard,
+requires v2 metric identity match, and stamps v2 snapshots
+`authority_scope=canonical_snapshot_v2` while snapshot-only fallback remains
+`diagnostic_non_promotion` and requires stored `p_raw_json`. Harvester context
+lookup now reads v2 first only when the snapshot id also matches expected
+city/date/metric identity, preserves legacy fallback when no matching v2 row
+exists, and treats v2 `training_allowed=0` as not learning-ready even if
+`issue_time` is present.
+This closes the reader side of DSA-13 for replay/harvester diagnostics and
+learning-context gates; it still does not promote diagnostic replay to
+economics authority or mutate production DB rows.
+
 ### DSA-14 [P1] Market identity is not yet one closed contract from discovery to SDK submit
 
 Classification: architecture blocker behind F03/F04/F05/F09.

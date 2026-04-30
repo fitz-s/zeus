@@ -906,3 +906,234 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
     assert contexts[0]["learning_snapshot_ready"] is False
     assert contexts[0]["is_degraded"] is True
     assert contexts[0]["degraded_reason"] == "missing_forecast_issue_time"
+
+
+def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_conn):
+    """DSA-13: harvester learning context reads canonical v2 before legacy."""
+    apply_v2_schema(harvester_conn)
+    harvester_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, issue_time, valid_time,
+            available_at, fetch_time, lead_hours, members_json, p_raw_json,
+            spread, is_bimodal, model_version, data_version, authority,
+            temperature_metric
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            501,
+            "NYC",
+            "2026-04-24",
+            "2026-04-23T00:00:00Z",
+            "2026-04-24T00:00:00Z",
+            "2026-04-23T00:05:00Z",
+            "2026-04-23T00:05:00Z",
+            24.0,
+            "[70,71,72]",
+            "[0.1,0.8,0.1]",
+            2.0,
+            0,
+            "legacy_model",
+            "legacy_v1",
+            "VERIFIED",
+            "high",
+        ),
+    )
+    harvester_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 (
+            snapshot_id, city, target_date, temperature_metric,
+            physical_quantity, observation_field, issue_time, valid_time,
+            available_at, fetch_time, lead_hours, members_json, p_raw_json,
+            spread, is_bimodal, model_version, data_version, training_allowed,
+            causality_status, boundary_ambiguous, provenance_json, authority,
+            members_unit, unit
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            501,
+            "NYC",
+            "2026-04-24",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
+            "2026-04-23T00:00:00Z",
+            "2026-04-24T00:00:00Z",
+            "2026-04-23T00:05:00Z",
+            "2026-04-23T00:05:00Z",
+            24.0,
+            "[70,71,72]",
+            "[0.2,0.5,0.3]",
+            2.0,
+            0,
+            "v2_model",
+            HIGH_LOCALDAY_MAX.data_version,
+            0,
+            "RUNTIME_ONLY_FALLBACK",
+            0,
+            "{}",
+            "UNVERIFIED",
+            "degF",
+            "F",
+        ),
+    )
+
+    context = harvester_mod.get_snapshot_context(harvester_conn, "501")
+    p_raw = harvester_mod.get_snapshot_p_raw(harvester_conn, "501")
+
+    assert context is not None
+    assert context["snapshot_source"] == "ensemble_snapshots_v2"
+    assert context["source_model_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
+    assert context["snapshot_learning_ready"] is False
+    assert context["learning_blocked_reason"] == "snapshot_training_not_allowed"
+    assert context["snapshot_causality_status"] == "RUNTIME_ONLY_FALLBACK"
+    assert p_raw == [0.2, 0.5, 0.3]
+
+
+def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_conn):
+    """DSA-13: legacy diagnostic snapshot rows remain readable if v2 has no id."""
+    apply_v2_schema(harvester_conn)
+    cur = harvester_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, issue_time, valid_time, available_at, fetch_time,
+            lead_hours, members_json, p_raw_json, spread, is_bimodal,
+            model_version, data_version, authority, temperature_metric
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "NYC",
+            "2026-04-24",
+            "2026-04-23T00:00:00Z",
+            "2026-04-24T00:00:00Z",
+            "2026-04-23T00:05:00Z",
+            "2026-04-23T00:05:00Z",
+            24.0,
+            "[70,71,72]",
+            "[0.2,0.5,0.3]",
+            2.0,
+            0,
+            "legacy_model",
+            "legacy_v1",
+            "VERIFIED",
+            "high",
+        ),
+    )
+    snapshot_id = str(cur.lastrowid)
+
+    context = harvester_mod.get_snapshot_context(harvester_conn, snapshot_id)
+    p_raw = harvester_mod.get_snapshot_p_raw(harvester_conn, snapshot_id)
+
+    assert context is not None
+    assert context["snapshot_source"] == "ensemble_snapshots"
+    assert context["source_model_version"] == "legacy_v1"
+    assert context["snapshot_learning_ready"] is True
+    assert context["learning_blocked_reason"] == ""
+    assert p_raw == [0.2, 0.5, 0.3]
+
+
+def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(harvester_conn):
+    """DSA-13: legacy snapshot ids must not bind to unrelated v2 rows."""
+    apply_v2_schema(harvester_conn)
+    harvester_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, issue_time, valid_time,
+            available_at, fetch_time, lead_hours, members_json, p_raw_json,
+            spread, is_bimodal, model_version, data_version, authority,
+            temperature_metric
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            777,
+            "NYC",
+            "2026-04-24",
+            "2026-04-23T00:00:00Z",
+            "2026-04-24T00:00:00Z",
+            "2026-04-23T00:05:00Z",
+            "2026-04-23T00:05:00Z",
+            24.0,
+            "[70,71,72]",
+            "[0.2,0.5,0.3]",
+            2.0,
+            0,
+            "legacy_model",
+            "legacy_v1",
+            "VERIFIED",
+            "high",
+        ),
+    )
+    harvester_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 (
+            snapshot_id, city, target_date, temperature_metric,
+            physical_quantity, observation_field, issue_time, valid_time,
+            available_at, fetch_time, lead_hours, members_json, p_raw_json,
+            spread, is_bimodal, model_version, data_version, training_allowed,
+            causality_status, boundary_ambiguous, provenance_json, authority,
+            members_unit, unit
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            777,
+            "LA",
+            "2026-04-25",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
+            "2026-04-23T00:00:00Z",
+            "2026-04-24T00:00:00Z",
+            "2026-04-23T00:05:00Z",
+            "2026-04-23T00:05:00Z",
+            24.0,
+            "[90,91,92]",
+            "[0.9,0.1,0.0]",
+            2.0,
+            0,
+            "wrong_v2",
+            HIGH_LOCALDAY_MAX.data_version,
+            1,
+            "OK",
+            0,
+            "{}",
+            "VERIFIED",
+            "degF",
+            "F",
+        ),
+    )
+
+    context = harvester_mod.get_snapshot_context(
+        harvester_conn,
+        "777",
+        expected_city="NYC",
+        expected_target_date="2026-04-24",
+        expected_temperature_metric="high",
+    )
+    contexts, dropped_rows = harvester_mod._snapshot_contexts_from_rows(
+        harvester_conn,
+        harvester_conn,
+        [{
+            "decision_snapshot_id": "777",
+            "city": "NYC",
+            "target_date": "2026-04-24",
+            "temperature_metric": "high",
+            "source": "position_events",
+            "authority_level": "durable_event",
+            "learning_snapshot_ready": True,
+        }],
+    )
+
+    assert context is not None
+    assert context["snapshot_source"] == "ensemble_snapshots"
+    assert context["source_model_version"] == "legacy_v1"
+    assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
+    assert dropped_rows == []
+    assert len(contexts) == 1
+    assert contexts[0]["snapshot_source"] == "ensemble_snapshots"
+    assert contexts[0]["p_raw_vector"] == [0.2, 0.5, 0.3]

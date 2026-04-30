@@ -776,6 +776,16 @@ Current status (2026-04-29):
   executable edge selection. This does not promote replay/harvester legacy
   readers to authority, mutate production DB rows, change source routing,
   activate TIGGE/direct ECMWF, or decide Paris.
+- Phase 1L reader follow-up is repaired for replay and harvester: both now
+  prefer `ensemble_snapshots_v2` for snapshot rows and keep legacy
+  `ensemble_snapshots` as compatibility/diagnostic fallback. Replay preserves
+  the `available_at <= decision_time` guard, requires v2 metric identity, and
+  keeps snapshot-only fallback diagnostic/non-promotion with non-null p_raw
+  evidence. Harvester now requires expected city/date/metric identity before a
+  v2 row can outrank legacy fallback and respects v2 `training_allowed=0` in
+  learning context, so degraded/runtime-only snapshots can be audited without
+  entering calibration training. This does not mutate production DB rows or
+  promote replay/economics authority.
 
 Exit criteria:
 
