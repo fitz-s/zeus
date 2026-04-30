@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
@@ -20,10 +21,19 @@ import numpy as np
 if TYPE_CHECKING:
     from src.data.observation_client import Day0ObservationContext
 
-from src.calibration.manager import get_calibrator
+from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.config import CONFIG_DIR, City, edge_n_bootstrap, ensemble_crosscheck_member_count, ensemble_member_count, settings
+from src.config import (
+    CONFIG_DIR,
+    City,
+    edge_n_bootstrap,
+    ensemble_crosscheck_member_count,
+    ensemble_crosscheck_model,
+    ensemble_member_count,
+    ensemble_primary_model,
+    settings,
+)
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -65,6 +75,7 @@ from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
+from src.data.forecast_source_registry import SourceNotEnabled
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import AuthorityViolation, compute_alpha, vwmp
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
@@ -345,7 +356,7 @@ def _serialize_json(value) -> str:
     return json.dumps(_to_jsonable(value), default=str, ensure_ascii=False)
 
 
-def _forecast_source_key(model_name: str | None) -> str:
+def _forecast_model_family(model_name: str | None) -> str:
     text = str(model_name or "ecmwf_ifs025").strip().lower()
     if text.startswith("ecmwf"):
         return "ecmwf"
@@ -356,6 +367,137 @@ def _forecast_source_key(model_name: str | None) -> str:
     if text.startswith("openmeteo"):
         return "openmeteo"
     return text
+
+
+def _forecast_source_key(*, source_id: str | None, model_name: str | None) -> str:
+    source = str(source_id or "").strip().lower()
+    if source:
+        return source
+    return _forecast_model_family(model_name)
+
+
+def _forecast_evidence_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _raw_payload_hash_is_valid(value) -> bool:
+    text = _forecast_evidence_text(value)
+    return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
+
+
+def _forecast_available_time_value(ens_result: dict) -> Optional[str]:
+    return _snapshot_time_value(ens_result.get("available_at"))
+
+
+def _forecast_evidence_datetime(value) -> Optional[datetime]:
+    """Parse forecast evidence timestamps into UTC datetimes.
+
+    Entry decisions need a causality proof, not just timestamp strings. Naive
+    timestamps are treated as UTC because existing Zeus forecast evidence uses
+    UTC wall-clock values when tzinfo is absent.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = _forecast_evidence_text(value)
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_forecast_evidence_errors(
+    ens_result: dict,
+    target_date: str,
+    decision_time: Optional[datetime],
+) -> list[str]:
+    """Validate the executable-entry forecast evidence contract.
+
+    Monitor/diagnostic fallbacks may have weaker provenance, but entry must not
+    proceed unless the forecast source, timing, payload hash, and authority
+    fields are explicit enough to audit later and are knowable before the
+    decision was made.
+    """
+
+    errors: list[str] = []
+    for field in ("source_id", "model", "degradation_level", "forecast_source_role", "authority_tier"):
+        if not _forecast_evidence_text(ens_result.get(field)):
+            errors.append(f"forecast_evidence_missing_{field}")
+
+    if not _raw_payload_hash_is_valid(ens_result.get("raw_payload_hash")):
+        errors.append("forecast_evidence_missing_raw_payload_hash")
+
+    decision_time_value = _snapshot_time_value(decision_time)
+    decision_time_dt = _forecast_evidence_datetime(decision_time_value)
+    if decision_time_value is None:
+        errors.append("forecast_evidence_missing_decision_time")
+    elif decision_time_dt is None:
+        errors.append("forecast_evidence_invalid_decision_time")
+
+    issue_time_value = _snapshot_issue_time_value(ens_result)
+    issue_time_dt = _forecast_evidence_datetime(issue_time_value)
+    if issue_time_value is None:
+        errors.append("forecast_evidence_missing_issue_time")
+    elif issue_time_dt is None:
+        errors.append("forecast_evidence_invalid_issue_time")
+
+    valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
+    valid_time_dt = _forecast_evidence_datetime(valid_time_value)
+    if valid_time_value is None:
+        errors.append("forecast_evidence_missing_valid_time")
+    elif valid_time_dt is None:
+        errors.append("forecast_evidence_invalid_valid_time")
+
+    fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
+    fetch_time_dt = _forecast_evidence_datetime(fetch_time_value)
+    if fetch_time_value is None:
+        errors.append("forecast_evidence_missing_fetch_time")
+    elif fetch_time_dt is None:
+        errors.append("forecast_evidence_invalid_fetch_time")
+
+    available_time_value = _forecast_available_time_value(ens_result)
+    available_time_dt = _forecast_evidence_datetime(available_time_value)
+    if available_time_value is None:
+        errors.append("forecast_evidence_missing_available_at")
+    elif available_time_dt is None:
+        errors.append("forecast_evidence_invalid_available_at")
+
+    if decision_time_dt is not None:
+        if issue_time_dt is not None and issue_time_dt > decision_time_dt:
+            errors.append("forecast_evidence_issue_after_decision")
+        if fetch_time_dt is not None and fetch_time_dt > decision_time_dt:
+            errors.append("forecast_evidence_fetch_after_decision")
+        if available_time_dt is not None and available_time_dt > decision_time_dt:
+            errors.append("forecast_evidence_available_after_decision")
+
+    if issue_time_dt is not None and fetch_time_dt is not None and issue_time_dt > fetch_time_dt:
+        errors.append("forecast_evidence_issue_after_fetch_time")
+    if issue_time_dt is not None and available_time_dt is not None and issue_time_dt > available_time_dt:
+        errors.append("forecast_evidence_issue_after_available_at")
+    if available_time_dt is not None and fetch_time_dt is not None and available_time_dt > fetch_time_dt:
+        errors.append("forecast_evidence_available_after_fetch_time")
+
+    role = _forecast_evidence_text(ens_result.get("forecast_source_role"))
+    if role and role != "entry_primary":
+        errors.append(f"forecast_evidence_role_not_entry_primary:{role}")
+
+    degradation = _forecast_evidence_text(ens_result.get("degradation_level"))
+    if degradation and degradation != "OK":
+        errors.append(f"forecast_evidence_degraded:{degradation}")
+
+    authority = _forecast_evidence_text(ens_result.get("authority_tier"))
+    if authority and authority != "FORECAST":
+        errors.append(f"forecast_evidence_authority_not_forecast:{authority}")
+
+    return errors
 
 
 def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
@@ -840,10 +982,6 @@ def evaluate_candidate(
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
-    # Semantic Provenance Guard
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
-    if False: _ = None.selected_method; _ = None.entry_method
     city = candidate.city
     target_date = candidate.target_date
     outcomes = candidate.outcomes
@@ -863,6 +1001,12 @@ def evaluate_candidate(
         if is_day0_mode
         else EntryMethod.ENS_MEMBER_COUNTING.value
     )
+    entry_provenance_context = SimpleNamespace(
+        selected_method=selected_method,
+        entry_method=selected_method,
+    )
+    if not entry_provenance_context.selected_method or not entry_provenance_context.entry_method:
+        raise ValueError("entry provenance context is required before probability evaluation")
 
     if is_day0_mode and candidate.observation is None:
         return [EdgeDecision(
@@ -908,11 +1052,25 @@ def evaluate_candidate(
         if low is None and high is None:
             continue
         bins.append(Bin(low=low, high=high, label=o["title"], unit=city.settlement_unit))
-        token_map[len(bins) - 1] = {
+        token_payload = {
             "token_id": o["token_id"],
             "no_token_id": o["no_token_id"],
             "market_id": o["market_id"],
         }
+        executable_snapshot_id = o.get("executable_snapshot_id") or o.get("snapshot_id")
+        if executable_snapshot_id:
+            token_payload["executable_snapshot_id"] = str(executable_snapshot_id)
+        executable_tick = o.get("executable_snapshot_min_tick_size", o.get("min_tick_size"))
+        if executable_tick is not None:
+            token_payload["executable_snapshot_min_tick_size"] = executable_tick
+        executable_min_order = o.get("executable_snapshot_min_order_size", o.get("min_order_size"))
+        if executable_min_order is not None:
+            token_payload["executable_snapshot_min_order_size"] = executable_min_order
+        if "executable_snapshot_neg_risk" in o:
+            token_payload["executable_snapshot_neg_risk"] = o["executable_snapshot_neg_risk"]
+        elif "neg_risk" in o:
+            token_payload["executable_snapshot_neg_risk"] = o["neg_risk"]
+        token_map[len(bins) - 1] = token_payload
 
     if len(bins) < 3:
         return [EdgeDecision(
@@ -940,9 +1098,26 @@ def evaluate_candidate(
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
     ens_forecast_days = max(2, int(max(0.0, lead_days)) + 2)
 
+    primary_model = ensemble_primary_model()
+
     # Fetch ENS
     try:
-        ens_result = fetch_ensemble(city, forecast_days=ens_forecast_days)
+        ens_result = fetch_ensemble(
+            city,
+            forecast_days=ens_forecast_days,
+            model=primary_model,
+            role="entry_primary",
+        )
+    except SourceNotEnabled as e:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[str(e)],
+            availability_status="DATA_STALE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch", "forecast_source_policy"],
+        )]
     except Exception as e:
         return [EdgeDecision(
             False,
@@ -973,6 +1148,37 @@ def evaluate_candidate(
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
+        )]
+    if ens_result.get("degradation_level") == "DEGRADED_FORECAST_FALLBACK":
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[
+                f"Forecast source {ens_result.get('source_id', 'unknown')} is "
+                "DEGRADED_FORECAST_FALLBACK; entry requires primary forecast authority"
+            ],
+            availability_status="DATA_STALE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch", "forecast_source_policy"],
+        )]
+    forecast_evidence_errors = _entry_forecast_evidence_errors(
+        ens_result,
+        target_date,
+        decision_time,
+    )
+    if forecast_evidence_errors:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[
+                "Forecast source evidence incomplete for executable entry: "
+                + ", ".join(forecast_evidence_errors)
+            ],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch", "forecast_source_evidence"],
         )]
     try:
         ens_times = _forecast_times_as_strings(ens_result["times"])
@@ -1184,6 +1390,17 @@ def evaluate_candidate(
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate)
     snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+    if not snapshot_id:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["ENS snapshot persistence failed: decision_snapshot_id unavailable"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "ens_snapshot_persistence"],
+            p_raw=p_raw,
+        )]
     _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
 
     # Calibration
@@ -1275,6 +1492,44 @@ def evaluate_candidate(
             applied_validations=entry_validations,
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
+            p_cal=p_cal,
+        )]
+
+    try:
+        maturity_multiplier = edge_threshold_multiplier(cal_level)
+    except Exception as exc:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="CALIBRATION_IMMATURE",
+            rejection_reasons=[f"invalid calibration maturity level {cal_level!r}: {exc}"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "calibration_maturity_invalid"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+        )]
+    maturity_validation = [
+        f"calibration_maturity_level_{cal_level}",
+        f"calibration_maturity_threshold_{maturity_multiplier:g}x",
+    ]
+    entry_validations.extend(maturity_validation)
+    if cal is None or cal_level >= 4:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="CALIBRATION_IMMATURE",
+            rejection_reasons=[
+                "calibration_level=4 has no Platt model; raw-probability entries "
+                f"are blocked before edge/FDR selection (required_threshold={maturity_multiplier:g}x)"
+            ],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "raw_probability_entry_blocked"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
         )]
 
     # Market prices via VWMP
@@ -1347,32 +1602,41 @@ def evaluate_candidate(
 
     agreement = "AGREE"
     if not is_day0_mode:
+        crosscheck_model = ensemble_crosscheck_model()
         try:
-            gfs_result = fetch_ensemble(city, forecast_days=ens_forecast_days, model="gfs025")
+            crosscheck_result = fetch_ensemble(
+                city,
+                forecast_days=ens_forecast_days,
+                model=crosscheck_model,
+                role="diagnostic",
+            )
         except Exception as e:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[f"GFS crosscheck unavailable: {e}"],
+                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable: {e}"],
                 availability_status=_availability_status_for_error(e),
                 selected_method=selected_method,
-                applied_validations=[*entry_validations, "gfs_crosscheck_unavailable"],
+                applied_validations=[*entry_validations, "crosscheck_unavailable"],
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
                 p_cal=p_cal,
                 p_market=p_market,
                 agreement="CROSSCHECK_UNAVAILABLE",
             )]
-        if gfs_result is None:
+        if crosscheck_result is None or not validate_ensemble(
+            crosscheck_result,
+            expected_members=ensemble_crosscheck_member_count(),
+        ):
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["GFS crosscheck unavailable"],
+                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable"],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
-                applied_validations=[*entry_validations, "gfs_crosscheck_unavailable"],
+                applied_validations=[*entry_validations, "crosscheck_unavailable"],
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
                 p_cal=p_cal,
@@ -1383,10 +1647,10 @@ def evaluate_candidate(
             gfs_tz_hours = select_hours_for_target_date(
                 target_d,
                 city.timezone,
-                times=_forecast_times_as_strings(gfs_result["times"]),
+                times=_forecast_times_as_strings(crosscheck_result["times"]),
             )
             if not _validate_ensemble_for_required_hours(
-                gfs_result,
+                crosscheck_result,
                 expected_members=ensemble_crosscheck_member_count(),
                 required_hour_indices=gfs_tz_hours,
             ):
@@ -1405,9 +1669,9 @@ def evaluate_candidate(
                     agreement="CROSSCHECK_UNAVAILABLE",
                 )]
             gfs_metric_values = (
-                gfs_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
+                crosscheck_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
                 if temperature_metric.is_low()
-                else gfs_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
+                else crosscheck_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
             )
             gfs_measured = settlement_semantics.round_values(gfs_metric_values)
             n_gfs = len(gfs_measured)
@@ -1424,15 +1688,15 @@ def evaluate_candidate(
                 gfs_p /= total
             agreement = model_agreement(p_raw, gfs_p)
         except Exception as e:
-            logger.warning("GFS crosscheck failed: %s", e)
+            logger.warning("%s crosscheck failed: %s", crosscheck_model, e)
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[f"GFS crosscheck unavailable: {e}"],
+                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable: {e}"],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
-                applied_validations=[*entry_validations, "gfs_crosscheck_unavailable"],
+                applied_validations=[*entry_validations, "crosscheck_unavailable"],
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
                 p_cal=p_cal,
@@ -1445,7 +1709,7 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ECMWF/GFS CONFLICT"],
+            rejection_reasons=[f"{primary_model}/{crosscheck_model} CONFLICT"],
             selected_method=selected_method,
             applied_validations=[*entry_validations, "model_agreement"],
             decision_snapshot_id=snapshot_id,
@@ -1502,7 +1766,11 @@ def evaluate_candidate(
         entry_validations.append("model_agreement")
     entry_validations.append("alpha_posterior")
 
-    forecast_source = _forecast_source_key(ens_result.get("model"))
+    forecast_source = _forecast_source_key(
+        source_id=ens_result.get("source_id"),
+        model_name=ens_result.get("model"),
+    )
+    forecast_model_family = _forecast_model_family(ens_result.get("model"))
     season = season_from_date(target_date, lat=city.lat)
     bias_reference = _load_model_bias_reference(
         conn,
@@ -1543,6 +1811,24 @@ def evaluate_candidate(
         }
     if day0_forecast_context is not None:
         forecast_context["day0"] = day0_forecast_context
+    forecast_issue_time = _snapshot_issue_time_value(ens_result)
+    forecast_valid_time = _snapshot_valid_time_value(target_date, ens_result)
+    forecast_fetch_time = _snapshot_time_value(ens_result.get("fetch_time"))
+    forecast_available_at = _forecast_available_time_value(ens_result)
+    forecast_context["forecast_source_id"] = forecast_source
+    forecast_context["model_family"] = forecast_model_family
+    forecast_context["forecast_issue_time"] = forecast_issue_time
+    forecast_context["forecast_valid_time"] = forecast_valid_time
+    forecast_context["forecast_fetch_time"] = forecast_fetch_time
+    forecast_context["forecast_available_at"] = forecast_available_at
+    forecast_context["raw_payload_hash"] = ens_result.get("raw_payload_hash")
+    forecast_context["degradation_level"] = ens_result.get("degradation_level")
+    forecast_context["forecast_source_role"] = ens_result.get("forecast_source_role")
+    forecast_context["authority_tier"] = ens_result.get("authority_tier")
+    forecast_context["decision_time"] = (
+        decision_time.isoformat() if isinstance(decision_time, datetime) else None
+    )
+    forecast_context["decision_time_status"] = "OK" if decision_time is not None else "NOT_SUPPLIED_DIRECT_EVALUATOR_CALL"
     n_bootstrap = edge_n_bootstrap()
     edges = analysis.find_edges(n_bootstrap=n_bootstrap)
     _fdr_fallback = False
@@ -2026,7 +2312,11 @@ def _snapshot_valid_time_value(target_date: str, ens_result: dict) -> Optional[s
     if valid_time is not None:
         return valid_time
 
-    # Return None instead of synthetic sentinels for missing valid_time
+    first_valid_time = _snapshot_time_value(ens_result.get("first_valid_time"))
+    if first_valid_time is not None:
+        return first_valid_time
+
+    # Return None instead of synthetic sentinels for missing valid_time.
     return None
 
 
@@ -2052,6 +2342,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
         if fetch_time_value is None:
             raise ValueError("ENS snapshot missing fetch_time")
+        available_at_value = _forecast_available_time_value(ens_result) or fetch_time_value
 
         # P10D S3: stamp temperature_metric on each snapshot row so LOW rows
         # are distinguishable from HIGH rows in the legacy table.
@@ -2085,7 +2376,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             target_date,
             issue_time_value,
             valid_time_value,
-            fetch_time_value,
+            available_at_value,
             fetch_time_value,
             max(
                 0.0,
@@ -2114,13 +2405,29 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         ))
         row = conn.execute(f"""
             SELECT snapshot_id FROM {snapshots_table}
-            WHERE city = ? AND target_date = ? AND issue_time = ? AND data_version = ?
+            WHERE city = ?
+              AND target_date = ?
+              AND data_version = ?
+              AND temperature_metric = ?
+              AND model_version = ?
+              AND available_at = ?
+              AND fetch_time = ?
+              AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
+              AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
+            ORDER BY snapshot_id DESC
             LIMIT 1
         """, (
             city.name,
             target_date,
-            issue_time_value,
             "live_v1",
+            snap_metric,
+            ens_result["model"],
+            available_at_value,
+            fetch_time_value,
+            issue_time_value,
+            issue_time_value,
+            valid_time_value,
+            valid_time_value,
         )).fetchone()
         conn.commit()
         return str(row["snapshot_id"]) if row is not None else ""

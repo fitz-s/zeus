@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-18; last_reviewed=2026-04-18; last_reused=never
+# Lifecycle: created=2026-04-18; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Phase 6 R-BA..R-BG invariants: Day0 split + router + DT#6 graceful-degradation + B055 absorption
 # Reuse: Anchors on phase6_contract.md. Confirms Day0Router routes by metric+causality,
 #   LOW missing low_so_far clean-rejects, RemainingMemberExtrema prevents MAX→MIN alias.
@@ -8,7 +8,9 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -128,6 +130,99 @@ class TestRBB_LowPathMinArray:
         )
         signal = Day0Router.route(inputs)
         assert isinstance(signal, Day0LowNowcastSignal)
+
+    def test_low_signal_p_vector_handles_open_shoulders(self):
+        """LOW Day0 must use Bin shoulder semantics instead of float(None)."""
+        from src.signal.day0_low_nowcast_signal import Day0LowNowcastSignal
+        from src.types import Bin
+
+        bins = [
+            Bin(low=None, high=36, label="36°F or below", unit="F"),
+            Bin(low=37, high=38, label="37-38°F", unit="F"),
+            Bin(low=39, high=None, label="39°F or higher", unit="F"),
+        ]
+
+        low_tail_signal = Day0LowNowcastSignal(
+            observed_low_so_far=35.0,
+            member_mins_remaining=np.array([35.0, 35.0, 35.0], dtype=np.float64),
+            current_temp=40.0,
+            hours_remaining=0.0,
+            unit="F",
+        )
+        low_tail_probs = low_tail_signal.p_vector(bins)
+        assert np.isfinite(low_tail_probs).all()
+        assert low_tail_probs[0] == pytest.approx(1.0)
+        assert low_tail_probs.sum() == pytest.approx(1.0)
+
+        high_tail_signal = Day0LowNowcastSignal(
+            observed_low_so_far=45.0,
+            member_mins_remaining=np.array([45.0, 45.0, 45.0], dtype=np.float64),
+            current_temp=45.0,
+            hours_remaining=0.0,
+            unit="F",
+        )
+        high_tail_probs = high_tail_signal.p_vector(bins)
+        assert np.isfinite(high_tail_probs).all()
+        assert high_tail_probs[2] == pytest.approx(1.0)
+        assert high_tail_probs.sum() == pytest.approx(1.0)
+
+    def test_low_signal_applies_injected_settlement_rounding_before_binning(self):
+        """LOW Day0 samples must be rounded by the market settlement rule."""
+        from src.signal.day0_low_nowcast_signal import Day0LowNowcastSignal
+        from src.types import Bin
+
+        bins = [
+            Bin(low=37, high=38, label="37-38°F", unit="F"),
+            Bin(low=39, high=40, label="39-40°F", unit="F"),
+        ]
+
+        floor_signal = Day0LowNowcastSignal(
+            observed_low_so_far=40.0,
+            member_mins_remaining=np.array([38.7, 38.7, 38.7], dtype=np.float64),
+            current_temp=38.7,
+            hours_remaining=24.0,
+            unit="F",
+            round_fn=lambda values: np.floor(np.asarray(values, dtype=float)),
+        )
+        np.testing.assert_allclose(floor_signal.p_vector(bins), np.array([1.0, 0.0]))
+
+        half_up_signal = Day0LowNowcastSignal(
+            observed_low_so_far=40.0,
+            member_mins_remaining=np.array([38.5, 38.5, 38.5], dtype=np.float64),
+            current_temp=38.5,
+            hours_remaining=24.0,
+            unit="F",
+        )
+        np.testing.assert_allclose(half_up_signal.p_vector(bins), np.array([0.0, 1.0]))
+
+    def test_low_router_preserves_rich_observation_context(self):
+        """Router LOW branch must not drop observation timing/context metadata."""
+        from src.signal.day0_router import Day0Router, Day0SignalInputs
+        from src.types.metric_identity import LOW_LOCALDAY_MIN
+
+        current_utc = datetime(2026, 4, 29, 18, 0, tzinfo=timezone.utc)
+        inputs = Day0SignalInputs(
+            temperature_metric=LOW_LOCALDAY_MIN,
+            current_temp=40.0,
+            hours_remaining=2.0,
+            observed_high_so_far=None,
+            observed_low_so_far=38.0,
+            member_maxes_remaining=None,
+            member_mins_remaining=np.array([37.0, 38.0, 39.0], dtype=np.float64),
+            causality_status="OK",
+            unit="F",
+            observation_source="wu_api",
+            observation_time="2026-04-29T17:45:00+00:00",
+            temporal_context=SimpleNamespace(current_utc_timestamp=current_utc),
+        )
+
+        signal = Day0Router.route(inputs)
+        context = signal.forecast_context()
+
+        assert context["backbone"]["observation_source"] == "wu_api"
+        assert context["backbone"]["observation_time"] == "2026-04-29T17:45:00+00:00"
+        assert context["backbone"]["current_utc_timestamp"] == current_utc.isoformat()
+        assert context["backbone"]["nowcast"]["fresh_observation"] is True
 
 
 # ---------------------------------------------------------------------------

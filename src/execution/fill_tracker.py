@@ -501,7 +501,7 @@ def _record_partial_entry_observed(
     pos.entry_price = fill_price
     pos.entry_order_id = pos.entry_order_id or pos.order_id
     pos.order_id = pos.order_id or pos.entry_order_id or ""
-    pos.entry_fill_verified = True
+    pos.entry_fill_verified = False
     pos.shares = shares
     actual_cost_basis = shares * fill_price
     if actual_cost_basis > 0:
@@ -537,6 +537,15 @@ def _record_optimistic_entry_observed(
         pos.state = "quarantine_fill_failed"
         return "still_pending", True, False
 
+    pos.entry_price = fill_price
+    pos.entry_order_id = pos.entry_order_id or pos.order_id
+    pos.order_id = pos.order_id or pos.entry_order_id or ""
+    pos.entry_fill_verified = False
+    pos.shares = shares
+    actual_cost_basis = shares * fill_price
+    if actual_cost_basis > 0:
+        pos.size_usd = actual_cost_basis
+        pos.cost_basis_usd = actual_cost_basis
     _update_pending_status(pos, status.lower())
     return "still_pending", True, False
 
@@ -626,45 +635,47 @@ def _check_entry_fill(
         )
 
     if status in _partial_fill_statuses(deps):
+        outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
+        if getattr(pos, "state", "") == "quarantine_fill_failed":
+            return outcome, dirty, tracker_dirty
         if _pending_order_timed_out(pos, now):
             cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
             if cancel_succeeded:
-                return _mark_entry_filled(
-                    pos,
-                    payload,
-                    now,
-                    tracker,
-                    order_status="partial_remainder_cancelled",
-                    execution_status="partial",
-                    deps=deps,
-                )
-        return _record_partial_entry_observed(pos, payload, now, deps=deps)
+                if _position_has_observed_exposure(pos):
+                    pending_outcome, pending_dirty, pending_tracker_dirty = _update_pending_status(
+                        pos,
+                        "partial_remainder_cancelled",
+                    )
+                    return (
+                        pending_outcome,
+                        dirty or pending_dirty,
+                        tracker_dirty or pending_tracker_dirty,
+                    )
+                return _mark_entry_voided(portfolio, pos, "UNFILLED_ORDER", deps=deps)
+        return outcome, dirty, tracker_dirty
 
     if status in _cancel_statuses(deps):
-        if _position_has_observed_fill(pos) or _extract_filled_shares(payload, allow_order_size_fallback=False):
-            return _mark_entry_filled(
+        dirty = False
+        tracker_dirty = False
+        if _extract_filled_shares(payload, allow_order_size_fallback=False):
+            outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
+            if getattr(pos, "state", "") == "quarantine_fill_failed":
+                return outcome, dirty, tracker_dirty
+        if _position_has_observed_exposure(pos):
+            pending_outcome, pending_dirty, pending_tracker_dirty = _update_pending_status(
                 pos,
-                payload,
-                now,
-                tracker,
-                order_status="partial_remainder_cancelled",
-                execution_status="partial",
-                deps=deps,
+                "partial_remainder_cancelled",
             )
+            return pending_outcome, dirty or pending_dirty, tracker_dirty or pending_tracker_dirty
         return _mark_entry_voided(portfolio, pos, "UNFILLED_ORDER", deps=deps)
 
     if _pending_order_timed_out(pos, now):
         cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
         if cancel_succeeded:
-            if _position_has_observed_fill(pos):
-                return _mark_entry_filled(
+            if _position_has_observed_exposure(pos):
+                return _update_pending_status(
                     pos,
-                    payload,
-                    now,
-                    tracker,
-                    order_status="partial_remainder_cancelled",
-                    execution_status="partial",
-                    deps=deps,
+                    "partial_remainder_cancelled",
                 )
             return _mark_entry_voided(portfolio, pos, "UNFILLED_ORDER", deps=deps)
         return "still_pending", False, False
@@ -746,8 +757,18 @@ def _update_pending_status(pos: Position, status: str) -> tuple[str, bool, bool]
     return "still_pending", False, False
 
 
-def _position_has_observed_fill(pos: Position) -> bool:
-    if not getattr(pos, "entry_fill_verified", False):
+def _position_has_observed_exposure(pos: Position) -> bool:
+    observed_statuses = frozenset(
+        {
+            "matched",
+            "filled",
+            "partial",
+            "partially_matched",
+            "partially_filled",
+            "partial_remainder_cancelled",
+        }
+    )
+    if str(getattr(pos, "order_status", "") or "").lower() not in observed_statuses:
         return False
     try:
         return float(getattr(pos, "shares", 0) or 0) > 0

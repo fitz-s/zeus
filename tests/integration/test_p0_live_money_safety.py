@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
-# Purpose: R3 T1 paper/live parity P0 safety scenario antibodies.
-# Reuse: Run before fake/live parity, adapter protocol, or live-readiness gate changes.
+# Purpose: R3 T1 fake/live adapter parity P0 safety scenario antibodies.
+# Reuse: Run before fake/live adapter parity, adapter protocol, or live-readiness gate changes.
 # Created: 2026-04-27
 # Last reused/audited: 2026-04-27
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml

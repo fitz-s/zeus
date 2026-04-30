@@ -1,3 +1,6 @@
+# Created: 2026-04-16
+# Last reused/audited: 2026-04-29
+# Authority basis: Phase 5C.2 market_price_history schema owner DDL seam
 """Relationship tests for Gate A: same-(city, target_date) carries distinct
 high + low rows across all 7 metric-aware v2 tables.
 
@@ -17,6 +20,9 @@ import sqlite3
 import unittest
 
 import pytest
+
+from src.backtest.economics import check_economics_readiness
+from src.state.db import log_forward_market_substrate
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +222,157 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             columns,
             msg="observation_instants_v2 must have running_min column (v2 schema requirement)",
         )
+
+    def test_apply_v2_schema_creates_market_price_history(self):
+        """Phase 5C.2: v2 schema owns forward market price history DDL."""
+        conn = _apply_and_get_conn()
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(market_price_history)")
+        }
+        self.assertEqual(
+            {
+                "id",
+                "market_slug",
+                "token_id",
+                "price",
+                "recorded_at",
+                "hours_since_open",
+                "hours_to_resolution",
+            },
+            columns,
+        )
+        indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(market_price_history)")
+        }
+        self.assertIn("idx_market_price_history_slug_recorded", indexes)
+        self.assertIn("idx_market_price_history_token_recorded", indexes)
+
+        index_columns = {
+            index_name: [
+                row[2]
+                for row in conn.execute(f"PRAGMA index_info({index_name})")
+            ]
+            for index_name in indexes
+        }
+        self.assertIn(["token_id", "recorded_at"], index_columns.values())
+        self.assertEqual(
+            ["market_slug", "recorded_at"],
+            index_columns["idx_market_price_history_slug_recorded"],
+        )
+        self.assertEqual(
+            ["token_id", "recorded_at"],
+            index_columns["idx_market_price_history_token_recorded"],
+        )
+
+        conn.execute(
+            """
+            INSERT INTO market_price_history (
+                market_slug, token_id, price, recorded_at,
+                hours_since_open, hours_to_resolution
+            )
+            VALUES ('slug', 'token-1', 0.41, '2026-04-29T16:00:00Z', 1.0, 3.0)
+            """
+        )
+        for bad_price in (-0.1, 1.25):
+            with self.subTest(bad_price=bad_price):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        INSERT INTO market_price_history (
+                            market_slug, token_id, price, recorded_at,
+                            hours_since_open, hours_to_resolution
+                        )
+                        VALUES ('slug', ?, ?, ?, 1.0, 3.0)
+                        """,
+                        (
+                            f"token-bad-{bad_price}",
+                            bad_price,
+                            f"2026-04-29T16:0{len(str(bad_price))}:00Z",
+                        ),
+                    )
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO market_price_history (
+                    market_slug, token_id, price, recorded_at,
+                    hours_since_open, hours_to_resolution
+                )
+                VALUES ('slug', 'token-1', 0.42, '2026-04-29T16:00:00Z', 1.0, 3.0)
+                """
+            )
+
+    def test_market_price_history_schema_is_idempotent(self):
+        """Repeated apply_v2_schema preserves rows and foreign_keys PRAGMA."""
+        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+
+        conn = _make_memory_db()
+        conn.execute("PRAGMA foreign_keys = ON")
+        apply_v2_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO market_price_history (
+                market_slug, token_id, price, recorded_at,
+                hours_since_open, hours_to_resolution
+            )
+            VALUES ('slug', 'token-1', 0.41, '2026-04-29T16:00:00Z', 1.0, 3.0)
+            """
+        )
+        conn.commit()
+        apply_v2_schema(conn)
+
+        self.assertEqual(
+            1,
+            conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0],
+        )
+        self.assertEqual(1, conn.execute("PRAGMA foreign_keys").fetchone()[0])
+
+    def test_forward_market_substrate_writer_works_after_apply_v2_schema(self):
+        """Schema owner DDL unlocks the explicit-connection writer in memory only."""
+        conn = _apply_and_get_conn()
+        result = log_forward_market_substrate(
+            conn,
+            markets=[
+                {
+                    "slug": "highest-temperature-in-chicago-on-april-30-2026",
+                    "city": "Chicago",
+                    "target_date": "2026-04-30",
+                    "temperature_metric": "high",
+                    "hours_since_open": 2.0,
+                    "hours_to_resolution": 12.0,
+                    "outcomes": [
+                        {
+                            "condition_id": "cond-high-shoulder",
+                            "token_id": "yes-high-shoulder",
+                            "no_token_id": "no-high-shoulder",
+                            "title": "75°F or higher",
+                            "range_low": 75.0,
+                            "range_high": None,
+                            "price": 0.34,
+                            "no_price": 0.66,
+                            "market_start_at": "2026-04-29T12:00:00Z",
+                        }
+                    ],
+                }
+            ],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        self.assertEqual("written", result["status"])
+        self.assertEqual(1, result["market_events_inserted"])
+        self.assertEqual(2, result["price_rows_inserted"])
+        self.assertEqual(
+            2,
+            conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0],
+        )
+        readiness = check_economics_readiness(conn)
+        self.assertFalse(readiness.ready)
+        self.assertNotIn("missing_table:market_price_history", readiness.blockers)
+        self.assertIn("missing_table:venue_trade_facts", readiness.blockers)
+        self.assertIn("no_market_event_outcomes", readiness.blockers)
+        self.assertIn("economics_engine_not_implemented", readiness.blockers)
 
     def test_dead_tables_dropped_after_apply_v2(self):
         """After apply_v2_schema, dead tables do NOT exist in sqlite_master.

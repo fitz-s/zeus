@@ -1,7 +1,7 @@
 # Created: 2026-04-27
 # Last reused/audited: 2026-04-27
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
-"""Fake Polymarket V2 venue used by T1 paper/live parity tests.
+"""Fake Polymarket V2 venue used by T1 fake/live adapter parity tests.
 
 This fake is intentionally test-scoped. It implements the public adapter
 surface consumed by Zeus while avoiding credentials, network, production DB

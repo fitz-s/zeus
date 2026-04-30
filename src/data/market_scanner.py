@@ -9,14 +9,22 @@ import logging
 import os
 import re
 import time
+import hashlib
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 
 from src.config import City, cities_by_name, state_path
+from src.contracts.executable_market_snapshot_v2 import (
+    FRESHNESS_WINDOW_DEFAULT,
+    ExecutableMarketSnapshotV2,
+)
+from src.state.snapshot_repo import insert_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -508,6 +516,7 @@ def find_weather_markets(
     """
     events = _get_active_events()
     if not events:
+        _mark_keyword_fallback_authority()
         events = _fetch_events_by_keyword("temperature")
 
     results = []
@@ -551,6 +560,7 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     """
     events = _get_active_events()
     if not events:
+        _mark_keyword_fallback_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -568,6 +578,7 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
     """
     events = _get_active_events()
     if not events:
+        _mark_keyword_fallback_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -657,6 +668,18 @@ def get_last_scan_authority() -> ScanAuthority:
     scan has occurred.
     """
     return _ACTIVE_EVENTS_LAST_STATUS
+
+
+def _mark_keyword_fallback_authority() -> None:
+    """Mark keyword-search Gamma results as degraded provenance.
+
+    The tag path is the authoritative discovery surface. Keyword search is a
+    recovery fallback with weaker provenance, so live entry must not turn it
+    into executable candidates without an explicit fail-closed gate.
+    """
+
+    global _ACTIVE_EVENTS_LAST_STATUS
+    _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
 
 
 def _clear_active_events_cache() -> None:
@@ -1181,6 +1204,8 @@ def _extract_outcomes(event: dict) -> list[dict]:
     markets = event.get("markets", [])
 
     for market in markets:
+        if not _market_child_is_tradable(market):
+            continue
         question = market.get("question", "")
 
         # Parse token IDs — may be JSON string or list
@@ -1241,6 +1266,10 @@ def _extract_outcomes(event: dict) -> list[dict]:
         # Parse range from question text
         range_low, range_high = _parse_temp_range(question)
 
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or market.get("id", "") or "")
+        question_id = str(market.get("questionID") or market.get("question_id") or "")
+        gamma_market_id = str(market.get("id") or condition_id)
+
         outcomes.append({
             "title": question,
             "token_id": yes_token,
@@ -1249,10 +1278,513 @@ def _extract_outcomes(event: dict) -> list[dict]:
             "no_price": no_price,
             "range_low": range_low,
             "range_high": range_high,
-            "market_id": market.get("conditionId") or market.get("id", ""),
+            "market_id": condition_id,
+            "condition_id": condition_id,
+            "question_id": question_id,
+            "gamma_market_id": gamma_market_id,
+            "active": _boolish_market_field(market, "active", "isActive"),
+            "closed": _boolish_market_field(market, "closed", "isClosed"),
+            "accepting_orders": _boolish_market_field(market, "acceptingOrders", "accepting_orders"),
+            "enable_orderbook": _boolish_market_field(
+                market,
+                "enableOrderBook",
+                "enable_orderbook",
+                "orderbookEnabled",
+            ),
+            "rfqe": _boolish_market_field(market, "rfqe", "rfqEnabled", "rfq_enabled"),
+            "market_start_at": _first_nonempty(
+                market,
+                event,
+                "startDate",
+                "start_date",
+                "marketStartTime",
+            ),
+            "market_end_at": _first_nonempty(market, event, "endDate", "end_date"),
+            "market_close_at": _first_nonempty(
+                market,
+                event,
+                "closeDate",
+                "close_date",
+                "endDate",
+                "end_date",
+            ),
+            "sports_start_at": _first_nonempty(
+                market,
+                event,
+                "sportsStartTime",
+                "sports_start_time",
+            ),
+            "token_map_raw": {
+                "clobTokenIds": clob_tokens,
+                "outcomes": outcome_labels,
+                "labels_swapped": _labels_swapped,
+            },
+            "raw_gamma_payload_hash": _sha256_json(market),
+            "gamma_market_raw": market,
         })
 
     return outcomes
+
+
+def _market_child_is_tradable(market: dict) -> bool:
+    """Return whether a Gamma child market is currently tradable.
+
+    Gamma can return open parent events with closed or non-accepting children.
+    Missing flags are treated as unknown for legacy payload compatibility; only
+    explicit non-tradable values are filtered.
+    """
+
+    closed = _boolish_market_field(market, "closed", "isClosed")
+    if closed is True:
+        return False
+
+    active = _boolish_market_field(market, "active", "isActive")
+    if active is False:
+        return False
+
+    accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
+    if accepting is False:
+        return False
+
+    orderbook = _boolish_market_field(market, "enableOrderBook", "enable_orderbook", "orderbookEnabled")
+    if orderbook is False:
+        return False
+
+    return True
+
+
+def _boolish_market_field(market: dict, *names: str) -> bool | None:
+    for name in names:
+        if name not in market:
+            continue
+        value = market.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+            continue
+        if isinstance(value, (int, float)):
+            return bool(value)
+    return None
+
+
+class ExecutableSnapshotCaptureError(RuntimeError):
+    """Raised when Gamma/CLOB facts cannot prove executable market identity."""
+
+
+def capture_executable_market_snapshot(
+    conn,
+    *,
+    market: dict,
+    decision: Any,
+    clob: Any,
+    captured_at: datetime,
+    scan_authority: str,
+) -> dict[str, str | bool]:
+    """Capture and persist an entry-only executable market snapshot.
+
+    This is deliberately post-decision: the selected YES/NO token is known, so
+    the stored orderbook hash and top-of-book facts describe the token that the
+    executor will actually submit against.
+    """
+
+    if str(scan_authority or "").strip().upper() != "VERIFIED":
+        raise ExecutableSnapshotCaptureError(
+            f"executable snapshot requires VERIFIED Gamma authority, got {scan_authority!r}"
+        )
+    if clob is None:
+        raise ExecutableSnapshotCaptureError("executable snapshot capture requires a CLOB client")
+
+    tokens = dict(getattr(decision, "tokens", {}) or {})
+    if not tokens:
+        raise ExecutableSnapshotCaptureError("decision tokens are missing")
+    outcome = _find_decision_outcome(market, tokens)
+    if outcome is None:
+        raise ExecutableSnapshotCaptureError("decision tokens do not match a scanned Gamma child market")
+
+    yes_token = str(outcome.get("token_id") or tokens.get("token_id") or "")
+    no_token = str(outcome.get("no_token_id") or tokens.get("no_token_id") or "")
+    condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or tokens.get("market_id") or "")
+    question_id = str(outcome.get("question_id") or "")
+    if not yes_token or not no_token or not condition_id or not question_id:
+        raise ExecutableSnapshotCaptureError(
+            "Gamma child market is missing condition_id/question_id/yes/no token facts"
+        )
+
+    direction = str(getattr(getattr(decision, "edge", None), "direction", "") or "").lower()
+    if direction == "buy_no":
+        selected_token = no_token
+        outcome_label = "NO"
+    elif direction == "buy_yes":
+        selected_token = yes_token
+        outcome_label = "YES"
+    else:
+        raise ExecutableSnapshotCaptureError(f"unsupported entry direction for snapshot capture: {direction!r}")
+
+    gamma_market_raw = outcome.get("gamma_market_raw")
+    if not isinstance(gamma_market_raw, dict):
+        gamma_market_raw = _minimal_gamma_payload(market, outcome)
+
+    active = _required_bool_fact((outcome, gamma_market_raw), ("active", "isActive"))
+    closed = _required_bool_fact((outcome, gamma_market_raw), ("closed", "isClosed"))
+    enable_orderbook = _required_bool_fact(
+        (outcome, gamma_market_raw),
+        ("enable_orderbook", "enableOrderBook", "orderbookEnabled"),
+    )
+    accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
+    if accepting_orders is None:
+        accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
+    if closed or not active or not enable_orderbook or accepting_orders is False:
+        raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
+
+    raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+    raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
+    fee_rate = _fetch_fee_rate(clob, selected_token)
+    _assert_clob_identity(
+        raw_clob_market=raw_clob_market,
+        raw_orderbook=raw_orderbook,
+        condition_id=condition_id,
+        selected_token=selected_token,
+        yes_token=yes_token,
+        no_token=no_token,
+    )
+
+    min_tick_size = _required_decimal_fact(
+        (raw_orderbook, raw_clob_market),
+        ("tick_size", "min_tick_size", "minimum_tick_size", "minTickSize"),
+    )
+    min_order_size = _required_decimal_fact(
+        (raw_orderbook, raw_clob_market),
+        ("min_order_size", "minimum_order_size", "minOrderSize"),
+    )
+    neg_risk = _required_bool_fact(
+        (raw_orderbook, raw_clob_market),
+        ("neg_risk", "negRisk", "negative_risk"),
+    )
+    top_bid = _top_book_decimal(raw_orderbook, "bids")
+    top_ask = _top_book_decimal(raw_orderbook, "asks")
+    if top_bid <= 0 or top_ask <= 0:
+        raise ExecutableSnapshotCaptureError("CLOB top-of-book prices must be positive")
+
+    captured = _utc_datetime(captured_at, field_name="captured_at")
+    snapshot = ExecutableMarketSnapshotV2(
+        snapshot_id=_snapshot_id(
+            condition_id=condition_id,
+            selected_token=selected_token,
+            captured_at=captured,
+            raw_gamma_hash=str(outcome.get("raw_gamma_payload_hash") or _sha256_json(gamma_market_raw)),
+            raw_clob_hash=_sha256_json(raw_clob_market),
+            raw_orderbook_hash=_sha256_json(raw_orderbook),
+        ),
+        gamma_market_id=str(outcome.get("gamma_market_id") or gamma_market_raw.get("id") or condition_id),
+        event_id=str(market.get("event_id") or market.get("id") or ""),
+        event_slug=str(market.get("slug") or ""),
+        condition_id=condition_id,
+        question_id=question_id,
+        yes_token_id=yes_token,
+        no_token_id=no_token,
+        selected_outcome_token_id=selected_token,
+        outcome_label=outcome_label,
+        enable_orderbook=enable_orderbook,
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+        market_start_at=_datetime_fact(outcome, "market_start_at"),
+        market_end_at=_datetime_fact(outcome, "market_end_at"),
+        market_close_at=_datetime_fact(outcome, "market_close_at"),
+        sports_start_at=_datetime_fact(outcome, "sports_start_at"),
+        min_tick_size=min_tick_size,
+        min_order_size=min_order_size,
+        fee_details={
+            "source": "clob_fee_rate",
+            "token_id": selected_token,
+            "fee_rate_bps": fee_rate,
+        },
+        token_map_raw=dict(outcome.get("token_map_raw") or {"YES": yes_token, "NO": no_token}),
+        rfqe=_boolish_market_field(outcome, "rfqe"),
+        neg_risk=neg_risk,
+        orderbook_top_bid=top_bid,
+        orderbook_top_ask=top_ask,
+        orderbook_depth_jsonb=_canonical_json(raw_orderbook),
+        raw_gamma_payload_hash=str(outcome.get("raw_gamma_payload_hash") or _sha256_json(gamma_market_raw)),
+        raw_clob_market_info_hash=_sha256_json(raw_clob_market),
+        raw_orderbook_hash=_sha256_json(raw_orderbook),
+        authority_tier="CLOB",
+        captured_at=captured,
+        freshness_deadline=captured + FRESHNESS_WINDOW_DEFAULT,
+    )
+    insert_snapshot(conn, snapshot)
+    return {
+        "executable_snapshot_id": snapshot.snapshot_id,
+        "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
+        "executable_snapshot_min_order_size": str(snapshot.min_order_size),
+        "executable_snapshot_neg_risk": snapshot.neg_risk,
+    }
+
+
+def _find_decision_outcome(market: dict, tokens: dict) -> dict | None:
+    token_values = {
+        str(value)
+        for value in (
+            tokens.get("market_id"),
+            tokens.get("token_id"),
+            tokens.get("no_token_id"),
+        )
+        if value not in (None, "")
+    }
+    for outcome in market.get("outcomes", []) or []:
+        if not isinstance(outcome, dict):
+            continue
+        fields = {
+            str(value)
+            for value in (
+                outcome.get("market_id"),
+                outcome.get("condition_id"),
+                outcome.get("token_id"),
+                outcome.get("no_token_id"),
+            )
+            if value not in (None, "")
+        }
+        if token_values & fields:
+            return outcome
+    return None
+
+
+def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
+    getter = getattr(clob, "get_clob_market_info", None)
+    if not callable(getter):
+        raise ExecutableSnapshotCaptureError("CLOB client lacks get_clob_market_info")
+    raw = getter(condition_id)
+    raw = getattr(raw, "raw", raw)
+    if not isinstance(raw, dict) or not raw:
+        raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")
+    return dict(raw)
+
+
+def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
+    getter = getattr(clob, "get_orderbook_snapshot", None)
+    if not callable(getter):
+        getter = getattr(clob, "get_orderbook", None)
+    if not callable(getter):
+        raise ExecutableSnapshotCaptureError("CLOB client lacks orderbook snapshot fetch")
+    raw = getter(token_id)
+    if not isinstance(raw, dict) or not raw:
+        raise ExecutableSnapshotCaptureError("CLOB orderbook response is empty or non-object")
+    return dict(raw)
+
+
+def _fetch_fee_rate(clob: Any, token_id: str) -> float:
+    getter = getattr(clob, "get_fee_rate", None)
+    if not callable(getter):
+        raise ExecutableSnapshotCaptureError("CLOB client lacks fee-rate fetch")
+    try:
+        return float(getter(token_id))
+    except (TypeError, ValueError) as exc:
+        raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
+    except Exception as exc:
+        raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
+
+def _assert_clob_identity(
+    *,
+    raw_clob_market: dict,
+    raw_orderbook: dict,
+    condition_id: str,
+    selected_token: str,
+    yes_token: str,
+    no_token: str,
+) -> None:
+    clob_condition = _first_field(
+        raw_clob_market,
+        "condition_id",
+        "conditionId",
+        "conditionID",
+        "market",
+    )
+    if clob_condition is not None and str(clob_condition) != str(condition_id):
+        raise ExecutableSnapshotCaptureError("CLOB market condition_id does not match Gamma child")
+
+    book_asset = _first_field(raw_orderbook, "asset_id", "assetId", "token_id", "tokenId")
+    if book_asset is not None and str(book_asset) != str(selected_token):
+        raise ExecutableSnapshotCaptureError("CLOB orderbook token_id does not match selected outcome token")
+
+    clob_tokens = _market_token_strings_from_payload(raw_clob_market)
+    if not clob_tokens:
+        raise ExecutableSnapshotCaptureError("CLOB market token map is missing")
+    if {str(yes_token), str(no_token)} - clob_tokens:
+        raise ExecutableSnapshotCaptureError("CLOB market token map does not match Gamma child tokens")
+
+
+def _first_field(surface: dict, *names: str) -> Any:
+    for name in names:
+        value = surface.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _market_token_strings_from_payload(payload: Any) -> set[str]:
+    tokens: set[str] = set()
+    if isinstance(payload, dict):
+        for key in ("tokens", "clobTokenIds", "clob_token_ids", "outcomeTokens", "t"):
+            value = payload.get(key)
+            tokens.update(_market_token_strings_from_payload(value))
+        for key in (
+            "token_id",
+            "tokenId",
+            "yes_token_id",
+            "no_token_id",
+            "yesTokenId",
+            "noTokenId",
+            "primary_token_id",
+            "secondary_token_id",
+            "primaryTokenId",
+            "secondaryTokenId",
+            "t",
+        ):
+            value = payload.get(key)
+            if value not in (None, "") and not isinstance(value, (dict, list, tuple)):
+                tokens.add(str(value))
+    elif isinstance(payload, str):
+        stripped = payload.strip()
+        if not stripped:
+            return tokens
+        if stripped[:1] in "[{":
+            try:
+                tokens.update(_market_token_strings_from_payload(json.loads(stripped)))
+            except json.JSONDecodeError:
+                tokens.add(stripped)
+        else:
+            tokens.add(stripped)
+    elif isinstance(payload, (list, tuple)):
+        for item in payload:
+            tokens.update(_market_token_strings_from_payload(item))
+    return tokens
+
+
+def _required_decimal_fact(surfaces: tuple[dict, ...], names: tuple[str, ...]) -> Decimal:
+    for surface in surfaces:
+        if not isinstance(surface, dict):
+            continue
+        for name in names:
+            value = surface.get(name)
+            if value in (None, ""):
+                continue
+            try:
+                parsed = Decimal(str(value))
+            except (InvalidOperation, ValueError) as exc:
+                raise ExecutableSnapshotCaptureError(f"CLOB fact {name} is not decimal") from exc
+            if parsed <= 0:
+                raise ExecutableSnapshotCaptureError(f"CLOB fact {name} must be positive")
+            return parsed
+    raise ExecutableSnapshotCaptureError(f"CLOB fact missing: {'/'.join(names)}")
+
+
+def _required_bool_fact(surfaces: tuple[dict, ...], names: tuple[str, ...]) -> bool:
+    for surface in surfaces:
+        if not isinstance(surface, dict):
+            continue
+        value = _boolish_market_field(surface, *names)
+        if value is not None:
+            return value
+    raise ExecutableSnapshotCaptureError(f"required boolean fact missing: {'/'.join(names)}")
+
+
+def _top_book_decimal(orderbook: dict, side: str) -> Decimal:
+    rows = orderbook.get(side)
+    if not isinstance(rows, list) or not rows:
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook missing {side}")
+    first = rows[0]
+    if isinstance(first, dict):
+        value = first.get("price")
+    elif isinstance(first, (list, tuple)) and first:
+        value = first[0]
+    else:
+        value = None
+    if value in (None, ""):
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} top price missing")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} top price is not decimal") from exc
+
+
+def _datetime_fact(surface: dict, name: str) -> datetime | None:
+    value = surface.get(name)
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return _utc_datetime(value, field_name=name)
+    try:
+        return _utc_datetime(datetime.fromisoformat(str(value).replace("Z", "+00:00")), field_name=name)
+    except ValueError as exc:
+        raise ExecutableSnapshotCaptureError(f"Gamma datetime fact {name} is invalid") from exc
+
+
+def _utc_datetime(value: datetime, *, field_name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise ExecutableSnapshotCaptureError(f"{field_name} must be datetime")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _minimal_gamma_payload(market: dict, outcome: dict) -> dict:
+    return {
+        "event_id": market.get("event_id") or market.get("id") or "",
+        "event_slug": market.get("slug") or "",
+        "outcome": {
+            key: value
+            for key, value in outcome.items()
+            if key not in {"gamma_market_raw"}
+        },
+    }
+
+
+def _snapshot_id(
+    *,
+    condition_id: str,
+    selected_token: str,
+    captured_at: datetime,
+    raw_gamma_hash: str,
+    raw_clob_hash: str,
+    raw_orderbook_hash: str,
+) -> str:
+    seed = _canonical_json(
+        {
+            "condition_id": condition_id,
+            "selected_token": selected_token,
+            "captured_at": captured_at.isoformat(),
+            "raw_gamma_hash": raw_gamma_hash,
+            "raw_clob_hash": raw_clob_hash,
+            "raw_orderbook_hash": raw_orderbook_hash,
+            "nonce": uuid.uuid4().hex,
+        }
+    )
+    return "ems2-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:40]
+
+
+def _first_nonempty(primary: dict, fallback: dict, *names: str) -> Any:
+    for surface in (primary, fallback):
+        for name in names:
+            value = surface.get(name)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _parse_temp_range(question: str) -> tuple[Optional[float], Optional[float]]:

@@ -18,9 +18,9 @@ Cross-module relationship pinned:
     (every name in the live allowlist exists in the engine's universe)
 
 Behavioral pin:
-    LIVE_SAFE_STRATEGIES == {"opening_inertia"}
-    (single operator-approved strategy as of 2026-04-26 per pro/con-Opus
-    converged verdict in the archived live-readiness workbook)
+    LIVE_SAFE_STRATEGIES == {"opening_inertia", "center_buy",
+    "settlement_capture", "shoulder_sell"} after the 2026-04-29
+    operator-approved expansion.
 
 Boot guard:
     Runtime is live-only. Any enabled strategy outside LIVE_SAFE_STRATEGIES
@@ -58,16 +58,18 @@ def test_live_safe_strategies_is_frozenset_of_str():
 
 
 def test_live_safe_strategies_pins_current_allowlist():
-    """Pin current operator-approved set (2026-04-26).
+    """Pin current operator-approved set (2026-04-29 expansion).
 
     Future expansion REQUIRES an explicit packet — accidental list growth
     via copy/paste is caught here. See parent packet
-    docs/operations/task_2026-04-26_live_readiness_completion/plan.md §5.
+    docs/operations/task_2026-04-26_live_readiness_completion/plan.md §5
+    and 2026-04-29 expansion authorization in src/control/control_plane.py.
     """
     from src.control.control_plane import LIVE_SAFE_STRATEGIES
 
-    assert LIVE_SAFE_STRATEGIES == frozenset({"opening_inertia"}), (
-        f"LIVE_SAFE_STRATEGIES drift detected. Expected {{'opening_inertia'}}, "
+    expected = frozenset({"opening_inertia", "center_buy", "settlement_capture", "shoulder_sell"})
+    assert LIVE_SAFE_STRATEGIES == expected, (
+        f"LIVE_SAFE_STRATEGIES drift detected. Expected {sorted(expected)}, "
         f"got {sorted(LIVE_SAFE_STRATEGIES)}. If this is a deliberate expansion, "
         f"update this pin AND the parent packet plan.md authority basis."
     )
@@ -105,15 +107,25 @@ def test_assert_live_safe_strategies_silent_on_safe_set(monkeypatch):
 
 
 def test_assert_live_safe_strategies_raises_on_unsafe_set(monkeypatch):
-    """Helper raises SystemExit when an enabled strategy is outside the allowlist."""
+    """Helper raises SystemExit when an enabled strategy is outside the allowlist.
+
+    SystemExit (not RuntimeError) matches the existing FATAL boot pattern at
+    src/main.py:472-477 — daemon launchers consume SystemExit and refuse to
+    start; RuntimeError would leak past launchd and create zombie state.
+
+    Uses synthetic non-existent strategy name to remain robust to allowlist
+    expansion — the FATAL semantic must fire whenever an enabled strategy is
+    NOT in LIVE_SAFE_STRATEGIES, regardless of which 4 KNOWN_STRATEGIES are
+    currently allowlisted.
+    """
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     with pytest.raises(SystemExit) as exc_info:
-        assert_live_safe_strategies_under_live_mode({"center_buy", "opening_inertia"})
+        assert_live_safe_strategies_under_live_mode({"_test_ghost_strategy", "opening_inertia"})
 
     msg = str(exc_info.value)
     assert "FATAL" in msg, f"SystemExit message must contain FATAL marker: {msg!r}"
-    assert "center_buy" in msg, f"SystemExit message must name the offender: {msg!r}"
+    assert "_test_ghost_strategy" in msg, f"SystemExit message must name the offender: {msg!r}"
 
 
 def test_assert_live_safe_strategies_ignores_retired_paper_env(monkeypatch):
@@ -122,7 +134,7 @@ def test_assert_live_safe_strategies_ignores_retired_paper_env(monkeypatch):
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     with pytest.raises(SystemExit):
-        assert_live_safe_strategies_under_live_mode({"center_buy"})
+        assert_live_safe_strategies_under_live_mode({"_test_ghost_strategy"})
 
 
 def test_assert_live_safe_strategies_enforces_when_zeus_mode_unset(monkeypatch):
@@ -131,7 +143,7 @@ def test_assert_live_safe_strategies_enforces_when_zeus_mode_unset(monkeypatch):
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     with pytest.raises(SystemExit):
-        assert_live_safe_strategies_under_live_mode({"center_buy"})
+        assert_live_safe_strategies_under_live_mode({"_test_ghost_strategy"})
 
 
 # ---------------------------------------------------------------------------
@@ -189,31 +201,44 @@ def _populate_strategy_gates(_control_state: dict, gates: dict[str, bool]) -> No
 
 
 def test_boot_helper_refuses_when_unsafe_strategy_enabled(monkeypatch):
-    """Production composition path: hydrated state with center_buy enabled → SystemExit.
+    """Production composition path: hydrated state with a ghost strategy enabled → SystemExit.
 
     Replaces the missing relationship test that masked BLOCKER #1.
     Sets up _control_state via the same shape refresh_control_state() would
     populate, then invokes the boot guard with refresh_state=False (we already
     populated it ourselves to avoid touching a real DB).
+
+    Uses a synthetic strategy name OUTSIDE the LIVE_SAFE_STRATEGIES allowlist
+    so the test stays correct under any allowlist expansion (including the
+    2026-04-29 expansion to all 4 KNOWN_STRATEGIES). The boot guard composes
+    enabled = KNOWN_STRATEGIES ∩ enabled_gates, so a name not in
+    KNOWN_STRATEGIES will not enter the enabled set even if its gate=True.
+    To test the refusal path properly we must monkeypatch KNOWN_STRATEGIES.
     """
     import src.control.control_plane as cp
+    import src.engine.cycle_runner as cycle_runner
     import src.main as main_mod
 
     monkeypatch.setenv("ZEUS_MODE", "live")
+
+    # Inject a ghost strategy into KNOWN_STRATEGIES for this test only so that
+    # it appears in the enabled set but NOT in the allowlist.
+    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
+    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
 
     # Snapshot + restore _control_state to avoid leaking into other tests.
     original_state = dict(cp._control_state)
     monkeypatch.setattr(cp, "_control_state", {})
 
-    # Production scenario: opening_inertia enabled (safe), center_buy also
-    # enabled (NOT safe). Operator forgot to disable center_buy.
+    # Production scenario: a ghost strategy enabled that is NOT in the allowlist.
     _populate_strategy_gates(
         cp._control_state,
         {
             "opening_inertia": True,
             "center_buy": True,
-            "shoulder_sell": False,
-            "settlement_capture": False,
+            "shoulder_sell": True,
+            "settlement_capture": True,
+            "_test_ghost_strategy": True,
         },
     )
 
@@ -222,7 +247,7 @@ def test_boot_helper_refuses_when_unsafe_strategy_enabled(monkeypatch):
 
     msg = str(exc_info.value)
     assert "FATAL" in msg, f"Expected FATAL marker: {msg!r}"
-    assert "center_buy" in msg, f"Expected center_buy in offenders: {msg!r}"
+    assert "_test_ghost_strategy" in msg, f"Expected ghost in offenders: {msg!r}"
 
     # Restore (defensive — monkeypatch.setattr handles this, but explicit on dict).
     cp._control_state.clear()
@@ -263,16 +288,27 @@ def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypat
     """The pre-fix BLOCKER scenario, now PINNED as expected behavior under refresh_state=False.
 
     Cold cache (empty _control_state) + is_strategy_enabled returns True for
-    all KNOWN_STRATEGIES → guard refuses. This documents the contract
-    operators MUST satisfy: hydration before guard. The production main()
-    path always passes refresh_state=True (the default), which calls
-    refresh_control_state() first; this test pins what happens if a future
-    caller forgets to hydrate.
+    all KNOWN_STRATEGIES → guard refuses if any KNOWN_STRATEGIES are not in
+    LIVE_SAFE_STRATEGIES. This documents the contract operators MUST satisfy:
+    hydration before guard. The production main() path always passes
+    refresh_state=True (the default), which calls refresh_control_state()
+    first; this test pins what happens if a future caller forgets to hydrate.
+
+    To remain correct under allowlist expansion (2026-04-29: all 4 KNOWN now
+    safe), this test injects a ghost into KNOWN_STRATEGIES so the cold-cache
+    default-True semantic surfaces a non-safe strategy.
     """
     import src.control.control_plane as cp
+    import src.engine.cycle_runner as cycle_runner
     import src.main as main_mod
 
     monkeypatch.setenv("ZEUS_MODE", "live")
+
+    # Extend KNOWN_STRATEGIES with a synthetic ghost so cold-cache default-True
+    # surfaces it as offender even when all 4 real KNOWN are now allowlisted.
+    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
+    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
+
     original_state = dict(cp._control_state)
     monkeypatch.setattr(cp, "_control_state", {})  # empty: cold cache
 
@@ -280,12 +316,11 @@ def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypat
         main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
 
     msg = str(exc_info.value)
-    # All 3 non-safe strategies should be named (default-True semantic on empty cache).
-    for offender in ("center_buy", "shoulder_sell", "settlement_capture"):
-        assert offender in msg, (
-            f"Cold-cache scenario must surface ALL non-safe strategies. "
-            f"Missing {offender!r} in: {msg!r}"
-        )
+    # The ghost (only non-safe under expanded allowlist) must be named.
+    assert "_test_ghost_strategy" in msg, (
+        f"Cold-cache scenario must surface non-safe strategies. "
+        f"Missing _test_ghost_strategy in: {msg!r}"
+    )
 
     cp._control_state.clear()
     cp._control_state.update(original_state)
@@ -372,16 +407,23 @@ def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_pa
     """Inverse of the above: empty DB → refresh yields strategy_gates={} → default-True → SystemExit.
 
     Confirms the post-fix path is still fail-closed when the operator has
-    NOT issued any set_strategy_gate commands. Without this control, the
-    bool-to-dict fix could over-correct by silently treating empty as safe.
+    NOT issued any set_strategy_gate commands and at least one non-allowlisted
+    strategy exists in KNOWN_STRATEGIES. Injects a ghost into KNOWN_STRATEGIES
+    to remain correct under the 2026-04-29 allowlist expansion (all 4 real
+    KNOWN now safe).
     """
     import sqlite3
     import src.control.control_plane as cp
+    import src.engine.cycle_runner as cycle_runner
     import src.main as main_mod
     import src.state.db as db
     from src.state.db import init_schema
 
     monkeypatch.setenv("ZEUS_MODE", "live")
+
+    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
+    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
+
     db_path = tmp_path / "empty.db"
 
     def fake_conn():
@@ -403,8 +445,8 @@ def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_pa
         main_mod._assert_live_safe_strategies_or_exit()
 
     msg = str(exc_info.value)
-    for offender in ("center_buy", "shoulder_sell", "settlement_capture"):
-        assert offender in msg, (
-            f"Empty-DB scenario must surface non-safe strategies. "
-            f"Missing {offender!r} in: {msg!r}"
-        )
+    # Under expanded allowlist, only the ghost is non-safe. Pin its presence.
+    assert "_test_ghost_strategy" in msg, (
+        f"Empty-DB scenario must surface non-safe strategies. "
+        f"Missing _test_ghost_strategy in: {msg!r}"
+    )

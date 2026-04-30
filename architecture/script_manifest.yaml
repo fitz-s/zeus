@@ -253,7 +253,6 @@ class_defaults:
     required_tests: []
 
 scripts:
-  _verify_isolation.py: {class: stale_deprecated, reason: legacy isolation probe against old DB layout}
   _build_pm_truth.py: {class: config_writer, write_targets: [data/pm_settlements_full.json], target_db: data/pm_settlements_full.json, external_inputs: [Polymarket Gamma API], apply_flag: implicit, unguarded_write_rationale: "Existing packet-generated builder writes a data artifact directly; output is evidence and must be reviewed before promotion.", promotion_barrier: "Generated PM settlement export is evidence and must not become canonical truth without a dedicated settlement authority packet."}
   _yaml_bootstrap.py: {class: utility}
   _tigge_common.py: {class: utility}
@@ -262,12 +261,10 @@ scripts:
     canonical_command: DO_NOT_RUN
     required_tests: [tests/test_backfill_completeness_guardrails.py]
     reason: "Imported by observation backfill scripts to write P2 4.4.B-lite completeness manifests and enforce fail thresholds."
-  analyze_paper_trading.py: {class: diagnostic_report_writer, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/paper_trading_analysis.json, stdout], replacement: run_replay.py, reason: paper-era report}
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
   audit_architecture_alignment.py: {class: diagnostic}
   audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
-  audit_divergence_counterfactual.py: {class: diagnostic}
   audit_observation_instants_v2.py:
     class: diagnostic_report_writer
     module_owner: data
@@ -277,19 +274,13 @@ scripts:
     required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hk_rejects_vhhh_source.py]
     notes: "Read-only Phase 0 Gate 0→1 auditor; returns 0 iff tier_violations + source_tier_mismatches + openmeteo_rows + authority_unverified_rows all 0 AND every non-HK city has >=min_expected rows for the given data_version."
   audit_divergence_exit_counterfactual.py: {class: diagnostic}
-  audit_divergence_hindsight.py: {class: diagnostic}
-  audit_divergence_postchange.py: {class: diagnostic}
-  audit_divergence_thresholds.py: {class: diagnostic}
-  audit_paper_explainability.py: {class: stale_deprecated, reason: paper-era audit}
   audit_realtime_pnl.py: {class: diagnostic}
-  audit_replay_completeness.py: {class: diagnostic}
   audit_replay_fidelity.py: {class: diagnostic}
   audit_time_semantics.py: {class: diagnostic}
   automation_analysis.py: {class: diagnostic}
   backfill_cluster_taxonomy.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db}
   backfill_current_market_price_snapshots.py: {class: etl_writer}
   backfill_ens.py: {class: etl_writer}
-  backfill_exit_telemetry.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_forecast_issue_time.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [state/zeus-world.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Backfill forecast_issue_time + availability_provenance for pre-F11 NULL rows. Idempotent — skips already-populated rows. Requires F11.2 schema migration applied first.", do_not_use_when: "Schema migration not applied yet (script raises). All rows already populated.", canonical_command: "python3 scripts/backfill_forecast_issue_time.py [--db PATH] (--dry-run | --apply --confirm-backup | --verify)", external_inputs: [], promotion_barrier: "--apply requires --confirm-backup affirming verified DB backup exists.", required_helpers: [src.data.dissemination_schedules.derive_availability], required_tests: [tests/test_dissemination_schedules.py, tests/test_forecasts_writer_provenance_required.py], unguarded_write_rationale: "Backfills 23,466 rows in single transaction; --apply + --confirm-backup required; uses F11.1 dissemination registry to derive provenance per source."}
   backfill_hko_daily.py:
     class: etl_writer
@@ -331,8 +322,6 @@ scripts:
     required_tests: [tests/test_backfill_openmeteo_previous_runs.py, tests/test_forecasts_schema_alignment.py, tests/test_forecast_source_registry.py]
   backfill_outcome_fact.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_probability_traces_from_opportunities.py: {class: etl_writer}
-  backfill_recent_exits_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
-  backfill_semantic_snapshots.py: {class: etl_writer, write_targets: [state/zeus_trades.db, state/zeus-world.db], target_db: state}
   backfill_solar_openmeteo.py: {class: etl_writer}
   backfill_tigge_snapshot_p_raw.py:
     class: etl_writer
@@ -343,7 +332,6 @@ scripts:
     module_owner: data
     required_tests: [tests/test_etl_forecasts_v2_from_legacy.py]
   backfill_tigge_snapshot_p_raw_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware p_raw backfill; safety gates mirror rebuild_v2 (--dry-run default, --no-dry-run + --force required)."}
-  backfill_trade_decision_attribution.py: {class: etl_writer, write_targets: [state/zeus_trades.db], target_db: state/zeus_trades.db}
   backfill_truth_metadata.py: {class: etl_writer}
   backfill_wu_daily_all.py:
     class: etl_writer
@@ -370,7 +358,6 @@ scripts:
   data_completeness_audit.py: {class: diagnostic_report_writer, write_targets: [docs/reports/data_completeness_report.md, stdout]}
   deep_heartbeat.py: {class: runtime_support}
   deprecate_legacy_state_files.py: {class: repair, apply_flag: implicit, target_db: state, unguarded_write_rationale: "Existing legacy-state deprecation script mutates state files without an apply flag; manifest marks it dangerous pending hardening."}
-  diagnose_center_buy_failure.py: {class: diagnostic}
   diagnose_truth_surfaces.py: {class: diagnostic}
   digest_profiles_export.py:
     class: config_writer
@@ -452,7 +439,6 @@ scripts:
     target_db: state/zeus-world.db
     required_tests: [tests/test_b070_control_overrides_history_v2.py]
   migrate_b071_token_suppression_to_history.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus.db, dry_run_default: true, read_targets: [state/zeus.db], write_targets: [state/zeus.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-time migration from mutable token_suppression upsert to append-only token_suppression_history + view (Phase 10A B071). Run once per DB; idempotent on re-run.", do_not_use_when: "Migration has already been applied to this DB instance (idempotency guard checks table existence).", canonical_command: "python3 scripts/migrate_b071_token_suppression_to_history.py [--db PATH] [--apply]", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows DDL + row-count changes without writing.", required_helpers: [src.state.db.get_connection], required_tests: [tests/test_phase10a_hygiene.py], unguarded_write_rationale: "Migration applies DDL (CREATE TABLE token_suppression_history + CREATE VIEW token_suppression_current) and copies existing rows; --apply required; dangerous if run on wrong DB path."}
-  migrate_to_isolated_dbs.py: {class: repair, apply_flag: "--apply", target_db: state/zeus.db}
   migrate_forecasts_availability_provenance.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [state/zeus-world.db], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "F11.2: ALTER TABLE forecasts ADD COLUMN availability_provenance TEXT with CHECK constraint enforcing the AvailabilityProvenance enum. Idempotent — skips if column exists.", do_not_use_when: "Column already present (idempotency guard).", canonical_command: "python3 scripts/migrate_forecasts_availability_provenance.py [--db PATH] (--dry-run | --apply | --verify)", external_inputs: [], promotion_barrier: "Requires explicit --apply flag; dry-run default shows the ALTER statement only.", required_helpers: [src.backtest.decision_time_truth.AvailabilityProvenance], required_tests: [tests/test_dissemination_schedules.py, tests/test_forecasts_writer_provenance_required.py], unguarded_write_rationale: "DDL only (ADD COLUMN); reversible because new column defaults NULL and old readers continue to work; --apply required."}
   module_manifest_audit.py:
     class: utility

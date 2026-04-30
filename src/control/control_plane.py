@@ -31,7 +31,18 @@ TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 # src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries); this set is the
 # subset operator-approved for live execution. Expansion REQUIRES an explicit
 # packet — accidental drift caught by tests/test_live_safe_strategies.py.
-LIVE_SAFE_STRATEGIES: frozenset[str] = frozenset({"opening_inertia"})
+#
+# 2026-04-29: Operator authorized expansion to ALL 4 KNOWN_STRATEGIES post-
+# calibration-rebuild. Justification: refit_platt_v2 produced 395 active models
+# (200 HIGH + 195 LOW) on 40.4M-pair calibration_pairs_v2; settings.json
+# n_mc=10000 lifted runtime to LAW 4 preferred precision; live_safety_cap_usd=$5
+# canary rail still hard-clips Kelly per-trade. Test pin updated in same commit.
+LIVE_SAFE_STRATEGIES: frozenset[str] = frozenset({
+    "opening_inertia",
+    "center_buy",
+    "settlement_capture",
+    "shoulder_sell",
+})
 
 COMMANDS = {
     "pause_entries",                # Stop entering, keep monitoring

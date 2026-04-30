@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -258,6 +259,51 @@ def test_cancel_canceled_array_success_creates_CANCEL_CONFIRMED(conn):
     assert "CANCEL_ACKED" in events
 
 
+def test_cancel_requested_persists_execution_capability_before_cancel_callable(conn):
+    from src.execution.exit_safety import request_cancel_for_command
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+    seen: list[str] = []
+
+    def cancel(order_id: str):
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'CANCEL_REQUESTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            ("cmd-exit-1",),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        capability = payload["execution_capability"]
+        assert order_id == "ord-1"
+        assert capability["schema_version"] == 1
+        assert capability["action"] == "CANCEL"
+        assert capability["intent_kind"] == "CANCEL"
+        assert capability["mode"] == "cancel"
+        assert capability["allowed"] is True
+        assert len(capability["capability_id"]) == 32
+        assert capability["command_id"] == "cmd-exit-1"
+        assert capability["venue_order_id"] == "ord-1"
+        assert {component["component"] for component in capability["components"]} >= {
+            "cutover_guard",
+            "cancel_command_identity",
+            "venue_order_cancelability",
+        }
+        seen.append(capability["capability_id"])
+        return {"canceled": [order_id], "not_canceled": []}
+
+    outcome = request_cancel_for_command(conn, "cmd-exit-1", cancel)
+
+    assert outcome.status == "CANCELED"
+    assert len(seen) == 1
+
+
 def test_cancel_guard_blocks_before_cancel_callable_and_command_transition(conn, monkeypatch):
     from src.control.cutover_guard import CutoverDecision, CutoverPending, CutoverState
     from src.execution.exit_safety import request_cancel_for_command
@@ -316,11 +362,45 @@ def test_cancel_network_timeout_creates_CANCEL_UNKNOWN(conn):
 
     assert outcome.status == "UNKNOWN"
     assert get_command(conn, "cmd-exit-1")["state"] == "REVIEW_REQUIRED"
-    events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
-    assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_REPLACE_BLOCKED"]
+    events = list_events(conn, "cmd-exit-1")
+    event_types = [event["event_type"] for event in events]
+    requested_payload = json.loads(
+        next(event["payload_json"] for event in events if event["event_type"] == "CANCEL_REQUESTED")
+    )
+    assert requested_payload["execution_capability"]["allowed"] is True
+    assert requested_payload["execution_capability"]["venue_order_id"] == "ord-1"
+    assert event_types[-2:] == ["CANCEL_REQUESTED", "CANCEL_REPLACE_BLOCKED"]
     allowed, reason = can_submit_replacement_sell(conn, "pos-1", YES_TOKEN)
     assert allowed is False
     assert "cancel_unknown_requires_m5" in (reason or "")
+
+
+def test_cancel_pending_without_capability_fails_closed_without_duplicate_request(conn):
+    from src.execution.exit_safety import request_cancel_for_command
+    from src.state.venue_command_repo import append_event, get_command, list_events
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+    append_event(
+        conn,
+        command_id="cmd-exit-1",
+        event_type="CANCEL_REQUESTED",
+        occurred_at=_NOW.isoformat(),
+        payload={"venue_order_id": "ord-1"},
+    )
+
+    outcome = request_cancel_for_command(
+        conn,
+        "cmd-exit-1",
+        lambda _order_id: (_ for _ in ()).throw(AssertionError("must not call cancel without proof")),
+    )
+
+    events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
+    assert outcome.status == "UNKNOWN"
+    assert outcome.reason == "missing_cancel_capability_proof"
+    assert events.count("CANCEL_REQUESTED") == 1
+    assert events[-1] == "CANCEL_REPLACE_BLOCKED"
+    assert get_command(conn, "cmd-exit-1")["state"] == "REVIEW_REQUIRED"
 
 
 def test_CANCEL_UNKNOWN_blocks_replacement(conn, monkeypatch):

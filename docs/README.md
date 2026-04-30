@@ -47,6 +47,7 @@ Historical governance files demoted from authority live under
 - `operations/known_gaps.md` - active operational gap register
 - `operations/task_2026-04-23_midstream_remediation/` - midstream remediation package; phase evidence lives under `phases/`
 - `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` - R3 Z0 packet-local live-money invariant summary for CLOB V2
+- `operations/task_2026-04-29_design_simplification_audit/` - first-principles audit plus phased repair evidence; not live-deploy authority
 - `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
 - `../workspace_map.md` - repo visibility and routing guide
 

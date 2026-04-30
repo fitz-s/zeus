@@ -1,6 +1,6 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T4.3b runtime-mock dead-code-path gap antibody)
+# Last reused/audited: 2026-04-29
+# Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29
 
 """T4.3b DecisionEvidence runtime-invocation antibody.
 
@@ -82,6 +82,8 @@ class _FakeDay0Result:
 
 class _FakeAnalysis:
     def __init__(self, **kwargs):
+        self.selected_method = kwargs.get("selected_method", "test_fixture")
+        self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
         self.bins = kwargs["bins"]
         self.p_raw = kwargs["p_raw"]
         self.p_cal = kwargs["p_cal"]
@@ -98,6 +100,8 @@ class _FakeAnalysis:
         return {"uncertainty": {}, "location": {}}
 
     def find_edges(self, n_bootstrap=None):
+        self.selected_method = getattr(self, "selected_method", "test_fixture")
+        assert self.selected_method
         return [
             BinEdge(
                 bin=self.bins[0],
@@ -141,9 +145,16 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
             "members_hourly": np.ones((51, 2)) * 72.0,
             "times": [now, now],
             "fetch_time": now,
+            "available_at": now,
             "issue_time": now,
             "first_valid_time": now,
             "model": "ecmwf_ifs025",
+            "source_id": "tigge",
+            "raw_payload_hash": "a" * 64,
+            "authority_tier": "FORECAST",
+            "degradation_level": "OK",
+            "forecast_source_role": kwargs.get("role", "entry_primary"),
+            "n_members": 51,
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
@@ -188,6 +199,12 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
     monkeypatch.setattr(
         evaluator_module, "_store_snapshot_p_raw",
         lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (object(), 1))
+    monkeypatch.setattr(
+        evaluator_module,
+        "calibrate_and_normalize",
+        lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
     )
     monkeypatch.setattr(
         evaluator_module,

@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -255,18 +256,31 @@ def refit_v2(
         )
 
     failed_buckets: list[str] = []
+    overall_start = time.monotonic()
 
     conn.execute("SAVEPOINT v2_refit")
     try:
-        for bucket in buckets:
+        for bucket_idx, bucket in enumerate(buckets, start=1):
             cluster = bucket["cluster"]
             season = bucket["season"]
             data_version = bucket["data_version"]
             bucket_key = f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}"
+            print(
+                f"[{bucket_idx}/{len(buckets)}] starting bucket {bucket_key}",
+                flush=True,
+            )
+            t0 = time.monotonic()
             try:
                 _fit_bucket(conn, cluster, season, data_version, metric_identity=metric_identity, dry_run=dry_run, stats=stats)
+                elapsed = time.monotonic() - t0
+                cumulative = time.monotonic() - overall_start
+                print(
+                    f"[{bucket_idx}/{len(buckets)}] done in {elapsed:.1f}s "
+                    f"(cumulative {cumulative:.0f}s)",
+                    flush=True,
+                )
             except Exception as e:
-                print(f"ERR {bucket_key}: {e}")
+                print(f"ERR {bucket_key}: {e}", flush=True)
                 stats.buckets_failed += 1
                 failed_buckets.append(bucket_key)
 

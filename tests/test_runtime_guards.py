@@ -1,7 +1,10 @@
 """Runtime guard and live-cycle wiring tests."""
+# Lifecycle: created=2026-04-28; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
-# Authority basis: task_2026-04-28_contamination_remediation Batch G current-law fixture alignment
+# Last reused/audited: 2026-04-30
+# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy.
+# Purpose: Lock runtime guard and live-cycle wiring contracts.
+# Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ import sys
 import tempfile
 import types
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,6 +27,7 @@ import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
 import src.execution.exit_lifecycle as exit_lifecycle_module
+from src.backtest.economics import check_economics_readiness
 from src.data.observation_client import Day0ObservationContext
 from src.config import City, settings
 from src.control import control_plane as control_plane_module
@@ -33,11 +38,12 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
-from src.execution.executor import OrderResult
+from src.execution.executor import OrderResult, create_execution_intent
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
 import src.state.db as db_module
 from src.state.db import get_connection, init_schema, query_position_events
+from src.state.schema.v2_schema import apply_v2_schema
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
@@ -54,6 +60,7 @@ from src.state.portfolio import (
 from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
+from src.types.temperature import TemperatureDelta
 
 
 @pytest.fixture(autouse=True)
@@ -96,12 +103,63 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
 
 
+def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
+    from src.contracts.alpha_decision import AlphaDecision
+
+    class _Calibrator:
+        pass
+
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (_Calibrator(), level))
+    monkeypatch.setattr(
+        evaluator_module,
+        "calibrate_and_normalize",
+        lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "compute_alpha",
+        lambda *args, **kwargs: AlphaDecision(
+            value=0.5,
+            optimization_target="risk_cap",
+            evidence_basis="runtime guard mature calibration fixture",
+            ci_bound=0.05,
+        ),
+    )
+
+
+def _entry_forecast_evidence(
+    *,
+    model: str = "ecmwf_ifs025",
+    source_id: str = "tigge",
+    role: str = "entry_primary",
+    issue_time: datetime | None = None,
+    first_valid_time: datetime | None = None,
+    fetch_time: datetime | None = None,
+    available_at: datetime | None = None,
+    n_members: int = 51,
+) -> dict[str, object]:
+    now = fetch_time or datetime(2026, 4, 1, 6, 0, tzinfo=timezone.utc)
+    return {
+        "issue_time": issue_time or now,
+        "first_valid_time": first_valid_time or now,
+        "fetch_time": now,
+        "available_at": available_at or now,
+        "model": model,
+        "source_id": source_id,
+        "raw_payload_hash": "a" * 64,
+        "authority_tier": "FORECAST",
+        "degradation_level": "OK",
+        "forecast_source_role": role,
+        "n_members": n_members,
+    }
+
+
 NYC = City(
     name="NYC",
     lat=40.7772,
     lon=-73.8726,
     timezone="America/New_York",
-    cluster="US-Northeast",
+    cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
 )
@@ -123,7 +181,7 @@ def _position(**kwargs) -> Position:
         trade_id="t1",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -163,8 +221,11 @@ def _edge() -> BinEdge:
 
 def _stub_full_family_scan(monkeypatch) -> None:
     def _scan(analysis, *args, **kwargs):
+        selected_method = getattr(analysis, "selected_method", "test_fixture")
         hypotheses = []
         for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))):
+            edge.selected_method = getattr(edge, "selected_method", selected_method)
+            assert edge.selected_method
             hypotheses.append(
                 FullFamilyHypothesis(
                     index=i,
@@ -194,7 +255,7 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     conn.execute(
         """
         INSERT INTO position_current (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label, direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior, entry_method, strategy_key, edge_source, discovery_mode, chain_state, order_id, order_status, updated_at)
-        VALUES ('t1', 'active', 't1', 'm1', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F', 'buy_yes', 'F', 8.0, 20.0, 8.0, 0.4, 0.6, 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt', 'unknown', '', 'filled', '2026-04-01T00:00:00Z')
+        VALUES ('t1', 'active', 't1', 'm1', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', 8.0, 20.0, 8.0, 0.4, 0.6, 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt', 'unknown', '', 'filled', '2026-04-01T00:00:00Z')
         """
     )
     conn.commit()
@@ -230,6 +291,8 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
     def _mock_refresh(conn, clob, pos):
+        pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+        assert pos.entry_method
         pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_prob_is_fresh = True
         return EdgeContext(p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([pos.entry_price]), p_posterior=pos.p_posterior, forward_edge=pos.p_posterior - pos.entry_price, alpha=0.0, confidence_band_upper=pos.p_posterior - pos.entry_price + 0.1, confidence_band_lower=pos.p_posterior - pos.entry_price - 0.1, entry_provenance=None, decision_snapshot_id="snap", n_edges_found=1, n_edges_after_fdr=1, market_velocity_1h=0.0, divergence_score=0.0)
@@ -419,7 +482,7 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
         paper_mode = False
         def get_order_status(self, order_id):
             assert order_id == "ord-1"
-            return {"status": "FILLED", "avgPrice": 0.41, "filledSize": 24.39}
+            return {"status": "CONFIRMED", "avgPrice": 0.41, "filledSize": 24.39}
 
     monkeypatch.setattr(cycle_runner, "_utcnow", lambda: datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc))
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -437,7 +500,7 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     assert pos.state == "entered"
     assert pos.entry_fill_verified is True
     assert pos.entry_order_id == "ord-1"
-    assert pos.order_status == "filled"
+    assert pos.order_status == "confirmed"
     assert pos.chain_state == "local_only"
     assert pos.size_usd == pytest.approx(24.39 * 0.41)
     assert pos.cost_basis_usd == pytest.approx(24.39 * 0.41)
@@ -480,6 +543,8 @@ def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, 
     monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
     def _mock_refresh(conn, clob, pos):
+        pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+        assert pos.entry_method
         pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_prob_is_fresh = True
         return EdgeContext(p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([pos.entry_price]), p_posterior=pos.p_posterior, forward_edge=pos.p_posterior - pos.entry_price, alpha=0.0, confidence_band_upper=pos.p_posterior - pos.entry_price + 0.1, confidence_band_lower=pos.p_posterior - pos.entry_price - 0.1, entry_provenance=None, decision_snapshot_id="snap", n_edges_found=1, n_edges_after_fdr=1, market_velocity_1h=0.0, divergence_score=0.0)
@@ -605,7 +670,15 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         def __init__(self, should_trade):
             self.should_trade = should_trade
             self.edge = _edge() if should_trade else None
-            self.tokens = {"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"} if should_trade else None
+            self.tokens = {
+                "market_id": "m1",
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "executable_snapshot_id": "snap-runtime-exec",
+                "executable_snapshot_min_tick_size": "0.01",
+                "executable_snapshot_min_order_size": "5",
+                "executable_snapshot_neg_risk": False,
+            } if should_trade else None
             self.size_usd = 5.0
             self.decision_id = "d1" if should_trade else "d2"
             self.rejection_stage = "EDGE_INSUFFICIENT"
@@ -628,6 +701,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
         "city": NYC,
         "target_date": "2026-04-01",
@@ -755,6 +829,7 @@ def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, cap
         MarketCandidate=MarketCandidate,
         DiscoveryMode=DiscoveryMode,
         evaluate_candidate=lambda *args, **kwargs: [decision],
+        get_last_scan_authority=lambda: "VERIFIED",
         logger=logging.getLogger("test_probability_trace_skip"),
         NoTradeCase=NoTradeCase,
         _classify_edge_source=lambda mode, edge: "",
@@ -781,6 +856,810 @@ def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, cap
 
     assert "Probability trace not written" in caplog.text
     assert "skipped_missing_decision_id" in caplog.text
+
+
+def test_discovery_phase_blocks_stale_market_scan_before_evaluator(tmp_path):
+    conn = get_connection(tmp_path / "scan-authority.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-stale",
+        "slug": "slug-stale",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "STALE",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        evaluate_candidate=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("stale Gamma authority must block before evaluator")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    row = conn.execute(
+        """
+        SELECT scope_type, scope_key, failure_type
+        FROM availability_fact
+        WHERE scope_type = 'city_target'
+        ORDER BY availability_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert summary["market_scan_authority"] == "STALE"
+    assert summary["forward_market_substrate_status"] == "refused_degraded_authority"
+    assert summary["candidates"] == 0
+    assert summary["no_trades"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "MARKET_FILTER"
+    assert artifact.no_trade_cases[0].availability_status == "DATA_STALE"
+    assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=STALE"]
+    assert row["scope_type"] == "city_target"
+    assert row["scope_key"] == "NYC:2026-04-01"
+    assert row["failure_type"] == "data_stale"
+
+
+def test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator(tmp_path):
+    conn = get_connection(tmp_path / "scan-empty-fallback.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-empty-fallback",
+        "slug": "slug-empty-fallback",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "EMPTY_FALLBACK",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        evaluate_candidate=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("keyword fallback authority must block before evaluator")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    row = conn.execute(
+        """
+        SELECT scope_type, scope_key, failure_type
+        FROM availability_fact
+        WHERE scope_type = 'city_target'
+        ORDER BY availability_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert summary["market_scan_authority"] == "EMPTY_FALLBACK"
+    assert summary["forward_market_substrate_status"] == "refused_degraded_authority"
+    assert summary["candidates"] == 0
+    assert summary["no_trades"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "MARKET_FILTER"
+    assert artifact.no_trade_cases[0].availability_status == "DATA_UNAVAILABLE"
+    assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=EMPTY_FALLBACK"]
+    assert row["scope_type"] == "city_target"
+    assert row["scope_key"] == "NYC:2026-04-01"
+    assert row["failure_type"] == "data_unavailable"
+
+
+@pytest.mark.parametrize(
+    "authority_getter",
+    [
+        lambda: "NEVER_FETCHED",
+        None,
+    ],
+)
+def test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluator(
+    tmp_path,
+    authority_getter,
+):
+    conn = get_connection(tmp_path / "scan-never-fetched.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-never-fetched",
+        "slug": "slug-never-fetched",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    deps_kwargs = {
+        "MODE_PARAMS": {DiscoveryMode.OPENING_HUNT: {}},
+        "find_weather_markets": lambda **kwargs: [market],
+        "DiscoveryMode": DiscoveryMode,
+        "logger": types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+        "NoTradeCase": NoTradeCase,
+        "evaluate_candidate": lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unverified Gamma authority must block before evaluator")
+        ),
+    }
+    if authority_getter is not None:
+        deps_kwargs["get_last_scan_authority"] = authority_getter
+    deps = types.SimpleNamespace(**deps_kwargs)
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["market_scan_authority"] == "NEVER_FETCHED"
+    assert summary["forward_market_substrate_status"] == "refused_degraded_authority"
+    assert summary["candidates"] == 0
+    assert summary["no_trades"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "MARKET_FILTER"
+    assert artifact.no_trade_cases[0].availability_status == "DATA_UNAVAILABLE"
+    assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=NEVER_FETCHED"]
+
+
+def test_discovery_phase_writes_verified_forward_market_substrate_before_evaluator(tmp_path):
+    db_path = tmp_path / "forward-substrate-runtime.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    apply_v2_schema(conn)
+    conn.commit()
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    decision_time = datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc)
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-forward-substrate",
+        "slug": "slug-forward-substrate",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-forward-substrate",
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes-forward-substrate",
+                "no_token_id": "no-forward-substrate",
+                "price": 0.37,
+                "no_price": 0.63,
+                "market_start_at": "2026-04-02T00:00:00Z",
+            },
+        ],
+    }
+    observed = {}
+
+    def _evaluate_after_forward_write(candidate, conn_arg, *args, **kwargs):
+        del candidate, args, kwargs
+        observed["same_conn_events"] = conn_arg.execute(
+            "SELECT COUNT(*) FROM market_events_v2"
+        ).fetchone()[0]
+        observed["same_conn_prices"] = conn_arg.execute(
+            "SELECT COUNT(*) FROM market_price_history"
+        ).fetchone()[0]
+        read_conn = get_connection(db_path)
+        try:
+            observed["external_events_before_commit"] = read_conn.execute(
+                "SELECT COUNT(*) FROM market_events_v2"
+            ).fetchone()[0]
+            observed["external_prices_before_commit"] = read_conn.execute(
+                "SELECT COUNT(*) FROM market_price_history"
+            ).fetchone()[0]
+        finally:
+            read_conn.close()
+        return []
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=_evaluate_after_forward_write,
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=decision_time,
+        env="live",
+        deps=deps,
+    )
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert observed == {
+        "same_conn_events": 1,
+        "same_conn_prices": 2,
+        "external_events_before_commit": 0,
+        "external_prices_before_commit": 0,
+    }
+    assert summary["forward_market_substrate_status"] == "written"
+    assert summary["forward_market_substrate_market_events_inserted"] == 1
+    assert summary["forward_market_substrate_price_rows_inserted"] == 2
+    assert not summary.get("degraded", False)
+    assert not readiness.ready
+    assert "economics_engine_not_implemented" in readiness.blockers
+
+
+def test_discovery_phase_forward_market_substrate_missing_schema_is_nonblocking(tmp_path):
+    conn = get_connection(tmp_path / "forward-substrate-missing-schema.db")
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-forward-substrate-missing-schema",
+        "slug": "slug-forward-substrate-missing-schema",
+        "temperature_metric": "high",
+        "outcomes": [],
+    }
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [],
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["forward_market_substrate_status"] == "skipped_missing_tables"
+    assert summary["candidates"] == 1
+    assert not summary.get("degraded", False)
+
+
+def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(tmp_path):
+    conn = get_connection(tmp_path / "forward-substrate-invalid-schema.db")
+    conn.execute("CREATE TABLE market_events_v2 (market_slug TEXT)")
+    conn.execute("CREATE TABLE market_price_history (token_id TEXT)")
+    conn.commit()
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-forward-substrate-invalid-schema",
+        "slug": "slug-forward-substrate-invalid-schema",
+        "temperature_metric": "high",
+        "outcomes": [],
+    }
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [],
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["forward_market_substrate_status"] == "skipped_invalid_schema"
+    assert summary["degraded"] is True
+    assert summary["candidates"] == 1
+
+
+def test_live_entry_requires_executable_market_identity_before_intent(tmp_path):
+    conn = get_connection(tmp_path / "missing-executable-identity.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-no-snapshot",
+        "slug": "slug-no-snapshot",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_id="d-missing-exec",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-1",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=None,
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing executable identity must block before intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing executable identity must block before submit")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    case = artifact.no_trade_cases[0]
+    assert case.rejection_stage == "EXECUTION_FAILED"
+    assert case.rejection_reasons == [
+        "missing_executable_market_identity:"
+        "executable_snapshot_id,executable_snapshot_min_tick_size,"
+        "executable_snapshot_min_order_size,executable_snapshot_neg_risk"
+    ]
+
+
+def test_live_entry_snapshot_capture_failure_blocks_before_intent(tmp_path):
+    conn = get_connection(tmp_path / "capture-failure-blocks-intent.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-capture-failure",
+        "slug": "slug-capture-failure",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "condition_id": "m1",
+                "question_id": "q1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_id="d-capture-failure",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-1",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=None,
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        capture_executable_market_snapshot=lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("CLOB market info missing")
+        ),
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot capture failure must block before intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot capture failure must block before submit")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    case = artifact.no_trade_cases[0]
+    assert case.rejection_stage == "EXECUTION_FAILED"
+    assert case.rejection_reasons[0].startswith("missing_executable_market_identity:")
+    assert case.rejection_reasons[1] == "executable_snapshot_capture_failed:CLOB market info missing"
+
+
+def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
+    conn = get_connection(tmp_path / "thread-executable-identity.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    captured = {}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-snapshot",
+        "slug": "slug-snapshot",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-entry-1",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-exec-thread",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-1",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=None,
+    )
+
+    def _capture_intent(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace()
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=_capture_intent,
+        execute_intent=lambda *args, **kwargs: OrderResult(
+            status="pending",
+            trade_id="trade-1",
+            order_id="ord-1",
+            submitted_price=0.35,
+            shares=10.0,
+            command_state="ACKED",
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert captured["executable_snapshot_id"] == "snap-entry-1"
+    assert captured["executable_snapshot_min_tick_size"] == "0.01"
+    assert captured["executable_snapshot_min_order_size"] == "5"
+    assert captured["executable_snapshot_neg_risk"] is False
+
+
+def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
+    from src.data.market_scanner import capture_executable_market_snapshot
+    from src.state.snapshot_repo import get_snapshot
+
+    db_path = tmp_path / "live-entry-forward-snapshot.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-forward-snapshot",
+        "slug": "slug-forward-snapshot",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "cond1",
+                "condition_id": "cond1",
+                "question_id": "q1",
+                "gamma_market_id": "gamma1",
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "token_map_raw": {"YES": "yes1", "NO": "no1"},
+                "raw_gamma_payload_hash": "a" * 64,
+                "gamma_market_raw": {
+                    "id": "gamma1",
+                    "conditionId": "cond1",
+                    "questionID": "q1",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes1", "no1"],
+                },
+            },
+        ],
+    }
+
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "cond1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_id="d-forward-snapshot",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-1",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=types.SimpleNamespace(p_posterior=0.47),
+    )
+
+    class FakeClob:
+        def get_clob_market_info(self, condition_id):
+            assert condition_id == "cond1"
+            return {
+                "condition_id": "cond1",
+                "tokens": [{"token_id": "yes1"}, {"token_id": "no1"}],
+                "feesEnabled": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id):
+            assert token_id == "yes1"
+            return {
+                "asset_id": "yes1",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [{"price": "0.34", "size": "100"}],
+                "asks": [{"price": "0.36", "size": "100"}],
+            }
+
+        def get_fee_rate(self, token_id):
+            assert token_id == "yes1"
+            return 30
+
+    captured = {}
+
+    def _execute_after_snapshot_commit(intent, edge_vwmp, label, **kwargs):
+        assert "conn" not in kwargs
+        captured["intent"] = intent
+        read_conn = get_connection(db_path)
+        init_schema(read_conn)
+        try:
+            snap = get_snapshot(read_conn, intent.executable_snapshot_id)
+            assert snap is not None
+        finally:
+            read_conn.close()
+        shares = 15.0
+        return OrderResult(
+            status="pending",
+            trade_id="trade-forward-snapshot",
+            order_id="ord-forward-snapshot",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            command_state="INTENT_CREATED",
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        capture_executable_market_snapshot=capture_executable_market_snapshot,
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=create_execution_intent,
+        execute_intent=_execute_after_snapshot_commit,
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=FakeClob(),
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    snapshot_count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
+    command_count = conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+    loaded_snapshot = get_snapshot(conn, captured["intent"].executable_snapshot_id)
+    conn.close()
+
+    assert captured["intent"].executable_snapshot_id
+    assert Decimal(str(captured["intent"].limit_price)) % Decimal("0.01") == 0
+    assert loaded_snapshot is not None
+    assert loaded_snapshot.captured_at != datetime(2026, 4, 3, tzinfo=timezone.utc)
+    assert snapshot_count == 1
+    assert command_count == 0
+    assert summary["no_trades"] == 0
 
 
 def _trace_status_for_evaluator_decision(tmp_path, candidate):
@@ -889,6 +1768,483 @@ def test_ens_validation_failure_is_pre_vector_traceable(tmp_path, monkeypatch):
     assert result["trace_status"] == "pre_vector_unavailable"
 
 
+def test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {
+        "members_hourly": np.ones((51, 24)) * 40.0,
+        "times": [f"2026-04-01T{hour:02d}:00:00Z" for hour in range(24)],
+        "issue_time": None,
+        "first_valid_time": datetime(2026, 4, 1, tzinfo=timezone.utc),
+        "fetch_time": datetime(2026, 4, 1, tzinfo=timezone.utc),
+        "model": "ecmwf_ifs025",
+        "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+        "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+        "forecast_source_role": "monitor_fallback",
+        "n_members": 51,
+    })
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_STALE"
+    assert "DEGRADED_FORECAST_FALLBACK" in decision.rejection_reasons[0]
+    assert "forecast_source_policy" in decision.applied_validations
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_entry_primary_source_policy_exception_blocks_entry_before_vector(tmp_path, monkeypatch):
+    from src.data.forecast_source_registry import SourceNotEnabled
+
+    def _blocked_entry(*args, **kwargs):
+        assert kwargs.get("role") == "entry_primary"
+        raise SourceNotEnabled(
+            "forecast source 'openmeteo_ensemble_ecmwf_ifs025' is not "
+            "authorized for role 'entry_primary'"
+        )
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _blocked_entry)
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=_three_outcomes(),
+        hours_since_open=12.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    decision, result = _trace_status_for_evaluator_decision(tmp_path, candidate)
+
+    assert decision.rejection_stage == "SIGNAL_QUALITY"
+    assert decision.availability_status == "DATA_STALE"
+    assert "entry_primary" in decision.rejection_reasons[0]
+    assert "forecast_source_policy" in decision.applied_validations
+    assert result["trace_status"] == "pre_vector_unavailable"
+
+
+def test_monitor_ens_refresh_records_forecast_fallback_provenance(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setitem(settings["ensemble"], "primary", "gfs025")
+    captured: dict[str, object] = {}
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="30-31°F",
+        unit="F",
+        market_id="m-monitor",
+        direction="buy_yes",
+        p_posterior=0.42,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.array([30.0, 31.0, 32.0])
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.array([0.7, 0.3])
+
+        def spread(self):
+            return monitor_refresh.TemperatureDelta(1.0, "F")
+
+    def _fetch(*args, **kwargs):
+        captured["role"] = kwargs.get("role")
+        captured["model"] = kwargs.get("model")
+        return {
+            "members_hourly": np.ones((51, 24)),
+            "times": ["2026-04-01T00:00:00Z"] * 24,
+            "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+            "forecast_source_role": "monitor_fallback",
+            "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+            "n_members": 51,
+        }
+
+    monkeypatch.setattr(monitor_refresh, "fetch_ensemble", _fetch)
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+    monkeypatch.setattr(monitor_refresh, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=30, high=31, label="30-31°F", unit="F"),
+                Bin(low=32, high=33, label="32-33°F", unit="F"),
+            ],
+            0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
+    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+    monkeypatch.setattr(
+        monitor_refresh,
+        "compute_alpha",
+        lambda **kwargs: types.SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+    )
+    monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *args, **kwargs: 1.0)
+
+    _posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=types.SimpleNamespace(execute=lambda *args, **kwargs: None),
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert captured["role"] == "monitor_fallback"
+    assert captured["model"] == "gfs025"
+    assert "forecast_source_id:openmeteo_ensemble_ecmwf_ifs025" in applied
+    assert "forecast_source_role:monitor_fallback" in applied
+    assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
+    assert "alpha_posterior" in applied
+
+
+def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setitem(settings["ensemble"], "primary", "gfs025")
+    captured: dict[str, object] = {}
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="40-41°F",
+        unit="F",
+        market_id="m-day0",
+        direction="buy_yes",
+        p_posterior=0.31,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="day0_observation",
+        entry_method="day0_observation",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+
+    def _fetch(*args, **kwargs):
+        captured["role"] = kwargs.get("role")
+        captured["model"] = kwargs.get("model")
+        return {
+            "members_hourly": np.ones((51, 24)),
+            "times": ["2026-04-01T00:00:00Z"] * 24,
+            "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+            "forecast_source_role": "monitor_fallback",
+            "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+            "n_members": 51,
+        }
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            high_so_far=41.0,
+            low_so_far=None,
+            current_temp=40.5,
+            source="wu_api",
+            observation_time="2026-04-01T16:00:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "fetch_ensemble", _fetch)
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            current_utc_timestamp=datetime(2026, 4, 1, 16, tzinfo=timezone.utc)
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "remaining_member_extrema_for_day0",
+        lambda *args, **kwargs: (
+            types.SimpleNamespace(maxes=np.array([40.0, 41.0, 42.0]), mins=None),
+            2.0,
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh.Day0Router,
+        "route",
+        lambda inputs: types.SimpleNamespace(p_vector=lambda bins, n_mc=None: np.array([0.8, 0.2])),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=40, high=41, label="40-41°F", unit="F"),
+                Bin(low=42, high=43, label="42-43°F", unit="F"),
+            ],
+            0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *args, **kwargs: [])
+    monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *args, **kwargs: "MAM")
+    monkeypatch.setattr(
+        monitor_refresh,
+        "compute_alpha",
+        lambda **kwargs: types.SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+    )
+
+    _posterior, applied = monitor_refresh._refresh_day0_observation(
+        position=position,
+        current_p_market=0.50,
+        conn=types.SimpleNamespace(execute=lambda *args, **kwargs: None),
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert captured["role"] == "monitor_fallback"
+    assert captured["model"] == "gfs025"
+    assert "forecast_source_id:openmeteo_ensemble_ecmwf_ifs025" in applied
+    assert "forecast_source_role:monitor_fallback" in applied
+    assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
+    assert "alpha_posterior" in applied
+
+
+def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
+    monkeypatch.setitem(settings["ensemble"], "primary", "tigge")
+    monkeypatch.setitem(settings["ensemble"], "crosscheck", "gfs025")
+    calls: list[dict[str, object]] = []
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=_three_outcomes(),
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins):
+            return np.array([0.25, 0.25, 0.25, 0.25])
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            pass
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
+        calls.append({"model": model, "role": role})
+        n_members = 31 if role == "diagnostic" else 51
+        return {
+            "members_hourly": np.ones((n_members, len(times))) * 40.0,
+            "times": times,
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id=str(model or "ecmwf_ifs025"),
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 15, 5, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, tzinfo=timezone.utc),
+                n_members=n_members,
+            ),
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-source-selection")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "model_agreement", lambda *args, **kwargs: "CONFLICT")
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert calls[0] == {"model": "tigge", "role": "entry_primary"}
+    assert calls[1] == {"model": "gfs025", "role": "diagnostic"}
+    assert decisions[0].rejection_reasons == ["tigge/gfs025 CONFLICT"]
+
+
+def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch):
+    captured: dict[str, object] = {}
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    season = evaluator_module.season_from_date(target_date, lat=NYC.lat)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE model_bias (
+            city TEXT,
+            season TEXT,
+            source TEXT,
+            bias REAL,
+            mae REAL,
+            n_samples INTEGER,
+            discount_factor REAL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO model_bias VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (NYC.name, season, "ecmwf", 99.0, 99.0, 1, 0.01),
+    )
+    conn.execute(
+        "INSERT INTO model_bias VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (NYC.name, season, "tigge", 1.0, 2.0, 30, 0.5),
+    )
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date=target_date,
+        outcomes=_three_outcomes(),
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins):
+            return np.array([0.25, 0.25, 0.25, 0.25])
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class CapturingAnalysis:
+        def __init__(self, **kwargs):
+            captured["forecast_source"] = kwargs["forecast_source"]
+            captured["bias_reference"] = kwargs["bias_reference"]
+            captured["forecast_context_source"] = kwargs["forecast_source"]
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.5}
+
+        def forecast_context(self):
+            return {"uncertainty": self.sigma_context(), "location": self.mean_context()}
+
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
+        n_members = 31 if role == "diagnostic" else 51
+        return {
+            "members_hourly": np.ones((n_members, len(times))) * 40.0,
+            "times": times,
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025" if role == "entry_primary" else "gfs025",
+                source_id="tigge" if role == "entry_primary" else "openmeteo_ensemble_gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 15, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, tzinfo=timezone.utc),
+                n_members=n_members,
+            ),
+        }
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-provider-id")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", CapturingAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=conn,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert captured["forecast_source"] == "tigge"
+    assert captured["bias_reference"]["source"] == "tigge"
+    assert captured["bias_reference"]["bias"] == 1.0
+
+
 def _patch_day0_ens_prefix(monkeypatch):
     class DummyEnsembleSignal:
         def __init__(self, *args, **kwargs):
@@ -904,9 +2260,11 @@ def _patch_day0_ens_prefix(monkeypatch):
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {
         "members_hourly": np.zeros((51, 24)),
         "times": ["2026-04-01T00:00:00+00:00"],
-        "fetch_time": datetime(2026, 4, 1, tzinfo=timezone.utc),
-        "model": "ecmwf_ifs025",
-        "n_members": 51,
+        **_entry_forecast_evidence(
+            issue_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            first_valid_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            fetch_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        ),
     })
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -992,6 +2350,7 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     _market_list = [{
         "city": NYC,
         "target_date": "2026-04-01",
@@ -1005,6 +2364,8 @@ def test_live_dynamic_cap_flows_to_evaluator(monkeypatch, tmp_path):
 
     def _dummy_refresh(conn, clob, pos):
         from src.contracts import EdgeContext, EntryMethod
+        pos.entry_method = getattr(pos, "entry_method", EntryMethod.ENS_MEMBER_COUNTING.value)
+        assert pos.entry_method
         return EdgeContext(
             p_raw=np.array([pos.p_posterior]),
             p_cal=np.array([pos.p_posterior]),
@@ -1068,7 +2429,15 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
         def __init__(self):
             self.should_trade = True
             self.edge = _edge()
-            self.tokens = {"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"}
+            self.tokens = {
+                "market_id": "m1",
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "executable_snapshot_id": "snap-reject-exec",
+                "executable_snapshot_min_tick_size": "0.01",
+                "executable_snapshot_min_order_size": "5",
+                "executable_snapshot_neg_risk": False,
+            }
             self.size_usd = 5.0
             self.decision_id = "d-reject"
             self.rejection_stage = ""
@@ -1091,6 +2460,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
         "city": NYC,
         "target_date": "2026-04-01",
@@ -1171,6 +2541,7 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     # P3-fix1c (post-review side-fix, 2026-04-26): market dict needs
     # temperature_metric — P2-fix3 routes via _normalize_temperature_metric
     # which now raises on missing/invalid (post-A3 antibody).
@@ -1242,6 +2613,8 @@ def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatc
 
     def _tracking_refresh(conn, clob, pos):
         from src.contracts import EdgeContext, EntryMethod
+        pos.entry_method = getattr(pos, "entry_method", EntryMethod.ENS_MEMBER_COUNTING.value)
+        assert pos.entry_method
         monitored.append(pos.trade_id)
         return EdgeContext(
             p_raw=np.array([pos.p_posterior]),
@@ -1438,6 +2811,7 @@ def test_run_cycle_surfaces_fdr_family_scan_failure_without_entries(monkeypatch,
     monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", lambda *args, **kwargs: (False, False))
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
     monkeypatch.setattr(
         cycle_runner,
         "find_weather_markets",
@@ -2182,7 +3556,7 @@ def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path):
             "trade_id": "t1",
             "market_id": "m1",
             "city": "NYC",
-            "cluster": "US-Northeast",
+            "cluster": "NYC",
             "target_date": "2026-04-01",
             "bin_label": "39-40°F",
             "direction": "buy_yes",
@@ -2221,7 +3595,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'db-t1', 'active', 'db-t1', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-t1', 'active', 'db-t1', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2237,7 +3611,7 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
             "trade_id": "db-t1",
             "market_id": "m-json",
             "city": "NYC",
-            "cluster": "US-Northeast",
+            "cluster": "NYC",
             "target_date": "2026-04-01",
             "bin_label": "41-42°F",
             "direction": "buy_no",
@@ -2285,7 +3659,7 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
         ) VALUES (
-            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2301,7 +3675,7 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
             "trade_id": "db-token",
             "market_id": "m-json",
             "city": "NYC",
-            "cluster": "US-Northeast",
+            "cluster": "NYC",
             "target_date": "2026-04-01",
             "bin_label": "41-42°F",
             "direction": "buy_no",
@@ -2338,7 +3712,7 @@ def test_load_portfolio_reads_ignored_tokens_from_canonical_suppression(tmp_path
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
         ) VALUES (
-            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-token', 'active', 'db-token', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2482,7 +3856,7 @@ def test_load_portfolio_ignores_deprecated_json_when_projection_authoritative(tm
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'db-deprecated-json', 'active', 'db-deprecated-json', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-deprecated-json', 'active', 'db-deprecated-json', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2518,7 +3892,7 @@ def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_p
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'db-corrupt-json', 'active', 'db-corrupt-json', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-corrupt-json', 'active', 'db-corrupt-json', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2609,7 +3983,7 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
         ) VALUES (
-            'db-recent-exit', 'active', 'db-recent-exit', 'm-db', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
+            'db-recent-exit', 'active', 'db-recent-exit', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
@@ -2681,7 +4055,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
             "trade_id": "json-t1",
             "market_id": "m-json",
             "city": "NYC",
-            "cluster": "US-Northeast",
+            "cluster": "NYC",
             "target_date": "2026-04-01",
             "bin_label": "39-40°F",
             "direction": "buy_yes",
@@ -2715,7 +4089,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json
             "trade_id": "t1",
             "market_id": "m1",
             "city": "NYC",
-            "cluster": "US-Northeast",
+            "cluster": "NYC",
             "target_date": "2026-04-01",
             "bin_label": "39-40°F",
             "direction": "buy_yes",
@@ -2850,6 +4224,8 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
             pass
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             result = list(edges)
             for e in result:
                 e.forward_edge = e.p_posterior - e.p_market
@@ -2875,22 +4251,28 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: {
+        lambda city, forecast_days=2, model=None, role=None: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
                 for hour in range(24)
             ],
-            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
-            "model": model or "ecmwf_ifs025",
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id="tigge" if (model or "ecmwf_ifs025") != "gfs025" else "gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+                n_members=31 if model == "gfs025" else 51,
+            ),
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-1")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
@@ -2905,6 +4287,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(max_portfolio_heat_pct=0.5, min_order_usd=1.0),
         entry_bankroll=10.0,
+        decision_time=datetime(2026, 4, 2, 0, 0, tzinfo=timezone.utc),
     )
 
     assert [d.should_trade for d in decisions] == [True, False]
@@ -2986,6 +4369,8 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
             pass
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             degenerate_edge.forward_edge = degenerate_edge.p_posterior - degenerate_edge.p_market
             return [degenerate_edge]
 
@@ -3002,22 +4387,28 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: {
+        lambda city, forecast_days=2, model=None, role=None: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
                 for hour in range(24)
             ],
-            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
-            "model": model or "ecmwf_ifs025",
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id="tigge" if (model or "ecmwf_ifs025") != "gfs025" else "gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+                n_members=31 if model == "gfs025" else 51,
+            ),
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-degenerate-ci")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
@@ -3030,6 +4421,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         entry_bankroll=150.0,
+        decision_time=datetime(2026, 4, 2, 0, 0, tzinfo=timezone.utc),
     )
 
     assert len(decisions) == 1
@@ -3104,22 +4496,28 @@ def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: {
+        lambda city, forecast_days=2, model=None, role=None: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
                 for hour in range(24)
             ],
-            "issue_time": datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
-            "model": model or "ecmwf_ifs025",
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                source_id="tigge" if (model or "ecmwf_ifs025") != "gfs025" else "gfs025",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 4, 1, 23, 30, tzinfo=timezone.utc),
+                n_members=31 if model == "gfs025" else 51,
+            ),
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-alpha-target")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(
         evaluator_module,
         "compute_alpha",
@@ -3139,6 +4537,7 @@ def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         entry_bankroll=150.0,
+        decision_time=datetime(2026, 4, 2, 0, 0, tzinfo=timezone.utc),
     )
 
     assert len(decisions) == 1
@@ -3214,7 +4613,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
 
         def p_vector(self, bins, n_mc=3000):
             calls["bins"] = [b.label for b in bins]
-            return np.array([0.60, 0.30, 0.10])
+            return np.array([0.50, 0.30, 0.15, 0.05])
 
         def forecast_context(self):
             return {
@@ -3249,6 +4648,8 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             result = [_edge()]
             for e in result:
                 e.forward_edge = e.p_posterior - e.p_market
@@ -3267,15 +4668,18 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: None if model == "gfs025" else {
+        lambda city, forecast_days=2, model=None, role=None: None if model == "gfs025" else {
             "members_hourly": np.ones((51, 12)) * 44.0,
             "times": [
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                 for _ in range(12)
             ],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": "ecmwf_ifs025",
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025",
+                issue_time=datetime.now(timezone.utc),
+                first_valid_time=datetime.now(timezone.utc),
+                fetch_time=datetime.now(timezone.utc),
+            ),
         },
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
@@ -3299,7 +4703,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(evaluator_module, "remaining_member_extrema_for_day0", _remaining_for_day0)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-day0")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -3334,9 +4738,10 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
         portfolio=PortfolioState(bankroll=150.0),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(),
+        decision_time=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
 
-    assert decisions[0].should_trade is True
+    assert decisions[0].should_trade is True, decisions[0].rejection_reasons
     assert decisions[0].selected_method == "day0_observation"
     assert calls["observed_high_so_far"] == pytest.approx(44.0)
     assert calls["temporal_context"] is not None
@@ -3374,16 +4779,19 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None: (
+        lambda city, forecast_days=2, model=None, role=None: (
             lambda base_utc: {
                 "members_hourly": np.ones((51, 12)) * 44.0,
                 "times": [
                     (base_utc + timedelta(hours=i)).replace(microsecond=0).isoformat()
                     for i in range(12)
                 ],
-                "issue_time": datetime.now(timezone.utc),
-                "fetch_time": datetime.now(timezone.utc),
-                "model": "ecmwf_ifs025",
+                **_entry_forecast_evidence(
+                    model="ecmwf_ifs025",
+                    issue_time=datetime.now(timezone.utc),
+                    first_valid_time=base_utc,
+                    fetch_time=datetime.now(timezone.utc),
+                ),
             }
         )(
             datetime.combine(
@@ -3420,6 +4828,7 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
         portfolio=PortfolioState(bankroll=150.0),
         clob=type("DummyClob", (), {"get_best_bid_ask": lambda self, token_id: (0.34, 0.36, 20.0, 20.0)})(),
         limits=evaluator_module.RiskLimits(),
+        decision_time=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
 
     assert len(decisions) == 1
@@ -3521,25 +4930,33 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
         def get_best_bid_ask(self, token_id):
             return (0.29, 0.31, 10.0, 10.0)
 
-    def _fetch_ensemble(city, forecast_days=2, model=None):
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
         if model == "gfs025":
             return {
                 "members_hourly": gfs_members,
                 "times": times,
-                "issue_time": None,
-                "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
-                "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
-                "model": "gfs025",
-                "n_members": 31,
+                **_entry_forecast_evidence(
+                    model="gfs025",
+                    source_id="openmeteo_ensemble_gfs025",
+                    role=role or "diagnostic",
+                    issue_time=datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+                    first_valid_time=datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                    fetch_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                    n_members=31,
+                ),
             }
         return {
             "members_hourly": ecmwf_members,
             "times": times,
-            "issue_time": None,
-            "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
-            "model": "ecmwf_ifs025",
-            "n_members": 51,
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025",
+                source_id="tigge",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                n_members=51,
+            ),
         }
 
     def _model_agreement(p_raw, gfs_p):
@@ -3552,7 +4969,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     monkeypatch.setattr(evaluator_module, "model_agreement", _model_agreement)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
@@ -3585,7 +5002,7 @@ def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypat
         discovery_mode=DiscoveryMode.OPENING_HUNT.value,
     )
 
-    def _fetch(city, forecast_days=2, model=None):
+    def _fetch(city, forecast_days=2, model=None, role=None):
         if model == "gfs025":
             return {
                 "members_hourly": np.ones((31, 6)) * 40.0,
@@ -3599,18 +5016,22 @@ def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypat
         return {
             "members_hourly": np.ones((51, 30)) * 40.0,
             "times": [f"2026-01-15T{hour:02d}:00:00Z" for hour in range(24)] + [f"2026-01-16T{hour:02d}:00:00Z" for hour in range(6)],
-            "issue_time": None,
-            "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
-            "fetch_time": datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
-            "model": "ecmwf_ifs025",
-            "n_members": 51,
+            **_entry_forecast_evidence(
+                model="ecmwf_ifs025",
+                source_id="tigge",
+                role=role or "entry_primary",
+                issue_time=datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 1, 14, 6, 0, tzinfo=timezone.utc),
+                n_members=51,
+            ),
         }
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch)
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs-fail")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -3646,7 +5067,7 @@ def test_build_exit_context_preserves_missing_best_bid_for_exit_audit():
         trade_id="live-buy-yes-missing-bid",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3675,7 +5096,7 @@ def test_monitoring_skips_sell_pending_when_chain_already_missing():
         trade_id="retry-missing-chain",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3718,7 +5139,7 @@ def test_monitoring_admin_closes_retry_pending_when_chain_missing_after_recovery
         trade_id="retry-missing-chain-close",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3766,7 +5187,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
         trade_id="retry-missing-chain-close",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3790,7 +5211,7 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
         trade_id="retry-missing-chain-close",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3827,7 +5248,7 @@ def test_monitoring_skips_backoff_exhausted_chain_missing_until_settlement():
         trade_id="backoff-missing-chain",
         market_id="m1",
         city="NYC",
-        cluster="US-Northeast",
+        cluster="NYC",
         target_date="2026-04-01",
         bin_label="39-40°F",
         direction="buy_yes",
@@ -3877,7 +5298,7 @@ def test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time():
     assert parsed["first_valid_time"] == datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc)
 
 
-def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
+def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -3907,28 +5328,31 @@ def test_store_ens_snapshot_marks_degraded_clock_metadata_explicitly(tmp_path):
         "model": "ecmwf_ifs025",
     }
 
-    evaluator_module._store_ens_snapshot(
+    snapshot_id = evaluator_module._store_ens_snapshot(
         conn,
         NYC,
         "2026-01-15",
         ens,
         ens_result,
     )
+    evaluator_module._store_snapshot_p_raw(conn, snapshot_id, np.array([0.2, 0.3, 0.5]))
     row = conn.execute(
         """
-        SELECT issue_time, valid_time, available_at, fetch_time
+        SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json
         FROM ensemble_snapshots
-        WHERE city = ? AND target_date = ?
+        WHERE snapshot_id = ? AND city = ? AND target_date = ?
         """,
-        (NYC.name, "2026-01-15"),
+        (snapshot_id, NYC.name, "2026-01-15"),
     ).fetchone()
     conn.close()
 
+    assert snapshot_id
     assert row is not None
     assert row["issue_time"] is None
-    assert row["valid_time"] is None
+    assert row["valid_time"] == "2026-01-14T05:00:00+00:00"
     assert row["available_at"] == "2026-01-14T06:05:00+00:00"
     assert row["fetch_time"] == "2026-01-14T06:05:00+00:00"
+    assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
 
 def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
@@ -3991,7 +5415,9 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     assert json.loads(world_row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
 
-def test_open_ens_collection_stores_snapshots(monkeypatch, tmp_path):
+def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypatch, tmp_path):
+    from src.data.forecast_source_registry import SOURCES, SourceNotEnabled, gate_source_role
+
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -4001,7 +5427,7 @@ def test_open_ens_collection_stores_snapshots(monkeypatch, tmp_path):
         lat=40.7772,
         lon=-73.8726,
         timezone="America/New_York",
-        cluster="US-Northeast",
+        cluster="NYC",
         settlement_unit="F",
         wu_station="KLGA",
     )
@@ -4025,17 +5451,33 @@ def test_open_ens_collection_stores_snapshots(monkeypatch, tmp_path):
 
     result = collect_open_ens_cycle(run_date=date(2026, 3, 30), run_hour=0, conn=conn)
     rows = conn.execute(
-        "SELECT city, target_date, data_version, model_version, p_raw_json FROM ensemble_snapshots ORDER BY target_date"
+        """
+        SELECT city, target_date, data_version, model_version, p_raw_json, authority
+        FROM ensemble_snapshots
+        ORDER BY target_date
+        """
     ).fetchall()
     conn.close()
 
     assert result["snapshots_inserted"] == 2
+    assert result["source_id"] == "ecmwf_open_data"
+    assert result["forecast_source_role"] == "diagnostic"
+    assert result["degradation_level"] == "DIAGNOSTIC_NON_EXECUTABLE"
+    assert result["authority"] == "UNVERIFIED"
     assert [row["target_date"] for row in rows] == ["2026-03-31", "2026-04-01"]
     assert all(row["data_version"] == DATA_VERSION for row in rows)
     assert all(row["p_raw_json"] is None for row in rows)
+    assert all(row["authority"] == "UNVERIFIED" for row in rows)
+    with pytest.raises(SourceNotEnabled, match="entry_primary"):
+        gate_source_role(SOURCES["ecmwf_open_data"], "entry_primary")
 
 
-def test_main_registers_ecmwf_open_data_jobs(monkeypatch, tmp_path):
+def test_main_registers_only_policy_owned_ecmwf_open_data_jobs(monkeypatch, tmp_path):
+    from src.data.forecast_source_registry import SOURCES
+
+    assert SOURCES["ecmwf_open_data"].allowed_roles == ("diagnostic",)
+    assert SOURCES["ecmwf_open_data"].degradation_level == "DIAGNOSTIC_NON_EXECUTABLE"
+
     blocking_module = types.ModuleType("apscheduler.schedulers.blocking")
 
     class BootstrapScheduler:
@@ -4144,8 +5586,18 @@ def test_fetch_ensemble_caches_identical_request(monkeypatch):
 
     monkeypatch.setattr(ensemble_client.httpx, "get", _fake_get)
 
-    first = ensemble_client.fetch_ensemble(NYC, forecast_days=3, model="ecmwf_ifs025")
-    second = ensemble_client.fetch_ensemble(NYC, forecast_days=3, model="ecmwf_ifs025")
+    first = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=3,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
+    second = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=3,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
 
     assert first is not None
     assert second is not None
@@ -4179,8 +5631,18 @@ def test_fetch_ensemble_reuses_longer_horizon_for_shorter_request(monkeypatch):
 
     monkeypatch.setattr(ensemble_client.httpx, "get", _fake_get)
 
-    long_result = ensemble_client.fetch_ensemble(NYC, forecast_days=8, model="ecmwf_ifs025")
-    short_result = ensemble_client.fetch_ensemble(NYC, forecast_days=3, model="ecmwf_ifs025")
+    long_result = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=8,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
+    short_result = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=3,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
 
     assert long_result is not None
     assert short_result is not None
@@ -4399,6 +5861,8 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
     summary = {"monitors": 0, "exits": 0}
 
     def _refresh_position(conn, clob, pos):
+        pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+        assert pos.entry_method
         pos.last_monitor_market_price = 0.46
         pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_best_bid = 0.46
@@ -4512,6 +5976,8 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
         decision_snapshot_id="snap-live-exit",
         last_monitor_market_price=0.46,
     )
+    pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+    assert pos.entry_method
     portfolio = PortfolioState(positions=[pos])
     artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
     summary = {"monitors": 0, "exits": 0}
@@ -4538,7 +6004,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
 
         def get_order_status(self, order_id):
             assert order_id == "sell-order-1"
-            return {"status": "FILLED"}
+            return {"status": "CONFIRMED"}
 
     tracker = Tracker()
     captured = {}
@@ -4546,6 +6012,8 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     monkeypatch.setattr(cycle_runner, "cities_by_name", {"NYC": NYC}, raising=False)
     monkeypatch.setattr("src.execution.exit_lifecycle.check_sell_collateral", lambda *args, **kwargs: (True, None))
     def _refresh_position(conn, clob, pos):
+        pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+        assert pos.entry_method
         pos.last_monitor_market_price = 0.46
         pos.last_monitor_market_price_is_fresh = True
         pos.last_monitor_best_bid = 0.46
@@ -4679,7 +6147,7 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     assert execution_fact_row["submitted_price"] == pytest.approx(0.46)
     assert execution_fact_row["fill_price"] == pytest.approx(0.46)
     assert execution_fact_row["shares"] == pytest.approx(25.0)
-    assert execution_fact_row["venue_status"] == "FILLED"
+    assert execution_fact_row["venue_status"] == "CONFIRMED"
     assert execution_fact_row["terminal_exec_status"] == "filled"
 
     conn.close()
@@ -5175,6 +6643,19 @@ def test_execute_exit_rejected_orderresult_preserves_retry_semantics(monkeypatch
 ## Original: test_execute_exit_paper_mode_dual_writes_economic_close_when_canonical_history_present
 
 
+def test_monitor_refresh_has_no_production_paper_mode_branch():
+    project_root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for subdir in ("src/engine", "src/execution"):
+        for path in (project_root / subdir).rglob("*.py"):
+            text = path.read_text()
+            for token in ("paper_mode", "paper_exit"):
+                if token in text:
+                    offenders.append(f"{path.relative_to(project_root)}:{token}")
+
+    assert offenders == []
+
+
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
@@ -5215,6 +6696,7 @@ def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch
         logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
         NoTradeCase=NoTradeCase,
         find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
         get_current_observation=lambda *args, **kwargs: (_ for _ in ()).throw(ObservationUnavailableError("obs down")),
         evaluate_candidate=lambda *args, **kwargs: [],
     )
@@ -5367,6 +6849,7 @@ def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_
         NoTradeCase=NoTradeCase,
         MarketCandidate=MarketCandidate,
         find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
         evaluate_candidate=lambda *args, **kwargs: [decision],
         _classify_edge_source=lambda *args, **kwargs: "",
     )
@@ -5429,6 +6912,7 @@ def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monke
         portfolio=PortfolioState(bankroll=150.0),
         clob=types.SimpleNamespace(),
         limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
     )
 
     assert len(decisions) == 1

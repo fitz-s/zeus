@@ -157,7 +157,9 @@ Encoded in `config/cities.json::cities[].weighted_low_calibration_eligible: bool
 
 ### LAW 4: n_mc tuning has context-dependent precision floor
 
-`rebuild_calibration_pairs_v2.py:578` defaults `n_mc=ensemble_n_mc()=10,000`. This default is mathematically justified for the **live runtime path** (single-snapshot p_raw used to size a single trade decision) but is **mathematically excess for the batch-rebuild path** (aggregate Platt fit across millions of pairs). Two distinct operational contexts have different precision floors.
+**Erratum 2026-04-29:** Earlier draft of this LAW stated `ensemble_n_mc()=10,000` as the production default. Audit of `config/settings.json` (commit `218b8c86`, 2026-04-01) showed the actual setting was `n_mc: 5000`. The 2026-04-29 calibration_pairs_v2 rebuild therefore ran at `n_mc=5000`, not 10,000. The 5000-vs-10000 distinction is mathematically below detection at aggregate fit scale (see derivation below) but is consequential for the **runtime per-trade evaluator** where it dominates per-decision SE. Settings.json was updated 2026-04-29 to `n_mc: 10000` (both `ensemble.n_mc` and `day0.n_mc`) to lift runtime to the LAW 4 preferred precision; the existing calibration_pairs_v2 (built at 5000) is retained for deployment because the math below shows the aggregate Platt fit difference is < 10⁻³ σ — empirically undetectable. A future re-rebuild at n_mc=10000 is queued in the backlog for full pipeline symmetry but is not load-bearing for fit quality.
+
+`rebuild_calibration_pairs_v2.py` defaults `n_mc=ensemble_n_mc()`. This default is mathematically justified for the **live runtime path** (single-snapshot p_raw used to size a single trade decision) but is **mathematically excess for the batch-rebuild path** (aggregate Platt fit across millions of pairs). Two distinct operational contexts have different precision floors.
 
 #### Math derivation
 
@@ -214,7 +216,7 @@ These are configured separately. The change applies ONLY to the rebuild script's
 
 - HIGH track (342k snapshots) + LOW track (74k eligible) processed serially in one SAVEPOINT
 - WAL grows to 7+ GB before commit
-- DB write-lock held for entire rebuild (~6-10 hours at n_mc=10000, ~30-50 min at n_mc=1000)
+- DB write-lock held for entire rebuild (~16 hours observed 2026-04-29 at n_mc=5000; would be ~32 hours at n_mc=10000 without rebuild MC vectorization; ~30-50 min at n_mc=1000)
 - Live daemon (`src.main`) cannot `init_schema(conn)` during rebuild → daemon crashes if respawned mid-rebuild ("database is locked")
 
 Operational fix: split SAVEPOINT per metric:
@@ -239,7 +241,7 @@ Combined: `--n-mc 1000` + per-track SAVEPOINT split:
 
 | Configuration | Wallclock (rebuild) | Daemon-blocked window | DB WAL peak |
 |---|---|---|---|
-| Current (n_mc=10000, single SAVEPOINT) | 6-10 hours | 6-10 hours | 7-10 GB |
+| Observed 2026-04-29 (n_mc=5000, single SAVEPOINT) | 16 hours | 16 hours | 22 GB final |
 | `--n-mc 1000` only | 30-50 min | 30-50 min | ~700 MB |
 | `--n-mc 1000` + per-track split | 30-50 min | 15-25 min (HIGH OR LOW at a time) | ~500 MB peak |
 

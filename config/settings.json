@@ -30,7 +30,8 @@
     "crosscheck": "gfs025",
     "primary_members": 51,
     "crosscheck_members": 31,
-    "n_mc": 5000,
+    "n_mc": 10000,
+    "_n_mc_note": "Runtime per-trade Monte Carlo iterations. Bumped 2026-04-29 from 5000 (LAW 4 forbidden move 7 floor) to 10000 for tighter per-trade SE (0.0071 -> 0.005 at p=0.5). Training calibration_pairs_v2 was rebuilt at n_mc=5000 on 2026-04-29; LAW 4 derivation shows that aggregate Platt fit difference between 5000 and 10000 is < 1e-3 sigma (label noise dominates). Future re-rebuild at 10000 is queued in backlog for full pipeline symmetry but is empirically not load-bearing for fit quality.",
     "instrument_noise_f": 0.5,
     "instrument_noise_c": 0.28,
     "bimodal_kde_order": 10,
@@ -56,7 +57,8 @@
     }
   },
   "day0": {
-    "n_mc": 5000
+    "n_mc": 10000,
+    "_n_mc_note": "Day0 nowcast Monte Carlo iterations. Bumped 2026-04-29 from 5000 to 10000 in lockstep with ensemble.n_mc per LAW 4 forbidden move 7 (runtime per-trade precision >= 5000; 10000 preferred)."
   },
   "edge": {
     "n_bootstrap": 500,
@@ -142,7 +144,6 @@
   },
   "bias_correction_enabled": false,
   "feature_flags": {
-    "EXECUTION_PRICE_SHADOW": true,
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,
     "_HOLD_VALUE_EXIT_COSTS_note": "T6.4 flag-gates HoldValue.compute_with_exit_costs at _buy_yes_exit + _buy_no_exit seams in src/state/portfolio.py. Default OFF to preserve pre-T6.4 zero-cost behavior during shadow validation; flip ON after operator reviews should_exit rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a pre-requisite). When ON, exit decisions include fee + time opportunity cost (not yet correlation — that lives in T6.4-phase2 requiring portfolio context in ExitContext)."

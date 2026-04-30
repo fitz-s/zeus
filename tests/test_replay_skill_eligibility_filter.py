@@ -7,8 +7,9 @@ Locks the wiring of SKILL_ELIGIBLE_SQL into src/engine/replay.py:_forecast_rows_
 (line 312 SELECT). RECONSTRUCTED rows must NOT flow into SKILL backtest output;
 DERIVED_FROM_DISSEMINATION + RECORDED + FETCH_TIME rows pass through.
 
-Pre-F11 legacy DBs (no availability_provenance column) MAY also pass through
-via the IS NULL clause — this is a deliberate tolerance for un-migrated DBs.
+Pre-F11 legacy DBs (no availability_provenance column) MAY pass through via
+the fallback query. Migrated schemas with the provenance column may tolerate
+non-Open-Meteo NULL rows, but Open-Meteo previous-runs NULL rows are excluded.
 """
 
 import sqlite3
@@ -46,8 +47,10 @@ def db_with_mixed_provenance():
         (3, "NYC", "2026-04-30", "openmeteo_previous_runs", "2026-04-28", "2026-04-28T12:00:00+00:00", 2, 48.0, 73.0, 59.0, "F", "t", "t", None, None, "reconstructed"),
         (4, "NYC", "2026-04-30", "gfs_previous_runs", "2026-04-28", "2026-04-28T04:14:00+00:00", 2, 48.0, 72.5, 58.5, "F", "t", "t", None, None, "fetch_time"),
         (5, "NYC", "2026-04-30", "ukmo_previous_runs", "2026-04-28", "2026-04-28T12:00:00+00:00", 2, 48.0, 70.0, 56.0, "F", "t", "t", None, None, "recorded"),
-        # Pre-F11 legacy row (NULL provenance — tolerance case)
+        # Open-Meteo NULL provenance row — excluded once the provenance column exists.
         (6, "NYC", "2026-04-30", "openmeteo_previous_runs", "2026-04-27", "2026-04-27T00:00:00+00:00", 3, 72.0, 70.5, 56.5, "F", "t", "t", None, None, None),
+        # Non-Open-Meteo NULL provenance row — preserved as migrated-schema legacy tolerance.
+        (7, "NYC", "2026-04-30", "gfs_previous_runs", "2026-04-27", "2026-04-27T00:00:00+00:00", 3, 72.0, 69.5, 55.5, "F", "t", "t", None, None, None),
     ]
     conn.executemany(
         "INSERT INTO forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -87,19 +90,17 @@ def test_replay_excludes_reconstructed_rows(db_with_mixed_provenance):
     assert "ukmo_previous_runs" in sources
     # ICON + OpenMeteo (both RECONSTRUCTED) → excluded
     assert "icon_previous_runs" not in sources
-    # Note: openmeteo appears once for the legacy NULL-provenance row, not
-    # for the RECONSTRUCTED row. We verify by checking basis_date.
+    # Open-Meteo is excluded both for RECONSTRUCTED and NULL provenance rows.
     openmeteo_rows = [r for r in rows if r["source"] == "openmeteo_previous_runs"]
-    assert len(openmeteo_rows) == 1
-    assert openmeteo_rows[0]["forecast_basis_date"] == "2026-04-27"  # the NULL-provenance legacy row
+    assert openmeteo_rows == []
 
 
-def test_replay_includes_legacy_null_provenance_rows(db_with_mixed_provenance):
-    """Pre-F11 legacy rows (availability_provenance IS NULL) are tolerated.
+def test_replay_includes_non_openmeteo_null_provenance_rows(db_with_mixed_provenance):
+    """Non-Open-Meteo NULL provenance rows remain tolerated in migrated schemas.
 
-    This is a deliberate compatibility allowance — un-migrated DBs continue
-    to produce diagnostic_non_promotion replay output. After backfill,
-    every row has populated provenance and the IS NULL clause becomes inert.
+    Unmigrated DBs without an availability_provenance column still fall back to
+    the no-provenance query; this migrated-schema tolerance is narrower and
+    excludes Open-Meteo previous-runs rows specifically.
     """
     from src.engine.replay import ReplayContext
 
@@ -111,10 +112,11 @@ def test_replay_includes_legacy_null_provenance_rows(db_with_mixed_provenance):
     )
     legacy_null_rows = [r for r in rows if r["forecast_basis_date"] == "2026-04-27"]
     assert len(legacy_null_rows) == 1
+    assert legacy_null_rows[0]["source"] == "gfs_previous_runs"
 
 
 def test_replay_eligibility_count_matches_design(db_with_mixed_provenance):
-    """6 fixture rows → 4 eligible (3 DERIVED/RECORDED/FETCH_TIME + 1 legacy NULL)."""
+    """7 fixture rows → 4 eligible (3 tiered + 1 non-Open-Meteo NULL)."""
     from src.engine.replay import ReplayContext
 
     rows = ReplayContext._forecast_rows_for(

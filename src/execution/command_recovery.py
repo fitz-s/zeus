@@ -9,7 +9,7 @@ SUBMIT_UNKNOWN_SIDE_EFFECT resolution: lookup by known venue_order_id or by
 idempotency-key capability, then convert found orders to ACKED/PARTIAL/FILLED
 or mark safe replay permitted via a terminal SUBMIT_REJECTED payload after the
 window elapses. MATCHED/MINED are optimistic venue observations and stay
-PARTIAL; only CONFIRMED or an explicit FILLED order status advances command
+PARTIAL; FILLED is an order observation and only CONFIRMED advances command
 fill finality. Appends durable events that advance state per the §P1.S4
 resolution table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
 
@@ -171,7 +171,7 @@ def _reconcile_row(
                     "venue_response": venue_resp,
                     "idempotency_key": cmd.idempotency_key.value,
                 }
-                if venue_status in {"FILLED", "CONFIRMED"}:
+                if venue_status == "CONFIRMED":
                     append_event(
                         conn,
                         command_id=cmd.command_id,
@@ -185,7 +185,7 @@ def _reconcile_row(
                         cmd.command_id, venue_status, venue_order_id,
                     )
                     return "advanced"
-                if venue_status in {"MATCHED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
+                if venue_status in {"FILLED", "MATCHED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
                     append_event(
                         conn,
                         command_id=cmd.command_id,

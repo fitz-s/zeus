@@ -778,7 +778,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope before SDK contact and anchors T1 paper/live parity fakes.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope before SDK contact and anchors T1 fake/live adapter parity fakes.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -1322,7 +1322,7 @@ files:
   src/strategy/benchmark_suite.py:
     zone: K3_extension
     authority_role: strategy_benchmark_gate
-    why: R3 A1 replay/paper/live-shadow benchmark metrics and promotion gate; computes evidence-only StrategyMetrics and blocks live promotion unless replay+paper+shadow pass.
+    why: R3 A1 diagnostic/simulated/read-only-live benchmark metrics and promotion gate; computes evidence-only StrategyMetrics and blocks live promotion unless promotion-grade economics plus supporting diagnostic, simulated-venue, and read-only-live evidence pass.
     downstream:
     - src/strategy/data_lake.py
     - src/strategy/candidates/__init__.py

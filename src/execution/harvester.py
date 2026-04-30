@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,7 +37,9 @@ from src.state.decision_chain import (
 from src.state.db import (
     get_world_connection,
     get_trade_connection,
+    log_market_event_outcomes_v2,
     log_settlement_event,
+    log_settlement_v2,
     query_authoritative_settlement_rows,
     query_settlement_events,
     record_token_suppression,
@@ -130,6 +133,25 @@ _HARVESTER_STAGE2_SHARED_TABLES = (
     "calibration_decision_group",
     "platt_models",
 )
+
+
+@dataclass(frozen=True)
+class ResolvedMarketOutcome:
+    """Resolved Gamma child market identity for one binary temperature bin."""
+
+    condition_id: str
+    yes_token_id: str
+    range_label: str
+    range_low: Optional[float]
+    range_high: Optional[float]
+    yes_won: bool
+
+    def as_v2_outcome_row(self) -> dict:
+        return {
+            "condition_id": self.condition_id,
+            "token_id": self.yes_token_id,
+            "outcome": "YES" if self.yes_won else "NO",
+        }
 
 
 def _missing_tables(conn, table_names: tuple[str, ...]) -> list[str]:
@@ -356,10 +378,27 @@ def run_harvester() -> dict:
             if target_date is None:
                 continue
 
-            pm_bin_lo, pm_bin_hi = _find_winning_bin(event)
-            if pm_bin_lo is None and pm_bin_hi is None:
-                # No UMA-resolved YES-won market for this event; skip silently.
+            resolved_market_outcomes = _extract_resolved_market_outcomes(event)
+            winning_market_outcomes = [
+                outcome for outcome in resolved_market_outcomes if outcome.yes_won
+            ]
+            if len(winning_market_outcomes) != 1:
+                # Exactly one YES-resolved child is required to avoid resolving
+                # malformed Gamma payloads into multiple winners.
+                if winning_market_outcomes:
+                    logger.warning(
+                        "harvester_live: skipping %s %s due ambiguous resolved winners=%d slug=%s",
+                        city.name,
+                        target_date,
+                        len(winning_market_outcomes),
+                        event.get("slug", ""),
+                    )
                 continue
+            winning_market_outcome = winning_market_outcomes[0]
+            pm_bin_lo, pm_bin_hi = (
+                winning_market_outcome.range_low,
+                winning_market_outcome.range_high,
+            )
 
             # Derive the canonical text-form winning_bin label that downstream
             # learning + position-settlement pipelines (harvest_settlement,
@@ -393,6 +432,7 @@ def run_harvester() -> dict:
                 shared_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
+                resolved_market_outcomes=resolved_market_outcomes,
             )
 
             # Extract all bin labels and use decision-time snapshots for calibration
@@ -559,6 +599,106 @@ def _fetch_settled_events() -> list[dict]:
     return events
 
 
+def _json_list(value) -> Optional[list]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, list) else None
+    return None
+
+
+def _resolution_price_is_one(value) -> bool:
+    try:
+        return float(value) == 1.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _resolution_price_is_zero(value) -> bool:
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _extract_resolved_market_outcomes(event: dict) -> list[ResolvedMarketOutcome]:
+    """Extract resolved Gamma child identities without requiring tradability.
+
+    Settled Gamma events are no longer tradable, so this intentionally does not
+    call the active-market tradability filter from market_scanner. Each returned
+    row is keyed by the YES token, because market_events_v2 stores one row per
+    temperature bin with the YES token as `token_id`.
+    """
+    resolved: list[ResolvedMarketOutcome] = []
+    for market in event.get("markets", []) or []:
+        if market.get("umaResolutionStatus") != "resolved":
+            continue
+
+        prices = _json_list(market.get("outcomePrices"))
+        outcomes = _json_list(market.get("outcomes"))
+        tokens = _json_list(market.get("clobTokenIds"))
+        if not (
+            isinstance(prices, list)
+            and isinstance(outcomes, list)
+            and isinstance(tokens, list)
+            and len(prices) >= 2
+            and len(outcomes) >= 2
+            and len(tokens) >= 2
+        ):
+            continue
+
+        labels = [str(outcomes[0]).strip().lower(), str(outcomes[1]).strip().lower()]
+        if labels == ["yes", "no"]:
+            yes_index = 0
+        elif labels == ["no", "yes"]:
+            yes_index = 1
+        else:
+            continue
+
+        yes_price = prices[yes_index]
+        no_price = prices[1 - yes_index]
+        if not (
+            (_resolution_price_is_one(yes_price) and _resolution_price_is_zero(no_price))
+            or (_resolution_price_is_zero(yes_price) and _resolution_price_is_one(no_price))
+        ):
+            continue
+
+        condition_id = str(
+            market.get("conditionId")
+            or market.get("condition_id")
+            or market.get("id")
+            or ""
+        ).strip()
+        yes_token_id = str(tokens[yes_index]).strip()
+        if not condition_id or not yes_token_id:
+            continue
+
+        label = market.get("question") or market.get("groupItemTitle", "")
+        low, high = _parse_temp_range(label)
+        resolved.append(
+            ResolvedMarketOutcome(
+                condition_id=condition_id,
+                yes_token_id=yes_token_id,
+                range_label=str(label or ""),
+                range_low=low,
+                range_high=high,
+                yes_won=_resolution_price_is_one(yes_price),
+            )
+        )
+    return resolved
+
+
+def _find_winning_market_outcome(event: dict) -> Optional[ResolvedMarketOutcome]:
+    winners = [outcome for outcome in _extract_resolved_market_outcomes(event) if outcome.yes_won]
+    if len(winners) != 1:
+        return None
+    return winners[0]
+
+
 def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
     """Determine which bin won from a UMA-resolved settled event.
 
@@ -566,14 +706,16 @@ def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
 
     Gate (P-D §6.1 + §5.3 non-reversal attestation against R3-09):
       - ``umaResolutionStatus == 'resolved'`` (terminal UMA DVM state)
-      - ``outcomes == ['Yes', 'No']`` (unexpected order → fail closed)
-      - ``outcomePrices[0] == '1'`` (YES-won per UMA's binary vote encoding)
+      - ``outcomes`` map one token to Yes and one token to No (unexpected
+        labels → fail closed)
+      - the Yes-labeled token has resolution price 1.0 (YES-won per UMA's
+        binary vote encoding)
 
     This is NOT the removed ``outcomePrices >= 0.95`` pre-resolution price
     fallback (R3-09). The removed pattern read prices as a live-trading
     signal on UN-resolved markets. This reads ONLY resolved markets where
     outcomePrices is the UMA oracle vote result encoded as
-    ``("1","0")`` = YES-won or ``("0","1")`` = NO-won.
+    ``("1","0")`` or ``("0","1")`` depending on outcome-label ordering.
 
     See:
       - docs/operations/task_2026-04-23_data_readiness_remediation/evidence/harvester_gamma_probe.md §6.1
@@ -583,32 +725,9 @@ def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
     already uses the same ``outcomePrices[0] == "1"`` pattern WITHOUT the
     umaResolutionStatus gate. This function is STRICTER than that precedent.
     """
-    for market in event.get("markets", []):
-        if market.get("umaResolutionStatus") != "resolved":
-            continue
-        op_raw = market.get("outcomePrices")
-        if not op_raw:
-            continue
-        try:
-            prices = json.loads(op_raw) if isinstance(op_raw, str) else op_raw
-        except (ValueError, TypeError):
-            continue
-        if not (isinstance(prices, list) and len(prices) == 2):
-            continue
-        outcomes_raw = market.get("outcomes")
-        try:
-            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
-        except (ValueError, TypeError):
-            continue
-        # Fail-closed: outcomes order must be ['Yes', 'No'] exactly.
-        if not (isinstance(outcomes, list) and len(outcomes) == 2
-                and str(outcomes[0]).lower() == "yes"):
-            continue
-        # YES won iff prices[0] == '1' (UMA binary vote encoding on RESOLVED markets)
-        if str(prices[0]) == "1":
-            label = market.get("question") or market.get("groupItemTitle", "")
-            low, high = _parse_temp_range(label)
-            return low, high
+    winning = _find_winning_market_outcome(event)
+    if winning is not None:
+        return winning.range_low, winning.range_high
     return None, None
 
 
@@ -667,6 +786,7 @@ def _write_settlement_truth(
     *,
     event_slug: str = "",
     obs_row: Optional[dict] = None,
+    resolved_market_outcomes: Optional[list[ResolvedMarketOutcome]] = None,
 ) -> dict:
     """Write canonical-authority settlement truth to settlements table.
 
@@ -740,6 +860,14 @@ def _write_settlement_truth(
         "rounding_rule": rounding_rule,
         "reconstruction_method": "harvester_live_uma_vote",
         "event_slug": event_slug or None,
+        "pm_bin_lo": pm_bin_lo,
+        "pm_bin_hi": pm_bin_hi,
+        "unit": city.settlement_unit,
+        "settlement_source_type": db_source_type,
+        "temperature_metric": HIGH_LOCALDAY_MAX.temperature_metric,
+        "physical_quantity": HIGH_LOCALDAY_MAX.physical_quantity,
+        "observation_field": HIGH_LOCALDAY_MAX.observation_field,
+        "data_version": data_version,
         "reconstructed_at": settled_at,
         "audit_ref": "docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md",
     }
@@ -776,9 +904,47 @@ def _write_settlement_truth(
                 data_version, json.dumps(provenance, sort_keys=True, default=str),
             ),
         )
+        settlement_v2_result = log_settlement_v2(
+            conn,
+            city=city.name,
+            target_date=target_date,
+            temperature_metric=HIGH_LOCALDAY_MAX.temperature_metric,
+            market_slug=event_slug or None,
+            winning_bin=winning_bin,
+            settlement_value=settlement_value,
+            settlement_source=city.settlement_source,
+            settled_at=settled_at,
+            authority=authority,
+            provenance=provenance,
+            recorded_at=settled_at,
+        )
+        if authority == "VERIFIED" and resolved_market_outcomes:
+            market_events_v2_result = log_market_event_outcomes_v2(
+                conn,
+                market_slug=event_slug or None,
+                city=city.name,
+                target_date=target_date,
+                temperature_metric=HIGH_LOCALDAY_MAX.temperature_metric,
+                outcomes=[
+                    outcome.as_v2_outcome_row()
+                    for outcome in resolved_market_outcomes
+                ],
+            )
+        elif resolved_market_outcomes:
+            market_events_v2_result = {
+                "status": "skipped_unverified_settlement",
+                "table": "market_events_v2",
+                "authority": authority,
+            }
+        else:
+            market_events_v2_result = {
+                "status": "skipped_no_resolved_market_identity",
+                "table": "market_events_v2",
+            }
         logger.info(
-            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s",
+            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlements_v2=%s market_events_v2=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
+            settlement_v2_result.get("status"), market_events_v2_result.get("status"),
         )
     except Exception as exc:
         logger.warning(
@@ -791,6 +957,8 @@ def _write_settlement_truth(
         "settlement_value": settlement_value,
         "winning_bin": winning_bin,
         "reason": reason,
+        "settlement_v2": settlement_v2_result,
+        "market_events_v2": market_events_v2_result,
     }
 
 
@@ -864,13 +1032,18 @@ def get_snapshot_context(conn, snapshot_id: str) -> Optional[dict]:
     source_model_version = row["data_version"] or row["model_version"]
     if not source_model_version:
         return None
+    issue_time = row["issue_time"]
+    learning_snapshot_ready = bool(issue_time)
+    learning_blocked_reason = "" if learning_snapshot_ready else "missing_forecast_issue_time"
     try:
         return {
             "p_raw_vector": json.loads(row["p_raw_json"]),
             "lead_days": float(row["lead_hours"]) / 24.0,
-            "issue_time": row["issue_time"],
+            "issue_time": issue_time,
             "available_at": row["available_at"],
             "source_model_version": source_model_version,
+            "snapshot_learning_ready": learning_snapshot_ready,
+            "learning_blocked_reason": learning_blocked_reason,
         }
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -939,13 +1112,16 @@ def _snapshot_contexts_for_market(
         context = get_snapshot_context(shared_conn, snapshot_id)
         if context is None:
             continue
+        blocked_reason = str(context.get("learning_blocked_reason") or "")
         fallback_contexts.append({
             **context,
             "decision_snapshot_id": snapshot_id,
             "source": "portfolio_open_fallback",
             "authority_level": "working_state_fallback",
             "is_degraded": True,
-            "degraded_reason": fallback_reason,
+            "degraded_reason": "; ".join(
+                reason for reason in (fallback_reason, blocked_reason) if reason
+            ),
             "learning_snapshot_ready": False,
         })
     return fallback_contexts, dropped_rows
@@ -977,14 +1153,22 @@ def _snapshot_contexts_from_rows(trade_conn, shared_conn, rows: list[dict]) -> t
             })
             continue
         seen_snapshot_ids.add(snapshot_id)
+        row_ready = bool(row.get("learning_snapshot_ready", bool(snapshot_id)))
+        snapshot_ready = bool(context.get("snapshot_learning_ready", True))
+        blocked_reason = str(context.get("learning_blocked_reason") or "")
+        degraded_reason = str(row.get("degraded_reason") or "")
+        if blocked_reason:
+            degraded_reason = "; ".join(
+                reason for reason in (degraded_reason, blocked_reason) if reason
+            )
         contexts.append({
             **context,
             "decision_snapshot_id": snapshot_id,
             "source": str(row.get("source") or "unknown"),
             "authority_level": str(row.get("authority_level") or "unknown"),
-            "is_degraded": bool(row.get("is_degraded", False)),
-            "degraded_reason": str(row.get("degraded_reason") or ""),
-            "learning_snapshot_ready": bool(row.get("learning_snapshot_ready", bool(snapshot_id))),
+            "is_degraded": bool(row.get("is_degraded", False)) or bool(blocked_reason),
+            "degraded_reason": degraded_reason,
+            "learning_snapshot_ready": row_ready and snapshot_ready,
         })
     return contexts, dropped_rows
 
@@ -1046,7 +1230,14 @@ def harvest_settlement(
     """
     season = season_from_date(target_date, lat=city.lat)
     now = forecast_available_at or datetime.now(timezone.utc).isoformat()
-    issue_time = forecast_issue_time or now
+    issue_time = str(forecast_issue_time or "").strip()
+    if p_raw_vector and not issue_time:
+        logger.warning(
+            "Skipping calibration harvest for %s %s: forecast_issue_time is missing",
+            city.name,
+            target_date,
+        )
+        return 0
     if bias_corrected is None:
         try:
             from src.config import settings
@@ -1130,10 +1321,6 @@ def _settle_positions(
     strategy_tracker=None,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
-    # Semantic Provenance Guard
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
-    if False: _ = None.selected_method; _ = None.entry_method
     settled = 0
     _canonical_exit = _get_canonical_exit_flag()
     settlement_records = settlement_records if settlement_records is not None else []
@@ -1164,6 +1351,15 @@ def _settle_positions(
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
             continue
+        try:
+            entry_provenance = pos.entry_method or pos.selected_method or "unknown"
+        except AttributeError:
+            entry_provenance = "unknown"
+        if entry_provenance == "unknown":
+            logger.debug(
+                "Settlement P&L for %s has unknown entry provenance",
+                pos.trade_id,
+            )
 
         # P6 iterator-level dedup: skip positions whose DB phase is already
         # terminal even when the in-memory snapshot shows otherwise.

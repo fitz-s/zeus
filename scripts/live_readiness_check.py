@@ -203,7 +203,7 @@ GATES: tuple[GateSpec, ...] = (
     ),
     GateSpec(
         "G1-15",
-        "Paper/live parity gate",
+        "Fake venue parity gate",
         "T1",
         "Fake venue emits live-adapter-compatible envelope/result schema",
         "pytest",
@@ -213,12 +213,13 @@ GATES: tuple[GateSpec, ...] = (
         "G1-16",
         "Strategy benchmark gate",
         "A1",
-        "Replay/paper/shadow promotion gate blocks unsafe strategies and optimistic success samples",
+        "Replay/simulated/read-only promotion gate blocks unsafe strategies and optimistic success samples",
         "pytest",
         (
-            "tests/test_strategy_benchmark.py::test_promotion_blocked_unless_replay_paper_shadow_all_pass",
-            "tests/test_strategy_benchmark.py::test_paper_benchmark_matched_mined_are_not_success_finality",
-            "tests/test_strategy_benchmark.py::test_paper_benchmark_confirmed_trade_counts_as_success_finality",
+            "tests/test_strategy_benchmark.py::test_promotion_blocked_without_promotion_grade_economics",
+            "tests/test_strategy_benchmark.py::test_promotion_requires_economics_evidence_grade",
+            "tests/test_strategy_benchmark.py::test_simulated_venue_benchmark_matched_mined_are_not_success_finality",
+            "tests/test_strategy_benchmark.py::test_simulated_venue_benchmark_confirmed_trade_counts_as_success_finality",
         ),
     ),
     GateSpec(

@@ -26,8 +26,8 @@
   "signal": {
     "ens_member_count": 51,
     "ens_source": "ECMWF via Open-Meteo Ensemble API",
-    "mc_count_entry": 5000,
-    "mc_count_monitor": 5000,
+    "mc_count_entry": 10000,
+    "mc_count_monitor": 10000,
     "instrument_noise_f": 0.5,
     "instrument_noise_c": 0.28
   },

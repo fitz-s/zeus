@@ -122,6 +122,7 @@ class ExtendedPlattCalibrator:
             rng = np.random.default_rng()
         group_ids = None
         unique_groups = None
+        group_to_indices: list[np.ndarray] | None = None
         if decision_group_ids is not None:
             group_ids = np.asarray(decision_group_ids, dtype=object)
             if len(group_ids) != len(outcomes):
@@ -131,12 +132,24 @@ class ExtendedPlattCalibrator:
                 )
             if any(group_id is None or str(group_id) == "" for group_id in group_ids):
                 raise ValueError("decision_group_ids must not contain null/empty values")
-            unique_groups = np.array(sorted({str(group_id) for group_id in group_ids}), dtype=object)
+            # Algebraic equivalent of `unique_groups = sorted({str(g) for g in group_ids})`
+            # plus the per-iter `np.flatnonzero(group_ids == g)` lookup, but vectorized:
+            # one-time np.unique with return_inverse → integer codes; then prebuild per-group
+            # index arrays. Eliminates O(n_eff × N) string memcmp inside the bootstrap loop
+            # (object-dtype equality falls back to PyObject_IsTrue per element). Bit-precise
+            # equivalence is preserved because rng.choice on the same `unique_groups` (sorted
+            # string array) yields the same group selections, and np.flatnonzero(inverse == k)
+            # picks identical row indices as the old string equality with sorted unique_groups[k].
+            group_strs = group_ids.astype(str)
+            unique_groups, inverse = np.unique(group_strs, return_inverse=True)
             if len(unique_groups) < 15:
                 raise ValueError(
                     f"Cannot fit Platt with n_eff={len(unique_groups)} < 15. "
                     f"Per spec §3.3: use P_raw directly for n_eff < 15."
                 )
+            group_to_indices = [
+                np.flatnonzero(inverse == k) for k in range(len(unique_groups))
+            ]
 
         X = self._build_features(p_raw, lead_days, bin_widths=bin_widths)
         self.input_space = (
@@ -153,13 +166,17 @@ class ExtendedPlattCalibrator:
 
         # Bootstrap parameter uncertainty (spec §3.1)
         self.bootstrap_params = []
+        n_groups = len(unique_groups) if unique_groups is not None else 0
         for _ in range(n_bootstrap):
-            if group_ids is not None and unique_groups is not None:
-                sampled_groups = rng.choice(unique_groups, len(unique_groups), replace=True)
-                idx = np.concatenate([
-                    np.flatnonzero(group_ids == group_id)
-                    for group_id in sampled_groups
-                ])
+            if group_to_indices is not None and n_groups > 0:
+                # Bit-precise RNG equivalence with the old `rng.choice(unique_groups, n_groups, replace=True)`:
+                # numpy's Generator.choice(array, size) and Generator.choice(int, size) both reduce
+                # internally to the same integers(0, n, size) draw, so passing n_groups instead of
+                # the unique_groups string array consumes identical RNG state. The returned codes
+                # k correspond bit-precisely to unique_groups[k]; group_to_indices[k] returns the
+                # same row indices as old flatnonzero(group_ids == unique_groups[k]).
+                sampled_group_codes = rng.choice(n_groups, size=n_groups, replace=True)
+                idx = np.concatenate([group_to_indices[k] for k in sampled_group_codes])
             else:
                 idx = rng.choice(len(outcomes), len(outcomes), replace=True)
             try:

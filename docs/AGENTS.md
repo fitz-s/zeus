@@ -46,6 +46,7 @@ body or bundle.
 | `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
 | `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | Packet-local R3 Z0 CLOB V2 live-money invariant summary; evidence, not authority |
 | `operations/task_2026-04-23_midstream_remediation/` | Midstream remediation package; phase evidence lives under `phases/` and routes through `operations/current_state.md` |
+| `operations/task_2026-04-29_design_simplification_audit/` | First-principles audit plus phased repair evidence; not live-deploy, production DB mutation, source-routing, or calibration authority |
 | `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
 | `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
 | `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |

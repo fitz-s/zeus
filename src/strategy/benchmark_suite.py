@@ -3,9 +3,11 @@
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml
 """Strategy benchmark and promotion gate for R3 A1.
 
-The suite is deliberately evidence-only: it computes replay/paper/live-shadow
-metrics and records local benchmark runs, but it never places orders, mutates a
-production DB, or authorizes live strategy promotion by itself.
+The suite is deliberately evidence-only: it computes supporting benchmark
+metrics and records local runs, but it never places orders or mutates a
+production DB. Promotion requires an explicit promotion-grade economics metric;
+diagnostic replay, simulated venue evidence, and read-only live evidence can
+block promotion but cannot authorize it alone.
 """
 
 from __future__ import annotations
@@ -20,10 +22,19 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 
 class BenchmarkEnvironment(str, Enum):
+    """Legacy storage labels for benchmark provenance, not promotion authority."""
+
     REPLAY = "replay"
-    PAPER = "paper"
-    SHADOW = "shadow"
-    LIVE = "live"
+    SIMULATED_VENUE = "paper"
+    READ_ONLY_LIVE = "shadow"
+    PROMOTION_GRADE_ECONOMICS = "live"
+
+
+class EvidenceGrade(str, Enum):
+    DIAGNOSTIC_REPLAY = "diagnostic_replay"
+    SIMULATED_VENUE_EVIDENCE = "simulated_venue_evidence"
+    READ_ONLY_LIVE_EVIDENCE = "read_only_live_evidence"
+    PROMOTION_GRADE_ECONOMICS = "promotion_grade_economics"
 
 
 class PromotionVerdict(str, Enum):
@@ -44,8 +55,8 @@ class BenchmarkObservation:
     """One normalized observation for benchmark metrics.
 
     Values are unit-normalized dollar/probability/basis-point inputs supplied by
-    replay, fake-paper, or live-shadow evidence providers. This object is not a
-    venue command and has no side effects.
+    replay, simulated-venue, read-only-live, or economics evidence providers.
+    This object is not a venue command and has no side effects.
     """
 
     strategy_key: str
@@ -105,6 +116,7 @@ class StrategyMetrics:
     drawdown_max_duration_hours: float
     calibration_error_vs_market_implied: float
     environment: BenchmarkEnvironment = BenchmarkEnvironment.REPLAY
+    evidence_grade: EvidenceGrade = EvidenceGrade.DIAGNOSTIC_REPLAY
     sample_count: int = 0
     alpha_pnl: float = 0.0
     spread_pnl: float = 0.0
@@ -143,9 +155,14 @@ class PromotionThresholds:
 class PromotionDecision:
     verdict: PromotionVerdict
     reasons: tuple[str, ...]
-    replay: StrategyMetrics
-    paper: StrategyMetrics
-    shadow: StrategyMetrics
+    diagnostic_replay: StrategyMetrics
+    simulated_venue: StrategyMetrics
+    read_only_live: StrategyMetrics
+    economics: StrategyMetrics | None = None
+
+    @property
+    def replay(self) -> StrategyMetrics:
+        return self.diagnostic_replay
 
 
 class VenueLike(Protocol):
@@ -159,6 +176,14 @@ CREATE TABLE IF NOT EXISTS strategy_benchmark_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
   strategy_key TEXT NOT NULL,
   environment TEXT NOT NULL CHECK (environment IN ('replay','paper','shadow','live')),
+  evidence_grade TEXT NOT NULL CHECK (
+    evidence_grade IN (
+      'diagnostic_replay',
+      'simulated_venue_evidence',
+      'read_only_live_evidence',
+      'promotion_grade_economics'
+    )
+  ),
   window_start TEXT NOT NULL,
   window_end TEXT NOT NULL,
   metrics_json TEXT NOT NULL,
@@ -169,30 +194,35 @@ CREATE TABLE IF NOT EXISTS strategy_benchmark_runs (
 
 
 class StrategyBenchmarkSuite:
-    """Compute replay/paper/shadow metrics and gate live promotion.
+    """Compute supporting evidence metrics and gate promotion-grade economics.
 
-    `evaluate_live_shadow` consumes preloaded shadow corpora only. It is not a
-    live adapter and intentionally cannot submit/cancel/redeem venue orders.
+    Read-only live evidence consumes preloaded corpora only. It is not a live
+    adapter and intentionally cannot submit/cancel/redeem venue orders.
     """
 
     def __init__(
         self,
         *,
         replay_corpora: Mapping[str, ReplayCorpus] | None = None,
-        shadow_corpora: Mapping[str, ReplayCorpus] | None = None,
+        read_only_live_corpora: Mapping[str, ReplayCorpus] | None = None,
         thresholds: PromotionThresholds | None = None,
     ) -> None:
         self._replay_corpora = dict(replay_corpora or {})
-        self._shadow_corpora = dict(shadow_corpora or {})
+        self._read_only_live_corpora = dict(read_only_live_corpora or {})
         self.thresholds = thresholds or PromotionThresholds()
 
     def evaluate_replay(self, strategy_key: str, fixture_corpus: ReplayCorpus | None = None) -> StrategyMetrics:
         corpus = fixture_corpus or self._require_corpus(self._replay_corpora, strategy_key, "replay")
-        return self._metrics_from_corpus(strategy_key, corpus, BenchmarkEnvironment.REPLAY)
+        return self._metrics_from_corpus(
+            strategy_key,
+            corpus,
+            BenchmarkEnvironment.REPLAY,
+            EvidenceGrade.DIAGNOSTIC_REPLAY,
+        )
 
-    def evaluate_paper(self, strategy_key: str, fake_venue: VenueLike, duration_hours: int) -> StrategyMetrics:
+    def evaluate_simulated_venue(self, strategy_key: str, fake_venue: VenueLike, duration_hours: int) -> StrategyMetrics:
         now = datetime.now(timezone.utc)
-        observations = tuple(_paper_observations_from_fake_venue(strategy_key, fake_venue, now))
+        observations = tuple(_simulated_venue_observations(strategy_key, fake_venue, now))
         if observations:
             start = min(item.observed_at for item in observations)
             end = max(item.observed_at for item in observations)
@@ -201,16 +231,21 @@ class StrategyBenchmarkSuite:
             end = now
         drift = () if observations else (
             SemanticDriftFinding(
-                code="NO_PAPER_TRADES",
-                message="paper benchmark observed no fake-venue trades in the requested window",
+                code="NO_SIMULATED_VENUE_TRADES",
+                message="simulated venue benchmark observed no fake-venue trades in the requested window",
                 waived=False,
             ),
         )
         corpus = ReplayCorpus(strategy_key=strategy_key, observations=observations, window_start=start, window_end=end, semantic_drift=drift, source="fake_venue")
-        return self._metrics_from_corpus(strategy_key, corpus, BenchmarkEnvironment.PAPER)
+        return self._metrics_from_corpus(
+            strategy_key,
+            corpus,
+            BenchmarkEnvironment.SIMULATED_VENUE,
+            EvidenceGrade.SIMULATED_VENUE_EVIDENCE,
+        )
 
-    def evaluate_live_shadow(self, strategy_key: str, capital_cap_micro: int, duration_hours: int) -> StrategyMetrics:
-        corpus = self._shadow_corpora.get(strategy_key)
+    def evaluate_read_only_live(self, strategy_key: str, capital_cap_micro: int, duration_hours: int) -> StrategyMetrics:
+        corpus = self._read_only_live_corpora.get(strategy_key)
         if corpus is None:
             now = datetime.now(timezone.utc)
             corpus = ReplayCorpus(
@@ -220,38 +255,70 @@ class StrategyBenchmarkSuite:
                 window_end=now,
                 semantic_drift=(
                     SemanticDriftFinding(
-                        code="NO_SHADOW_EVIDENCE",
-                        message="live-shadow benchmark requires preloaded read-only shadow evidence",
+                        code="NO_READ_ONLY_LIVE_EVIDENCE",
+                        message="read-only live benchmark requires preloaded read-only live evidence",
                         waived=False,
                     ),
                 ),
-                source=f"shadow_cap_micro={int(capital_cap_micro)}",
+                source=f"read_only_live_cap_micro={int(capital_cap_micro)}",
             )
-        return self._metrics_from_corpus(strategy_key, corpus, BenchmarkEnvironment.SHADOW)
+        return self._metrics_from_corpus(
+            strategy_key,
+            corpus,
+            BenchmarkEnvironment.READ_ONLY_LIVE,
+            EvidenceGrade.READ_ONLY_LIVE_EVIDENCE,
+        )
 
     def promotion_decision(
         self,
-        replay: StrategyMetrics,
-        paper: StrategyMetrics,
-        shadow: StrategyMetrics,
+        diagnostic_replay: StrategyMetrics,
+        simulated_venue: StrategyMetrics,
+        read_only_live: StrategyMetrics,
+        economics: StrategyMetrics | None = None,
     ) -> PromotionDecision:
         reasons: list[str] = []
-        expected = {
-            BenchmarkEnvironment.REPLAY: replay,
-            BenchmarkEnvironment.PAPER: paper,
-            BenchmarkEnvironment.SHADOW: shadow,
-        }
-        for env, metrics in expected.items():
-            if metrics.environment != env:
-                reasons.append(f"{env.value}: wrong environment {metrics.environment.value}")
+        expected = (
+            (EvidenceGrade.DIAGNOSTIC_REPLAY, diagnostic_replay),
+            (EvidenceGrade.SIMULATED_VENUE_EVIDENCE, simulated_venue),
+            (EvidenceGrade.READ_ONLY_LIVE_EVIDENCE, read_only_live),
+        )
+        for grade, metrics in expected:
+            if metrics.evidence_grade != grade:
+                reasons.append(f"{grade.value}: wrong evidence grade {metrics.evidence_grade.value}")
             reasons.extend(self._blocking_reasons(metrics))
-        if not (replay.strategy_key == paper.strategy_key == shadow.strategy_key):
-            reasons.append("strategy_key mismatch across replay/paper/shadow metrics")
+        if economics is None:
+            reasons.append("promotion_grade_economics: missing promotion-grade economics evidence")
+        else:
+            if economics.evidence_grade != EvidenceGrade.PROMOTION_GRADE_ECONOMICS:
+                reasons.append(f"promotion_grade_economics: wrong evidence grade {economics.evidence_grade.value}")
+            reasons.extend(self._blocking_reasons(economics))
+        strategy_keys = [
+            diagnostic_replay.strategy_key,
+            simulated_venue.strategy_key,
+            read_only_live.strategy_key,
+        ]
+        if economics is not None:
+            strategy_keys.append(economics.strategy_key)
+        if len(set(strategy_keys)) != 1:
+            reasons.append("strategy_key mismatch across evidence metrics")
         verdict = PromotionVerdict.PROMOTE if not reasons else PromotionVerdict.BLOCK
-        return PromotionDecision(verdict=verdict, reasons=tuple(reasons), replay=replay, paper=paper, shadow=shadow)
+        return PromotionDecision(
+            verdict=verdict,
+            reasons=tuple(reasons),
+            diagnostic_replay=diagnostic_replay,
+            simulated_venue=simulated_venue,
+            read_only_live=read_only_live,
+            economics=economics,
+        )
 
     def ensure_schema(self, conn: Connection) -> None:
         conn.execute(STRATEGY_BENCHMARK_RUNS_DDL)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(strategy_benchmark_runs)").fetchall()}
+        if "evidence_grade" not in cols:
+            raise RuntimeError(
+                "strategy_benchmark_runs is missing evidence_grade; run an explicit "
+                "benchmark schema migration packet before recording evidence-grade runs"
+            )
 
     def record_benchmark_run(
         self,
@@ -264,12 +331,13 @@ class StrategyBenchmarkSuite:
         cur = conn.execute(
             """
             INSERT INTO strategy_benchmark_runs (
-              strategy_key, environment, window_start, window_end, metrics_json, promotion_verdict
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              strategy_key, environment, evidence_grade, window_start, window_end, metrics_json, promotion_verdict
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 metrics.strategy_key,
                 metrics.environment.value,
+                metrics.evidence_grade.value,
                 metrics.window_start.isoformat(),
                 metrics.window_end.isoformat(),
                 json.dumps(payload, sort_keys=True),
@@ -283,6 +351,7 @@ class StrategyBenchmarkSuite:
         strategy_key: str,
         corpus: ReplayCorpus,
         environment: BenchmarkEnvironment,
+        evidence_grade: EvidenceGrade,
     ) -> StrategyMetrics:
         observations = tuple(item for item in corpus.observations if item.strategy_key == strategy_key)
         sample_count = len(observations)
@@ -305,6 +374,7 @@ class StrategyBenchmarkSuite:
                 drawdown_max_duration_hours=0.0,
                 calibration_error_vs_market_implied=0.0,
                 environment=environment,
+                evidence_grade=evidence_grade,
                 sample_count=0,
                 semantic_drift=tuple(drift),
             )
@@ -335,6 +405,7 @@ class StrategyBenchmarkSuite:
             drawdown_max_duration_hours=_max_drawdown(observations)[1],
             calibration_error_vs_market_implied=fmean(calibration_errors) if calibration_errors else 0.0,
             environment=environment,
+            evidence_grade=evidence_grade,
             sample_count=sample_count,
             alpha_pnl=alpha_pnl,
             spread_pnl=spread_pnl,
@@ -348,7 +419,7 @@ class StrategyBenchmarkSuite:
     def _blocking_reasons(self, metrics: StrategyMetrics) -> list[str]:
         threshold = self.thresholds
         reasons: list[str] = []
-        prefix = metrics.environment.value
+        prefix = metrics.evidence_grade.value
         if metrics.sample_count <= 0:
             reasons.append(f"{prefix}: no benchmark observations")
         if metrics.ev_after_fees_slippage <= threshold.min_ev_after_fees_slippage:
@@ -378,12 +449,13 @@ def metrics_to_jsonable(metrics: StrategyMetrics) -> dict[str, Any]:
     payload["window_start"] = metrics.window_start.isoformat()
     payload["window_end"] = metrics.window_end.isoformat()
     payload["environment"] = metrics.environment.value
+    payload["evidence_grade"] = metrics.evidence_grade.value
     payload["semantic_drift"] = [asdict(item) for item in metrics.semantic_drift]
     payload["pnl_breakdown"] = metrics.pnl_breakdown
     return payload
 
 
-def _paper_observations_from_fake_venue(strategy_key: str, fake_venue: VenueLike, observed_at: datetime) -> Iterable[BenchmarkObservation]:
+def _simulated_venue_observations(strategy_key: str, fake_venue: VenueLike, observed_at: datetime) -> Iterable[BenchmarkObservation]:
     for trade in fake_venue.get_trades(None):
         raw = dict(getattr(trade, "raw", {}) or {})
         state = str(raw.get("state", "")).upper()

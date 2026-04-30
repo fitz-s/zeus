@@ -1,5 +1,5 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
 #                  + P-D §6.1 (_find_winning_bin fix)
 #                  + P-E canonical authority pattern (INV-14 + provenance_json + SettlementSemantics gate)
@@ -51,6 +51,8 @@ def _event_with_market(uma_status: str, outcomes: list[str], outcome_prices: lis
         "markets": [{
             "question": question,
             "umaResolutionStatus": uma_status,
+            "conditionId": "condition-17c",
+            "clobTokenIds": json.dumps(["yes-17c", "no-17c"]),
             "outcomes": json.dumps(outcomes),
             "outcomePrices": json.dumps(outcome_prices),
         }],
@@ -72,10 +74,9 @@ def test_T2_find_winning_bin_resolved_yes_won_returns_bin():
     assert lo == 17.0 and hi == 17.0
 
 
-def test_T3_find_winning_bin_rejects_unexpected_outcomes_order():
-    """outcomes=['No','Yes'] is unexpected; P-D §6.1 fails closed (no silent swap)."""
-    ev = _event_with_market("resolved", ["No", "Yes"], ["0", "1"])
-    # outcomes order differs from ['Yes','No']; treat as unexpected and skip
+def test_T3_find_winning_bin_rejects_unexpected_outcome_labels():
+    """Unexpected outcome labels fail closed rather than guessing token mapping."""
+    ev = _event_with_market("resolved", ["Maybe", "No"], ["1", "0"])
     assert _find_winning_bin(ev) == (None, None)
 
 
@@ -88,12 +89,15 @@ def test_T3b_find_winning_bin_resolved_no_won_returns_none():
         "markets": [
             {"question": "Will the highest temperature in London be 15°C on April 15?",
              "umaResolutionStatus": "resolved",
+             "conditionId": "condition-15c", "clobTokenIds": json.dumps(["yes-15c", "no-15c"]),
              "outcomes": json.dumps(["Yes", "No"]), "outcomePrices": json.dumps(["0", "1"])},
             {"question": "Will the highest temperature in London be 16°C on April 15?",
              "umaResolutionStatus": "resolved",
+             "conditionId": "condition-16c", "clobTokenIds": json.dumps(["yes-16c", "no-16c"]),
              "outcomes": json.dumps(["Yes", "No"]), "outcomePrices": json.dumps(["0", "1"])},
             {"question": "Will the highest temperature in London be 18°C on April 15?",
              "umaResolutionStatus": "resolved",
+             "conditionId": "condition-18c", "clobTokenIds": json.dumps(["yes-18c", "no-18c"]),
              "outcomes": json.dumps(["Yes", "No"]), "outcomePrices": json.dumps(["0", "1"])},
         ],
     }

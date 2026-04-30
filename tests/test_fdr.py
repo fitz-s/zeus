@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-03-30; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
 #          substrate boundary-gate + Day0 causal-day edge case coverage.
 # Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
 #        CANONICAL_DATA_VERSIONS → CANONICAL_ENSEMBLE_DATA_VERSIONS comment
 #        rename (no assertion change).
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29
 """Tests for FDR (Benjamini-Hochberg) filter.
 
 Covers:
@@ -26,7 +26,7 @@ from src.engine.evaluator import _record_selection_family_facts, _selected_edge_
 from src.config import cities_by_name
 from src.state.db import get_connection, init_schema
 from src.state.portfolio import PortfolioState
-from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
+from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.fdr_filter import fdr_filter
 from src.strategy.risk_limits import RiskLimits
 from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id, make_edge_family_id
@@ -89,6 +89,16 @@ def _seed_ensemble_snapshots_v2_row(
         (city, target_date, metric, boundary_ambiguous, causality_status),
     )
     conn.commit()
+
+
+def _patch_mature_calibration(monkeypatch) -> None:
+    """Keep non-calibration evaluator tests on the mature-calibration path."""
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (object(), 1))
+    monkeypatch.setattr(
+        evaluator_module,
+        "calibrate_and_normalize",
+        lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
+    )
 
 
 class TestFDRFilter:
@@ -375,6 +385,65 @@ class TestSelectionFamilySubstrate:
 
         assert selected == set()
 
+    def test_multi_bin_full_family_scan_excludes_unexecutable_buy_no(self):
+        class FakeAnalysis:
+            bins = [
+                Bin(low=None, high=38, unit="F", label="38°F or below"),
+                Bin(low=39, high=40, unit="F", label="39-40°F"),
+                Bin(low=41, high=None, unit="F", label="41°F or higher"),
+            ]
+            p_cal = np.array([0.25, 0.50, 0.25])
+            p_market = np.array([0.20, 0.60, 0.20])
+            p_posterior = np.array([0.30, 0.45, 0.25])
+
+            def supports_buy_no_edges(self):
+                return False
+
+            def _bootstrap_bin(self, idx, n):
+                return (0.01, 0.05, 0.001)
+
+            def _bootstrap_bin_no(self, idx, n):
+                raise AssertionError("multi-bin NO hypotheses require native NO-token economics")
+
+        hypotheses = scan_full_hypothesis_family(FakeAnalysis(), n_bootstrap=2)
+
+        assert len(hypotheses) == 3
+        assert {hypothesis.direction for hypothesis in hypotheses} == {"buy_yes"}
+        assert [hypothesis.range_label for hypothesis in hypotheses] == [
+            "38°F or below",
+            "39-40°F",
+            "41°F or higher",
+        ]
+
+    def test_binary_full_family_scan_keeps_executable_buy_no(self):
+        class FakeAnalysis:
+            bins = [
+                Bin(low=None, high=40, unit="F", label="40°F or below"),
+                Bin(low=41, high=None, unit="F", label="41°F or higher"),
+            ]
+            p_cal = np.array([0.45, 0.55])
+            p_market = np.array([0.55, 0.45])
+            p_posterior = np.array([0.40, 0.60])
+
+            def supports_buy_no_edges(self):
+                return True
+
+            def _bootstrap_bin(self, idx, n):
+                return (0.01, 0.05, 0.001)
+
+            def _bootstrap_bin_no(self, idx, n):
+                return (0.01, 0.05, 0.001)
+
+        hypotheses = scan_full_hypothesis_family(FakeAnalysis(), n_bootstrap=2)
+
+        assert len(hypotheses) == 4
+        assert [hypothesis.direction for hypothesis in hypotheses] == [
+            "buy_yes",
+            "buy_no",
+            "buy_yes",
+            "buy_no",
+        ]
+
     def test_full_family_selection_uses_one_candidate_family_across_strategies(self, tmp_path):
         conn = get_connection(tmp_path / "selection_one_family.db")
         init_schema(conn)
@@ -466,6 +535,7 @@ class TestSelectionFamilySubstrate:
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
+        _patch_mature_calibration(monkeypatch)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):
@@ -509,6 +579,8 @@ class TestSelectionFamilySubstrate:
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                self.selected_method = kwargs.get("selected_method", "test_fixture")
+                self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
                 # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
                 # calibrator / lead_days / etc. are intentionally dropped.
                 # We pin bin topology from the candidate and fabricate a
@@ -567,9 +639,16 @@ class TestSelectionFamilySubstrate:
                 "members_hourly": np.ones((51, 2)) * 72.0,
                 "times": [now, now],
                 "fetch_time": now,
+                "available_at": now,
                 "issue_time": now,
                 "first_valid_time": now,
                 "model": "ecmwf_ifs025",
+                "source_id": "tigge",
+                "raw_payload_hash": "a" * 64,
+                "authority_tier": "FORECAST",
+                "degradation_level": "OK",
+                "forecast_source_role": kwargs.get("role", "entry_primary"),
+                "n_members": 51,
             },
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
@@ -673,14 +752,14 @@ class TestSelectionFamilySubstrate:
         meta = json.loads(conn.execute("SELECT meta_json FROM selection_family_fact").fetchone()["meta_json"])
         conn.close()
 
-        # T2.d.1 2026-04-24: bin count increased 3 -> 4 (left-shoulder).
-        # hypothesis_count = 2 * n_bins = 8 (YES + NO per bin). Bin 0 is
-        # the only one with positive edge + CI_lower > 0; others fail at
-        # prefilter. active_fdr_selected remains 1.
+        # Phase 4 2026-04-29: multi-bin NO hypotheses are not executable with
+        # YES-only VWMP, so the tested FDR family is the executable YES side.
+        # Bin 0 is the only one with positive edge + CI_lower > 0; others fail
+        # at prefilter. active_fdr_selected remains 1.
         assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
         assert family_count == 1
-        assert hypothesis_count == 8
-        assert meta["tested_hypotheses"] == 8
+        assert hypothesis_count == 4
+        assert meta["tested_hypotheses"] == 4
         assert meta["active_fdr_selected"] == 1
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
@@ -692,6 +771,7 @@ class TestSelectionFamilySubstrate:
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
+        _patch_mature_calibration(monkeypatch)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):
@@ -735,6 +815,8 @@ class TestSelectionFamilySubstrate:
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                self.selected_method = kwargs.get("selected_method", "test_fixture")
+                self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
                 # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
                 # calibrator / lead_days / etc. are intentionally dropped.
                 # We pin bin topology from the candidate and fabricate a
@@ -780,9 +862,16 @@ class TestSelectionFamilySubstrate:
                 "members_hourly": np.ones((51, 2)) * 72.0,
                 "times": [now, now],
                 "fetch_time": now,
+                "available_at": now,
                 "issue_time": now,
                 "first_valid_time": now,
                 "model": "ecmwf_ifs025",
+                "source_id": "tigge",
+                "raw_payload_hash": "a" * 64,
+                "authority_tier": "FORECAST",
+                "degradation_level": "OK",
+                "forecast_source_role": kwargs.get("role", "entry_primary"),
+                "n_members": 51,
             },
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
@@ -907,6 +996,7 @@ class TestSelectionFamilySubstrate:
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
+        _patch_mature_calibration(monkeypatch)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):
@@ -950,6 +1040,8 @@ class TestSelectionFamilySubstrate:
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                self.selected_method = kwargs.get("selected_method", "test_fixture")
+                self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
                 # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
                 # calibrator / lead_days / etc. are intentionally dropped.
                 # We pin bin topology from the candidate and fabricate a
@@ -995,9 +1087,16 @@ class TestSelectionFamilySubstrate:
                 "members_hourly": np.ones((51, 2)) * 72.0,
                 "times": [now, now],
                 "fetch_time": now,
+                "available_at": now,
                 "issue_time": now,
                 "first_valid_time": now,
                 "model": "ecmwf_ifs025",
+                "source_id": "tigge",
+                "raw_payload_hash": "a" * 64,
+                "authority_tier": "FORECAST",
+                "degradation_level": "OK",
+                "forecast_source_role": kwargs.get("role", "entry_primary"),
+                "n_members": 51,
             },
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)
@@ -1125,6 +1224,7 @@ class TestSelectionFamilySubstrate:
         conn = get_connection(tmp_path / "t2g_real_day0.db")
         init_schema(conn)
         now = datetime.now(timezone.utc)
+        _patch_mature_calibration(monkeypatch)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):
@@ -1143,6 +1243,8 @@ class TestSelectionFamilySubstrate:
 
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                self.selected_method = kwargs.get("selected_method", "test_fixture")
+                self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
                 # Kwargs from production dropped; fabricate 1-bin-positive-edge.
                 self.bins = kwargs["bins"]
                 self.p_raw = kwargs["p_raw"]
@@ -1193,9 +1295,16 @@ class TestSelectionFamilySubstrate:
                 "members_hourly": np.ones((51, 2)) * 72.0,
                 "times": [now, now],
                 "fetch_time": now,
+                "available_at": now,
                 "issue_time": now,
                 "first_valid_time": now,
                 "model": "ecmwf_ifs025",
+                "source_id": "tigge",
+                "raw_payload_hash": "a" * 64,
+                "authority_tier": "FORECAST",
+                "degradation_level": "OK",
+                "forecast_source_role": kwargs.get("role", "entry_primary"),
+                "n_members": 51,
             },
         )
         monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda *args, **kwargs: True)

@@ -1835,6 +1835,25 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _table_has_unique_key(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+) -> bool:
+    """Return whether *table* has a UNIQUE index exactly matching *columns*."""
+    for index_row in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        if not bool(index_row[2]):
+            continue
+        index_name = index_row[1]
+        index_columns = tuple(
+            column_row[2]
+            for column_row in conn.execute(f"PRAGMA index_info({index_name})").fetchall()
+        )
+        if index_columns == columns:
+            return True
+    return False
+
+
 def _view_exists(conn: sqlite3.Connection, view: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ?",
@@ -1852,13 +1871,763 @@ def _table_or_view_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+_FORWARD_MARKET_EVENT_COLUMNS = (
+    "market_slug",
+    "city",
+    "target_date",
+    "temperature_metric",
+    "condition_id",
+    "token_id",
+    "range_label",
+    "range_low",
+    "range_high",
+    "outcome",
+    "created_at",
+    "recorded_at",
+)
+_FORWARD_PRICE_HISTORY_COLUMNS = (
+    "market_slug",
+    "token_id",
+    "price",
+    "recorded_at",
+    "hours_since_open",
+    "hours_to_resolution",
+)
+_FORWARD_MARKET_REQUIRED_TABLES = (
+    "market_events_v2",
+    "market_price_history",
+)
+_SETTLEMENT_V2_COLUMNS = (
+    "city",
+    "target_date",
+    "temperature_metric",
+    "market_slug",
+    "winning_bin",
+    "settlement_value",
+    "settlement_source",
+    "settled_at",
+    "authority",
+    "provenance_json",
+    "recorded_at",
+)
+_MARKET_EVENT_OUTCOME_VALUES = frozenset({"YES", "NO"})
+_MARKET_EVENT_OUTCOME_UPDATE_SQL = """
+    UPDATE market_events_v2
+    SET outcome = ?
+    WHERE market_slug = ?
+      AND condition_id = ?
+      AND token_id = ?
+      AND city = ?
+      AND target_date = ?
+      AND temperature_metric = ?
+"""
 
 
+def _forward_clean_str(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
+def _forward_city_name(value) -> str | None:
+    name = getattr(value, "name", value)
+    return _forward_clean_str(name)
 
 
+def _forward_metric(value) -> str | None:
+    metric = _forward_clean_str(value)
+    if metric is None:
+        return None
+    metric = metric.lower()
+    return metric if metric in {"high", "low"} else None
 
+
+def _forward_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _forward_price(value) -> float | None:
+    price = _forward_float(value)
+    if price is None or not 0.0 <= price <= 1.0:
+        return None
+    return price
+
+
+def _forward_values_equal(left, right) -> bool:
+    if left is None and right is None:
+        return True
+    if left is None or right is None:
+        return False
+    if isinstance(right, float):
+        try:
+            return abs(float(left) - right) < 1e-12
+        except (TypeError, ValueError):
+            return False
+    return str(left) == str(right)
+
+
+def _forward_existing_matches(existing, expected: dict, *, ignore: set[str] | None = None) -> bool:
+    ignored = ignore or set()
+    for key, value in expected.items():
+        if key in ignored:
+            continue
+        if not _forward_values_equal(existing[key], value):
+            return False
+    return True
+
+
+def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
+    existing = conn.execute(
+        """
+        SELECT market_slug, city, target_date, temperature_metric, condition_id,
+               token_id, range_label, range_low, range_high, outcome, created_at,
+               recorded_at
+        FROM market_events_v2
+        WHERE market_slug = ? AND condition_id = ?
+        """,
+        (values["market_slug"], values["condition_id"]),
+    ).fetchone()
+    if existing is not None:
+        existing_values = dict(zip(_FORWARD_MARKET_EVENT_COLUMNS, tuple(existing)))
+        if _forward_clean_str(existing_values.get("outcome")) is not None:
+            return "resolved_existing"
+        if _forward_existing_matches(existing_values, values, ignore={"recorded_at", "outcome"}):
+            return "unchanged"
+        return "conflict"
+
+    conn.execute(
+        """
+        INSERT INTO market_events_v2 (
+            market_slug, city, target_date, temperature_metric, condition_id,
+            token_id, range_label, range_low, range_high, outcome, created_at,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(values[column] for column in _FORWARD_MARKET_EVENT_COLUMNS),
+    )
+    return "inserted"
+
+
+def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    existing = conn.execute(
+        """
+        SELECT market_slug, token_id, price, recorded_at, hours_since_open,
+               hours_to_resolution
+        FROM market_price_history
+        WHERE token_id = ? AND recorded_at = ?
+        """,
+        (values["token_id"], values["recorded_at"]),
+    ).fetchone()
+    if existing is not None:
+        existing_values = dict(zip(_FORWARD_PRICE_HISTORY_COLUMNS, tuple(existing)))
+        if _forward_existing_matches(existing_values, values):
+            return "unchanged"
+        return "conflict"
+
+    conn.execute(
+        """
+        INSERT INTO market_price_history (
+            market_slug, token_id, price, recorded_at, hours_since_open,
+            hours_to_resolution
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        tuple(values[column] for column in _FORWARD_PRICE_HISTORY_COLUMNS),
+    )
+    return "inserted"
+
+
+def log_forward_market_substrate(
+    conn: sqlite3.Connection | None,
+    *,
+    markets: Iterable[dict],
+    recorded_at: str,
+    scan_authority: str,
+) -> dict:
+    """Persist Gamma scanner market identity and price observations.
+
+    This is forward-only scanner substrate. It is not CLOB VWMP/orderbook truth,
+    settlement truth, or live wiring; callers must supply an explicit DB
+    connection and a fresh VERIFIED scan authority.
+    """
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": _FORWARD_MARKET_REQUIRED_TABLES}
+
+    if str(scan_authority or "").strip().upper() != "VERIFIED":
+        return {
+            "status": "refused_degraded_authority",
+            "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+            "scan_authority": scan_authority,
+        }
+
+    recorded_at_value = _forward_clean_str(recorded_at)
+    if recorded_at_value is None:
+        return {"status": "refused_missing_recorded_at", "tables": _FORWARD_MARKET_REQUIRED_TABLES}
+
+    missing_tables = [
+        table for table in _FORWARD_MARKET_REQUIRED_TABLES if not _table_exists(conn, table)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+            "missing_tables": tuple(missing_tables),
+        }
+
+    required_columns = {
+        "market_events_v2": set(_FORWARD_MARKET_EVENT_COLUMNS),
+        "market_price_history": set(_FORWARD_PRICE_HISTORY_COLUMNS),
+    }
+    missing_columns = {
+        table: tuple(sorted(required_columns[table] - _table_columns(conn, table)))
+        for table in required_columns
+    }
+    missing_columns = {table: columns for table, columns in missing_columns.items() if columns}
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+            "missing_columns": missing_columns,
+        }
+
+    counts = {
+        "market_events_inserted": 0,
+        "market_events_unchanged": 0,
+        "market_events_conflicted": 0,
+        "price_rows_inserted": 0,
+        "price_rows_unchanged": 0,
+        "price_rows_conflicted": 0,
+        "markets_skipped_missing_facts": 0,
+        "outcomes_skipped_missing_facts": 0,
+        "prices_skipped_missing_facts": 0,
+        "outcomes_skipped_with_outcome_fact": 0,
+    }
+
+    for market in markets:
+        if not isinstance(market, dict):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+        market_slug = _forward_clean_str(market.get("slug"))
+        city = _forward_city_name(market.get("city"))
+        target_date = _forward_clean_str(market.get("target_date"))
+        temperature_metric = _forward_metric(market.get("temperature_metric"))
+        if not (market_slug and city and target_date and temperature_metric):
+            counts["markets_skipped_missing_facts"] += 1
+            continue
+
+        hours_since_open = _forward_float(market.get("hours_since_open"))
+        hours_to_resolution = _forward_float(market.get("hours_to_resolution"))
+
+        for outcome in market.get("outcomes") or ():
+            if not isinstance(outcome, dict):
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+            if _forward_clean_str(outcome.get("outcome")) is not None:
+                counts["outcomes_skipped_with_outcome_fact"] += 1
+                continue
+
+            condition_id = _forward_clean_str(outcome.get("condition_id"))
+            yes_token = _forward_clean_str(outcome.get("token_id"))
+            range_label = _forward_clean_str(outcome.get("title"))
+            range_low = _forward_float(outcome.get("range_low"))
+            range_high = _forward_float(outcome.get("range_high"))
+            if not (
+                condition_id
+                and yes_token
+                and range_label
+                and (range_low is not None or range_high is not None)
+            ):
+                counts["outcomes_skipped_missing_facts"] += 1
+                continue
+
+            event_values = {
+                "market_slug": market_slug,
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": temperature_metric,
+                "condition_id": condition_id,
+                "token_id": yes_token,
+                "range_label": range_label,
+                "range_low": range_low,
+                "range_high": range_high,
+                "outcome": None,
+                "created_at": _forward_clean_str(
+                    market.get("created_at") or outcome.get("market_start_at")
+                ),
+                "recorded_at": recorded_at_value,
+            }
+            event_result = _insert_forward_market_event(conn, event_values)
+            if event_result == "resolved_existing":
+                counts["outcomes_skipped_with_outcome_fact"] += 1
+                continue
+            if event_result == "conflict":
+                counts["market_events_conflicted"] += 1
+                continue
+            counts[f"market_events_{event_result}"] += 1
+
+            for token_key, price_key in (("token_id", "price"), ("no_token_id", "no_price")):
+                token_id = _forward_clean_str(outcome.get(token_key))
+                price = _forward_price(outcome.get(price_key))
+                if token_id is None or price is None:
+                    counts["prices_skipped_missing_facts"] += 1
+                    continue
+                price_values = {
+                    "market_slug": market_slug,
+                    "token_id": token_id,
+                    "price": price,
+                    "recorded_at": recorded_at_value,
+                    "hours_since_open": hours_since_open,
+                    "hours_to_resolution": hours_to_resolution,
+                }
+                price_result = _insert_forward_price_history(conn, price_values)
+                price_key_name = "price_rows_conflicted" if price_result == "conflict" else f"price_rows_{price_result}"
+                counts[price_key_name] += 1
+
+    status = "written"
+    if counts["market_events_conflicted"] or counts["price_rows_conflicted"]:
+        status = "written_with_conflicts"
+    elif (
+        counts["market_events_inserted"] == 0
+        and counts["price_rows_inserted"] == 0
+        and (counts["market_events_unchanged"] or counts["price_rows_unchanged"])
+    ):
+        status = "unchanged"
+    elif counts["market_events_inserted"] == 0 and counts["price_rows_inserted"] == 0:
+        status = "skipped_no_valid_rows"
+
+    return {
+        "status": status,
+        "tables": _FORWARD_MARKET_REQUIRED_TABLES,
+        **counts,
+    }
+
+
+def log_settlement_v2(
+    conn: sqlite3.Connection | None,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    market_slug: str | None,
+    winning_bin: str | None,
+    settlement_value: float | None,
+    settlement_source: str | None,
+    settled_at: str | None,
+    authority: str,
+    provenance: dict | None = None,
+    recorded_at: str | None = None,
+) -> dict:
+    """Mirror harvester settlement truth into settlements_v2.
+
+    The helper is intentionally substrate-only: it never opens a default DB,
+    never creates/migrates tables, never commits, and never infers missing
+    market identity.
+    """
+    table = "settlements_v2"
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": table}
+    if not _table_exists(conn, table):
+        return {"status": "skipped_missing_table", "table": table}
+
+    required_columns = set(_SETTLEMENT_V2_COLUMNS)
+    missing_columns = tuple(sorted(required_columns - _table_columns(conn, table)))
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_columns": missing_columns,
+        }
+    unique_key = ("city", "target_date", "temperature_metric")
+    if not _table_has_unique_key(conn, table, unique_key):
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_unique_key": unique_key,
+        }
+
+    clean_city = _forward_clean_str(city)
+    clean_target_date = _forward_clean_str(target_date)
+    clean_metric = _forward_metric(temperature_metric)
+    clean_market_slug = _forward_clean_str(market_slug)
+    clean_authority = _forward_clean_str(authority)
+    if not (clean_city and clean_target_date and clean_metric and clean_market_slug):
+        return {
+            "status": "refused_missing_identity",
+            "table": table,
+            "missing_fields": tuple(
+                field
+                for field, value in (
+                    ("city", clean_city),
+                    ("target_date", clean_target_date),
+                    ("temperature_metric", clean_metric),
+                    ("market_slug", clean_market_slug),
+                )
+                if not value
+            ),
+        }
+    if clean_authority not in {"VERIFIED", "UNVERIFIED", "QUARANTINED"}:
+        return {
+            "status": "refused_invalid_authority",
+            "table": table,
+            "authority": authority,
+        }
+
+    recorded_at_value = _forward_clean_str(recorded_at) or datetime.now(timezone.utc).isoformat()
+    provenance_payload = dict(provenance or {})
+    provenance_payload.setdefault("legacy_table", "settlements")
+    provenance_json = json.dumps(provenance_payload, sort_keys=True, default=str)
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO settlements_v2 (
+                city, target_date, temperature_metric, market_slug, winning_bin,
+                settlement_value, settlement_source, settled_at, authority,
+                provenance_json, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city, target_date, temperature_metric) DO UPDATE SET
+                market_slug=excluded.market_slug,
+                winning_bin=excluded.winning_bin,
+                settlement_value=excluded.settlement_value,
+                settlement_source=excluded.settlement_source,
+                settled_at=excluded.settled_at,
+                authority=excluded.authority,
+                provenance_json=excluded.provenance_json,
+                recorded_at=excluded.recorded_at
+            """,
+            (
+                clean_city,
+                clean_target_date,
+                clean_metric,
+                clean_market_slug,
+                winning_bin,
+                settlement_value,
+                _forward_clean_str(settlement_source),
+                _forward_clean_str(settled_at),
+                clean_authority,
+                provenance_json,
+                recorded_at_value,
+            ),
+        )
+    except sqlite3.OperationalError as exc:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "schema_error": str(exc),
+        }
+    return {"status": "written", "table": table}
+
+
+def _market_event_outcome_public_result(result: dict) -> dict:
+    """Strip internal SQL parameters before exposing helper results."""
+    return {key: value for key, value in result.items() if key != "update_values"}
+
+
+def _prepare_market_event_outcome_v2_update(
+    conn: sqlite3.Connection | None,
+    *,
+    market_slug: str | None,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    condition_id: str | None,
+    token_id: str | None,
+    outcome: str,
+) -> dict:
+    table = "market_events_v2"
+    if conn is None:
+        return {"status": "skipped_no_connection", "table": table}
+    if not _table_exists(conn, table):
+        return {"status": "skipped_missing_table", "table": table}
+
+    required_columns = set(_FORWARD_MARKET_EVENT_COLUMNS)
+    missing_columns = tuple(sorted(required_columns - _table_columns(conn, table)))
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_columns": missing_columns,
+        }
+    unique_key = ("market_slug", "condition_id")
+    if not _table_has_unique_key(conn, table, unique_key):
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_unique_key": unique_key,
+        }
+
+    clean_market_slug = _forward_clean_str(market_slug)
+    clean_city = _forward_city_name(city)
+    clean_target_date = _forward_clean_str(target_date)
+    clean_metric = _forward_metric(temperature_metric)
+    clean_condition_id = _forward_clean_str(condition_id)
+    clean_token_id = _forward_clean_str(token_id)
+    clean_outcome = _forward_clean_str(outcome)
+    if clean_outcome is not None:
+        clean_outcome = clean_outcome.upper()
+
+    identity_fields = (
+        ("market_slug", clean_market_slug),
+        ("city", clean_city),
+        ("target_date", clean_target_date),
+        ("temperature_metric", clean_metric),
+        ("condition_id", clean_condition_id),
+        ("token_id", clean_token_id),
+    )
+    if not all(value for _, value in identity_fields):
+        return {
+            "status": "refused_missing_identity",
+            "table": table,
+            "missing_fields": tuple(field for field, value in identity_fields if not value),
+        }
+    if clean_outcome not in _MARKET_EVENT_OUTCOME_VALUES:
+        return {
+            "status": "refused_invalid_outcome",
+            "table": table,
+            "outcome": outcome,
+        }
+
+    try:
+        row = conn.execute(
+            """
+            SELECT city, target_date, temperature_metric, token_id, outcome
+            FROM market_events_v2
+            WHERE market_slug = ? AND condition_id = ?
+            """,
+            (clean_market_slug, clean_condition_id),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "schema_error": str(exc),
+        }
+
+    if row is None:
+        return {
+            "status": "skipped_missing_market_event",
+            "table": table,
+            "market_slug": clean_market_slug,
+            "condition_id": clean_condition_id,
+        }
+
+    existing = dict(zip(("city", "target_date", "temperature_metric", "token_id", "outcome"), tuple(row)))
+    mismatches = tuple(
+        field
+        for field, expected in (
+            ("city", clean_city),
+            ("target_date", clean_target_date),
+            ("temperature_metric", clean_metric),
+            ("token_id", clean_token_id),
+        )
+        if str(existing.get(field)) != str(expected)
+    )
+    if mismatches:
+        return {
+            "status": "refused_identity_mismatch",
+            "table": table,
+            "mismatched_fields": mismatches,
+        }
+
+    existing_outcome = _forward_clean_str(existing.get("outcome"))
+    if existing_outcome is not None:
+        existing_outcome = existing_outcome.upper()
+        if existing_outcome == clean_outcome:
+            return {"status": "unchanged", "table": table}
+        return {
+            "status": "conflict_existing_outcome",
+            "table": table,
+            "existing_outcome": existing_outcome,
+            "incoming_outcome": clean_outcome,
+        }
+
+    return {
+        "status": "ready",
+        "table": table,
+        "update_values": (
+            clean_outcome,
+            clean_market_slug,
+            clean_condition_id,
+            clean_token_id,
+            clean_city,
+            clean_target_date,
+            clean_metric,
+        ),
+    }
+
+
+def log_market_event_outcome_v2(
+    conn: sqlite3.Connection | None,
+    *,
+    market_slug: str | None,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    condition_id: str | None,
+    token_id: str | None,
+    outcome: str,
+) -> dict:
+    """Write a resolved child-market outcome onto existing market_events_v2 substrate.
+
+    This helper updates only an exact scanner-produced row. It never creates
+    tables, inserts missing market identities, opens a default DB, commits, or
+    overwrites a conflicting resolved outcome.
+    """
+    prepared = _prepare_market_event_outcome_v2_update(
+        conn,
+        market_slug=market_slug,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        condition_id=condition_id,
+        token_id=token_id,
+        outcome=outcome,
+    )
+    if prepared.get("status") != "ready":
+        return _market_event_outcome_public_result(prepared)
+
+    try:
+        conn.execute(
+            _MARKET_EVENT_OUTCOME_UPDATE_SQL,
+            prepared["update_values"],
+        )
+    except sqlite3.OperationalError as exc:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": "market_events_v2",
+            "schema_error": str(exc),
+        }
+    return {"status": "written", "table": "market_events_v2"}
+
+
+def log_market_event_outcomes_v2(
+    conn: sqlite3.Connection | None,
+    *,
+    market_slug: str | None,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    outcomes: Iterable[dict],
+) -> dict:
+    """Batch-update market_events_v2 outcomes using exact child identities."""
+    table = "market_events_v2"
+    counts = {
+        "written": 0,
+        "unchanged": 0,
+        "skipped_missing_market_event": 0,
+        "refused_missing_identity": 0,
+        "refused_identity_mismatch": 0,
+        "conflict_existing_outcome": 0,
+        "refused_invalid_outcome": 0,
+        "skipped_invalid_schema": 0,
+        "skipped_missing_table": 0,
+        "skipped_no_connection": 0,
+    }
+    prepared_updates: list[dict] = []
+    details: list[dict] = []
+    for outcome_row in outcomes:
+        if not isinstance(outcome_row, dict):
+            result = {
+                "status": "refused_missing_identity",
+                "table": table,
+                "missing_fields": ("outcome",),
+            }
+        else:
+            result = _prepare_market_event_outcome_v2_update(
+                conn,
+                market_slug=market_slug,
+                city=city,
+                target_date=target_date,
+                temperature_metric=temperature_metric,
+                condition_id=outcome_row.get("condition_id"),
+                token_id=outcome_row.get("token_id"),
+                outcome=outcome_row.get("outcome"),
+            )
+        status = str(result.get("status", "unknown"))
+        if status == "ready":
+            prepared_updates.append(result)
+            details.append({"status": "pending_write", "table": table})
+        else:
+            if status in counts:
+                counts[status] += 1
+            details.append(_market_event_outcome_public_result(result))
+        if status in {"skipped_no_connection", "skipped_missing_table", "skipped_invalid_schema"}:
+            break
+
+    blocking_statuses = {
+        "skipped_missing_market_event",
+        "refused_missing_identity",
+        "refused_identity_mismatch",
+        "conflict_existing_outcome",
+        "refused_invalid_outcome",
+        "skipped_invalid_schema",
+        "skipped_missing_table",
+        "skipped_no_connection",
+    }
+    if any(counts[key] for key in blocking_statuses):
+        if counts["skipped_no_connection"]:
+            status = "skipped_no_connection"
+        elif counts["skipped_missing_table"]:
+            status = "skipped_missing_table"
+        elif counts["skipped_invalid_schema"]:
+            status = "skipped_invalid_schema"
+        elif counts["conflict_existing_outcome"] or counts["refused_identity_mismatch"]:
+            status = "conflicted"
+        else:
+            status = "skipped_no_updates"
+        return {"status": status, "table": table, **counts, "details": tuple(details)}
+
+    if prepared_updates:
+        try:
+            conn.execute("SAVEPOINT market_events_v2_outcome_batch")
+            for result in prepared_updates:
+                conn.execute(
+                    _MARKET_EVENT_OUTCOME_UPDATE_SQL,
+                    result["update_values"],
+                )
+            conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+        except sqlite3.OperationalError as exc:
+            try:
+                conn.execute("ROLLBACK TO SAVEPOINT market_events_v2_outcome_batch")
+                conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+            except sqlite3.OperationalError:
+                pass
+            counts["skipped_invalid_schema"] += 1
+            details.append(
+                {
+                    "status": "skipped_invalid_schema",
+                    "table": table,
+                    "schema_error": str(exc),
+                }
+            )
+            return {
+                "status": "skipped_invalid_schema",
+                "table": table,
+                **counts,
+                "details": tuple(details),
+            }
+        counts["written"] = len(prepared_updates)
+        details = [
+            {"status": "written", "table": table}
+            if detail.get("status") == "pending_write"
+            else detail
+            for detail in details
+        ]
+        status = "written"
+    elif counts["unchanged"]:
+        status = "unchanged"
+    else:
+        status = "skipped_no_updates"
+
+    return {"status": status, "table": table, **counts, "details": tuple(details)}
 
 
 def log_microstructure(conn, token_id: str, city: str, target_date: str, range_label: str,
@@ -4730,7 +5499,7 @@ def log_pending_exit_status_event(
     timestamp: str | None = None,
 ) -> None:
     """Append fill-check telemetry for an already placed exit order."""
-    event_type = "EXIT_FILL_CONFIRMED" if status in {"FILLED", "CONFIRMED"} else "EXIT_FILL_CHECKED"
+    event_type = "EXIT_FILL_CONFIRMED" if status == "CONFIRMED" else "EXIT_FILL_CHECKED"
     log_exit_lifecycle_event(
         conn,
         pos,
@@ -4784,7 +5553,7 @@ def log_exit_fill_event(
 ) -> None:
     """Append terminal sell-fill telemetry for live exits."""
     payload = {
-        "status": "FILLED",
+        "status": "CONFIRMED",
         "fill_price": fill_price,
         "current_market_price": current_market_price,
         "best_bid": best_bid,
@@ -4794,7 +5563,7 @@ def log_exit_fill_event(
         conn,
         pos,
         event_type="EXIT_ORDER_FILLED",
-        status="FILLED",
+        status="CONFIRMED",
         order_id=order_id,
         details=payload,
         timestamp=timestamp,

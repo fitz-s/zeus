@@ -23,7 +23,20 @@ from src.data.tigge_client import TIGGEIngest
 
 
 ForecastSourceTier = Literal["primary", "secondary", "experimental", "disabled"]
-ForecastSourceKind = Literal["forecast_table", "live_ensemble", "experimental_ingest"]
+ForecastSourceKind = Literal["forecast_table", "live_ensemble", "experimental_ingest", "scheduled_collector"]
+ForecastSourceRole = Literal[
+    "entry_primary",
+    "entry_fallback",
+    "monitor_fallback",
+    "diagnostic",
+    "learning",
+]
+ForecastDegradationLevel = Literal[
+    "OK",
+    "DEGRADED_FORECAST_FALLBACK",
+    "EXPERIMENTAL_DISABLED",
+    "DIAGNOSTIC_NON_EXECUTABLE",
+]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -47,12 +60,16 @@ class ForecastSourceSpec:
     env_flag_name: str | None = None
     enabled_by_default: bool = True
     model_name: str | None = None
+    allowed_roles: tuple[ForecastSourceRole, ...] = ("diagnostic",)
+    degradation_level: ForecastDegradationLevel = "OK"
 
     def __post_init__(self) -> None:
         if not self.source_id:
             raise ValueError("ForecastSourceSpec.source_id is required")
         if self.tier == "disabled" and self.enabled_by_default:
             raise ValueError("disabled forecast sources cannot be enabled_by_default")
+        if self.degradation_level == "OK" and "entry_fallback" in self.allowed_roles:
+            raise ValueError("entry fallback sources must carry a degraded forecast level")
         if self.requires_operator_decision and not (
             self.operator_decision_artifact and self.env_flag_name
         ):
@@ -87,42 +104,51 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         tier="primary",
         kind="forecast_table",
         model_name="best_match",
+        allowed_roles=("diagnostic",),
     ),
     "gfs_previous_runs": ForecastSourceSpec(
         source_id="gfs_previous_runs",
         tier="secondary",
         kind="forecast_table",
         model_name="gfs_global",
+        allowed_roles=("diagnostic",),
     ),
     "ecmwf_previous_runs": ForecastSourceSpec(
         source_id="ecmwf_previous_runs",
         tier="secondary",
         kind="forecast_table",
         model_name="ecmwf_ifs025",
+        allowed_roles=("diagnostic",),
     ),
     "icon_previous_runs": ForecastSourceSpec(
         source_id="icon_previous_runs",
         tier="secondary",
         kind="forecast_table",
         model_name="icon_global",
+        allowed_roles=("diagnostic",),
     ),
     "ukmo_previous_runs": ForecastSourceSpec(
         source_id="ukmo_previous_runs",
         tier="secondary",
         kind="forecast_table",
         model_name="ukmo_global_deterministic_10km",
+        allowed_roles=("diagnostic",),
     ),
     "openmeteo_ensemble_ecmwf_ifs025": ForecastSourceSpec(
         source_id="openmeteo_ensemble_ecmwf_ifs025",
-        tier="primary",
+        tier="secondary",
         kind="live_ensemble",
         model_name="ecmwf_ifs025",
+        allowed_roles=("monitor_fallback", "diagnostic"),
+        degradation_level="DEGRADED_FORECAST_FALLBACK",
     ),
     "openmeteo_ensemble_gfs025": ForecastSourceSpec(
         source_id="openmeteo_ensemble_gfs025",
         tier="secondary",
         kind="live_ensemble",
         model_name="gfs025",
+        allowed_roles=("monitor_fallback", "diagnostic"),
+        degradation_level="DEGRADED_FORECAST_FALLBACK",
     ),
     "tigge": ForecastSourceSpec(
         source_id="tigge",
@@ -134,6 +160,16 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         operator_decision_artifact=_TIGGE_OPERATOR_ARTIFACT,
         env_flag_name="ZEUS_TIGGE_INGEST_ENABLED",
         enabled_by_default=False,
+        allowed_roles=("entry_primary", "monitor_fallback", "diagnostic"),
+        degradation_level="OK",
+    ),
+    "ecmwf_open_data": ForecastSourceSpec(
+        source_id="ecmwf_open_data",
+        tier="secondary",
+        kind="scheduled_collector",
+        model_name="ecmwf_open_data",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
 }
 
@@ -228,6 +264,20 @@ def gate_source(
             f"forecast source {source_id!r} is disabled or operator-gated closed"
         )
     return spec
+
+
+def source_allows_role(spec: ForecastSourceSpec, role: ForecastSourceRole) -> bool:
+    return role in spec.allowed_roles
+
+
+def gate_source_role(spec: ForecastSourceSpec, role: ForecastSourceRole) -> None:
+    """Fail closed when a source is not authorized for the requested money lane."""
+
+    if not source_allows_role(spec, role):
+        raise SourceNotEnabled(
+            f"forecast source {spec.source_id!r} is not authorized for role {role!r} "
+            f"(degradation_level={spec.degradation_level})"
+        )
 
 
 def active_sources(

@@ -17,11 +17,13 @@ state between cases (conftest-free isolation).
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 import httpx
 import pytest
 
+from src.backtest.economics import check_economics_readiness
 from src.data import market_scanner as ms
 from src.data.market_scanner import (
     MarketSnapshot,
@@ -31,6 +33,8 @@ from src.data.market_scanner import (
     _parse_event,
     get_last_scan_authority,
 )
+from src.state import db as state_db
+from src.state.db import log_forward_market_substrate
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +109,77 @@ def _complete_release_evidence(prefix: str = "docs/operations/source_transition"
         for key in ms.REQUIRED_SOURCE_CONVERSION_EVIDENCE
     }
     return release_evidence
+
+
+def _make_forward_substrate_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE market_events_v2 (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            created_at TEXT,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(market_slug, condition_id)
+        );
+        CREATE TABLE market_price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            recorded_at TEXT NOT NULL,
+            hours_since_open REAL,
+            hours_to_resolution REAL,
+            UNIQUE(token_id, recorded_at)
+        );
+        """
+    )
+    return conn
+
+
+def _forward_market() -> dict:
+    return {
+        "slug": "lowest-temperature-in-chicago-on-april-30-2026",
+        "city": "Chicago",
+        "target_date": "2026-04-30",
+        "temperature_metric": "low",
+        "hours_since_open": 2.5,
+        "hours_to_resolution": 18.0,
+        "outcomes": [
+            {
+                "condition_id": "cond-low-shoulder",
+                "token_id": "yes-low-shoulder",
+                "no_token_id": "no-low-shoulder",
+                "title": "35°F or lower",
+                "range_low": None,
+                "range_high": 35.0,
+                "price": 0.31,
+                "no_price": 0.69,
+                "market_start_at": "2026-04-29T12:00:00Z",
+            },
+            {
+                "condition_id": "cond-low-range",
+                "token_id": "yes-low-range",
+                "no_token_id": "no-low-range",
+                "title": "36-37°F",
+                "range_low": 36.0,
+                "range_high": 37.0,
+                "price": "0.42",
+                "no_price": "0.58",
+                "market_start_at": "2026-04-29T12:00:00Z",
+            },
+        ],
+    }
 
 
 class TestB017MarketSnapshotProvenance:
@@ -763,3 +838,250 @@ class TestSourceContractGate:
             {"action": "quarantine_city_source", "status": "error"}
         ]
         assert report["quarantine_error"] == "cannot write quarantine"
+
+
+class TestForwardMarketSubstrateProducer:
+    """Forward substrate writer is explicit, authority-gated, and idempotent."""
+
+    def test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics(
+        self, monkeypatch
+    ):
+        """Verified Gamma scanner facts populate only market/price substrate."""
+        monkeypatch.setattr(
+            state_db,
+            "get_connection",
+            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
+        )
+        conn = _make_forward_substrate_conn()
+
+        result = log_forward_market_substrate(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "written"
+        assert result["market_events_inserted"] == 2
+        assert result["price_rows_inserted"] == 4
+        event_rows = conn.execute(
+            """
+            SELECT market_slug, city, target_date, temperature_metric,
+                   condition_id, token_id, range_label, range_low, range_high,
+                   outcome
+            FROM market_events_v2
+            ORDER BY condition_id
+            """
+        ).fetchall()
+        assert len(event_rows) == 2
+        assert {row["temperature_metric"] for row in event_rows} == {"low"}
+        assert all(row["outcome"] is None for row in event_rows)
+        shoulder = [row for row in event_rows if row["condition_id"] == "cond-low-shoulder"][0]
+        assert shoulder["range_low"] is None
+        assert shoulder["range_high"] == 35.0
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 4
+
+        readiness = check_economics_readiness(conn)
+        assert readiness.ready is False
+        assert "empty_table:market_events_v2" not in readiness.blockers
+        assert "empty_table:market_price_history" not in readiness.blockers
+        assert "missing_table:venue_trade_facts" in readiness.blockers
+        assert "no_market_event_outcomes" in readiness.blockers
+        assert "economics_engine_not_implemented" in readiness.blockers
+
+    def test_forward_substrate_skips_when_required_tables_are_absent(self):
+        """Capability-absent behavior is fail-loud and does not create tables."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+
+        result = log_forward_market_substrate(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_missing_tables"
+        assert set(result["missing_tables"]) == {"market_events_v2", "market_price_history"}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+        ).fetchone()[0] == 0
+
+    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    def test_forward_substrate_refuses_degraded_scan_authority(self, authority):
+        """Only a fresh VERIFIED scan can create forward market substrate."""
+        conn = _make_forward_substrate_conn()
+
+        result = log_forward_market_substrate(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority=authority,
+        )
+
+        assert result["status"] == "refused_degraded_authority"
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
+
+    def test_forward_substrate_refuses_missing_identity_or_range_facts(self):
+        """Missing condition/token/range facts are not inferred from neighbors."""
+        conn = _make_forward_substrate_conn()
+        market = _forward_market()
+        market["outcomes"] = [
+            {
+                "token_id": "yes-missing-condition",
+                "no_token_id": "no-missing-condition",
+                "title": "35°F or lower",
+                "range_low": None,
+                "range_high": 35.0,
+                "price": 0.31,
+                "no_price": 0.69,
+            },
+            {
+                "condition_id": "cond-missing-range",
+                "token_id": "yes-missing-range",
+                "no_token_id": "no-missing-range",
+                "title": "unparseable range",
+                "range_low": None,
+                "range_high": None,
+                "price": 0.42,
+                "no_price": 0.58,
+            },
+        ]
+
+        result = log_forward_market_substrate(
+            conn,
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_no_valid_rows"
+        assert result["outcomes_skipped_missing_facts"] == 2
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
+
+    def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self):
+        """Repeated facts are unchanged; conflicting token-time facts are reported."""
+        conn = _make_forward_substrate_conn()
+        first = log_forward_market_substrate(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+        second = log_forward_market_substrate(
+            conn,
+            markets=[_forward_market()],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert first["status"] == "written"
+        assert second["status"] == "unchanged"
+        assert second["market_events_unchanged"] == 2
+        assert second["price_rows_unchanged"] == 4
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 4
+
+        conflicting = _forward_market()
+        conflicting["outcomes"][0]["price"] = 0.99
+        conflict = log_forward_market_substrate(
+            conn,
+            markets=[conflicting],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert conflict["status"] == "written_with_conflicts"
+        assert conflict["price_rows_conflicted"] == 1
+        stored_price = conn.execute(
+            """
+            SELECT price
+            FROM market_price_history
+            WHERE token_id = 'yes-low-shoulder'
+              AND recorded_at = '2026-04-29T16:00:00Z'
+            """
+        ).fetchone()[0]
+        assert stored_price == 0.31
+
+    def test_forward_substrate_does_not_append_prices_for_resolved_events(self):
+        """A resolved market_events_v2 row is not unresolved scanner substrate."""
+        conn = _make_forward_substrate_conn()
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low, range_high,
+                outcome, created_at, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lowest-temperature-in-chicago-on-april-30-2026",
+                "Chicago",
+                "2026-04-30",
+                "low",
+                "cond-low-shoulder",
+                "yes-low-shoulder",
+                "35°F or lower",
+                None,
+                35.0,
+                "YES",
+                "2026-04-29T12:00:00Z",
+                "2026-04-29T15:00:00Z",
+            ),
+        )
+        market = _forward_market()
+        market["outcomes"] = [market["outcomes"][0]]
+
+        result = log_forward_market_substrate(
+            conn,
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert result["status"] == "skipped_no_valid_rows"
+        assert result["outcomes_skipped_with_outcome_fact"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
+
+    def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self):
+        """Rejected event identity conflicts cannot create orphan price facts."""
+        conn = _make_forward_substrate_conn()
+        market = _forward_market()
+        market["outcomes"] = [market["outcomes"][0]]
+        first = log_forward_market_substrate(
+            conn,
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+        assert first["status"] == "written"
+        assert first["market_events_inserted"] == 1
+        assert first["price_rows_inserted"] == 2
+
+        conflicting = _forward_market()
+        conflicting["outcomes"] = [conflicting["outcomes"][0]]
+        conflicting["outcomes"][0]["token_id"] = "yes-conflicting-token"
+        conflicting["outcomes"][0]["no_token_id"] = "no-conflicting-token"
+        conflict = log_forward_market_substrate(
+            conn,
+            markets=[conflicting],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+        )
+
+        assert conflict["status"] == "written_with_conflicts"
+        assert conflict["market_events_conflicted"] == 1
+        assert conflict["price_rows_inserted"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM market_price_history
+            WHERE token_id IN ('yes-conflicting-token', 'no-conflicting-token')
+            """
+        ).fetchone()[0] == 0

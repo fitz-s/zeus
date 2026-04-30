@@ -108,6 +108,90 @@ class SettlementCommandStateError(SettlementCommandError):
     """Raised for illegal settlement command transitions."""
 
 
+def _enum_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)
+
+
+def _capability_component(
+    component: str,
+    *,
+    allowed: bool,
+    reason: str,
+    **details: Any,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "component": str(component),
+        "allowed": bool(allowed),
+        "reason": str(reason),
+    }
+    if details:
+        payload["details"] = {
+            key: _enum_value(value) if not isinstance(value, (bool, int, float)) else value
+            for key, value in details.items()
+        }
+    return payload
+
+
+def _build_redeem_execution_capability(
+    *,
+    row: sqlite3.Row,
+    cutover: Any,
+    fx_classification: FXClassification | None,
+    freshness_time: str,
+) -> dict[str, Any]:
+    payout_asset = str(row["payout_asset"])
+    state = str(row["state"])
+    state_allowed = SettlementState(state) in _SUBMITTABLE_STATES
+    cutover_allowed = bool(getattr(cutover, "allow_redemption", False))
+    fx_required = payout_asset == "pUSD"
+    fx_allowed = (not fx_required) or isinstance(fx_classification, FXClassification)
+    components = [
+        _capability_component(
+            "redeem_command_state",
+            allowed=state_allowed,
+            reason="allowed" if state_allowed else f"state_not_redeem_submittable:{state}",
+            command_state=state,
+        ),
+        _capability_component(
+            "payout_asset_fx_classification",
+            allowed=fx_allowed,
+            reason=(
+                fx_classification.value
+                if isinstance(fx_classification, FXClassification)
+                else ("missing_pusd_fx_classification" if fx_required else f"not_required_for_{payout_asset}")
+            ),
+            payout_asset=payout_asset,
+        ),
+        _capability_component(
+            "cutover_guard",
+            allowed=cutover_allowed,
+            reason=str(getattr(cutover, "block_reason", None) or ("allowed" if cutover_allowed else "blocked")),
+            state=_enum_value(getattr(cutover, "state", None)),
+        ),
+    ]
+    proof: dict[str, Any] = {
+        "schema_version": 1,
+        "action": "REDEEM",
+        "intent_kind": "REDEEM",
+        "mode": "redeem",
+        "allowed": all(bool(component.get("allowed")) for component in components),
+        "freshness_time": freshness_time,
+        "command_id": str(row["command_id"]),
+        "condition_id": str(row["condition_id"]),
+        "market_id": str(row["market_id"]),
+        "payout_asset": payout_asset,
+        "components": components,
+    }
+    proof["capability_id"] = hashlib.sha256(
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return proof
+
+
 def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
 
@@ -253,17 +337,28 @@ def submit_redeem(
         state = SettlementState(row["state"])
         if state not in _SUBMITTABLE_STATES:
             raise SettlementCommandStateError(f"command {command_id} is not submittable from {state.value}")
+        selected_fx_classification: FXClassification | None = None
         if row["payout_asset"] == "pUSD":
-            require_pusd_redemption_allowed(fx_classification)
+            selected_fx_classification = require_pusd_redemption_allowed(fx_classification)
         cutover = redemption_decision()
         if not cutover.allow_redemption:
             raise CutoverPending(cutover.block_reason or cutover.state.value)
+        execution_capability = _build_redeem_execution_capability(
+            row=row,
+            cutover=cutover,
+            fx_classification=selected_fx_classification,
+            freshness_time=submitted_at_s,
+        )
         with _savepoint(conn):
             _transition(
                 conn,
                 command_id,
                 SettlementState.REDEEM_SUBMITTED,
-                payload={"condition_id": row["condition_id"], "pre_side_effect": True},
+                payload={
+                    "condition_id": row["condition_id"],
+                    "pre_side_effect": True,
+                    "execution_capability": execution_capability,
+                },
                 submitted_at=submitted_at_s,
                 recorded_at=submitted_at_s,
             )

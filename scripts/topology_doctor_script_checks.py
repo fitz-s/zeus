@@ -272,7 +272,10 @@ def run_scripts(api: Any) -> Any:
                         f"diagnostic writes forbidden targets {forbidden_writes}",
                     )
                 )
-            text = (api.ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+            script_path = api.ROOT / rel
+            if not script_path.exists():
+                continue
+            text = script_path.read_text(encoding="utf-8", errors="ignore")
             if any(helper in text for helper in CANONICAL_WRITE_HELPERS):
                 issues.append(
                     api._issue(

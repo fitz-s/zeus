@@ -155,15 +155,18 @@ Role: single live control pointer for the repo.
 
 - Use `docs/operations/AGENTS.md` for non-default packet/package routing.
 - Use `docs/archive_registry.md` for archived packet lookup.
-- Archived independent top-level operation packages route through
-  `docs/archive_registry.md`; do not treat archived packet paths as current
-  routing evidence.
-- Active retained top-level package:
-  `docs/operations/task_2026-04-23_graph_rendering_integration/`.
+- Independent top-level operation packages retained outside the midstream
+  phase tree: `docs/operations/task_2026-04-19_execution_state_truth_upgrade/`,
+  `docs/operations/task_2026-04-23_graph_rendering_integration/`, and
+  `docs/operations/task_2026-04-25_p2_packet_runtime/`.
 - Merge-preserved packet evidence retained outside the active execution lane:
   `docs/operations/task_2026-04-27_harness_debate/`. This is debate/review
   evidence only; it is not live-deploy, production DB mutation, source-routing,
   or calibration authority.
+- Design simplification audit and phased repair evidence:
+  `docs/operations/task_2026-04-29_design_simplification_audit/`. This is
+  packet-local evidence only; it is not live-deploy, production DB mutation,
+  source-routing, or calibration authority.
 
 ## Parallel infrastructure packet
 
@@ -182,10 +185,10 @@ Role: single live control pointer for the repo.
 
 ## Active worktrees (2026-04-26)
 
-The 2026-04-26 live-readiness worktree inventory is historical packet evidence
-routed through `docs/archive_registry.md`.
-Do not treat that archived inventory as an active coordination gate unless a
-current packet re-routes there.
+Three claude worktrees are concurrently active. Per-worktree scope, file-touch
+inventory, and cross-worktree collision matrix live in
+`docs/operations/task_2026-04-26_live_readiness_completion/evidence/audit_2026-04-26.md`.
+Do not edit a file inventoried by another worktree without coordinating there first.
 
 | Worktree path | Branch | Packet root |
 |---|---|---|

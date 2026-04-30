@@ -1,4 +1,7 @@
 # Created: 2026-04-07
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Protect cross-module invariants where one module output becomes another module input.
+# Reuse: Run for finality, lifecycle, replay, truth-surface, and relationship-boundary changes.
 # Last reused/audited: 2026-04-30
 # Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30
 """Cross-module relationship tests.
@@ -457,8 +460,8 @@ def test_exit_lifecycle_fill_statuses_match_fill_tracker():
     one path will see fills the other misses — exits get stranded.
 
     First-principles finality: MATCHED/MINED are optimistic observations.
-    Both modules should share the final-only set, currently
-    {"CONFIRMED", "FILLED"}, so one path cannot economically close while
+    Both modules should share the final-only set, currently {"CONFIRMED"}, so
+    one path cannot economically close while
     the other keeps waiting.
     """
     from src.execution.exit_lifecycle import FILL_STATUSES as lifecycle_statuses
@@ -471,6 +474,7 @@ def test_exit_lifecycle_fill_statuses_match_fill_tracker():
         f"Consequence: fill statuses in {{tracker_statuses - lifecycle_statuses}} will be "
         f"recognized as fills by fill_tracker but NOT by exit_lifecycle — positions stranded."
     )
+    assert lifecycle_statuses == {"CONFIRMED"}
 
 
 # ---------------------------------------------------------------------------

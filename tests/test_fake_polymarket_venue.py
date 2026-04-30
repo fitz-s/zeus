@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
 # Purpose: R3 T1 FakePolymarketVenue protocol and failure-injection antibodies.
-# Reuse: Run when fake/live venue adapter protocol, failure modes, or paper/live parity changes.
+# Reuse: Run when fake/live venue adapter protocol, failure modes, or fake/live adapter parity changes.
 # Created: 2026-04-27
 # Last reused/audited: 2026-04-27
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml

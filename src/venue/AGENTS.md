@@ -20,8 +20,8 @@ journal → `VenueSubmissionEnvelope` provenance → SDK/API side effect.
 
 - Adapter code may import `py_clob_client_v2`; other live source modules must
   not.
-- Paper/live parity fakes must implement `PolymarketV2AdapterProtocol`; fake
-  behavior belongs in test-only fakes, not production paper/live split paths.
+- Fake/live adapter parity fakes must implement `PolymarketV2AdapterProtocol`;
+  fake behavior belongs in test-only fakes, not production fake/live split paths.
 - Pin provenance at `VenueSubmissionEnvelope`, not a specific SDK call shape.
 - Preserve command-journal pre-side-effect discipline. Do not insert or mutate
   `venue_commands` directly from this package.

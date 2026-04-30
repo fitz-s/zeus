@@ -1,4 +1,7 @@
 # Created: 2026-03-31
+# Lifecycle: created=2026-03-31; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
+# Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
 # Last reused/audited: 2026-04-30
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Live safety invariant tests: relationship tests, not function tests.
@@ -6,7 +9,7 @@
 These verify cross-module relationships that prevent ghost positions,
 phantom P&L, and local↔chain divergence in live mode.
 
-GOLDEN RULE: economic close is ONLY created after confirmed FILLED.
+GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 """
 
 import logging
@@ -113,7 +116,7 @@ def _make_clob(
 # ---- Test 1: GOLDEN RULE ----
 
 def test_live_exit_never_closes_without_fill():
-    """GOLDEN RULE: economic close only created after confirmed FILLED.
+    """GOLDEN RULE: economic close only created after CONFIRMED fill truth.
 
     If CLOB returns OPEN (not filled), position must remain open with
     retry_pending state. It must NOT be closed or voided.
@@ -185,8 +188,8 @@ def test_pending_tracked_voids_after_cancel():
     assert len(portfolio.positions) == 0  # void_position removes from portfolio
 
 
-def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
-    """Normal CLOB fill verifies locally first; chain ownership arrives later."""
+def test_fill_tracker_keeps_confirmed_entry_local_only_until_chain_seen():
+    """CONFIRMED CLOB fill verifies locally first; chain ownership arrives later."""
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -207,9 +210,9 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
             self.entries.append(position.trade_id)
 
     tracker = Tracker()
-    clob = _make_clob(order_status="FILLED")
+    clob = _make_clob(order_status="CONFIRMED")
     clob.get_order_status.return_value = {
-        "status": "FILLED",
+        "status": "CONFIRMED",
         "avgPrice": 0.44,
         "filledSize": 25.0,
     }
@@ -222,7 +225,7 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert pos.state == "entered"
     assert pos.entry_order_id == "buy_123"
     assert pos.entry_fill_verified is True
-    assert pos.order_status == "filled"
+    assert pos.order_status == "confirmed"
     assert pos.chain_state == "local_only"
     assert pos.entered_at != ""
     assert pos.size_usd == pytest.approx(11.0)
@@ -231,8 +234,34 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert tracker.entries == ["test_001"]
 
 
-def test_fill_tracker_keeps_matched_entry_pending_until_final_confirmation():
-    """MATCHED is optimistic execution truth; it must not activate entry state."""
+def test_matched_without_filled_size_does_not_materialize_entry():
+    """MATCHED alone is not finality; legacy polling must see filled size."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {"status": "MATCHED", "price": 0.44}
+
+    class StaleDeps:
+        PENDING_FILL_STATUSES = {"FILLED", "MATCHED"}
+
+    stats = check_pending_entries(portfolio, clob, deps=StaleDeps)
+
+    assert stats["entered"] == 0
+    assert stats["still_pending"] == 1
+    assert pos.state == "pending_tracked"
+    assert pos.entry_fill_verified is False
+    assert pos.order_status == "matched"
+
+
+def test_confirmed_fill_survives_stale_deps_fill_statuses():
+    """Stale deps cannot remove CONFIRMED as the only entry success terminal."""
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -244,17 +273,214 @@ def test_fill_tracker_keeps_matched_entry_pending_until_final_confirmation():
         chain_state="unknown",
     )
     portfolio = _make_portfolio(pos)
-    clob = _make_clob(order_status="MATCHED")
+    clob = _make_clob(order_status="CONFIRMED")
+    clob.get_order_status.return_value = {
+        "status": "CONFIRMED",
+        "avgPrice": 0.44,
+        "filledSize": 25.0,
+    }
 
-    stats = check_pending_entries(portfolio, clob)
+    class StaleDeps:
+        PENDING_FILL_STATUSES = {"FILLED", "MATCHED"}
+
+    stats = check_pending_entries(portfolio, clob, deps=StaleDeps)
+
+    assert stats["entered"] == 1
+    assert stats["still_pending"] == 0
+    assert pos.state == "entered"
+    assert pos.entry_fill_verified is True
+    assert pos.order_status == "confirmed"
+
+
+def test_legacy_polling_matched_maps_numeric_live_runtime_id_to_optimistic_lot(tmp_path):
+    """Numeric-looking executor runtime ids must not bypass trade_decisions mapping."""
+    from src.execution.fill_tracker import check_pending_entries
+    from src.state.db import get_connection, init_schema
+    from src.state.venue_command_repo import load_calibration_trade_facts
+
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-match",
+            "snap-match",
+            "env-match",
+            "123456789012",
+            "dec-live-abc",
+            "idem-match",
+            "ENTRY",
+            "condition-match",
+            "tok_yes_001",
+            "BUY",
+            20.0,
+            0.40,
+            "buy_123",
+            "ACKED",
+            None,
+            "2026-04-29T12:00:00+00:00",
+            "2026-04-29T12:00:00+00:00",
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "condition-match",
+            "60-65",
+            "buy_yes",
+            20.0,
+            0.40,
+            "2026-04-29T12:00:00+00:00",
+            0.55,
+            0.55,
+            0.15,
+            0.50,
+            0.60,
+            0.0,
+            "pending_tracked",
+            "123456789012",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    class Deps:
+        @staticmethod
+        def get_connection():
+            return get_connection(db_path)
+
+    pos = _make_position(
+        trade_id="123456789012",
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        strategy_key="center_buy",
+        strategy="center_buy",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+    clob.get_order_status.return_value = {
+        "status": "MATCHED",
+        "trade_id": "trade-match",
+        "trade_status": "MATCHED",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+        "timestamp": "2026-04-29T12:01:00+00:00",
+    }
+
+    stats = check_pending_entries(
+        portfolio,
+        clob,
+        deps=Deps,
+        now=datetime(2026, 4, 29, 12, 1, tzinfo=timezone.utc),
+    )
 
     assert stats["entered"] == 0
-    assert stats["voided"] == 0
     assert stats["still_pending"] == 1
-    assert stats["dirty"] is True
+    assert pos.state == "pending_tracked"
+    assert pos.order_status == "matched"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+
+    conn = get_connection(db_path)
+    order_states = [r["state"] for r in conn.execute("SELECT state FROM venue_order_facts").fetchall()]
+    trade_states = [r["state"] for r in conn.execute("SELECT state FROM venue_trade_facts").fetchall()]
+    lot_rows = conn.execute("SELECT position_id, state FROM position_lots").fetchall()
+    exec_row = conn.execute(
+        "SELECT terminal_exec_status FROM execution_fact WHERE position_id = ? AND order_role = 'entry'",
+        ("123456789012",),
+    ).fetchone()
+    canonical_events = conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ?",
+        ("123456789012",),
+    ).fetchall()
+    calibration_rows = load_calibration_trade_facts(conn)
+    conn.close()
+
+    assert order_states == ["MATCHED"]
+    assert trade_states == ["MATCHED"]
+    assert [(row["position_id"], row["state"]) for row in lot_rows] == [(1, "OPTIMISTIC_EXPOSURE")]
+    assert exec_row is None
+    assert canonical_events == []
+    assert calibration_rows == []
+
+
+def test_partial_remainder_cancel_preserves_filled_exposure():
+    """A partial fill followed by cancel timeout preserves non-final exposure."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        order_timeout_at="2026-04-29T12:05:00+00:00",
+        size_usd=20.0,
+        entry_price=0.40,
+        shares=0.0,
+        cost_basis_usd=0.0,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="PARTIAL")
+    clob.get_order_status.return_value = {
+        "status": "PARTIAL",
+        "avgPrice": 0.42,
+        "filledSize": 12.0,
+    }
+
+    first = check_pending_entries(
+        portfolio,
+        clob,
+        now=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert first["entered"] == 0
+    assert first["still_pending"] == 1
     assert pos.state == "pending_tracked"
     assert pos.entry_fill_verified is False
-    assert pos.order_status == "matched"
+    assert pos.shares == pytest.approx(12.0)
+    assert pos.cost_basis_usd == pytest.approx(12.0 * 0.42)
+    assert pos.order_status == "partial"
+    clob.cancel_order.assert_not_called()
+
+    clob.get_order_status.return_value = {"status": "OPEN"}
+    second = check_pending_entries(
+        portfolio,
+        clob,
+        now=datetime(2026, 4, 29, 12, 6, tzinfo=timezone.utc),
+    )
+
+    assert second["entered"] == 0
+    assert second["voided"] == 0
+    assert second["still_pending"] == 1
+    assert len(portfolio.positions) == 1
+    assert pos.state == "pending_tracked"
+    assert pos.entry_fill_verified is False
+    assert pos.entered_at == ""
+    assert pos.shares == pytest.approx(12.0)
+    assert pos.cost_basis_usd == pytest.approx(12.0 * 0.42)
+    assert pos.order_status == "partial_remainder_cancelled"
+    clob.cancel_order.assert_called_once_with("buy_123")
 
 
 def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
@@ -742,8 +968,9 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
     pos = _make_position(direction="unknown", chain_state="quarantined")
     portfolio = _make_portfolio(pos)
 
-    class PaperClob:
-        paper_mode = True
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.41, 100.0, 100.0
 
     class Tracker:
         def record_exit(self, position):
@@ -767,7 +994,7 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -788,7 +1015,7 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -810,8 +1037,9 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
     pos = _make_position(direction="unknown", chain_state="quarantine_expired")
     portfolio = _make_portfolio(pos)
 
-    class PaperClob:
-        paper_mode = True
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.41, 100.0, 100.0
 
     class Tracker:
         def record_exit(self, position):
@@ -835,7 +1063,7 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -859,8 +1087,9 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
     pos = _make_position(state="holding", city="Chicago", target_date="2026-04-01")
     portfolio = _make_portfolio(pos)
 
-    class PaperClob:
-        paper_mode = True
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.41, 100.0, 100.0
 
     class Tracker:
         def record_exit(self, position):
@@ -913,7 +1142,7 @@ def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -992,8 +1221,8 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     append_many_and_project(conn, events, projection)
     portfolio = _make_portfolio(pos)
 
-    class PaperClob:
-        paper_mode = True
+    class LiveClob:
+        pass
 
     class Tracker:
         def record_exit(self, position):
@@ -1041,7 +1270,7 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
 
     cycle_runtime.execute_monitoring_phase(
         conn,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -1084,14 +1313,13 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     )
     portfolio = _make_portfolio(pos)
 
-    class PaperClob:
-        paper_mode = True
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.41, 100.0, 100.0
 
     class Tracker:
         def record_exit(self, position):
             raise AssertionError("No exit expected in same-cycle Day0 refresh test")
-
-    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.41)
 
     observed_methods = []
 
@@ -1124,7 +1352,7 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
 
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
-        PaperClob(),
+        LiveClob(),
         portfolio,
         artifact,
         Tracker(),
@@ -1159,9 +1387,8 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
     )
 
     class DummyClob:
-        paper_mode = True
-
-    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.41)
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.43, 100.0, 100.0
 
     observed_methods = []
 
@@ -1202,8 +1429,6 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
     )
 
     class DummyClob:
-        paper_mode = False
-
         def get_best_bid_ask(self, token_id):
             assert token_id == "tok_yes_001"
             return 0.37, 0.55, 100.0, 200.0
@@ -1248,9 +1473,9 @@ def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):
     )
 
     class DummyClob:
-        paper_mode = True
+        def get_best_bid_ask(self, token_id):
+            return 0.41, 0.43, 100.0, 100.0
 
-    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.41)
     monkeypatch.setattr(
         monitor_refresh,
         "_fetch_day0_observation",
@@ -1338,8 +1563,8 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     assert pos in portfolio.positions  # NOT closed
 
 
-def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
-    """Deferred fill telemetry must preserve sell-side realizable bid, not
+def test_deferred_confirmed_fill_logs_last_monitor_best_bid(tmp_path):
+    """Deferred confirmed fill telemetry must preserve sell-side realizable bid, not
     mark price. T1.c-followup rewrite 2026-04-23: post-T4.1b, exit fill
     emission flows through build_economic_close_canonical_write; test
     seeds active-phase canonical baseline so EXIT_ORDER_FILLED lands
@@ -1376,7 +1601,7 @@ def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     # pending_exit state via exit_state mutation for the test scenario.
     _seed_canonical_entry_baseline(conn, pos)
     pos.exit_state = "sell_pending"
-    clob = _make_clob(sell_result={"status": "FILLED", "avgPrice": 0.39})
+    clob = _make_clob(sell_result={"status": "CONFIRMED", "avgPrice": 0.39})
 
     stats = check_pending_exits(portfolio, clob, conn=conn)
     events = query_position_events(conn, "deferred-fill-1")
@@ -1389,6 +1614,31 @@ def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     assert fill_event["details"]["fill_price"] == pytest.approx(0.39)
     assert fill_event["details"]["best_bid"] == pytest.approx(0.39)
     assert fill_event["details"]["current_market_price"] == pytest.approx(0.44)
+
+
+def test_pending_exit_filled_status_does_not_economically_close():
+    """FILLED is an order observation; CONFIRMED is required for exit finality."""
+    pos = _make_position(
+        state="day0_window",
+        exit_state="sell_pending",
+        last_exit_order_id="sell-order-1",
+        exit_reason="DEFERRED_SELL_FILL",
+        last_monitor_market_price=0.44,
+        last_monitor_best_bid=0.39,
+        entry_fill_verified=True,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(sell_result={"status": "FILLED", "avgPrice": 0.39})
+
+    stats = check_pending_exits(portfolio, clob, conn=None)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos in portfolio.positions
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "sell_pending"
+    assert pos.exit_price in (None, 0.0)
 
 
 def test_pending_exit_matched_status_does_not_economically_close():

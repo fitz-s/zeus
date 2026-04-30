@@ -1,14 +1,16 @@
 # Created: 2026-04-30
 # Last reused/audited: 2026-04-30
-# Authority basis: first-principles safety implementation 2026-04-30
+# Authority basis: Phase 1D forecast source policy + first-principles safety implementation 2026-04-30
 """Tests for ensemble client caching and request behavior."""
 
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 
 from src.config import City
 from src.data import ensemble_client
+from src.data.forecast_source_registry import SourceNotEnabled
 
 
 NYC = City(
@@ -16,7 +18,7 @@ NYC = City(
     lat=40.7772,
     lon=-73.8726,
     timezone="America/New_York",
-    cluster="US-Northeast",
+    cluster="NYC",
     settlement_unit="F",
     wu_station="KLGA",
 )
@@ -57,12 +59,31 @@ def test_fetch_ensemble_uses_cache(monkeypatch):
 
     monkeypatch.setattr(ensemble_client.httpx, "get", _get)
 
-    first = ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="ecmwf_ifs025")
-    second = ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="ecmwf_ifs025")
+    first = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
+    second = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
 
     assert calls["n"] == 1
     assert first is not None and second is not None
     np.testing.assert_array_equal(first["members_hourly"], second["members_hourly"])
+    assert first["degradation_level"] == "DEGRADED_FORECAST_FALLBACK"
+    assert first["forecast_source_role"] == "monitor_fallback"
+
+
+def test_fetch_ensemble_blocks_openmeteo_for_entry_primary_role():
+    ensemble_client._ENSEMBLE_CACHE.clear()
+
+    with pytest.raises(SourceNotEnabled, match="entry_primary"):
+        ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="ecmwf_ifs025", role="entry_primary")
 
 
 def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
@@ -78,8 +99,18 @@ def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
 
     monkeypatch.setattr(ensemble_client.httpx, "get", _get)
 
-    ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="ecmwf_ifs025")
-    ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="gfs025")
+    ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
+    ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="gfs025",
+        role="monitor_fallback",
+    )
 
     assert calls["n"] == 2
 
@@ -142,3 +173,35 @@ def test_validate_ensemble_ignores_irrelevant_hour_nans_for_required_hours():
         expected_members=51,
         required_hour_indices=[1, 2],
     )
+
+
+def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
+    ensemble_client._ENSEMBLE_CACHE.clear()
+    calls = {"n": 0}
+
+    monkeypatch.setattr(ensemble_client.quota_tracker, "can_call", lambda: True)
+    monkeypatch.setattr(ensemble_client.quota_tracker, "record_call", lambda endpoint="": None)
+
+    def _get(*args, **kwargs):
+        calls["n"] += 1
+        return _Response(_payload())
+
+    monkeypatch.setattr(ensemble_client.httpx, "get", _get)
+
+    monitor = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
+    diagnostic = ensemble_client.fetch_ensemble(
+        NYC,
+        forecast_days=4,
+        model="ecmwf_ifs025",
+        role="diagnostic",
+    )
+
+    assert calls["n"] == 2
+    assert monitor is not None and diagnostic is not None
+    assert monitor["forecast_source_role"] == "monitor_fallback"
+    assert diagnostic["forecast_source_role"] == "diagnostic"

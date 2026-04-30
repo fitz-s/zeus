@@ -12,6 +12,8 @@ Future M5 exchange reconciliation owns proving absence and unblocking unknowns.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +62,18 @@ _ACTIVE_REPLACEMENT_STATES = frozenset(
         "CANCEL_UNKNOWN",
     }
 )
+_CANCEL_REQUESTABLE_STATES = frozenset(
+    {
+        "INTENT_CREATED",
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "ACKED",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "PARTIAL",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +87,125 @@ class CancelOutcome:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _enum_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)
+
+
+def _capability_component(
+    component: str,
+    *,
+    allowed: bool,
+    reason: str,
+    **details: Any,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "component": str(component),
+        "allowed": bool(allowed),
+        "reason": str(reason),
+    }
+    if details:
+        payload["details"] = {
+            key: _enum_value(value) if not isinstance(value, (bool, int, float)) else value
+            for key, value in details.items()
+        }
+    return payload
+
+
+def _build_cancel_execution_capability(
+    *,
+    command_id: str,
+    venue_order_id: str,
+    command_state: str,
+    cutover: Any | None,
+    freshness_time: str,
+) -> dict[str, Any]:
+    cutover_allowed = bool(getattr(cutover, "allow_cancel", False))
+    cutover_state = _enum_value(getattr(cutover, "state", None))
+    cutover_reason = getattr(cutover, "block_reason", None)
+    identity_allowed = bool(str(command_id).strip() and str(venue_order_id).strip())
+    requestable = command_state in _CANCEL_REQUESTABLE_STATES or command_state == "CANCEL_PENDING"
+    components = [
+        _capability_component(
+            "cutover_guard",
+            allowed=cutover_allowed,
+            reason=str(cutover_reason or ("allowed" if cutover_allowed else "not_evaluated_or_blocked")),
+            state=cutover_state,
+        ),
+        _capability_component(
+            "cancel_command_identity",
+            allowed=identity_allowed,
+            reason="allowed" if identity_allowed else "missing_command_or_venue_order_id",
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        ),
+        _capability_component(
+            "venue_order_cancelability",
+            allowed=bool(identity_allowed and requestable),
+            reason=(
+                "missing_command_or_venue_order_id"
+                if not identity_allowed
+                else ("allowed" if requestable else f"state_not_cancel_requestable:{command_state}")
+            ),
+            command_state=command_state,
+        ),
+    ]
+    proof: dict[str, Any] = {
+        "schema_version": 1,
+        "action": "CANCEL",
+        "intent_kind": "CANCEL",
+        "mode": "cancel",
+        "allowed": all(bool(component.get("allowed")) for component in components),
+        "freshness_time": freshness_time,
+        "command_id": str(command_id),
+        "venue_order_id": str(venue_order_id),
+        "command_state": command_state,
+        "components": components,
+    }
+    proof["capability_id"] = hashlib.sha256(
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return proof
+
+
+def _has_cancel_execution_capability(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+           AND event_type = 'CANCEL_REQUESTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None or not row[0]:
+        return False
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    capability = payload.get("execution_capability") if isinstance(payload, dict) else None
+    if not isinstance(capability, dict):
+        return False
+    return (
+        capability.get("action") == "CANCEL"
+        and capability.get("intent_kind") == "CANCEL"
+        and capability.get("command_id") == str(command_id)
+        and capability.get("venue_order_id") == str(venue_order_id)
+        and bool(capability.get("allowed"))
+    )
 
 
 def init_exit_mutex_schema(conn: sqlite3.Connection) -> None:
@@ -298,8 +431,6 @@ def _latest_event(conn: sqlite3.Connection, command_id: str) -> tuple[str, dict[
         return None
     payload = None
     if row[1]:
-        import json
-
         payload = json.loads(row[1])
     return str(row[0]), payload
 
@@ -387,21 +518,52 @@ def request_cancel_for_command(
     venue_order_id = str(cmd.get("venue_order_id") or "")
     if not venue_order_id:
         outcome = CancelOutcome("UNKNOWN", "missing_venue_order_id", {})
-        _append_cancel_unknown(conn, command_id, outcome, when)
+        _append_cancel_unknown(
+            conn,
+            command_id,
+            outcome,
+            when,
+            execution_capability=_build_cancel_execution_capability(
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+                command_state=str(cmd.get("state") or "").upper(),
+                cutover=None,
+                freshness_time=when,
+            ),
+        )
         return outcome
 
     cutover = gate_for_intent(IntentKind.CANCEL)
     if not cutover.allow_cancel:
         raise CutoverPending(cutover.block_reason or cutover.state.value)
 
-    if str(cmd.get("state") or "").upper() != "CANCEL_PENDING":
+    command_state = str(cmd.get("state") or "").upper()
+    if command_state != "CANCEL_PENDING":
+        execution_capability = _build_cancel_execution_capability(
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+            command_state=command_state,
+            cutover=cutover,
+            freshness_time=when,
+        )
         append_event(
             conn,
             command_id=command_id,
             event_type="CANCEL_REQUESTED",
             occurred_at=when,
-            payload={"venue_order_id": venue_order_id},
+            payload={
+                "venue_order_id": venue_order_id,
+                "execution_capability": execution_capability,
+            },
         )
+    elif not _has_cancel_execution_capability(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ):
+        outcome = CancelOutcome("UNKNOWN", "missing_cancel_capability_proof", {})
+        _append_cancel_unknown(conn, command_id, outcome, when)
+        return outcome
     try:
         raw = cancel_order(venue_order_id)
         outcome = parse_cancel_response(raw)
@@ -441,6 +603,8 @@ def _append_cancel_unknown(
     command_id: str,
     outcome: CancelOutcome,
     observed_at: str,
+    *,
+    execution_capability: Mapping[str, Any] | None = None,
 ) -> None:
     from src.state.venue_command_repo import append_event, get_command
 
@@ -449,12 +613,15 @@ def _append_cancel_unknown(
         raise ValueError(f"Unknown command_id: {command_id!r}")
     state = str(cmd.get("state") or "").upper()
     if state != "CANCEL_PENDING":
+        payload: dict[str, Any] = {"venue_order_id": cmd.get("venue_order_id") or ""}
+        if execution_capability is not None:
+            payload["execution_capability"] = dict(execution_capability)
         append_event(
             conn,
             command_id=command_id,
             event_type="CANCEL_REQUESTED",
             occurred_at=observed_at,
-            payload={"venue_order_id": cmd.get("venue_order_id") or ""},
+            payload=payload,
         )
     append_event(
         conn,

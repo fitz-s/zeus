@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from src.config import PROJECT_ROOT, cities
+from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.state.db import get_world_connection as get_connection
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,11 @@ FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
 DOWNLOAD_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "download_ecmwf_open_ens.py"
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_city_member_vectors.py"
 STEP_HOURS = [24, 48, 72, 96, 120, 144, 168]
+SOURCE_ID = "ecmwf_open_data"
+FORECAST_SOURCE_ROLE = "diagnostic"
 DATA_VERSION = "open_ens_v1"
 MODEL_VERSION = "ecmwf_open_data"
+DIAGNOSTIC_AUTHORITY = "UNVERIFIED"
 
 
 def _run_json_command(args: list[str]) -> dict:
@@ -73,6 +77,9 @@ def collect_open_ens_cycle(
     conn=None,
 ) -> dict:
     """Download the latest ECMWF Open Data ENS run and mirror it into SQLite."""
+
+    source_spec = gate_source(SOURCE_ID)
+    gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
 
     now = datetime.now(timezone.utc)
     cycle_date, cycle_hour = _default_cycle(now) if run_date is None or run_hour is None else (run_date, run_hour)
@@ -131,8 +138,9 @@ def collect_open_ens_cycle(
                     """
                     INSERT OR IGNORE INTO ensemble_snapshots
                     (city, target_date, issue_time, valid_time, available_at, fetch_time,
-                     lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
+                     data_version, authority)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         city.name,
@@ -148,6 +156,7 @@ def collect_open_ens_cycle(
                         0,
                         MODEL_VERSION,
                         DATA_VERSION,
+                        DIAGNOSTIC_AUTHORITY,
                     ),
                 )
                 inserted += int(conn.execute("SELECT changes()").fetchone()[0])
@@ -159,6 +168,10 @@ def collect_open_ens_cycle(
     return {
         "run_date": cycle_date.isoformat(),
         "run_hour": cycle_hour,
+        "source_id": SOURCE_ID,
+        "forecast_source_role": FORECAST_SOURCE_ROLE,
+        "degradation_level": source_spec.degradation_level,
+        "authority": DIAGNOSTIC_AUTHORITY,
         "download_path": str(output_path),
         "snapshots_inserted": inserted,
         "cities_attempted": len(cities),

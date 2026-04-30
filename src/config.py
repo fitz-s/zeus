@@ -315,6 +315,21 @@ def ensemble_crosscheck_member_count() -> int:
     return int(settings["ensemble"]["crosscheck_members"])
 
 
+def _ensemble_model_setting(key: str) -> str:
+    model = str(settings["ensemble"][key]).strip()
+    if not model:
+        raise ValueError(f"settings['ensemble']['{key}'] must not be empty")
+    return model
+
+
+def ensemble_primary_model() -> str:
+    return _ensemble_model_setting("primary")
+
+
+def ensemble_crosscheck_model() -> str:
+    return _ensemble_model_setting("crosscheck")
+
+
 def ensemble_n_mc() -> int:
     return int(settings["ensemble"]["n_mc"])
 
