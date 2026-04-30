@@ -7,6 +7,19 @@ Status: first guardrail slice implemented.
 Status: first corrected executor bridge landed in
 `worktree/reality-semantics-refactor`.
 
+Additional completed slice: buy_no exit quote split.
+
+- `src/execution/exit_triggers.py` now threads held-token `best_bid` into the
+  buy_no reversal EV gate
+- buy_no exit EV comparison uses held-token sell quote when available; it no
+  longer reads `current_edge_context.p_market[0]` as a sell-value proxy
+- runtime guard tests lock both sides of the split: a high `p_market` vector
+  cannot force a buy_no exit when held-token `best_bid` is uneconomic, and a
+  low `p_market` vector cannot block an exit when held-token `best_bid` beats
+  hold value
+- no lifecycle, state, config, schema, venue, or live side-effect surface was
+  changed in this slice
+
 Additional completed slice: runtime corrected live gate.
 
 - added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
@@ -86,6 +99,16 @@ Passing checks:
 - `python -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_routes_to_refactor_profile tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py` -> 109 passed, 22 skipped
 - `python scripts/digest_profiles_export.py --check`
 - `python scripts/topology_doctor.py --schema`
+- `python -m pytest tests/test_runtime_guards.py::test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector tests/test_runtime_guards.py::test_buy_no_exit_ev_gate_allows_sell_when_best_bid_beats_hold_value tests/test_churn_defense.py tests/test_lifecycle.py::TestExitTriggers -q` -> 24 passed
+- `python -m pytest tests/test_runtime_guards.py tests/test_churn_defense.py tests/test_lifecycle.py tests/test_entry_exit_symmetry.py tests/test_instrument_invariants.py -q` -> 253 passed
+- `python -m compileall -q src/execution/exit_triggers.py tests/test_runtime_guards.py`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_runtime_guards.py --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/execution/exit_triggers.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/execution/exit_triggers.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+
+Known adjacent failure observed outside the buy_no quote split:
+
+- `python -m pytest tests/test_runtime_guards.py tests/test_churn_defense.py tests/test_lifecycle.py tests/test_entry_exit_symmetry.py tests/test_pre_live_integration.py tests/test_instrument_invariants.py -q` -> 1 failed in `tests/test_pre_live_integration.py::test_full_monitoring_pipeline`; this exercises buy_yes monitoring pipeline dirtiness and was not changed by the buy_no exit quote split
 
 Review gates:
 
@@ -93,12 +116,19 @@ Review gates:
   package registration, and focused tests
 - code-reviewer pass: initial REVISE on plan scope / INV-35 scope / monitor
   test breadth; fixes applied; re-review APPROVE
+- critic pass for commit `d07d944`: PASS on default-off corrected live gate,
+  fail-closed shadow handling, no config promotion, no cycle_runner injection,
+  and no live/prod side effects
 
 ## Not Completed
 
 This slice does not implement runtime rewiring. Legacy executor limit
 computation, monitor/exit executable proceeds, persistence, reporting, shadow,
 canary, and promotion evidence remain later phases under `WORKFLOW.md`.
+
+The buy_no quote split in `src/execution/exit_triggers.py` does not yet route
+through the state-owned `Position._buy_no_exit` path; that remains a separate
+scope requiring its own topology admission.
 
 No live venue submission, production DB mutation, schema migration apply,
 source-routing change, config flip, or live strategy promotion was performed.

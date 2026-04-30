@@ -311,6 +311,68 @@ def _insert_executable_snapshot(
     )
 
 
+def _buy_no_exit_position_for_quote_split() -> Position:
+    pos = Position(
+        trade_id="buy-no-exit-quote-split",
+        market_id="market-buy-no-exit-quote-split",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_no",
+        size_usd=10.0,
+        entry_price=0.50,
+        p_posterior=0.70,
+        entry_ci_width=0.02,
+        token_id="yes-held",
+        no_token_id="no-held",
+    )
+    pos.neg_edge_count = 1
+    return pos
+
+
+def _buy_no_exit_context_for_quote_split(*, p_market_quote: float) -> EdgeContext:
+    return EdgeContext(
+        p_raw=np.array([0.60, 0.40]),
+        p_cal=np.array([0.60, 0.40]),
+        p_market=np.array([p_market_quote]),
+        p_posterior=0.60,
+        forward_edge=-0.10,
+        alpha=0.0,
+        confidence_band_upper=-0.08,
+        confidence_band_lower=-0.12,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="buy-no-exit-quote-split-snap",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+
+
+def test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector():
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    pos = _buy_no_exit_position_for_quote_split()
+    ctx = _buy_no_exit_context_for_quote_split(p_market_quote=0.95)
+
+    signal = evaluate_exit_triggers(pos, ctx, best_bid=0.20)
+
+    assert signal is None
+
+
+def test_buy_no_exit_ev_gate_allows_sell_when_best_bid_beats_hold_value():
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    pos = _buy_no_exit_position_for_quote_split()
+    ctx = _buy_no_exit_context_for_quote_split(p_market_quote=0.05)
+
+    signal = evaluate_exit_triggers(pos, ctx, best_bid=0.70)
+
+    assert signal is not None
+    assert signal.trigger == "BUY_NO_EDGE_EXIT"
+
+
 def _stub_full_family_scan(monkeypatch) -> None:
     def _scan(analysis, *args, **kwargs):
         selected_method = getattr(analysis, "selected_method", "test_fixture")
