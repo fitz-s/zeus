@@ -2162,6 +2162,28 @@ def test_digest_profile_selection_rejects_shared_only_selector(monkeypatch):
     assert any(issue.code == "digest_profile_selector_shared_only" for issue in result.issues)
 
 
+def test_digest_profile_selection_uses_match_policy_strong_phrases(monkeypatch):
+    topology = json.loads(json.dumps(topology_doctor.load_topology()))
+    topology["digest_profile_selection"] = {
+        "shared_companion_patterns": ["architecture/topology.yaml"],
+    }
+    topology["digest_profiles"] = [
+        {
+            "id": "phrase selectable shared-file profile",
+            "match_policy": {
+                "strong_phrases": ["phrase selectable"],
+            },
+            "file_patterns": ["architecture/topology.yaml"],
+        }
+    ]
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    result = topology_doctor.run_schema()
+
+    assert_topology_ok(result)
+
+
 def test_digest_profile_selection_rejects_conflicting_file_evidence(monkeypatch):
     topology = json.loads(json.dumps(topology_doctor.load_topology()))
     topology["digest_profiles"] = [

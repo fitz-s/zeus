@@ -6,7 +6,7 @@ Task: Topology profile resolver stability.
 Changed files: see `receipt.json`.
 Summary: Implemented semantic-vs-companion profile selection and navigation input fixes.
 Verification: focused topology gates pass; see Verification section.
-Next: independent pre-close critic/verifier review before marking the packet closed.
+Next: independent verifier review before marking the packet closed.
 
 ## 2026-04-29
 
@@ -33,8 +33,8 @@ Next: independent pre-close critic/verifier review before marking the packet clo
 - `python -m py_compile scripts/topology_doctor_digest.py scripts/topology_doctor.py scripts/topology_doctor_cli.py scripts/topology_doctor_registry_checks.py` -> passed.
 - `python scripts/topology_doctor.py --schema --json` -> `ok: true`.
 - `python scripts/digest_profiles_export.py --check` -> passed.
-- `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py` -> 40 passed.
-- `python -m pytest -q tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or digest_profile_selection or route_card or issue_schema'` -> 80 passed, 200 deselected.
+- `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py` -> 41 passed.
+- `python -m pytest -q tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or digest_profile_selection or route_card or issue_schema'` -> 81 passed, 200 deselected.
 - Typed topology navigation for this changed-file set -> `ok: true`, admission `admitted`, direct blockers empty, risk tier T3.
 - Planning lock with packet plan evidence -> `ok: true`.
 - Work record gate -> `ok: true`.
@@ -53,3 +53,20 @@ Next: independent pre-close critic/verifier review before marking the packet clo
 - Full `tests/test_topology_doctor.py` currently has an unrelated repository
   health failure: `reference_replacement_missing_entry` for
   `docs/reference/zeus_calibration_weighting_authority.md`.
+
+## Subagent Review Follow-up
+
+- Subagent review verdict: `REQUEST CHANGES`.
+- Finding addressed: exact receipt `changed_files` without typed intent still
+  routed to `r3 live readiness gates implementation` because
+  `tests/test_digest_profile_matching.py` was treated as a legacy semantic file
+  hit.
+- Fix applied: added cross-profile resolver/topology tests to
+  `digest_profile_selection.shared_companion_patterns` and kept true
+  live-readiness files explicit under `semantic_file_patterns`.
+- Regression added: exact profile-resolver-stability changed-file set now
+  returns generic `advisory_only` with `shared_file_only` evidence and
+  `needs_typed_intent: true`, not live-readiness.
+- Finding addressed: schema guard now reads `match_policy.strong_phrases`
+  instead of only top-level `strong_phrases`.
+- Re-verified closeout after follow-up -> `ok: true`, no blocking issues.

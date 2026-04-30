@@ -141,7 +141,12 @@ def check_digest_profile_selection(api: Any, topology: dict[str, Any]) -> list[A
 
         legacy_patterns = {str(pattern) for pattern in profile.get("file_patterns", []) or []}
         legacy_non_shared_patterns = sorted(legacy_patterns - shared_patterns)
-        strong_phrases = [phrase for phrase in profile.get("strong_phrases", []) or [] if str(phrase).strip()]
+        policy = profile.get("match_policy") or {}
+        strong_phrases = [
+            phrase
+            for phrase in (policy.get("strong_phrases", []) or profile.get("strong_phrases", []) or [])
+            if str(phrase).strip()
+        ]
         if legacy_patterns and not semantic_patterns and not legacy_non_shared_patterns and not strong_phrases:
             issues.append(
                 api._issue(

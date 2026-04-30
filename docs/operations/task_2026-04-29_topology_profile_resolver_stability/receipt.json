@@ -1,6 +1,6 @@
 {
   "task": "Topology profile resolver stability: distinguish semantic file evidence from shared companion registry evidence, fix navigation changed-files input, and clarify task-scoped blockers.",
-  "status": "implemented_pending_preclose_review",
+  "status": "implemented_after_preclose_critic_pending_verifier",
   "packet": "docs/operations/task_2026-04-29_topology_profile_resolver_stability",
   "route_source": "navigation",
   "route_evidence": [
@@ -53,15 +53,18 @@
     "py_compile topology doctor modules: passed",
     "topology schema check: ok true",
     "digest profile mirror check: ok",
-    "pytest digest profile suite: 40 passed",
-    "pytest scoped topology doctor slice: 80 passed, 200 deselected",
+    "pytest digest profile suite: 41 passed",
+    "pytest scoped topology doctor slice: 81 passed, 200 deselected",
     "typed topology navigation for changed files: ok true, admission admitted, direct blockers empty",
     "planning lock with packet plan evidence: ok true",
     "work record gate: ok true",
     "change receipt gate: ok true",
     "map maintenance closeout: ok true",
     "topology closeout: ok true, no blocking issues",
-    "git diff --check: clean"
+    "git diff --check: clean",
+    "subagent code review returned REQUEST CHANGES; findings addressed in follow-up patch",
+    "exact changed-file regression: untyped resolver returns generic advisory_only with shared_file_only evidence and no live-readiness route",
+    "schema guard regression: match_policy.strong_phrases recognized"
   ],
   "tests_evidence": [
     "docs/operations/task_2026-04-29_topology_profile_resolver_stability/work_log.md",
@@ -70,7 +73,7 @@
     "tests/test_topology_doctor.py"
   ],
   "residual_risks": [
-    "Packet status is implemented_pending_preclose_review because no independent third-party critic/verifier artifact was produced in this turn.",
+    "Packet status is implemented_after_preclose_critic_pending_verifier because independent verifier artifact has not yet been produced.",
     "Full tests/test_topology_doctor.py currently fails on unrelated existing repository health: reference_replacement_missing_entry for docs/reference/zeus_calibration_weighting_authority.md.",
     "Navigation reports pre-existing global health debt in docs, source, history_lore, and reference_replacement lanes; task-scoped blockers for this packet are empty."
   ]
