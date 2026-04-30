@@ -169,6 +169,22 @@ def test_source_current_fact_refresh_routes_to_current_fact_profile():
     assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
 
 
+def test_source_contract_auto_conversion_routes_to_runtime_profile():
+    digest = build_digest(
+        "source contract auto conversion cron controller with Discord date scope",
+        [
+            "scripts/source_contract_auto_convert.py",
+            "tests/test_market_scanner_provenance.py",
+            "docs/operations/task_2026-04-30_source_auto_conversion/plan.md",
+            "architecture/script_manifest.yaml",
+        ],
+    )
+    assert digest["profile"] == "source contract auto conversion runtime"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/source_contract_auto_convert.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
 def test_r3_u2_raw_provenance_routes_to_u2_profile_not_heartbeat():
     """U2 shares broad R3 packet docs paths with earlier phases; strong U2
     phrases must win over Z3's broad docs file-pattern hit so state/schema

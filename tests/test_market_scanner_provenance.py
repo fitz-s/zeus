@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -77,6 +78,8 @@ def _make_dummy_event(market_id: str = "m1") -> dict:
 
 def _gamma_temperature_event(
     *,
+    event_id: str = "event1",
+    market_id: str = "market1",
     title: str = "Highest temperature in Los Angeles on April 29?",
     slug: str = "highest-temperature-in-los-angeles-on-april-29-2026",
     question: str = "Will the high temperature in Los Angeles be 68°F or higher?",
@@ -84,7 +87,7 @@ def _gamma_temperature_event(
     market_resolution_source: str | None = None,
 ) -> dict:
     market = {
-        "id": "market1",
+        "id": market_id,
         "question": question,
         "outcomePrices": "[0.55, 0.45]",
         "outcomes": '["Yes", "No"]',
@@ -96,7 +99,7 @@ def _gamma_temperature_event(
     if market_resolution_source is not None:
         market["resolutionSource"] = market_resolution_source
     event = {
-        "id": "event1",
+        "id": event_id,
         "slug": slug,
         "title": title,
         "markets": [market],
@@ -399,6 +402,69 @@ class TestSourceContractGate:
 
         assert parsed is None
 
+    def test_city_matching_reads_runtime_city_config(self, monkeypatch):
+        from src.config import City
+
+        live_city = City(
+            name="Reload City",
+            lat=1.0,
+            lon=2.0,
+            timezone="UTC",
+            settlement_unit="C",
+            cluster="Reload City",
+            wu_station="TEST",
+            aliases=("Reload City",),
+            slug_names=("reload-city",),
+            airport_name="Reload Test Airport",
+            settlement_source="https://www.wunderground.com/history/daily/xx/reload/TEST",
+            country_code="XX",
+        )
+        monkeypatch.setattr(ms.runtime_config, "runtime_cities", lambda: [live_city])
+
+        matched = ms._match_city(
+            "highest temperature in reload city",
+            "highest-temperature-in-reload-city-on-april-29-2026",
+        )
+
+        assert matched is live_city
+
+    def test_imported_city_map_reference_hot_reloads(self, monkeypatch):
+        from src import config as runtime_config
+        from src.config import City
+
+        original_load_cities = runtime_config.load_cities
+        original_mtime = runtime_config._cities_config_mtime_ns
+        imported_map = runtime_config.cities_by_name
+        loaded_mtime = runtime_config._cities_loaded_mtime_ns
+        reloaded_city = City(
+            name="Hot Reload City",
+            lat=10.0,
+            lon=20.0,
+            timezone="UTC",
+            settlement_unit="C",
+            cluster="Hot Reload City",
+            wu_station="HOT1",
+            aliases=("Hot Reload City",),
+            slug_names=("hot-reload-city",),
+            airport_name="Hot Reload Airport",
+            settlement_source="https://www.wunderground.com/history/daily/xx/hot/HOT1",
+            country_code="XX",
+        )
+        try:
+            monkeypatch.setattr(runtime_config, "load_cities", lambda path=None: [reloaded_city])
+            monkeypatch.setattr(
+                runtime_config,
+                "_cities_config_mtime_ns",
+                lambda path=None: loaded_mtime + 1,
+            )
+
+            assert imported_map.get("Hot Reload City") is reloaded_city
+            assert runtime_config.cities_by_name is imported_map
+        finally:
+            monkeypatch.setattr(runtime_config, "load_cities", original_load_cities)
+            monkeypatch.setattr(runtime_config, "_cities_config_mtime_ns", original_mtime)
+            runtime_config.reload_cities_if_changed(force=True)
+
     def test_unknown_resolution_source_url_is_rejected(self):
         event = _gamma_temperature_event(
             resolution_source="https://example.com/weather/stations/KLAX"
@@ -536,6 +602,36 @@ class TestSourceContractGate:
         monkeypatch.setattr(ms, "_get_active_events", lambda: [matching_event_after_reconfig])
 
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
+
+    def test_source_quarantine_does_not_block_existing_position_price_paths(
+        self, monkeypatch, tmp_path
+    ):
+        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        monkeypatch.setenv(ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV, str(quarantine_path))
+        ms.upsert_source_contract_quarantine(
+            "Paris",
+            reason="source_contract_mismatch",
+            evidence={"events": []},
+            observed_at="2026-04-29T00:00:00+00:00",
+            path=quarantine_path,
+        )
+        active_event = _gamma_temperature_event(
+            market_id="paris-existing-market",
+            title="Highest temperature in Paris on April 29?",
+            slug="highest-temperature-in-paris-on-april-29-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "bonneuil-en-france/LFPB"
+            ),
+        )
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [active_event])
+
+        assert ms.get_current_yes_price("cond1") == pytest.approx(0.55)
+        siblings = ms.get_sibling_outcomes("cond1")
+        assert len(siblings) == 1
+        assert siblings[0]["token_id"] == "token_yes"
+        assert siblings[0]["no_token_id"] == "token_no"
 
     def test_source_quarantine_release_requires_conversion_evidence_refs(self, tmp_path):
         quarantine_path = tmp_path / "source_contract_quarantine.json"
@@ -801,6 +897,539 @@ class TestSourceContractGate:
         assert plan["quarantine_entry"]["evidence"]["events"][0]["source_contract"][
             "status"
         ] == "UNSUPPORTED"
+
+    def test_auto_convert_plans_paris_same_provider_station_change(self, tmp_path):
+        from scripts import source_contract_auto_convert as auto
+        from scripts.watch_source_contract import analyze_events
+
+        events = [
+            _gamma_temperature_event(
+                event_id="paris-high-20260429",
+                title="Highest temperature in Paris on April 29?",
+                slug="highest-temperature-in-paris-on-april-29-2026",
+                question="Will the high temperature in Paris be 20°C or higher?",
+                resolution_source=(
+                    "https://www.wunderground.com/history/daily/fr/"
+                    "bonneuil-en-france/LFPB"
+                ),
+            ),
+            _gamma_temperature_event(
+                event_id="paris-low-20260501",
+                title="Lowest temperature in Paris on May 1?",
+                slug="lowest-temperature-in-paris-on-may-1-2026",
+                question="Will the low temperature in Paris be 10°C or lower?",
+                resolution_source=(
+                    "https://www.wunderground.com/history/daily/fr/"
+                    "bonneuil-en-france/LFPB"
+                ),
+            ),
+        ]
+        report = analyze_events(
+            events,
+            checked_at_utc=datetime(2026, 4, 30, tzinfo=timezone.utc),
+        )
+
+        receipt = auto.build_receipt(
+            report,
+            policy=auto.RuntimePolicy(
+                history_days=1095,
+                min_alert_markets=2,
+                min_target_dates=1,
+                today=auto.date(2026, 4, 30),
+            ),
+            run_id="test-run",
+            quarantine_actions=[],
+        )
+
+        assert receipt["status"] == "planned"
+        candidate = receipt["candidates"][0]
+        assert candidate["city"] == "Paris"
+        assert candidate["transition_branch"] == "same_provider_station_change"
+        assert candidate["confirmation_status"] == "auto_confirmed"
+        assert candidate["source_contract"]["from_station_ids"] == ["LFPG"]
+        assert candidate["source_contract"]["to_station_ids"] == ["LFPB"]
+        assert candidate["affected_metrics"] == ["high", "low"]
+        assert candidate["date_scope"]["affected_market_start"] == "2026-04-29"
+        assert candidate["date_scope"]["affected_market_end"] == "2026-05-01"
+        assert candidate["date_scope"]["executable_wu_fetch_end"] == "2026-04-28"
+        assert candidate["date_scope"]["future_or_recent_dates_not_fetchable_by_wu_history"] == [
+            "2026-04-29",
+            "2026-05-01",
+        ]
+        assert candidate["runtime_gaps_before_apply"] == []
+        mini_packet = candidate["mini_llm_execution"]
+        assert mini_packet["mini_model_can_directly_complete"] is True
+        assert mini_packet["current_authority"] == "ready_for_deterministic_apply_packet"
+        assert (
+            "Do not mutate production DB truth except through the exact scoped commands in this receipt after DB backup succeeds."
+        ) in mini_packet[
+            "forbidden_actions"
+        ]
+        assert mini_packet["evidence_manifest"]["config_updated"][
+            "expected_artifact"
+        ].endswith("/test-run/paris/config_update.json")
+        locator = mini_packet["workspace_locator"]
+        assert locator["repo_root"] == str(auto.ROOT)
+        assert any(
+            item["path"] == "scripts/watch_source_contract.py"
+            for item in locator["code_navigation"]
+        )
+        assert any(
+            item["path"] == "config/cities.json"
+            and item["access"] == "deterministic_controller_write_only_under_execute_apply"
+            for item in locator["code_navigation"]
+        )
+        safe_contract = mini_packet["safe_execution_contract"]
+        assert safe_contract["command_policy"] == "exact_allowed_command_only"
+        assert "state/zeus-world.db (only via exact scoped rebuild commands from the receipt)" in safe_contract["allowed_write_globs_current_phase"]
+        assert any("--apply/--no-dry-run/--force outside" in token for token in safe_contract["forbidden_command_tokens"])
+        assert mini_packet["report_template"] == {
+            "city": "Paris",
+            "can_complete_remaining_conversion": True,
+            "source_quarantine_should_remain_active": True,
+            "blocking_reasons": [],
+            "next_safe_action": "execute listed deterministic apply steps and collect evidence refs",
+        }
+        controller_apply = next(
+            item for item in candidate["command_plan"] if item["id"] == "controller_apply"
+        )
+        assert controller_apply["command"][:6] == [
+            sys.executable,
+            "scripts/source_contract_auto_convert.py",
+            "--city",
+            "Paris",
+            "--execute-apply",
+            "--force",
+        ]
+        backfill = next(
+            item for item in candidate["command_plan"] if item["id"] == "wu_backfill_dry_run"
+        )
+        assert backfill["command"] == [
+            sys.executable,
+            "scripts/backfill_wu_daily_all.py",
+            "--cities",
+            "Paris",
+            "--start-date",
+            "2023-04-30",
+            "--end-date",
+            "2026-04-28",
+            "--missing-only",
+            "--replace-station-mismatch",
+            "--db",
+            str(auto.DEFAULT_WORLD_DB_PATH),
+            "--dry-run",
+        ]
+        settlement_apply = next(
+            item for item in candidate["command_plan"] if item["id"] == "settlements_rebuild_apply"
+        )
+        assert "--temperature-metric" in settlement_apply["command"]
+        assert "all" in settlement_apply["command"]
+        assert "--apply" in settlement_apply["command"]
+        platt_apply = next(
+            item for item in candidate["command_plan"] if item["id"] == "platt_refit_apply"
+        )
+        assert "--city" in platt_apply["command"]
+        assert "Paris" in platt_apply["command"]
+        assert "--start-date" in platt_apply["command"]
+        assert "2023-04-30" in platt_apply["command"]
+        assert "--end-date" in platt_apply["command"]
+        assert "2026-04-28" in platt_apply["command"]
+        season_args = [
+            platt_apply["command"][idx + 1]
+            for idx, token in enumerate(platt_apply["command"])
+            if token == "--season"
+        ]
+        assert set(season_args) == {"DJF", "MAM", "JJA", "SON"}
+        assert platt_apply["bucket_scope"]["data_versions"] == "derived_from_scoped_calibration_pairs"
+
+    def test_auto_convert_blocks_single_market_below_threshold(self):
+        from scripts import source_contract_auto_convert as auto
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on April 29?",
+            slug="highest-temperature-in-paris-on-april-29-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "bonneuil-en-france/LFPB"
+            ),
+        )
+        report = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 4, 30, tzinfo=timezone.utc),
+        )
+
+        receipt = auto.build_receipt(
+            report,
+            policy=auto.RuntimePolicy(today=auto.date(2026, 4, 30)),
+        )
+
+        assert receipt["status"] == "blocked"
+        candidate = receipt["candidates"][0]
+        assert candidate["confirmation_status"] == "manual_review_required"
+        assert candidate["command_plan"] == []
+        assert candidate["threshold_blockers"] == [
+            "alert market count 1 is below threshold 2"
+        ]
+
+    def test_auto_convert_blocks_provider_family_change(self):
+        from scripts import source_contract_auto_convert as auto
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            resolution_source="https://api.weather.gov/stations/KLAX/observations/latest"
+        )
+        report = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 4, 30, tzinfo=timezone.utc),
+        )
+
+        receipt = auto.build_receipt(
+            report,
+            policy=auto.RuntimePolicy(today=auto.date(2026, 4, 30)),
+        )
+
+        assert receipt["status"] == "blocked"
+        candidate = receipt["candidates"][0]
+        assert (
+            candidate["transition_branch"]
+            == "provider_family_change_requires_new_source_role"
+        )
+        assert candidate["threshold_blockers"] == [
+            "provider family changed; a new source-role adapter/config path is required before automation can continue"
+        ]
+
+    def test_auto_convert_receipt_persistence_and_discord_required_exit(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from scripts import source_contract_auto_convert as auto
+
+        fixture = tmp_path / "events.json"
+        fixture.write_text(
+            json.dumps(
+                [
+                    _gamma_temperature_event(
+                        event_id="paris-high-20260429",
+                        title="Highest temperature in Paris on April 29?",
+                        slug="highest-temperature-in-paris-on-april-29-2026",
+                        question="Will the high temperature in Paris be 20°C or higher?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                    _gamma_temperature_event(
+                        event_id="paris-high-20260430",
+                        title="Highest temperature in Paris on April 30?",
+                        slug="highest-temperature-in-paris-on-april-30-2026",
+                        question="Will the high temperature in Paris be 21°C or higher?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            auto,
+            "send_discord_notification",
+            lambda receipt, notify_noop=False: {
+                "attempted": True,
+                "sent": False,
+                "status": "skipped_no_webhook",
+            },
+        )
+
+        exit_code = auto.main(
+            [
+                "--fixture",
+                str(fixture),
+                "--receipt-dir",
+                str(tmp_path / "receipts"),
+                "--lock-path",
+                str(tmp_path / "source_auto.lock"),
+                "--quarantine-path",
+                str(tmp_path / "quarantine.json"),
+                "--run-id",
+                "cron-run",
+                "--today",
+                "2026-04-30",
+                "--discord",
+                "--discord-required",
+                "--write-mini-report",
+                "--json",
+            ]
+        )
+
+        assert exit_code == 2
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "planned"
+        assert output["cron_lock"]["status"] == "held"
+        assert output["cron_lock"]["path"] == str(tmp_path / "source_auto.lock")
+        assert output["notification"]["status"] == "skipped_no_webhook"
+        controller_step = next(
+            step
+            for step in output["candidates"][0]["mini_llm_execution"]["step_protocol"]
+            if step["id"] == "execute_apply_controller"
+        )
+        assert "--fixture" in controller_step["allowed_command"]
+        assert str(fixture) in controller_step["allowed_command"]
+        assert "--quarantine-path" in controller_step["allowed_command"]
+        receipt_path = tmp_path / "receipts" / "cron-run.json"
+        latest_path = tmp_path / "receipts" / "latest.json"
+        report_path = tmp_path / "receipts" / "cron-run.mini_report.md"
+        assert json.loads(receipt_path.read_text())["run_id"] == "cron-run"
+        assert json.loads(latest_path.read_text())["run_id"] == "cron-run"
+        assert report_path.exists()
+        report_text = report_path.read_text()
+        assert "can_complete_remaining_conversion: `True`" in report_text
+        assert "exact scoped commands in this receipt" in report_text
+        assert "`scripts/watch_source_contract.py`" in report_text
+        assert "allowed: `state/zeus-world.db (only via exact scoped rebuild commands from the receipt)`" in report_text
+
+    def test_auto_convert_fixture_apply_refuses_default_write_surfaces(
+        self, tmp_path, capsys
+    ):
+        from scripts import source_contract_auto_convert as auto
+
+        fixture = tmp_path / "events.json"
+        fixture.write_text(
+            json.dumps(
+                [
+                    _gamma_temperature_event(
+                        event_id="paris-high-20260429",
+                        title="Highest temperature in Paris on April 29?",
+                        slug="highest-temperature-in-paris-on-april-29-2026",
+                        question="Will the high temperature in Paris be 20°C or higher?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                    _gamma_temperature_event(
+                        event_id="paris-low-20260501",
+                        title="Lowest temperature in Paris on May 1?",
+                        slug="lowest-temperature-in-paris-on-may-1-2026",
+                        question="Will the low temperature in Paris be 10°C or lower?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = auto.main(
+            [
+                "--fixture",
+                str(fixture),
+                "--receipt-dir",
+                str(tmp_path / "receipts"),
+                "--lock-path",
+                str(tmp_path / "source_auto.lock"),
+                "--quarantine-path",
+                str(tmp_path / "quarantine.json"),
+                "--run-id",
+                "fixture-prod-block",
+                "--today",
+                "2026-04-30",
+                "--execute-apply",
+                "--force",
+                "--json",
+            ]
+        )
+
+        assert exit_code == 2
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "failed"
+        assert "fixture-backed release" in output["error"]
+        assert "default world DB" in output["error"]
+        assert "default city config" in output["error"]
+
+    def test_auto_convert_execute_apply_writes_evidence_and_releases_quarantine(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from scripts import source_contract_auto_convert as auto
+
+        fixture = tmp_path / "events.json"
+        fixture.write_text(
+            json.dumps(
+                [
+                    _gamma_temperature_event(
+                        event_id="paris-high-20260429",
+                        title="Highest temperature in Paris on April 29?",
+                        slug="highest-temperature-in-paris-on-april-29-2026",
+                        question="Will the high temperature in Paris be 20°C or higher?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                    _gamma_temperature_event(
+                        event_id="paris-low-20260501",
+                        title="Lowest temperature in Paris on May 1?",
+                        slug="lowest-temperature-in-paris-on-may-1-2026",
+                        question="Will the low temperature in Paris be 10°C or lower?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                ]
+            )
+        )
+        config_path = tmp_path / "cities.json"
+        config_path.write_text(auto.DEFAULT_CITY_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        source_validity_path = tmp_path / "current_source_validity.md"
+        source_validity_path.write_text("# Current Source Validity\n", encoding="utf-8")
+        db_path = tmp_path / "zeus-world.db"
+        db_path.write_bytes(b"sqlite placeholder")
+        quarantine_path = tmp_path / "quarantine.json"
+        receipts_dir = tmp_path / "receipts"
+        evidence_base = tmp_path / "evidence"
+        commands: list[list[str]] = []
+
+        def _fake_run_command(command, *, cwd, artifact_path):
+            commands.append([str(part) for part in command])
+            receipt = {
+                "command": [str(part) for part in command],
+                "cwd": str(cwd),
+                "returncode": 0,
+                "stdout": "ok",
+                "stderr": "",
+            }
+            if "scripts/watch_source_contract.py" in command:
+                receipt["stdout"] = json.dumps(
+                    {
+                        "status": "OK",
+                        "authority": "FIXTURE",
+                        "events": [],
+                        "summary": {"OK": 2, "WARN": 0, "ALERT": 0, "DATA_UNAVAILABLE": 0},
+                    }
+                )
+            auto._write_json_atomic(artifact_path, receipt)
+            return receipt
+
+        monkeypatch.setattr(auto, "_run_command", _fake_run_command)
+
+        exit_code = auto.main(
+            [
+                "--fixture",
+                str(fixture),
+                "--receipt-dir",
+                str(receipts_dir),
+                "--lock-path",
+                str(tmp_path / "source_auto.lock"),
+                "--quarantine-path",
+                str(quarantine_path),
+                "--run-id",
+                "apply-run",
+                "--today",
+                "2026-04-30",
+                "--execute-apply",
+                "--force",
+                "--no-station-metadata-network",
+                "--config-path",
+                str(config_path),
+                "--source-validity-path",
+                str(source_validity_path),
+                "--db",
+                str(db_path),
+                "--evidence-root-base",
+                str(evidence_base),
+                "--json",
+            ]
+        )
+
+        assert exit_code == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "applied"
+        candidate = output["candidates"][0]
+        assert candidate["apply_status"] == "applied"
+        assert candidate["release_ready"] is True
+        assert candidate["release_result"]["status"] == "released"
+        evidence_refs = candidate["release_evidence"]["evidence_refs"]
+        assert set(evidence_refs) == set(ms.REQUIRED_SOURCE_CONVERSION_EVIDENCE)
+        for ref in evidence_refs.values():
+            assert ref.startswith(str(evidence_base / "apply-run" / "paris"))
+
+        city_rows = json.loads(config_path.read_text(encoding="utf-8"))["cities"]
+        paris = next(row for row in city_rows if row["name"] == "Paris")
+        assert paris["wu_station"] == "LFPB"
+        assert paris["settlement_source_type"] == "wu_icao"
+        assert paris["settlement_source"].endswith("/LFPB")
+        assert paris["airport_name"] == "Paris-Le Bourget Airport"
+        assert paris["lat"] == pytest.approx(48.969398)
+        assert paris["lon"] == pytest.approx(2.44139)
+        assert paris["wu_pws"] is None
+
+        history = ms.source_contract_transition_history("Paris", path=quarantine_path)
+        assert len(history) == 1
+        assert history[0]["to_source_contract"]["station_ids"] == ["LFPB"]
+        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is False
+        assert "Source Auto-Conversion Applied: Paris" in source_validity_path.read_text(encoding="utf-8")
+        assert (evidence_base / "apply-run" / "paris" / "db_backup.json").exists()
+        assert any("scripts/backfill_wu_daily_all.py" in cmd for command in commands for cmd in command)
+        assert any("--apply" in command for command in commands)
+        assert any("--no-dry-run" in command for command in commands)
+
+    def test_platt_refit_derives_exact_bucket_keys_from_city_date_scope(self):
+        from scripts import refit_platt_v2
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE calibration_pairs_v2 (
+                temperature_metric TEXT,
+                training_allowed INTEGER,
+                authority TEXT,
+                decision_group_id TEXT,
+                p_raw REAL,
+                city TEXT,
+                target_date TEXT,
+                cluster TEXT,
+                season TEXT,
+                data_version TEXT
+            )
+            """
+        )
+
+        def insert_bucket(*, city: str, target_date: str, season: str, data_version: str) -> None:
+            for idx in range(refit_platt_v2.MIN_DECISION_GROUPS):
+                conn.execute(
+                    """
+                    INSERT INTO calibration_pairs_v2 (
+                        temperature_metric, training_allowed, authority,
+                        decision_group_id, p_raw, city, target_date,
+                        cluster, season, data_version
+                    ) VALUES ('high', 1, 'VERIFIED', ?, 0.5, ?, ?, 'Europe', ?, ?)
+                    """,
+                    (f"{city}-{target_date}-{season}-{data_version}-{idx}", city, target_date, season, data_version),
+                )
+
+        insert_bucket(city="Paris", target_date="2026-04-28", season="MAM", data_version="affected_v1")
+        insert_bucket(city="London", target_date="2026-04-28", season="MAM", data_version="unaffected_same_season")
+        insert_bucket(city="Paris", target_date="2026-01-15", season="DJF", data_version="outside_window")
+
+        rows = refit_platt_v2._fetch_buckets(
+            conn,
+            HIGH_LOCALDAY_MAX,
+            city_filter="Paris",
+            start_date="2026-04-28",
+            end_date="2026-04-28",
+            cluster_filter="Europe",
+            season_filter=["MAM"],
+        )
+
+        assert [(row["season"], row["data_version"]) for row in rows] == [
+            ("MAM", "affected_v1")
+        ]
 
     def test_venus_sensing_report_source_watch_persists_quarantine(
         self, monkeypatch, tmp_path

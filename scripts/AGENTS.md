@@ -61,3 +61,4 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `venus_sensing_report.py` | Venus sensing report, including daemon-independent source-contract watch |
 | `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city quarantine writer, and conversion-history reporter |
+| `source_contract_auto_convert.py` | Cron-safe source-contract transition controller, deterministic date-scope planner, apply/evidence runner, quarantine release gate, receipt writer, and Discord reporter |
