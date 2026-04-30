@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Topology doctor for Zeus's compiled agent-navigation graph."""
-# Lifecycle: created=2026-04-13; last_reviewed=2026-04-21; last_reused=2026-04-21
+# Lifecycle: created=2026-04-13; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Main facade for compiled topology, navigation, and closeout checks.
 # Reuse: Prefer adding narrow checker-family modules instead of expanding this facade directly.
 
@@ -1991,6 +1991,7 @@ def build_runtime_packet(
             "keep scratch analysis out of authority surfaces",
             "promote stable lessons through manifests, module books, tests, or source",
             "record durable packet evidence only when an active gate or handoff consumes it",
+            "close complete operations with a compact feedback capsule in the final response or an already-required packet surface",
         ],
     }
 
