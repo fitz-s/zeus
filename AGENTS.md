@@ -211,6 +211,18 @@ The output contains:
 - `source_rationale` — per-file zone, hazards, and write routes
 - `history_lore` — relevant historical failure lessons
 
+Topology is the routing entrypoint, not a paperwork generator. T0/T1 work stays
+light: cite routed files, make focused edits, and run focused checks. Escalate
+only when risk or claims demand it: T2 source behavior needs scoped AGENTS and
+relationship tests; T3 governance/runtime tooling needs planning-lock for
+governed files, with receipts/critics only for packet closeout, explicit
+completion claims, or semantic ambiguity; T4 live/prod/data side effects stop
+until explicit operator-go, dry-run evidence, and rollback path exist.
+
+`evidence.md`, `findings.md`, work logs, receipts, and critic/verifier records
+are conditional artifacts. Create/update them only when an active packet,
+closeout gate, handoff, or completion claim consumes them.
+
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
 that package.
