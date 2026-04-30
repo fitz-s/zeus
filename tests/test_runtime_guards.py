@@ -2134,6 +2134,10 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["sweep_depth_status"] == "NOT_MARKETABLE_PASSIVE_LIMIT"
     assert shadow["cost_basis_hash"]
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
+    assert shadow["final_intent_shadow_built"] is False
+    assert shadow["final_intent_live_submit_authority"] is False
+    assert shadow["final_intent_shadow_status"] == "not_submit_ready"
+    assert "NOT_MARKETABLE_PASSIVE_LIMIT" in shadow["final_intent_shadow_error"]
 
 
 def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_path):
@@ -2178,11 +2182,19 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert reprice["best_ask_slippage_bps"] == pytest.approx((0.41 - 0.405) / 0.405 * 10_000.0)
     assert reprice["best_ask_blocked_by_slippage"] is False
     assert reprice["final_limit_price"] == pytest.approx(0.41)
-    assert reprice["corrected_pricing_shadow"]["candidate_final_limit_price"] == "0.41"
-    assert reprice["corrected_pricing_shadow"]["candidate_fee_adjusted_execution_price"] == "0.41"
-    assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
-    assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
-    assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["candidate_final_limit_price"] == "0.41"
+    assert shadow["candidate_fee_adjusted_execution_price"] == "0.41"
+    assert shadow["sweep_attempted"] is True
+    assert shadow["sweep_depth_status"] == "PASS"
+    assert shadow["sweep_book_side"] == "asks"
+    assert shadow["final_intent_shadow_built"] is True
+    assert shadow["final_intent_shadow_status"] == "submit_ready_shadow"
+    assert shadow["final_intent_live_submit_authority"] is False
+    assert shadow["final_intent_selected_token_id"] == "yes1"
+    assert shadow["final_intent_final_limit_price"] == "0.41"
+    assert shadow["final_intent_cost_basis_hash"] == shadow["cost_basis_hash"]
+    assert shadow["final_intent_no_recompute_inputs"] is True
 
 
 def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
@@ -2340,6 +2352,8 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
     assert shadow["candidate_final_limit_price"] == "0.38"
     assert shadow["sweep_attempted"] is False
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap-buy-no-reprice"
+    assert shadow["final_intent_shadow_built"] is False
+    assert shadow["final_intent_live_submit_authority"] is False
 
 
 def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_path):
