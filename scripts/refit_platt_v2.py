@@ -43,7 +43,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -85,21 +85,150 @@ def _validate_p_raw_domain(bucket_key: str, p_raw: np.ndarray) -> None:
         )
 
 
-def _fetch_buckets(conn: sqlite3.Connection, metric_identity: MetricIdentity) -> list[sqlite3.Row]:
+def _normalize_multi_filter(value: str | Sequence[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    return [str(item) for item in values if str(item)]
+
+
+def _append_multi_filter(
+    where: list[str],
+    params: list[object],
+    column: str,
+    value: str | Sequence[str] | None,
+) -> None:
+    values = _normalize_multi_filter(value)
+    if not values:
+        return
+    placeholders = ", ".join("?" for _ in values)
+    where.append(f"{column} IN ({placeholders})")
+    params.extend(values)
+
+
+def _fetch_affected_bucket_keys(
+    conn: sqlite3.Connection,
+    metric_identity: MetricIdentity,
+    *,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    cluster_filter: str | None = None,
+    season_filter: str | Sequence[str] | None = None,
+    data_version_filter: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return bucket identities touched by a city/date scoped rebuild.
+
+    Platt models are bucket-scoped, not city/date-scoped. A source conversion
+    should discover which buckets were affected by the changed city/date rows,
+    then refit those complete buckets using all eligible pairs in each bucket.
+    """
+
+    where = [
+        "temperature_metric = ?",
+        "training_allowed = 1",
+        "authority = 'VERIFIED'",
+        "decision_group_id IS NOT NULL",
+        "decision_group_id != ''",
+        "p_raw IS NOT NULL",
+    ]
+    params: list[object] = [metric_identity.temperature_metric]
+    if city_filter:
+        where.append("city = ?")
+        params.append(city_filter)
+    if start_date:
+        where.append("target_date >= ?")
+        params.append(start_date)
+    if end_date:
+        where.append("target_date <= ?")
+        params.append(end_date)
+    if cluster_filter:
+        where.append("cluster = ?")
+        params.append(cluster_filter)
+    _append_multi_filter(where, params, "season", season_filter)
+    if data_version_filter:
+        where.append("data_version = ?")
+        params.append(data_version_filter)
+
+    rows = conn.execute(f"""
+        SELECT DISTINCT cluster, season, data_version
+        FROM calibration_pairs_v2
+        WHERE {" AND ".join(where)}
+        ORDER BY cluster, season, data_version
+    """, tuple(params)).fetchall()
+    return [(str(row["cluster"]), str(row["season"]), str(row["data_version"])) for row in rows]
+
+
+def _append_bucket_key_filter(
+    where: list[str],
+    params: list[object],
+    bucket_keys: list[tuple[str, str, str]] | None,
+) -> None:
+    if bucket_keys is None:
+        return
+    if not bucket_keys:
+        where.append("1 = 0")
+        return
+    clauses = []
+    for cluster, season, data_version in bucket_keys:
+        clauses.append("(cluster = ? AND season = ? AND data_version = ?)")
+        params.extend([cluster, season, data_version])
+    where.append("(" + " OR ".join(clauses) + ")")
+
+
+def _fetch_buckets(
+    conn: sqlite3.Connection,
+    metric_identity: MetricIdentity,
+    *,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    cluster_filter: str | None = None,
+    season_filter: str | Sequence[str] | None = None,
+    data_version_filter: str | None = None,
+) -> list[sqlite3.Row]:
     """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs_v2."""
-    return conn.execute("""
+    affected_keys = None
+    if city_filter or start_date or end_date:
+        affected_keys = _fetch_affected_bucket_keys(
+            conn,
+            metric_identity,
+            city_filter=city_filter,
+            start_date=start_date,
+            end_date=end_date,
+            cluster_filter=cluster_filter,
+            season_filter=season_filter,
+            data_version_filter=data_version_filter,
+        )
+    where = [
+        "temperature_metric = ?",
+        "training_allowed = 1",
+        "authority = 'VERIFIED'",
+        "decision_group_id IS NOT NULL",
+        "decision_group_id != ''",
+        "p_raw IS NOT NULL",
+    ]
+    params: list[object] = [metric_identity.temperature_metric]
+    if cluster_filter:
+        where.append("cluster = ?")
+        params.append(cluster_filter)
+    _append_multi_filter(where, params, "season", season_filter)
+    if data_version_filter:
+        where.append("data_version = ?")
+        params.append(data_version_filter)
+    _append_bucket_key_filter(where, params, affected_keys)
+    params.append(MIN_DECISION_GROUPS)
+    return conn.execute(f"""
         SELECT cluster, season, data_version,
                COUNT(DISTINCT decision_group_id) AS n_eff
         FROM calibration_pairs_v2
-        WHERE temperature_metric = ?
-          AND training_allowed = 1
-          AND authority = 'VERIFIED'
-          AND decision_group_id IS NOT NULL
-          AND decision_group_id != ''
-          AND p_raw IS NOT NULL
+        WHERE {" AND ".join(where)}
         GROUP BY cluster, season, data_version
         HAVING n_eff >= ?
-    """, (metric_identity.temperature_metric, MIN_DECISION_GROUPS)).fetchall()
+    """, tuple(params)).fetchall()
 
 
 def _fetch_pairs_for_bucket(
@@ -228,6 +357,12 @@ def refit_v2(
     metric_identity: MetricIdentity,
     dry_run: bool,
     force: bool,
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    cluster_filter: str | None = None,
+    season_filter: str | Sequence[str] | None = None,
+    data_version_filter: str | None = None,
 ) -> RefitStatsV2:
     stats = RefitStatsV2()
 
@@ -236,9 +371,28 @@ def refit_v2(
     print("=" * 70)
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     print(f"MetricIdentity: {metric_identity}")
+    seasons_display = ",".join(_normalize_multi_filter(season_filter)) or "*"
+    if city_filter or start_date or end_date or cluster_filter or season_filter or data_version_filter:
+        print(
+            "Bucket filter:   "
+            f"city={city_filter or '*'} "
+            f"date={start_date or '-inf'}..{end_date or '+inf'} "
+            f"cluster={cluster_filter or '*'} "
+            f"season={seasons_display} "
+            f"data_version={data_version_filter or '*'}"
+        )
     print(f"Min groups:     {MIN_DECISION_GROUPS}")
 
-    buckets = _fetch_buckets(conn, metric_identity)
+    buckets = _fetch_buckets(
+        conn,
+        metric_identity,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+        cluster_filter=cluster_filter,
+        season_filter=season_filter,
+        data_version_filter=data_version_filter,
+    )
     stats.buckets_scanned = len(buckets)
     print(f"Buckets eligible (n_eff >= {MIN_DECISION_GROUPS}): {stats.buckets_scanned}")
 
@@ -318,6 +472,13 @@ def refit_all_v2(
     *,
     dry_run: bool,
     force: bool,
+    temperature_metric: str = "all",
+    city_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    cluster_filter: str | None = None,
+    season_filter: str | Sequence[str] | None = None,
+    data_version_filter: str | None = None,
 ) -> dict[str, RefitStatsV2]:
     """Refit Platt v2 models for ALL METRIC_SPECS in one invocation.
 
@@ -325,12 +486,22 @@ def refit_all_v2(
     Any spec that fails propagates the exception; caller sees non-zero exit.
     """
     per_metric: dict[str, RefitStatsV2] = {}
-    for spec in METRIC_SPECS:
+    specs = [
+        spec for spec in METRIC_SPECS
+        if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
+    ]
+    for spec in specs:
         stats = refit_v2(
             conn,
             metric_identity=spec.identity,
             dry_run=dry_run,
             force=force,
+            city_filter=city_filter,
+            start_date=start_date,
+            end_date=end_date,
+            cluster_filter=cluster_filter,
+            season_filter=season_filter,
+            data_version_filter=data_version_filter,
         )
         per_metric[spec.identity.temperature_metric] = stats
     return per_metric
@@ -356,6 +527,30 @@ def main() -> int:
         "--db", dest="db_path", default=None,
         help="Path to the world DB (default: production zeus-world.db).",
     )
+    parser.add_argument(
+        "--temperature-metric",
+        dest="temperature_metric",
+        choices=("high", "low", "all"),
+        default="all",
+        help="Metric track to refit (default: all).",
+    )
+    parser.add_argument("--cluster", dest="cluster", default=None, help="Limit refit to one cluster bucket.")
+    parser.add_argument(
+        "--season",
+        dest="season",
+        action="append",
+        default=None,
+        help="Limit refit to one season bucket; may be repeated.",
+    )
+    parser.add_argument("--city", dest="city", default=None, help="Derive affected bucket keys from one city.")
+    parser.add_argument("--start-date", dest="start_date", default=None, help="Derive affected bucket keys on/after YYYY-MM-DD.")
+    parser.add_argument("--end-date", dest="end_date", default=None, help="Derive affected bucket keys on/before YYYY-MM-DD.")
+    parser.add_argument(
+        "--data-version",
+        dest="data_version",
+        default=None,
+        help="Limit refit to one calibration data_version bucket.",
+    )
     args = parser.parse_args()
 
     db_path_for_preflight = Path(args.db_path) if args.db_path else SHARED_DB
@@ -376,7 +571,18 @@ def main() -> int:
     apply_v2_schema(conn)
 
     try:
-        per_metric = refit_all_v2(conn, dry_run=args.dry_run, force=args.force)
+        per_metric = refit_all_v2(
+            conn,
+            dry_run=args.dry_run,
+            force=args.force,
+            temperature_metric=args.temperature_metric,
+            city_filter=args.city,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            cluster_filter=args.cluster,
+            season_filter=args.season,
+            data_version_filter=args.data_version,
+        )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

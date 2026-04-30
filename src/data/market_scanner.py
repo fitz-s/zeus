@@ -19,6 +19,7 @@ from typing import Any, Literal, Optional
 
 import httpx
 
+from src import config as runtime_config
 from src.config import City, cities_by_name, state_path
 from src.contracts.executable_market_snapshot_v2 import (
     FRESHNESS_WINDOW_DEFAULT,
@@ -156,7 +157,7 @@ def _canonical_city_name(city_name: str) -> str:
     candidate = str(city_name or "").strip()
     if not candidate:
         raise ValueError("source-contract quarantine requires city_name")
-    for configured_name in cities_by_name:
+    for configured_name in runtime_config.runtime_cities_by_name():
         if configured_name.lower() == candidate.lower():
             return configured_name
     return candidate
@@ -872,15 +873,13 @@ def _parse_event(
 
 def _match_city(title: str, slug: str) -> Optional[City]:
     """Match event title/slug to a configured city using aliases from cities.json."""
-    from src.config import cities
-
     text = f"{title} {slug}".lower()
     slug_text = slug.lower()
 
     # Use boundary-aware aliases. Short aliases such as "LA" and "SF" must not
     # match inside longer city names like "Kuala Lumpur" or unrelated words.
     candidates: list[tuple[str, City, str]] = []
-    for city in cities:
+    for city in runtime_config.runtime_cities():
         candidates.extend((alias.lower(), city, "text") for alias in city.aliases)
         candidates.extend((slug_name.lower(), city, "slug") for slug_name in city.slug_names)
 
@@ -919,8 +918,6 @@ def _token_in_text(token: str, text: str) -> bool:
 
 def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None:
     """Reject Gamma events that explicitly identify a different configured city."""
-    from src.config import cities
-
     text_fields = [
         event.get("title", ""),
         event.get("slug", ""),
@@ -945,7 +942,7 @@ def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None
         return None
 
     matched_tokens = _city_match_tokens(matched_city)
-    for city in cities:
+    for city in runtime_config.runtime_cities():
         if city.name == matched_city.name:
             continue
         for token in sorted(_city_match_tokens(city), key=len, reverse=True):

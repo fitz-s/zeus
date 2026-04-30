@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone as _tz
@@ -119,80 +120,26 @@ COMPLETENESS_MANIFEST_PREFIX = "backfill_manifest_wu_daily_all"
 _GUARD = IngestionGuard()
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
-# Complete mapping: city → (ICAO, country_code, unit)
-CITY_STATIONS = {
-    # US cities
-    "NYC":           ("KLGA", "US", "F"),
-    "Chicago":       ("KORD", "US", "F"),
-    "Atlanta":       ("KATL", "US", "F"),
-    "Austin":        ("KAUS", "US", "F"),
-    "Dallas":        ("KDAL", "US", "F"),
-    "Denver":        ("KBKF", "US", "F"),
-    "Houston":       ("KHOU", "US", "F"),
-    "Los Angeles":   ("KLAX", "US", "F"),
-    "Miami":         ("KMIA", "US", "F"),
-    "San Francisco": ("KSFO", "US", "F"),
-    "Seattle":       ("KSEA", "US", "F"),
-    # Americas
-    "Buenos Aires":  ("SAEZ", "AR", "C"),
-    "Mexico City":   ("MMMX", "MX", "C"),
-    "Sao Paulo":     ("SBGR", "BR", "C"),
-    "Toronto":       ("CYYZ", "CA", "C"),
-    # Europe
-    "London":        ("EGLC", "GB", "C"),  # 2026-04-14: corrected from EGLL (Heathrow) to EGLC (City Airport) per Polymarket market text
-    "Paris":         ("LFPG", "FR", "C"),
-    "Munich":        ("EDDM", "DE", "C"),
-    "Madrid":        ("LEMD", "ES", "C"),
-    "Milan":         ("LIMC", "IT", "C"),
-    "Warsaw":        ("EPWA", "PL", "C"),
-    "Amsterdam":     ("EHAM", "NL", "C"),  # 2026-04-14: added per Polymarket market text (Schiphol)
-    "Helsinki":      ("EFHK", "FI", "C"),  # 2026-04-14: added per Polymarket market text (Vantaa)
-    # Moscow is handled by NOAA weather.gov (UUWW/Vnukovo), not WU.
-    # Do not re-add under WU — intentionally excluded per settlement_source_type="noaa".
-    # "Moscow":        ("UUEE", "RU", "C"),
-    # Istanbul is handled by NOAA weather.gov (LTFM), not WU (WU API rejects LTFM).
-    # Do not re-add under WU — intentionally excluded per settlement_source_type="noaa".
-    # "Istanbul":      ("LTFM", "TR", "C"),
-    "Ankara":        ("LTAC", "TR", "C"),
-    # Asia
-    "Beijing":       ("ZBAA", "CN", "C"),
-    "Shanghai":      ("ZSPD", "CN", "C"),
-    "Shenzhen":      ("ZGSZ", "CN", "C"),
-    "Chengdu":       ("ZUUU", "CN", "C"),
-    "Chongqing":     ("ZUCK", "CN", "C"),
-    "Wuhan":         ("ZHHH", "CN", "C"),
-    "Guangzhou":     ("ZGGG", "CN", "C"),  # 2026-04-14: added per Polymarket market text (Baiyun)
-    "Taipei":        ("RCSS", "TW", "C"),
-    # Hong Kong is handled by a separate HKO fetcher
-    # (scripts/backfill_hko_daily.py). HKO is the authoritative Polymarket
-    # settlement source for HK, not WU/VHHH. The VHHH airport (Chek Lap Kok)
-    # station differs from HKO Central (Tsim Sha Tsui) by 1-3°C due to the
-    # urban heat island, so using WU would systematically mis-match
-    # Polymarket HK settlements. See K0 contamination diagnosis #4 (296 rows
-    # of hko_daily_extract with F-unit label on °C data from a prior ETL).
-    # "Hong Kong":     ("VHHH", "HK", "C"),  # intentionally commented out
-    "Tokyo":         ("RJTT", "JP", "C"),
-    "Seoul":         ("RKSI", "KR", "C"),
-    "Singapore":     ("WSSS", "SG", "C"),
-    "Lucknow":       ("VILK", "IN", "C"),
-    "Karachi":       ("OPKC", "PK", "C"),  # 2026-04-14: added per Polymarket market text (Jinnah Intl)
-    "Manila":        ("RPLL", "PH", "C"),  # 2026-04-14: added per Polymarket market text (Ninoy Aquino Intl)
-    # Oceania
-    "Wellington":    ("NZWN", "NZ", "C"),
-    "Auckland":      ("NZAA", "NZ", "C"),
-    # Africa
-    "Lagos":         ("DNMM", "NG", "C"),
-    "Cape Town":     ("FACT", "ZA", "C"),
-    # Middle East
-    "Jeddah":        ("OEJN", "SA", "C"),
-    # Southeast Asia
-    "Kuala Lumpur":  ("WMKK", "MY", "C"),
-    "Jakarta":       ("WIHH", "ID", "C"),  # 2026-04-14: corrected from WIII (Soekarno-Hatta) to WIHH (Halim Perdanakusuma) per Polymarket market text
-    # Asia-Northeast
-    "Busan":         ("RKPK", "KR", "C"),
-    # Latin America
-    "Panama City":   ("MPMG", "PA", "C"),  # 2026-04-14: corrected from MPTO (Tocumen) to MPMG (Marcos A. Gelabert) per Polymarket market text
-}
+def _city_stations_from_config() -> dict[str, tuple[str, str, str]]:
+    """Return WU station routing from config/cities.json.
+
+    Source-conversion apply updates cities.json first, then this script runs in
+    a fresh process. Keeping the map config-derived prevents stale hard-coded
+    station drift such as Paris LFPG remaining here after a config promotion.
+    """
+
+    stations: dict[str, tuple[str, str, str]] = {}
+    for city in cities_by_name.values():
+        if city.settlement_source_type != "wu_icao":
+            continue
+        if not city.wu_station:
+            continue
+        stations[city.name] = (city.wu_station, city.country_code, city.settlement_unit)
+    return dict(sorted(stations.items()))
+
+
+# Backward-compatible module constant used by tests and CLI target listing.
+CITY_STATIONS = _city_stations_from_config()
 
 
 def _fetch_wu_icao_daily_highs_lows(
@@ -370,7 +317,14 @@ def _contiguous_date_chunks(dates: list[date], chunk_days: int) -> list[tuple[da
     return chunks
 
 
-def _dates_needing_fetch(conn, city_name: str, start_date: date, end_date: date) -> list[date]:
+def _dates_needing_fetch(
+    conn,
+    city_name: str,
+    start_date: date,
+    end_date: date,
+    *,
+    station_id: str | None = None,
+) -> list[date]:
     existing_wu = {
         row[0]
         for row in conn.execute(
@@ -384,6 +338,22 @@ def _dates_needing_fetch(conn, city_name: str, start_date: date, end_date: date)
             (city_name, start_date.isoformat(), end_date.isoformat()),
         ).fetchall()
     }
+    station_mismatch = set()
+    if station_id:
+        station_mismatch = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT target_date
+                FROM observations
+                WHERE city = ?
+                  AND source = 'wu_icao_history'
+                  AND target_date BETWEEN ? AND ?
+                  AND COALESCE(station_id, '') != ?
+                """,
+                (city_name, start_date.isoformat(), end_date.isoformat(), station_id),
+            ).fetchall()
+        }
     valued_settlements = {
         row[0]
         for row in conn.execute(
@@ -402,8 +372,47 @@ def _dates_needing_fetch(conn, city_name: str, start_date: date, end_date: date)
         target
         for target in _dates_in_range(start_date, end_date)
         if target.isoformat() not in existing_wu
+        or target.isoformat() in station_mismatch
         or target.isoformat() not in valued_settlements
     ]
+
+
+def _delete_station_mismatch_rows(
+    conn,
+    city_name: str,
+    start_date: date,
+    end_date: date,
+    station_id: str,
+    *,
+    dry_run: bool,
+) -> int:
+    params = (city_name, start_date.isoformat(), end_date.isoformat(), station_id)
+    count = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM observations
+            WHERE city = ?
+              AND source = 'wu_icao_history'
+              AND target_date BETWEEN ? AND ?
+              AND COALESCE(station_id, '') != ?
+            """,
+            params,
+        ).fetchone()[0]
+    )
+    if dry_run or count == 0:
+        return count
+    conn.execute(
+        """
+        DELETE FROM observations
+        WHERE city = ?
+          AND source = 'wu_icao_history'
+          AND target_date BETWEEN ? AND ?
+          AND COALESCE(station_id, '') != ?
+        """,
+        params,
+    )
+    return count
 
 
 def backfill_city(
@@ -416,6 +425,9 @@ def backfill_city(
     sleep_seconds: float = 0.5,
     missing_only: bool = False,
     dry_run: bool = False,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    replace_station_mismatch: bool = False,
 ) -> dict:
     """Backfill WU daily observations for one city using ICAO station data.
 
@@ -441,10 +453,22 @@ def backfill_city(
             f"{datetime.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}"
         )
 
-    end_date = date.today() - timedelta(days=2)
-    start_date = end_date - timedelta(days=days_back - 1)
+    end_date = end_date or (date.today() - timedelta(days=2))
+    start_date = start_date or (end_date - timedelta(days=days_back - 1))
+    if start_date > end_date:
+        raise ValueError(f"start_date {start_date} is after end_date {end_date}")
+    station_mismatch_rows = 0
+    if replace_station_mismatch:
+        station_mismatch_rows = _delete_station_mismatch_rows(
+            conn,
+            city_name,
+            start_date,
+            end_date,
+            icao,
+            dry_run=dry_run,
+        )
     target_dates = (
-        _dates_needing_fetch(conn, city_name, start_date, end_date)
+        _dates_needing_fetch(conn, city_name, start_date, end_date, station_id=icao)
         if missing_only
         else _dates_in_range(start_date, end_date)
     )
@@ -645,7 +669,19 @@ def backfill_city(
 
     if not dry_run:
         conn.commit()
-    return {"city": city_name, "collected": collected, "skip": skip_count, "err": err_count, "guard_rejected": guard_rejected, "requests": request_count}
+    return {
+        "city": city_name,
+        "collected": collected,
+        "skip": skip_count,
+        "err": err_count,
+        "guard_rejected": guard_rejected,
+        "requests": request_count,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "station_id": icao,
+        "station_mismatch_rows": station_mismatch_rows,
+        "station_mismatch_rows_deleted": 0 if dry_run else station_mismatch_rows,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -654,9 +690,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cities", nargs="+", default=None)
     parser.add_argument("--days", type=int, default=90)
+    parser.add_argument("--start-date", type=date.fromisoformat, default=None)
+    parser.add_argument("--end-date", type=date.fromisoformat, default=None)
+    parser.add_argument("--db", type=Path, default=None, help="World DB path; defaults to configured world DB")
     parser.add_argument("--chunk-days", type=int, default=31)
     parser.add_argument("--sleep", type=float, default=0.5)
     parser.add_argument("--missing-only", action="store_true", help="Fetch only dates missing WU observations or valued settlements")
+    parser.add_argument(
+        "--replace-station-mismatch",
+        action="store_true",
+        help="Delete scoped WU rows whose station_id differs from config before refetching.",
+    )
     parser.add_argument("--all", action="store_true", help="All configured cities")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and validate but do not write to DB; print per-city summary")
     add_completeness_args(
@@ -667,7 +711,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    conn = get_world_connection()
+    conn = sqlite3.connect(args.db) if args.db else get_world_connection()
+    conn.row_factory = sqlite3.Row
     # Enable WAL journal mode so IngestionGuard's `_log_availability_failure`
     # secondary connection can write during backfill writes without BUSY-lock
     # silent drops. Default rollback journal serializes writers and the
@@ -694,7 +739,9 @@ def main(argv: list[str] | None = None) -> int:
         print("[DRY RUN] No rows will be written to the DB.")
     print(
         f"=== WU ICAO Station History Backfill "
-        f"({len(targets)} cities, {args.days} days, run_id={run_id}) ==="
+        f"({len(targets)} cities, {args.days} days, "
+        f"start={args.start_date or 'auto'} end={args.end_date or 'auto'}, "
+        f"run_id={run_id}) ==="
     )
 
     results = []
@@ -710,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
             sleep_seconds=args.sleep,
             missing_only=args.missing_only,
             dry_run=dry_run,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            replace_station_mismatch=args.replace_station_mismatch,
         )
         results.append(r)
         print(f"  → collected={r['collected']} skip={r['skip']} err={r['err']} guard_rejected={r['guard_rejected']}")
