@@ -7,7 +7,25 @@ Status: first guardrail slice implemented.
 Status: first corrected executor bridge landed in
 `worktree/reality-semantics-refactor`.
 
-Additional completed slice:
+Additional completed slice: runtime corrected live gate.
+
+- added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
+  `src/engine/cycle_runtime.py`
+- when the gate is false or absent, live entry continues through the legacy
+  `create_execution_intent()` / `execute_intent()` path and records legacy
+  corrected-shadow comparison evidence as before
+- when the gate is true, live entry reconstructs an immutable
+  `FinalExecutionIntent` from corrected shadow evidence and calls
+  `deps.execute_final_intent()` without passing posterior, VWMP, or `BinEdge`
+  inputs into the corrected submit path
+- corrected live branch rejects not-submit-ready shadow evidence before legacy
+  submit creation/execution, preserving fail-closed behavior for passive
+  nonmarketable candidates
+- production runtime remains non-promoted: `cycle_runner.py` was not rewired in
+  this slice, config was not changed, and no live venue/prod side effect was
+  performed
+
+Additional completed slice: corrected executor bridge.
 
 - added `execute_final_intent()` as the corrected entry submit boundary in
   `src/execution/executor.py`
@@ -59,6 +77,15 @@ Passing checks:
 - `/Users/leofitz/miniconda3/bin/python3 -m compileall -q src/contracts/execution_intent.py src/execution/executor.py src/engine/cycle_runtime.py`
 - `/Users/leofitz/miniconda3/bin/python3 -m pytest tests/test_executor.py tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_runtime_guards.py -q` -> 263 passed, 1 skipped
 - `/Users/leofitz/miniconda3/bin/python3 -m pytest tests/test_runtime_guards.py tests/test_executor.py tests/test_executable_market_snapshot_v2.py -q` -> 255 passed, 1 skipped
+- `python -m pytest tests/test_runtime_guards.py::test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump tests/test_runtime_guards.py::test_live_corrected_pricing_uses_final_intent_when_flag_enabled tests/test_runtime_guards.py::test_live_corrected_pricing_rejects_not_submit_ready_shadow_without_legacy_submit -q` -> 3 passed
+- `python -m pytest tests/test_runtime_guards.py tests/test_executor.py tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py -q` -> 265 passed, 1 skipped
+- `python -m compileall -q src/engine/cycle_runtime.py tests/test_runtime_guards.py`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_runtime_guards.py --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/engine/cycle_runtime.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/engine/cycle_runtime.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_routes_to_refactor_profile tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py` -> 109 passed, 22 skipped
+- `python scripts/digest_profiles_export.py --check`
+- `python scripts/topology_doctor.py --schema`
 
 Review gates:
 

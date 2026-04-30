@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import tempfile
 import types
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -2595,6 +2596,270 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     assert shadow["candidate_final_limit_price"] == "0.23"
     assert shadow["legacy_submitted_limit_price"] == "0.23"
     assert shadow["legacy_submitted_matches_corrected_candidate"] is True
+
+
+def test_live_corrected_pricing_uses_final_intent_when_flag_enabled(monkeypatch, tmp_path):
+    monkeypatch.setitem(
+        settings._data.setdefault("feature_flags", {}),
+        cycle_runtime.CORRECTED_PRICING_LIVE_FLAG,
+        True,
+    )
+    db_path = tmp_path / "live-corrected-final-intent.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-corrected-ready",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.40",
+        top_ask="0.41",
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-corrected-ready",
+        "slug": "slug-corrected-ready",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    edge = replace(_edge(), p_posterior=0.60, edge=0.25)
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-corrected-ready",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-corrected-ready",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-corrected-ready",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+    captured = {}
+
+    def _legacy_create(**kwargs):
+        captured["legacy_create"] = kwargs
+        return create_execution_intent(**kwargs)
+
+    def _legacy_execute(*args, **kwargs):
+        captured["legacy_execute"] = (args, kwargs)
+        return OrderResult(status="rejected", trade_id="legacy", reason="legacy_called")
+
+    def _execute_final_intent(final_intent, **kwargs):
+        captured["final_intent"] = final_intent
+        captured["final_kwargs"] = kwargs
+        return OrderResult(
+            status="pending",
+            trade_id="trade-corrected-ready",
+            order_id="ord-corrected-ready",
+            submitted_price=float(final_intent.final_limit_price),
+            shares=12.0,
+            command_state="INTENT_CREATED",
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=_legacy_create,
+        execute_intent=_legacy_execute,
+        execute_final_intent=_execute_final_intent,
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert "legacy_create" not in captured
+    assert "legacy_execute" not in captured
+    final_intent = captured["final_intent"]
+    assert final_intent.selected_token_id == "yes1"
+    assert final_intent.final_limit_price == Decimal("0.41")
+    assert final_intent.expected_fill_price_before_fee == Decimal("0.41")
+    assert captured["final_kwargs"]["market_id"] == "m1"
+    assert captured["final_kwargs"]["decision_id"] == "d-corrected-ready"
+    assert summary["no_trades"] == 0
+    reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
+    assert reprice["corrected_submit_path"] == "final_execution_intent"
+    assert reprice["submitted_limit_price"] == pytest.approx(0.41)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["corrected_submit_path"] == "final_execution_intent"
+    assert shadow["corrected_submitted_limit_price"] == "0.41"
+    assert shadow["corrected_submitted_matches_final_intent"] is True
+    assert "legacy_submit_path" not in shadow
+
+
+def test_live_corrected_pricing_rejects_not_submit_ready_shadow_without_legacy_submit(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setitem(
+        settings._data.setdefault("feature_flags", {}),
+        cycle_runtime.CORRECTED_PRICING_LIVE_FLAG,
+        True,
+    )
+    conn = get_connection(tmp_path / "live-corrected-not-ready.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-corrected-not-ready",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.20",
+        top_ask="0.30",
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-corrected-not-ready",
+        "slug": "slug-corrected-not-ready",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-corrected-not-ready",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-corrected-not-ready",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-corrected-not-ready",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=types.SimpleNamespace(p_posterior=0.47),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+    captured = {"legacy_create": 0, "legacy_execute": 0, "corrected_execute": 0}
+
+    def _legacy_create(**kwargs):
+        captured["legacy_create"] += 1
+        return create_execution_intent(**kwargs)
+
+    def _legacy_execute(*args, **kwargs):
+        captured["legacy_execute"] += 1
+        return OrderResult(status="rejected", trade_id="legacy", reason="legacy_called")
+
+    def _execute_final_intent(*args, **kwargs):
+        captured["corrected_execute"] += 1
+        return OrderResult(status="rejected", trade_id="corrected", reason="should_not_call")
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=_legacy_create,
+        execute_intent=_legacy_execute,
+        execute_final_intent=_execute_final_intent,
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert captured == {"legacy_create": 0, "legacy_execute": 0, "corrected_execute": 0}
+    assert summary["no_trades"] == 1
+    case = artifact.no_trade_cases[0]
+    assert case.rejection_stage == "EXECUTION_FAILED"
+    assert case.rejection_reasons[0].startswith(
+        "execution_intent_rejected:corrected_final_intent_not_submit_ready"
+    )
+    assert artifact.trade_cases == []
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
