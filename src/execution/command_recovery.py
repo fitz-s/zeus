@@ -8,7 +8,9 @@ reconciles currently-supported side-effect states against venue truth. M2 owns
 SUBMIT_UNKNOWN_SIDE_EFFECT resolution: lookup by known venue_order_id or by
 idempotency-key capability, then convert found orders to ACKED/PARTIAL/FILLED
 or mark safe replay permitted via a terminal SUBMIT_REJECTED payload after the
-window elapses. Appends durable events that advance state per the §P1.S4
+window elapses. MATCHED/MINED are optimistic venue observations and stay
+PARTIAL; only CONFIRMED or an explicit FILLED order status advances command
+fill finality. Appends durable events that advance state per the §P1.S4
 resolution table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
 
 Chain reconciliation (FILL_CONFIRMED via on-chain settlement evidence) is OUT
@@ -169,7 +171,7 @@ def _reconcile_row(
                     "venue_response": venue_resp,
                     "idempotency_key": cmd.idempotency_key.value,
                 }
-                if venue_status in {"FILLED", "MINED", "CONFIRMED"}:
+                if venue_status in {"FILLED", "CONFIRMED"}:
                     append_event(
                         conn,
                         command_id=cmd.command_id,
@@ -183,7 +185,7 @@ def _reconcile_row(
                         cmd.command_id, venue_status, venue_order_id,
                     )
                     return "advanced"
-                if venue_status in {"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
+                if venue_status in {"MATCHED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
                     append_event(
                         conn,
                         command_id=cmd.command_id,

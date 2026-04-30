@@ -326,7 +326,7 @@ MODE_PARAMS = {
     DiscoveryMode.UPDATE_REACTION: {"min_hours_since_open": 24, "min_hours_to_resolution": 6},
     DiscoveryMode.DAY0_CAPTURE: {"max_hours_to_resolution": 6},
 }
-PENDING_FILL_STATUSES = {"FILLED", "MATCHED"}
+PENDING_FILL_STATUSES = {"FILLED", "CONFIRMED"}
 PENDING_CANCEL_STATUSES = {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"}
 
 

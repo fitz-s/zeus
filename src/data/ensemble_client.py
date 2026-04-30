@@ -310,7 +310,52 @@ def _parse_response(
     }
 
 
-def validate_ensemble(result: dict, expected_members: int | None = None) -> bool:
+def _coerce_members_hourly(result: dict) -> np.ndarray | None:
+    members = result.get("members_hourly")
+    if members is None:
+        return None
+    try:
+        arr = np.asarray(members, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 2:
+        return None
+    return arr
+
+
+def _effective_finite_member_count(
+    members: np.ndarray,
+    required_hour_indices: Sequence[int] | np.ndarray | None,
+) -> int:
+    if required_hour_indices is None:
+        return int(members.shape[0])
+    idxs = [int(idx) for idx in required_hour_indices]
+    if not idxs:
+        return 0
+    if min(idxs) < 0 or max(idxs) >= members.shape[1]:
+        return 0
+    required = members[:, idxs]
+    finite_member_mask = np.isfinite(required).all(axis=1)
+    return int(np.count_nonzero(finite_member_mask))
+
+
+def _required_hours_all_finite(
+    members: np.ndarray,
+    required_hour_indices: Sequence[int] | np.ndarray,
+) -> bool:
+    idxs = [int(idx) for idx in required_hour_indices]
+    if not idxs:
+        return False
+    if min(idxs) < 0 or max(idxs) >= members.shape[1]:
+        return False
+    return bool(np.isfinite(members[:, idxs]).all())
+
+
+def validate_ensemble(
+    result: dict,
+    expected_members: int | None = None,
+    required_hour_indices: Sequence[int] | np.ndarray | None = None,
+) -> bool:
     """Validate ensemble response. Per CLAUDE.md: reject if < expected members."""
     if expected_members is None:
         expected_members = ensemble_member_count()
@@ -320,12 +365,34 @@ def validate_ensemble(result: dict, expected_members: int | None = None) -> bool
     if n < expected_members:
         print(f"  WARN ensemble has {n} members, expected {expected_members}. REJECTED.")
         return False
-    members = result.get("members_hourly")
-    if members is not None:
-        import numpy as np
-        nan_frac = np.isnan(members).mean()
-        if nan_frac > 0.5:
-            print(f"  WARN ensemble has {nan_frac:.0%} NaN values. REJECTED.")
+    members_present = result.get("members_hourly") is not None
+    members = _coerce_members_hourly(result)
+    if members is None:
+        if members_present or required_hour_indices is not None:
+            print("  WARN ensemble members_hourly is missing or malformed. REJECTED.")
+            return False
+    else:
+        if members.shape[0] != n:
+            print(
+                "  WARN ensemble n_members metadata does not match members_hourly rows. "
+                "REJECTED."
+            )
+            return False
+        if required_hour_indices is not None:
+            effective_n = _effective_finite_member_count(members, required_hour_indices)
+            if effective_n < expected_members:
+                print(
+                    f"  WARN ensemble has {effective_n} finite members for required hours, "
+                    f"expected {expected_members}. REJECTED."
+                )
+                return False
+            if not _required_hours_all_finite(members, required_hour_indices):
+                print("  WARN ensemble has non-finite supplied members for required hours. REJECTED.")
+                return False
+            return True
+        nonfinite_frac = (~np.isfinite(members)).mean()
+        if nonfinite_frac > 0.5:
+            print(f"  WARN ensemble has {nonfinite_frac:.0%} non-finite values. REJECTED.")
             return False
     return True
 

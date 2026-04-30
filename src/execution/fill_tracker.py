@@ -21,7 +21,7 @@ from src.state.portfolio import PortfolioState, Position, void_position
 
 logger = logging.getLogger(__name__)
 
-FILL_STATUSES = frozenset({"FILLED", "MATCHED"})
+FILL_STATUSES = frozenset({"FILLED", "CONFIRMED"})
 CANCEL_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 
 # Void pending entries after this many cycles without resolution

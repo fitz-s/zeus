@@ -12,7 +12,11 @@ from typing import Optional
 
 import numpy as np
 
-from src.calibration.platt import ExtendedPlattCalibrator, logit_safe
+from src.calibration.platt import (
+    ExtendedPlattCalibrator,
+    logit_safe,
+    normalize_bin_probability_for_calibration,
+)
 from src.config import edge_n_bootstrap
 from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
@@ -29,6 +33,54 @@ logger = logging.getLogger(__name__)
 
 # Compatibility alias for tests and assumption audits.
 DEFAULT_EDGE_BOOTSTRAP = edge_n_bootstrap()
+
+
+def _finite_probability_distribution(
+    name: str,
+    values: np.ndarray,
+    expected_len: int,
+) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite")
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be non-negative")
+    if np.any(arr > 1.0):
+        raise ValueError(f"{name} components must be <= 1")
+    total = float(arr.sum())
+    if not np.isclose(total, 1.0, rtol=1e-6, atol=1e-6):
+        raise ValueError(f"{name} must sum to 1.0")
+    return arr
+
+
+def _finite_market_price_vector(
+    name: str,
+    values: np.ndarray,
+    expected_len: int,
+) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite")
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be non-negative")
+    if np.any(arr > 1.0):
+        raise ValueError(f"{name} components must be <= 1")
+    if float(arr.sum()) <= 0.0:
+        raise ValueError(f"{name} must have positive mass")
+    return arr
+
+
+def _finite_member_extrema(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError("member_maxes must be a non-empty 1D array")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("member_maxes must be finite")
+    return arr
 
 
 class MarketAnalysis:
@@ -57,20 +109,24 @@ class MarketAnalysis:
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
+        expected_bins = len(bins)
         self.bins = bins
-        self.p_raw = p_raw
-        self.p_cal = p_cal
-        self.p_market = p_market
+        self.p_raw = _finite_probability_distribution("p_raw", p_raw, expected_bins)
+        self.p_cal = _finite_probability_distribution("p_cal", p_cal, expected_bins)
+        self.p_market = _finite_market_price_vector("p_market", p_market, expected_bins)
         self.market_complete = market_complete
-        self.p_posterior = compute_posterior(p_cal, p_market, alpha, bins=bins)
-        self.vig = float(p_market.sum())
+        self.p_posterior = compute_posterior(self.p_cal, self.p_market, alpha, bins=bins)
+        self.vig = float(self.p_market.sum())
+        raw_member_maxes = _finite_member_extrema(member_maxes)
         self._member_maxes = analysis_member_maxes(
-            member_maxes,
+            raw_member_maxes,
             unit=unit,
             lead_days=lead_days,
             bias_corrected=bias_corrected,
             bias_reference=bias_reference,
         )
+        if not np.all(np.isfinite(self._member_maxes)):
+            raise ValueError("member_maxes must remain finite after uncertainty adjustment")
         self._mean_context = analysis_mean_context(
             unit=unit,
             lead_days=lead_days,
@@ -250,9 +306,10 @@ class MarketAnalysis:
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
                     if is_wnd:
-                        if bb.width is None or bb.width <= 0:
-                            raise ValueError(f"Bin width must be defined and >0 for width-normalized density. Bin: {bb}")
-                        p_input = p_raw_all[j] / bb.width
+                        p_input = normalize_bin_probability_for_calibration(
+                            p_raw_all[j],
+                            bin_width=bb.width,
+                        )
                     z = A * logit_safe(p_input) + B * self._lead_days + C
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
@@ -309,12 +366,10 @@ class MarketAnalysis:
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
                     if is_wnd:
-                        if bb.width is None or bb.width <= 0:
-                            raise ValueError(
-                                f"Bin width must be defined and >0 for width-normalized density. "
-                                f"Open/shoulder bins must not use WND input space. Bin: {bb}"
-                            )
-                        p_input = p_raw_all[j] / bb.width
+                        p_input = normalize_bin_probability_for_calibration(
+                            p_raw_all[j],
+                            bin_width=bb.width,
+                        )
                     z = A * logit_safe(p_input) + B * self._lead_days + C
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:

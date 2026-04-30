@@ -1,16 +1,18 @@
+# Created: pre-Phase-0
+# Last reused/audited: 2026-04-30
+# Authority basis: K5 Slice L truth-source tests + first-principles ZEUS_MODE cleanup 2026-04-30
 """Tests for Slice L — Truth Source: Data Layer (Bugs #3, #50, #60, #65)."""
 
 import logging
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
-# ── Bug #3: get_mode() reads ZEUS_MODE env var ────────────────────────
+# ── Bug #3 retired: get_mode() is live-only and no longer reads ZEUS_MODE ──
 
 class TestGetMode:
-    def test_get_mode_reads_env_var(self, monkeypatch):
+    def test_get_mode_returns_live_even_when_env_is_live(self, monkeypatch):
         monkeypatch.setenv("ZEUS_MODE", "live")
         from src.config import get_mode
         assert get_mode() == "live"
@@ -20,11 +22,10 @@ class TestGetMode:
         from src.config import get_mode
         assert get_mode() == "live"
 
-    def test_get_mode_rejects_invalid(self, monkeypatch):
+    def test_get_mode_ignores_retired_non_live_env_var(self, monkeypatch):
         monkeypatch.setenv("ZEUS_MODE", "paper")
         from src.config import get_mode
-        with pytest.raises(ValueError, match="ZEUS_MODE='paper'"):
-            get_mode()
+        assert get_mode() == "live"
 
 
 # ── Bug #50: add_position merge logs context loss ─────────────────────

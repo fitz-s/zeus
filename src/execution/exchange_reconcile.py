@@ -373,7 +373,7 @@ def _append_linkable_trade_fact_if_missing(
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
         return
-    event = _fill_event_for_command(latest, filled_size)
+    event = _fill_event_for_command(latest, filled_size, trade_state=state)
     if event is None:
         return
     try:
@@ -397,10 +397,19 @@ def _append_linkable_trade_fact_if_missing(
         return
 
 
-def _fill_event_for_command(command: Mapping[str, Any], filled_size: str) -> str | None:
+def _fill_event_for_command(
+    command: Mapping[str, Any],
+    filled_size: str,
+    *,
+    trade_state: str,
+) -> str | None:
     state = str(command.get("state") or "")
     if state in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}:
         return None
+    if trade_state in {"FAILED", "RETRYING"}:
+        return None
+    if trade_state != "CONFIRMED":
+        return "PARTIAL_FILL_OBSERVED"
     size = _decimal(command.get("size", 0))
     filled = _decimal(filled_size)
     if filled >= size:

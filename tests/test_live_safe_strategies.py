@@ -1,4 +1,6 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-26; last_reused=never
+# Created: 2026-04-26
+# Last reused/audited: 2026-04-30
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: G6 antibody — pin LIVE_SAFE_STRATEGIES typed frozenset + boot-time
 #          refusal to launch live daemon when any non-allowlisted strategy is
 #          enabled. Closes the gap between universe-of-strategies (KNOWN_STRATEGIES,
@@ -21,14 +23,12 @@ Behavioral pin:
     converged verdict in the archived live-readiness workbook)
 
 Boot guard:
-    Under ZEUS_MODE=live, any enabled strategy outside LIVE_SAFE_STRATEGIES
-    refuses daemon start via SystemExit (matching existing FATAL pattern at
-    src/main.py:472-477).
+    Runtime is live-only. Any enabled strategy outside LIVE_SAFE_STRATEGIES
+    refuses daemon start via SystemExit.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -98,7 +98,6 @@ def test_live_safe_strategies_subset_of_known_strategies():
 
 def test_assert_live_safe_strategies_silent_on_safe_set(monkeypatch):
     """Helper returns silently when enabled set is subset of allowlist."""
-    monkeypatch.setenv("ZEUS_MODE", "live")
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     # Must not raise.
@@ -106,13 +105,7 @@ def test_assert_live_safe_strategies_silent_on_safe_set(monkeypatch):
 
 
 def test_assert_live_safe_strategies_raises_on_unsafe_set(monkeypatch):
-    """Under ZEUS_MODE=live, helper raises SystemExit when an enabled strategy is outside the allowlist.
-
-    SystemExit (not RuntimeError) matches the existing FATAL boot pattern at
-    src/main.py:472-477 — daemon launchers consume SystemExit and refuse to
-    start; RuntimeError would leak past launchd and create zombie state.
-    """
-    monkeypatch.setenv("ZEUS_MODE", "live")
+    """Helper raises SystemExit when an enabled strategy is outside the allowlist."""
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     with pytest.raises(SystemExit) as exc_info:
@@ -123,30 +116,22 @@ def test_assert_live_safe_strategies_raises_on_unsafe_set(monkeypatch):
     assert "center_buy" in msg, f"SystemExit message must name the offender: {msg!r}"
 
 
-def test_assert_live_safe_strategies_silent_under_paper_mode(monkeypatch):
-    """Under ZEUS_MODE!='live', helper is silent regardless of enabled set.
-
-    Live-only enforcement — paper sessions are experimental and may run
-    arbitrary strategies. The boot refusal applies ONLY to live mode.
-    """
+def test_assert_live_safe_strategies_ignores_retired_paper_env(monkeypatch):
+    """The retired ZEUS_MODE switch cannot bypass live strategy allowlisting."""
     monkeypatch.setenv("ZEUS_MODE", "paper")
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
-    # Must not raise even with center_buy in the set.
-    assert_live_safe_strategies_under_live_mode({"center_buy"}) is None
+    with pytest.raises(SystemExit):
+        assert_live_safe_strategies_under_live_mode({"center_buy"})
 
 
-def test_assert_live_safe_strategies_silent_when_zeus_mode_unset(monkeypatch):
-    """If ZEUS_MODE is unset entirely, helper is silent.
-
-    Defends against import-time evaluation: tests / CI may import the helper
-    without setting ZEUS_MODE. Production boot path sets ZEUS_MODE before
-    invoking the helper, so the unset-case is test/CI-only.
-    """
+def test_assert_live_safe_strategies_enforces_when_zeus_mode_unset(monkeypatch):
+    """The live-only runtime no longer needs ZEUS_MODE to activate the guard."""
     monkeypatch.delenv("ZEUS_MODE", raising=False)
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
-    assert_live_safe_strategies_under_live_mode({"center_buy"}) is None
+    with pytest.raises(SystemExit):
+        assert_live_safe_strategies_under_live_mode({"center_buy"})
 
 
 # ---------------------------------------------------------------------------

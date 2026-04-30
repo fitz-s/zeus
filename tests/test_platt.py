@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-30
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Tests for ExtendedPlattCalibrator.
 
@@ -194,6 +194,43 @@ class TestWidthNormalization:
 
     def test_shoulder_probability_stays_raw(self):
         assert normalize_bin_probability_for_calibration(0.07, bin_width=None) == pytest.approx(0.07)
+
+    @pytest.mark.parametrize("bad_width", [np.nan, np.inf, 0.0, -1.0, "bad"])
+    def test_corrupt_finite_width_rejected(self, bad_width):
+        with pytest.raises(ValueError, match="bin_width must be finite and >0"):
+            normalize_bin_probability_for_calibration(0.07, bin_width=bad_width)
+
+    def test_fit_with_mixed_finite_and_open_shoulder_widths(self):
+        p_raw, lead_days, outcomes = _synthetic_data(60)
+        bin_widths = np.array([1.0, 2.0, None, None, None] * 12, dtype=object)
+        cal = ExtendedPlattCalibrator()
+
+        cal.fit(
+            p_raw,
+            lead_days,
+            outcomes,
+            bin_widths=bin_widths,
+            n_bootstrap=5,
+            rng=np.random.default_rng(123),
+        )
+
+        assert cal.fitted is True
+        assert np.isfinite([cal.A, cal.B, cal.C]).all()
+
+    def test_fit_rejects_corrupt_widths(self):
+        p_raw, lead_days, outcomes = _synthetic_data(60)
+        bin_widths = np.array([1.0, 2.0, np.inf] * 20, dtype=object)
+        cal = ExtendedPlattCalibrator()
+
+        with pytest.raises(ValueError, match="bin_width must be finite and >0"):
+            cal.fit(
+                p_raw,
+                lead_days,
+                outcomes,
+                bin_widths=bin_widths,
+                n_bootstrap=5,
+                rng=np.random.default_rng(123),
+            )
 
 
 class TestCalibrateAndNormalize:

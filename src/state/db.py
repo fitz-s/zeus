@@ -4730,7 +4730,7 @@ def log_pending_exit_status_event(
     timestamp: str | None = None,
 ) -> None:
     """Append fill-check telemetry for an already placed exit order."""
-    event_type = "EXIT_FILL_CONFIRMED" if status in {"MATCHED", "FILLED"} else "EXIT_FILL_CHECKED"
+    event_type = "EXIT_FILL_CONFIRMED" if status in {"FILLED", "CONFIRMED"} else "EXIT_FILL_CHECKED"
     log_exit_lifecycle_event(
         conn,
         pos,

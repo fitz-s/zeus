@@ -512,7 +512,6 @@ scripts:
     class: utility
     reason: "Read-only harness-debate audit utility for manifest completeness/header drift; deliberately audits instead of regenerating authority manifests."
     write_targets: [stdout, temp]
-  refresh_paper_runtime_artifacts.py: {class: repair, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, delete_policy: archive_or_delete_in_cleanup_packet, write_targets: [state/status_summary-paper.json, state/risk_state-paper.db], apply_flag: implicit, target_db: state/status_summary-paper.json + state/risk_state-paper.db, archive_reason: paper runtime artifacts are obsolete in live-only phase, unguarded_write_rationale: "Paper runtime artifact refresh writes obsolete paper status and paper risk DB rows; manifest marks it dangerous pending archive."}
   replay_parity.py: {class: diagnostic}
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
