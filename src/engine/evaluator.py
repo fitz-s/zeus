@@ -7,6 +7,7 @@ portfolio state, or execution. Pure function: candidate -> decision.
 import json
 import logging
 import hashlib
+import math
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -90,6 +91,8 @@ CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     "wu_icao": frozenset({"wu_api"}),
 }
+DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
+DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
 ORACLE_EVIDENCE_PATH = PROJECT_ROOT / "data" / "oracle_error_rates.json"
 ORACLE_EVIDENCE_MAX_STALENESS_DAYS = 30
 NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
@@ -251,6 +254,8 @@ def _read_v2_snapshot_metadata(
 def _day0_observation_source_rejection_reason(
     city: City,
     observation: "Day0ObservationContext",
+    *,
+    consumer_label: str = "executable entry",
 ) -> str | None:
     settlement_source_type = str(
         getattr(city, "settlement_source_type", "") or ""
@@ -265,15 +270,115 @@ def _day0_observation_source_rejection_reason(
     )
     if allowed_sources is None:
         return (
-            "Day0 observation source role is not authorized for executable entry: "
+            f"Day0 observation source role is not authorized for {consumer_label}: "
             f"city={city.name} settlement_source_type={settlement_source_type!r} "
             f"observation_source={source!r}"
         )
     if source not in allowed_sources:
         return (
-            "Day0 observation source is not authorized for executable entry: "
+            f"Day0 observation source is not authorized for {consumer_label}: "
             f"city={city.name} settlement_source_type={settlement_source_type!r} "
             f"observation_source={source!r} allowed={sorted(allowed_sources)}"
+        )
+    return None
+
+
+def _day0_observation_field(
+    observation: "Day0ObservationContext",
+    field: str,
+    default=None,
+):
+    if isinstance(observation, dict):
+        return observation.get(field, default)
+    return getattr(observation, field, default)
+
+
+def _parse_day0_observation_time_utc(value) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return None
+            if raw.isdigit():
+                parsed = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _finite_day0_observation_float(
+    observation: "Day0ObservationContext",
+    field: str,
+) -> float | None:
+    raw = _day0_observation_field(observation, field)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _day0_observation_quality_rejection_reason(
+    city: City,
+    observation: "Day0ObservationContext",
+    temperature_metric: MetricIdentity,
+    *,
+    decision_time: datetime | None,
+) -> str | None:
+    required_fields = ["current_temp"]
+    if temperature_metric.is_low():
+        required_fields.append("low_so_far")
+    else:
+        required_fields.append("high_so_far")
+
+    missing_or_nonfinite = [
+        field
+        for field in required_fields
+        if _finite_day0_observation_float(observation, field) is None
+    ]
+    if missing_or_nonfinite:
+        return (
+            "Day0 observation contains missing or non-finite required values: "
+            f"city={city.name} fields={missing_or_nonfinite}"
+        )
+
+    observed_at = _parse_day0_observation_time_utc(
+        _day0_observation_field(observation, "observation_time")
+    )
+    if observed_at is None:
+        return f"Day0 observation timestamp is unavailable or unparseable: city={city.name}"
+
+    reference_time = decision_time or datetime.now(timezone.utc)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+    reference_time = reference_time.astimezone(timezone.utc)
+    age_seconds = (reference_time - observed_at).total_seconds()
+    if age_seconds < -DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS:
+        return (
+            "Day0 observation timestamp is after the decision boundary: "
+            f"city={city.name} observed_at={observed_at.isoformat()} "
+            f"decision_time={reference_time.isoformat()}"
+        )
+    age_hours = max(0.0, age_seconds / 3600.0)
+    if age_hours > DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS:
+        return (
+            "Day0 observation is stale for executable probability generation: "
+            f"city={city.name} age_hours={age_hours:.3f} "
+            f"max_age_hours={DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS:.3f}"
         )
     return None
 
@@ -1157,6 +1262,28 @@ def evaluate_candidate(
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "observation_source_policy"],
             )]
+        observation_quality_rejection = _day0_observation_quality_rejection_reason(
+            city,
+            candidate.observation,
+            temperature_metric,
+            decision_time=decision_time,
+        )
+        if observation_quality_rejection is not None:
+            availability_status = (
+                "DATA_STALE"
+                if "stale" in observation_quality_rejection
+                or "after the decision boundary" in observation_quality_rejection
+                else "DATA_UNAVAILABLE"
+            )
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[observation_quality_rejection],
+                availability_status=availability_status,
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "observation_quality_gate"],
+            )]
 
     # Build bins — skip unparseable (both boundaries None)
     bins = []
@@ -1455,17 +1582,40 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch", "causality_gate"],
             )]
 
+        observed_high_so_far = _finite_day0_observation_float(
+            candidate.observation,
+            "high_so_far",
+        )
+        observed_low_so_far = _finite_day0_observation_float(
+            candidate.observation,
+            "low_so_far",
+        )
+        current_temp = _finite_day0_observation_float(
+            candidate.observation,
+            "current_temp",
+        )
+        if current_temp is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["Day0 current observation became unavailable before signal routing"],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "observation_quality_gate"],
+            )]
+
         day0 = Day0Router.route(Day0SignalInputs(
             temperature_metric=temperature_metric,
-            observed_high_so_far=float(candidate.observation.high_so_far) if candidate.observation.high_so_far is not None else None,
-            observed_low_so_far=float(candidate.observation.low_so_far) if candidate.observation.low_so_far is not None else None,
-            current_temp=float(candidate.observation.current_temp),
+            observed_high_so_far=observed_high_so_far,
+            observed_low_so_far=observed_low_so_far,
+            current_temp=current_temp,
             hours_remaining=hours_remaining,
             member_maxes_remaining=extrema.maxes,
             member_mins_remaining=extrema.mins,
             unit=city.settlement_unit,
-            observation_source=str(candidate.observation.source),
-            observation_time=candidate.observation.observation_time,
+            observation_source=str(_day0_observation_field(candidate.observation, "source", "")),
+            observation_time=_day0_observation_field(candidate.observation, "observation_time"),
             temporal_context=temporal_context,
             round_fn=settlement_semantics.round_values,
             causality_status=causality_status,

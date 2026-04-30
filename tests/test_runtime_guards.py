@@ -395,6 +395,88 @@ def test_day0_entry_rejects_settlement_types_without_executable_source_policy(se
     assert "observation_source_policy" in decisions[0].applied_validations
 
 
+def test_day0_entry_rejects_stale_epoch_observation_before_signal_path(monkeypatch):
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_ensemble must not run")),
+    )
+    observed_at = datetime(2026, 4, 12, 16, 0, tzinfo=timezone.utc)
+    decision_time = datetime(2026, 4, 12, 18, 5, tzinfo=timezone.utc)
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-12",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=4.0,
+        observation=Day0ObservationContext(
+            high_so_far=70.0,
+            low_so_far=62.0,
+            current_temp=69.0,
+            source="wu_api",
+            observation_time=int(observed_at.timestamp()),
+            unit="F",
+        ),
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=object(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=decision_time,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].availability_status == "DATA_STALE"
+    assert "observation_quality_gate" in decisions[0].applied_validations
+    assert "stale" in decisions[0].rejection_reasons[0]
+
+
+def test_day0_entry_rejects_nonfinite_observation_before_signal_path(monkeypatch):
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_ensemble must not run")),
+    )
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-12",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=4.0,
+        observation=Day0ObservationContext(
+            high_so_far=70.0,
+            low_so_far=62.0,
+            current_temp=float("nan"),
+            source="wu_api",
+            observation_time=datetime(2026, 4, 12, 18, 0, tzinfo=timezone.utc).isoformat(),
+            unit="F",
+        ),
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=object(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 12, 18, 5, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].availability_status == "DATA_UNAVAILABLE"
+    assert "observation_quality_gate" in decisions[0].applied_validations
+    assert "non-finite" in decisions[0].rejection_reasons[0]
+
+
 def test_oracle_evidence_gate_rejects_missing_and_stale_rows(monkeypatch, tmp_path):
     evidence_path = tmp_path / "oracle_error_rates.json"
     evidence_path.write_text(json.dumps({
@@ -2663,7 +2745,7 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
             low_so_far=None,
             current_temp=40.5,
             source="wu_api",
-            observation_time="2026-04-01T16:00:00+00:00",
+            observation_time=datetime.now(timezone.utc).isoformat(),
         ),
     )
     monkeypatch.setattr(monitor_refresh, "fetch_ensemble", _fetch)
@@ -2721,6 +2803,59 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "forecast_source_role:monitor_fallback" in applied
     assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
     assert "alpha_posterior" in applied
+
+
+def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="40-41°F",
+        unit="F",
+        market_id="m-day0",
+        direction="buy_yes",
+        p_posterior=0.31,
+        selected_method="day0_observation",
+        entry_method="day0_observation",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+    stale_observed_at = datetime(2026, 4, 1, 16, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            high_so_far=41.0,
+            low_so_far=39.0,
+            current_temp=40.5,
+            source="wu_api",
+            observation_time=int(stale_observed_at.timestamp()),
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_ensemble must not run")),
+    )
+
+    posterior, applied = monitor_refresh._refresh_day0_observation(
+        position=position,
+        current_p_market=0.50,
+        conn=None,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert "observation_quality_gate" in applied
+    assert any("stale" in item for item in applied)
 
 
 def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):

@@ -1300,7 +1300,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return missing
 
     params = deps.MODE_PARAMS[mode]
-    markets = deps.find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
+    min_hours_to_resolution = params.get("min_hours_to_resolution")
+    if min_hours_to_resolution is None:
+        min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+    markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
     if "max_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
     if "min_hours_since_open" in params:
