@@ -65,6 +65,12 @@ only when the active packet, closeout gate, audit/review task, or future handoff
 consumes them. Direct T0/T1 work should not create packet evidence just to make
 the workflow look complete.
 
+The operation-end feedback capsule is a closeout habit, not a packet filename.
+For direct work, keep it in the final response. For packet closeout, append it
+to an already-required work log or receipt. It should briefly capture context
+recovery, Zeus improvement insights, and topology helped/blocked notes without
+creating standalone evidence/findings files or widening the active packet.
+
 Tracked packet evidence in this live router is limited to the current or
 retained rows below. Closed packet evidence is archived under
 `docs/operations/_archive/` or `docs/archives/packets/` and indexed in
@@ -146,6 +152,10 @@ archive_registry entry becomes its single source of historical truth.
   `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`; do not create
   sibling top-level folders for phases of the same package.
 - Do not leave completed packet material in the live pointer after closeout.
+- At operation close, recycle context: promote durable lessons through the
+  owning manifest/module book/test/source when in scope, summarize transient
+  lessons in the final response or active packet closeout surface, and discard
+  scratch context that no future agent should load by default.
 - Runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
   before they are treated as durable work evidence.
 - `state/daemon-heartbeat.json` and `state/status_summary.json` are live

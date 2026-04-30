@@ -1,5 +1,5 @@
 """Context-pack and impact builder family for topology_doctor."""
-# Lifecycle: created=2026-04-15; last_reviewed=2026-04-20; last_reused=2026-04-20
+# Lifecycle: created=2026-04-15; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Build task-shaped context packets and derived review/debug appendices.
 # Reuse: Keep generated context provisional; do not promote graph or lore evidence to authority here.
 
@@ -203,6 +203,12 @@ def context_pack_profiles(api: Any) -> dict[str, dict[str, Any]]:
         for profile in api.load_context_pack_profiles().get("profiles") or []
         if profile.get("id")
     }
+
+
+def runtime_guidance_for_profile(api: Any, profile: dict[str, Any]) -> dict[str, Any]:
+    metadata = api.load_context_pack_profiles().get("metadata") or {}
+    common = metadata.get("common_runtime_guidance") or {}
+    return {**common, **(profile.get("runtime_guidance") or {})}
 
 
 def run_context_packs(api: Any) -> Any:
@@ -1201,7 +1207,7 @@ def build_role_context_pack(
         "authority_status": profile.get("authority_status", f"generated_{role}_packet_not_authority"),
         "task": task,
         "target_files": changed_files,
-        "runtime_guidance": profile.get("runtime_guidance", {}),
+        "runtime_guidance": runtime_guidance_for_profile(api, profile),
         "workflow_policy": profile.get("workflow_policy", {}),
         "skill_policy": profile.get("skill_policy", {}),
         "role_sections": role_context_sections(role, route_card, impact, claims),
