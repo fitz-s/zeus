@@ -239,6 +239,13 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 "recorded_at",
                 "hours_since_open",
                 "hours_to_resolution",
+                "market_price_linkage",
+                "source",
+                "best_bid",
+                "best_ask",
+                "raw_orderbook_hash",
+                "snapshot_id",
+                "condition_id",
             },
             columns,
         )
@@ -248,6 +255,8 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         }
         self.assertIn("idx_market_price_history_slug_recorded", indexes)
         self.assertIn("idx_market_price_history_token_recorded", indexes)
+        self.assertIn("idx_market_price_history_snapshot", indexes)
+        self.assertIn("idx_market_price_history_condition_recorded", indexes)
 
         index_columns = {
             index_name: [
@@ -264,6 +273,14 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         self.assertEqual(
             ["token_id", "recorded_at"],
             index_columns["idx_market_price_history_token_recorded"],
+        )
+        self.assertEqual(
+            ["snapshot_id", "recorded_at"],
+            index_columns["idx_market_price_history_snapshot"],
+        )
+        self.assertEqual(
+            ["condition_id", "recorded_at"],
+            index_columns["idx_market_price_history_condition_recorded"],
         )
 
         conn.execute(
@@ -302,6 +319,43 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 VALUES ('slug', 'token-1', 0.42, '2026-04-29T16:00:00Z', 1.0, 3.0)
                 """
             )
+
+    def test_market_price_history_accepts_full_linkage_shape(self):
+        """Phase 5E: code-owned DDL can hold CLOB top-of-book linkage rows."""
+        conn = _apply_and_get_conn()
+
+        conn.execute(
+            """
+            INSERT INTO market_price_history (
+                market_slug, token_id, price, recorded_at,
+                hours_since_open, hours_to_resolution, market_price_linkage,
+                source, best_bid, best_ask, raw_orderbook_hash, snapshot_id,
+                condition_id
+            )
+            VALUES (
+                'slug', 'yes-token', 0.43, '2026-04-30T16:00:00Z',
+                NULL, NULL, 'full', 'CLOB_ORDERBOOK', 0.42, 0.44,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'snap-1', 'cond-1'
+            )
+            """
+        )
+        row = conn.execute(
+            """
+            SELECT market_price_linkage, source, best_bid, best_ask,
+                   raw_orderbook_hash, snapshot_id, condition_id
+            FROM market_price_history
+            WHERE token_id = 'yes-token'
+            """
+        ).fetchone()
+
+        self.assertEqual("full", row[0])
+        self.assertEqual("CLOB_ORDERBOOK", row[1])
+        self.assertEqual(0.42, row[2])
+        self.assertEqual(0.44, row[3])
+        self.assertEqual("a" * 64, row[4])
+        self.assertEqual("snap-1", row[5])
+        self.assertEqual("cond-1", row[6])
 
     def test_market_price_history_schema_is_idempotent(self):
         """Repeated apply_v2_schema preserves rows and foreign_keys PRAGMA."""

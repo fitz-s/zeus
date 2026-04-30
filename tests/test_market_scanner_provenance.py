@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import httpx
 import pytest
 
 from src.backtest.economics import check_economics_readiness
+from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
 from src.data import market_scanner as ms
 from src.data.market_scanner import (
     MarketSnapshot,
@@ -34,7 +36,9 @@ from src.data.market_scanner import (
     get_last_scan_authority,
 )
 from src.state import db as state_db
-from src.state.db import log_forward_market_substrate
+from src.state.db import log_executable_snapshot_market_price_linkage, log_forward_market_substrate
+from src.state.schema.v2_schema import apply_v2_schema
+from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -140,11 +144,74 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
             recorded_at TEXT NOT NULL,
             hours_since_open REAL,
             hours_to_resolution REAL,
+            market_price_linkage TEXT NOT NULL DEFAULT 'price_only',
+            source TEXT NOT NULL DEFAULT 'GAMMA_SCANNER',
+            best_bid REAL,
+            best_ask REAL,
+            raw_orderbook_hash TEXT,
+            snapshot_id TEXT,
+            condition_id TEXT,
             UNIQUE(token_id, recorded_at)
         );
         """
     )
     return conn
+
+
+def _make_full_linkage_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_v2_schema(conn)
+    init_snapshot_schema(conn)
+    return conn
+
+
+def _insert_full_linkage_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: str = "snap-full-linkage",
+    best_bid: Decimal = Decimal("0.42"),
+    best_ask: Decimal = Decimal("0.44"),
+) -> None:
+    captured_at = datetime(2026, 4, 30, 16, 0, tzinfo=timezone.utc)
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-full-linkage",
+            event_id="event-full-linkage",
+            event_slug="highest-temperature-in-chicago-on-april-30-2026",
+            condition_id="cond-full-linkage",
+            question_id="question-full-linkage",
+            yes_token_id="yes-full-linkage",
+            no_token_id="no-full-linkage",
+            selected_outcome_token_id="yes-full-linkage",
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            fee_details={"source": "test"},
+            token_map_raw={"YES": "yes-full-linkage", "NO": "no-full-linkage"},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=best_bid,
+            orderbook_top_ask=best_ask,
+            orderbook_depth_jsonb='{"asks":[{"price":"0.44","size":"100"}],"bids":[{"price":"0.42","size":"100"}]}',
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(seconds=30),
+        ),
+    )
 
 
 def _forward_market() -> dict:
@@ -880,14 +947,128 @@ class TestForwardMarketSubstrateProducer:
         assert shoulder["range_low"] is None
         assert shoulder["range_high"] == 35.0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 4
+        price_linkage = {
+            row["market_price_linkage"]
+            for row in conn.execute("SELECT market_price_linkage FROM market_price_history")
+        }
+        assert price_linkage == {"price_only"}
 
         readiness = check_economics_readiness(conn)
         assert readiness.ready is False
         assert "empty_table:market_events_v2" not in readiness.blockers
         assert "empty_table:market_price_history" not in readiness.blockers
+        assert "no_full_market_price_linkage_rows" in readiness.blockers
         assert "missing_table:venue_trade_facts" in readiness.blockers
         assert "no_market_event_outcomes" in readiness.blockers
         assert "economics_engine_not_implemented" in readiness.blockers
+
+    def test_executable_snapshot_price_linkage_writes_full_clob_row_without_unblocking_engine(
+        self, monkeypatch
+    ):
+        """Executable snapshot top-of-book facts become full-linkage substrate."""
+        monkeypatch.setattr(
+            state_db,
+            "get_connection",
+            lambda *_a, **_kw: pytest.fail("writer must not open a default DB"),
+        )
+        conn = _make_full_linkage_conn()
+        _insert_full_linkage_snapshot(conn)
+
+        result = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="snap-full-linkage",
+        )
+
+        assert result["status"] == "inserted"
+        row = conn.execute(
+            """
+            SELECT market_slug, token_id, price, market_price_linkage, source,
+                   best_bid, best_ask, raw_orderbook_hash, snapshot_id,
+                   condition_id
+            FROM market_price_history
+            WHERE snapshot_id = 'snap-full-linkage'
+            """
+        ).fetchone()
+        assert row["market_slug"] == "highest-temperature-in-chicago-on-april-30-2026"
+        assert row["token_id"] == "yes-full-linkage"
+        assert row["price"] == pytest.approx(0.43)
+        assert row["market_price_linkage"] == "full"
+        assert row["source"] == "CLOB_ORDERBOOK"
+        assert row["best_bid"] == pytest.approx(0.42)
+        assert row["best_ask"] == pytest.approx(0.44)
+        assert row["raw_orderbook_hash"] == "c" * 64
+        assert row["condition_id"] == "cond-full-linkage"
+        readiness = check_economics_readiness(conn)
+        assert "no_full_market_price_linkage_rows" not in readiness.blockers
+        assert "economics_engine_not_implemented" in readiness.blockers
+
+    def test_executable_snapshot_price_linkage_is_idempotent_and_does_not_overwrite_conflicts(
+        self,
+    ):
+        """Full-linkage writer is point-in-time and conflict-reporting."""
+        conn = _make_full_linkage_conn()
+        _insert_full_linkage_snapshot(conn)
+        first = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="snap-full-linkage",
+            recorded_at="2026-04-30T16:00:00+00:00",
+        )
+        second = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="snap-full-linkage",
+            recorded_at="2026-04-30T16:00:00+00:00",
+        )
+
+        assert first["status"] == "inserted"
+        assert second["status"] == "unchanged"
+
+        _insert_full_linkage_snapshot(
+            conn,
+            snapshot_id="snap-full-linkage-conflict",
+            best_bid=Decimal("0.46"),
+            best_ask=Decimal("0.48"),
+        )
+        conflict = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="snap-full-linkage-conflict",
+            recorded_at="2026-04-30T16:00:00+00:00",
+        )
+
+        assert conflict["status"] == "conflict"
+        stored = conn.execute(
+            """
+            SELECT COUNT(*), MIN(price), MAX(price)
+            FROM market_price_history
+            WHERE token_id = 'yes-full-linkage'
+            """
+        ).fetchone()
+        assert stored[0] == 1
+        assert stored[1] == pytest.approx(0.43)
+        assert stored[2] == pytest.approx(0.43)
+
+    def test_executable_snapshot_price_linkage_refuses_bad_or_absent_snapshot_facts(self):
+        """Missing and crossed-orderbook snapshots do not create full-linkage rows."""
+        conn = _make_full_linkage_conn()
+
+        missing = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="missing-snapshot",
+        )
+        assert missing["status"] == "refused_missing_snapshot"
+
+        _insert_full_linkage_snapshot(
+            conn,
+            snapshot_id="snap-crossed",
+            best_bid=Decimal("0.55"),
+            best_ask=Decimal("0.44"),
+        )
+        crossed = log_executable_snapshot_market_price_linkage(
+            conn,
+            snapshot_id="snap-crossed",
+        )
+
+        assert crossed["status"] == "refused_crossed_orderbook"
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_skips_when_required_tables_are_absent(self):
         """Capability-absent behavior is fail-loud and does not create tables."""

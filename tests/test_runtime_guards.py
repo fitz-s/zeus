@@ -1544,6 +1544,29 @@ def test_live_entry_snapshot_capture_failure_blocks_before_intent(tmp_path):
     assert case.rejection_reasons[1] == "executable_snapshot_capture_failed:CLOB market info missing"
 
 
+@pytest.mark.parametrize("status", ["inserted", "unchanged"])
+def test_forward_price_linkage_success_statuses_do_not_degrade_cycle(status):
+    assert cycle_runtime._forward_price_linkage_status_degraded(status) is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "",
+        "conflict",
+        "skipped_invalid_schema",
+        "skipped_missing_tables",
+        "skipped_no_connection",
+        "refused_missing_snapshot_id",
+        "refused_missing_snapshot",
+        "refused_missing_snapshot_facts",
+        "refused_crossed_orderbook",
+    ],
+)
+def test_forward_price_linkage_non_success_statuses_degrade_cycle(status):
+    assert cycle_runtime._forward_price_linkage_status_degraded(status) is True
+
+
 def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
     conn = get_connection(tmp_path / "thread-executable-identity.db")
     init_schema(conn)
@@ -1800,6 +1823,15 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
 
     snapshot_count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
     command_count = conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+    price_linkage = conn.execute(
+        """
+        SELECT market_price_linkage, source, best_bid, best_ask,
+               raw_orderbook_hash, snapshot_id, condition_id
+        FROM market_price_history
+        WHERE snapshot_id = ?
+        """,
+        (captured["intent"].executable_snapshot_id,),
+    ).fetchone()
     loaded_snapshot = get_snapshot(conn, captured["intent"].executable_snapshot_id)
     conn.close()
 
@@ -1809,6 +1841,14 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
     assert loaded_snapshot.captured_at != datetime(2026, 4, 3, tzinfo=timezone.utc)
     assert snapshot_count == 1
     assert command_count == 0
+    assert price_linkage is not None
+    assert price_linkage["market_price_linkage"] == "full"
+    assert price_linkage["source"] == "CLOB_ORDERBOOK"
+    assert price_linkage["best_bid"] == pytest.approx(0.34)
+    assert price_linkage["best_ask"] == pytest.approx(0.36)
+    assert price_linkage["raw_orderbook_hash"]
+    assert price_linkage["condition_id"] == "cond1"
+    assert summary["forward_market_price_linkage_status"] == "inserted"
     assert summary["no_trades"] == 0
 
 

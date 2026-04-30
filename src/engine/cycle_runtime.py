@@ -29,6 +29,7 @@ CANONICAL_STRATEGY_KEYS = {
     "center_buy",
     "opening_inertia",
 }
+_FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 
 
 # T4.2-Phase1 2026-04-23 (D4 audit-only): exit triggers whose statistical
@@ -59,6 +60,10 @@ _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
 def _resolve_strategy_key(decision) -> str:
     strategy_key = str(getattr(decision, "strategy_key", "") or "").strip()
     return strategy_key if strategy_key in CANONICAL_STRATEGY_KEYS else ""
+
+
+def _forward_price_linkage_status_degraded(status: str) -> bool:
+    return str(status or "").strip() not in _FORWARD_PRICE_LINKAGE_OK_STATUSES
 
 
 def parse_iso(value: str) -> datetime | None:
@@ -1492,6 +1497,32 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 if not isinstance(d.tokens, dict):
                                     d.tokens = {}
                                 d.tokens.update(captured_snapshot_fields)
+                                try:
+                                    from src.state.db import log_executable_snapshot_market_price_linkage
+
+                                    linkage_result = log_executable_snapshot_market_price_linkage(
+                                        conn,
+                                        snapshot_id=str(
+                                            captured_snapshot_fields.get("executable_snapshot_id", "")
+                                        ),
+                                    )
+                                    summary["forward_market_price_linkage_status"] = str(
+                                        linkage_result.get("status", "")
+                                    )
+                                    if _forward_price_linkage_status_degraded(
+                                        summary["forward_market_price_linkage_status"]
+                                    ):
+                                        summary["degraded"] = True
+                                except Exception as exc:
+                                    deps.logger.warning(
+                                        "Executable snapshot price linkage write failed for %s %s %s: %s",
+                                        city.name,
+                                        candidate.target_date,
+                                        d.edge.bin.label if d.edge else "",
+                                        exc,
+                                    )
+                                    summary["forward_market_price_linkage_status"] = "error"
+                                    summary["degraded"] = True
                                 snapshot_fields = _execution_snapshot_fields(d.tokens)
                                 missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
                                 try:
