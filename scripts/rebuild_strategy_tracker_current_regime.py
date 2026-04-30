@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Rebuild the compatibility strategy tracker from current truth surfaces.
+# Reuse: Run after truth-file helper or tracker compatibility-surface changes.
 """Rebuild strategy tracker from current truth surfaces and archive mixed history."""
 
 from __future__ import annotations
@@ -56,7 +59,7 @@ def run(mode: str | None = None) -> dict:
         history_payload["accounting"] = history_accounting
         history_path.write_text(json.dumps(history_payload, ensure_ascii=False, indent=2))
 
-    portfolio, _truth = read_mode_truth_json("positions.json")
+    portfolio, _truth = read_mode_truth_json("positions.json", mode=mode)
     tracker = StrategyTracker()
 
     for row in portfolio.get("positions", []):

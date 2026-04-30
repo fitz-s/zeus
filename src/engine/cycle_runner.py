@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from src.config import cities_by_name, get_mode, settings
 from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
-from src.data.market_scanner import find_weather_markets
+from src.data.market_scanner import (
+    capture_executable_market_snapshot,
+    find_weather_markets,
+    get_last_scan_authority,
+)
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine import cycle_runtime as _runtime
@@ -326,7 +330,7 @@ MODE_PARAMS = {
     DiscoveryMode.UPDATE_REACTION: {"min_hours_since_open": 24, "min_hours_to_resolution": 6},
     DiscoveryMode.DAY0_CAPTURE: {"max_hours_to_resolution": 6},
 }
-PENDING_FILL_STATUSES = {"FILLED", "CONFIRMED"}
+PENDING_FILL_STATUSES = {"CONFIRMED"}
 PENDING_CANCEL_STATUSES = {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"}
 
 

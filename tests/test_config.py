@@ -216,7 +216,9 @@ def test_day0_constants_are_single_sourced_from_settings():
         member_maxes_remaining=np.array([39.0, 40.0, 41.0]),
         temperature_metric=HIGH_LOCALDAY_MAX,
     )
-    assert day0_n_mc() == 5000
+    # 2026-04-29: bumped from 5000 to 10000 per LAW 4 forbidden move 7 (runtime
+    # per-trade precision floor). Test pinned to current production value.
+    assert day0_n_mc() == 10000
     # Slice P4-1 (PR #19 phase 4 cleanup, 2026-04-26): obs_dominates() and
     # day0_obs_dominates_threshold() removed as dead code (zero callers
     # outside legacy interface). Replaced with continuous observation_weight()

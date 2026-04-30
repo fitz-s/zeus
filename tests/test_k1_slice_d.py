@@ -1,3 +1,6 @@
+# Created: 2026-04-17
+# Last reused/audited: 2026-04-29
+# Authority basis: K1 Slice D plus task_2026-04-29_design_simplification_audit Phase 2A.
 """K1 Slice D tests — token label validation, quarantine sentinel, policy precedence."""
 import pytest
 import sqlite3
@@ -62,6 +65,49 @@ def test_extract_outcomes_unknown_labels_skipped():
     }
     results = _extract_outcomes(event)
     assert len(results) == 0
+
+
+def test_extract_outcomes_filters_untradable_gamma_children():
+    """Closed or non-accepting children under an open event must not enter bins."""
+    from src.data.market_scanner import _extract_outcomes
+
+    def child(condition_id, low, high, **flags):
+        return {
+            "question": f"Will NYC high temp be {low}-{high}°F?",
+            "clobTokenIds": f'["yes-{condition_id}", "no-{condition_id}"]',
+            "outcomePrices": "[0.3, 0.7]",
+            "outcomes": '["Yes", "No"]',
+            "id": f"gamma-{condition_id}",
+            "conditionId": condition_id,
+            "questionID": f"question-{condition_id}",
+            **flags,
+        }
+
+    event = {
+        "markets": [
+            child("cond-good", 50, 51, active=True, closed=False, acceptingOrders=True, enableOrderBook=True),
+            child("cond-closed", 52, 53, active=True, closed=True, acceptingOrders=True, enableOrderBook=True),
+            child("cond-closed-alias", 52, 53, active=True, closed=None, isClosed=True, acceptingOrders=True, enableOrderBook=True),
+            child("cond-inactive", 54, 55, active=False, closed=False, acceptingOrders=True, enableOrderBook=True),
+            child("cond-inactive-alias", 54, 55, active=None, isActive=False, closed=False, acceptingOrders=True, enableOrderBook=True),
+            child("cond-no-orders", 56, 57, active=True, closed=False, acceptingOrders=False, enableOrderBook=True),
+            child("cond-no-orders-alias", 56, 57, active=True, closed=False, acceptingOrders=None, accepting_orders=False, enableOrderBook=True),
+            child("cond-no-book", 58, 59, active=True, closed=False, acceptingOrders=True, enableOrderBook=False),
+            child("cond-no-book-alias", 58, 59, active=True, closed=False, acceptingOrders=True, enableOrderBook=None, orderbookEnabled=False),
+        ],
+    }
+
+    results = _extract_outcomes(event)
+
+    assert [row["market_id"] for row in results] == ["cond-good"]
+    assert results[0]["condition_id"] == "cond-good"
+    assert results[0]["question_id"] == "question-cond-good"
+    assert results[0]["gamma_market_id"] == "gamma-cond-good"
+    assert results[0]["active"] is True
+    assert results[0]["closed"] is False
+    assert results[0]["accepting_orders"] is True
+    assert results[0]["enable_orderbook"] is True
+    assert len(results[0]["raw_gamma_payload_hash"]) == 64
 
 
 # ==================== D2 (#49): Quarantine Sentinel ====================

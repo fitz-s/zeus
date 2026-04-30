@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-29
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
@@ -263,6 +263,154 @@ class TestLiveOrderCommandSplit:
         assert call_log.index("insert_command") < call_log.index("place_limit_order"), (
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
+        bound_envelope = mock_inst.bind_submission_envelope.call_args.args[0]
+        assert bound_envelope.condition_id == "condition-test"
+        assert bound_envelope.selected_outcome_token_id == intent.token_id
+
+    def test_entry_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
+        """Entry SUBMIT_REQUESTED carries one pre-submit capability proof."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_entry_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            mock_inst.place_limit_order.return_value = {"orderID": "ord-entry-capability"}
+
+            result = _live_order(
+                trade_id="trd-entry-capability",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-capability",
+            )
+
+        assert result.status == "pending"
+        row = mem_conn.execute(
+            "SELECT command_id FROM venue_commands WHERE position_id = ?",
+            ("trd-entry-capability",),
+        ).fetchone()
+        events = list_events(mem_conn, row["command_id"])
+        requested = [event for event in events if event["event_type"] == "SUBMIT_REQUESTED"]
+        payload = json.loads(requested[0]["payload_json"])
+        capability = payload["execution_capability"]
+
+        assert capability["action"] == "ENTRY"
+        assert capability["intent_kind"] == "ENTRY"
+        assert capability["allowed"] is True
+        assert len(capability["capability_id"]) == 32
+        assert capability["command_id"] == row["command_id"]
+        assert capability["executable_snapshot_id"] == intent.executable_snapshot_id
+        assert {component["component"] for component in capability["components"]} >= {
+            "cutover_guard",
+            "risk_allocator",
+            "order_type_selection",
+            "heartbeat_supervisor",
+            "ws_gap_guard",
+            "collateral_ledger",
+            "executable_snapshot_gate",
+        }
+
+    def test_own_connection_commits_pre_submit_rows_before_sdk_submit(self, tmp_path, monkeypatch):
+        """Own-connection live entry must make command/envelope durable before SDK contact."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_intent
+        from src.state.db import get_connection, init_schema
+
+        token_id = "tok-" + "2" * 36
+        db_path = tmp_path / "entry-pre-submit-durable.db"
+        setup_conn = get_connection(db_path)
+        init_schema(setup_conn)
+        intent = _make_entry_intent(setup_conn, token_id=token_id)
+        setup_conn.commit()
+        setup_conn.close()
+
+        def _trade_conn():
+            conn = get_connection(db_path)
+            init_schema(conn)
+            return conn
+
+        monkeypatch.setattr(executor_module, "get_trade_connection_with_world", _trade_conn)
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        monkeypatch.setattr(executor_module, "alert_trade", lambda *args, **kwargs: None)
+
+        observed = {}
+
+        class DurableVisibilityClient:
+            def v2_preflight(self):
+                observed["preflight"] = True
+
+            def bind_submission_envelope(self, envelope):
+                observed["bound_envelope"] = envelope
+
+            def place_limit_order(self, **kwargs):
+                read_conn = get_connection(db_path)
+                init_schema(read_conn)
+                try:
+                    command_rows = read_conn.execute(
+                        """
+                        SELECT command_id, snapshot_id, envelope_id, state
+                        FROM venue_commands
+                        WHERE snapshot_id = ?
+                        """,
+                        (intent.executable_snapshot_id,),
+                    ).fetchall()
+                    envelope_count = read_conn.execute(
+                        "SELECT COUNT(*) FROM venue_submission_envelopes"
+                    ).fetchone()[0]
+                    requested_count = read_conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM venue_command_events
+                        WHERE command_id = ? AND event_type = 'SUBMIT_REQUESTED'
+                        """,
+                        (command_rows[0]["command_id"] if command_rows else "",),
+                    ).fetchone()[0]
+                finally:
+                    read_conn.close()
+
+                observed["submit_kwargs"] = kwargs
+                observed["durable_command_count"] = len(command_rows)
+                observed["durable_command_state"] = command_rows[0]["state"] if command_rows else None
+                observed["durable_envelope_count"] = envelope_count
+                observed["durable_submit_requested_count"] = requested_count
+                return {"orderID": "ord-entry-durable", "status": "LIVE"}
+
+        with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
+            result = execute_intent(
+                intent,
+                edge_vwmp=0.35,
+                label="39-40°F",
+                decision_id="dec-entry-durable",
+            )
+
+        assert result.status == "pending"
+        assert observed["preflight"] is True
+        assert observed["durable_command_count"] == 1
+        assert observed["durable_command_state"] == "SUBMITTING"
+        assert observed["durable_envelope_count"] == 1
+        assert observed["durable_submit_requested_count"] == 1
+        assert observed["submit_kwargs"]["token_id"] == token_id
 
     def test_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill: place_limit_order raises RuntimeError.
@@ -681,6 +829,63 @@ class TestExitOrderCommandSplit:
         assert call_log.index("insert_command") < call_log.index("place_limit_order"), (
             f"INV-30: insert_command must precede place_limit_order; call order was {call_log}"
         )
+
+    def test_exit_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
+        """Exit SUBMIT_REQUESTED carries one pre-submit capability proof."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "FOK")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-capability")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.place_limit_order.return_value = {"orderID": "ord-exit-capability"}
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-capability",
+            )
+
+        assert result.status == "pending"
+        row = mem_conn.execute(
+            "SELECT command_id FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-capability",),
+        ).fetchone()
+        events = list_events(mem_conn, row["command_id"])
+        requested = [event for event in events if event["event_type"] == "SUBMIT_REQUESTED"]
+        payload = json.loads(requested[0]["payload_json"])
+        capability = payload["execution_capability"]
+
+        assert capability["action"] == "EXIT"
+        assert capability["intent_kind"] == "EXIT"
+        assert capability["order_type"] == "FOK"
+        assert capability["allowed"] is True
+        assert len(capability["capability_id"]) == 32
+        assert capability["command_id"] == row["command_id"]
+        assert capability["executable_snapshot_id"] == intent.executable_snapshot_id
+        assert {component["component"] for component in capability["components"]} >= {
+            "cutover_guard",
+            "risk_allocator",
+            "order_type_selection",
+            "heartbeat_supervisor",
+            "ws_gap_guard",
+            "collateral_ledger",
+            "replacement_sell_guard",
+            "executable_snapshot_gate",
+        }
 
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.

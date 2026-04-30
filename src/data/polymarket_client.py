@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import warnings
+from decimal import Decimal
 from typing import Any, Optional
 
 import httpx
@@ -63,6 +64,7 @@ class PolymarketClient:
     def __init__(self):
         self._clob_client = None
         self._v2_adapter = None
+        self._pending_submission_envelope = None
 
     def _ensure_client(self):
         """Deprecated compatibility alias for the V2 adapter boundary."""
@@ -140,9 +142,7 @@ class PolymarketClient:
         Returns: {"bids": [{"price": float, "size": float}...],
                   "asks": [{"price": float, "size": float}...]}
         """
-        resp = httpx.get(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=15.0)
-        resp.raise_for_status()
-        data = resp.json()
+        data = self.get_orderbook_snapshot(token_id)
 
         # Normalize: API returns string numerics
         for side in ("bids", "asks"):
@@ -151,6 +151,45 @@ class PolymarketClient:
                     entry["price"] = float(entry["price"])
                     entry["size"] = float(entry["size"])
 
+        return data
+
+    def get_orderbook_snapshot(self, token_id: str) -> dict:
+        """Fetch raw CLOB orderbook facts for executable snapshot capture."""
+
+        resp = httpx.get(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"CLOB orderbook response for {token_id} is not an object")
+        return data
+
+    def get_clob_market_info(self, condition_id: str) -> dict:
+        """Fetch raw CLOB market facts for executable snapshot capture."""
+
+        adapter = getattr(self, "_v2_adapter", None)
+        if adapter is not None:
+            getter = getattr(adapter, "get_clob_market_info", None)
+            if callable(getter):
+                info = getter(condition_id)
+                raw = getattr(info, "raw", info)
+                if isinstance(raw, dict):
+                    return dict(raw)
+
+        legacy_client = getattr(self, "_clob_client", None)
+        if legacy_client is not None:
+            getter = getattr(legacy_client, "get_market", None)
+            if callable(getter):
+                raw = getter(condition_id)
+                if isinstance(raw, dict):
+                    return dict(raw)
+                if raw is not None and hasattr(raw, "__dict__"):
+                    return dict(raw.__dict__)
+
+        resp = httpx.get(f"{CLOB_BASE}/markets/{condition_id}", timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
         return data
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
@@ -185,10 +224,24 @@ class PolymarketClient:
             schedule = data if isinstance(data, dict) else {}
         if schedule.get("feesEnabled") is False:
             return 0.0
-        for key in ("feeRate", "fee_rate", "takerFeeRate", "taker_fee_rate"):
+        for key in (
+            "base_fee",
+            "baseFee",
+            "fee_rate_bps",
+            "feeRateBps",
+            "feeRate",
+            "fee_rate",
+            "takerFeeRate",
+            "taker_fee_rate",
+        ):
             if key in schedule and schedule[key] is not None:
                 return float(schedule[key])
-        raise RuntimeError(f"Fee-rate response missing feeSchedule.feeRate for {token_id}")
+        raise RuntimeError(f"Fee-rate response missing base_fee/feeRate for {token_id}")
+
+    def bind_submission_envelope(self, envelope: Any) -> None:
+        """Bind the next limit-order submit to executable snapshot provenance."""
+
+        self._pending_submission_envelope = envelope
 
     def place_limit_order(
         self,
@@ -211,6 +264,37 @@ class PolymarketClient:
         """
         if side not in {"BUY", "SELL"}:
             raise ValueError(f"place_limit_order requires side='BUY' or 'SELL', got {side!r}")
+
+        pending_envelope = getattr(self, "_pending_submission_envelope", None)
+        if pending_envelope is not None:
+            self._pending_submission_envelope = None
+            mismatch = _submission_envelope_mismatch(
+                pending_envelope,
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=side,
+                order_type=order_type,
+            )
+            if mismatch:
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "errorCode": "BOUND_ENVELOPE_MISMATCH",
+                    "errorMessage": mismatch,
+                    "_venue_submission_envelope": pending_envelope.to_dict(),
+                }
+            submit = self._ensure_v2_adapter().submit(pending_envelope)
+            result = _legacy_order_result_from_submit(submit)
+            logger.info(
+                "V2 bound-envelope submit result: %s %s @ %.3f x %.1f → %s",
+                side,
+                token_id[:12],
+                price,
+                size,
+                result.get("status"),
+            )
+            return result
 
         warnings.warn(
             "PolymarketClient.place_limit_order() is a compatibility wrapper; "
@@ -444,6 +528,28 @@ class PolymarketClient:
             "errorMessage": "R1 settlement command ledger must own pUSD redemption side effects",
             "condition_id": condition_id,
         }
+
+
+def _submission_envelope_mismatch(
+    envelope: Any,
+    *,
+    token_id: str,
+    price: float,
+    size: float,
+    side: str,
+    order_type: str,
+) -> str:
+    if str(getattr(envelope, "selected_outcome_token_id", "")) != str(token_id):
+        return "bound envelope token_id does not match submit token_id"
+    if str(getattr(envelope, "side", "")) != str(side):
+        return "bound envelope side does not match submit side"
+    if str(getattr(envelope, "order_type", "")) != str(order_type):
+        return "bound envelope order_type does not match submit order_type"
+    if Decimal(str(getattr(envelope, "price", ""))) != Decimal(str(price)):
+        return "bound envelope price does not match submit price"
+    if Decimal(str(getattr(envelope, "size", ""))) != Decimal(str(size)):
+        return "bound envelope size does not match submit size"
+    return ""
 
 
 def _legacy_order_result_from_submit(submit: Any) -> dict:

@@ -107,6 +107,30 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         """)
 
         # ----------------------------------------------------------------
+        # market_price_history
+        # ----------------------------------------------------------------
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_slug TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                price REAL NOT NULL CHECK (price >= 0.0 AND price <= 1.0),
+                recorded_at TEXT NOT NULL,
+                hours_since_open REAL,
+                hours_to_resolution REAL,
+                UNIQUE(token_id, recorded_at)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_slug_recorded
+                ON market_price_history(market_slug, recorded_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_token_recorded
+                ON market_price_history(token_id, recorded_at)
+        """)
+
+        # ----------------------------------------------------------------
         # ensemble_snapshots_v2
         # ----------------------------------------------------------------
         conn.execute("""

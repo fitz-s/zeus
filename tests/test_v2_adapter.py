@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-29
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
@@ -497,6 +497,102 @@ def test_polymarket_client_live_submit_delegates_to_v2_adapter(tmp_path):
     assert result["orderID"] == "ord-v2"
     assert result["success"] is True
     assert result["_venue_submission_envelope"]["sdk_package"] == "py-clob-client-v2"
+
+
+def test_polymarket_client_bound_envelope_bypasses_legacy_compat_submit(tmp_path):
+    from src.data.polymarket_client import PolymarketClient
+
+    envelope = _adapter(tmp_path, FakeOneStepClient())[0].create_submission_envelope(
+        _intent(),
+        FakeSnapshot(condition_id="cond-bound", question_id="q-bound"),
+        order_type="GTC",
+    )
+
+    class FakeAdapter:
+        def __init__(self):
+            self.submit_calls = []
+            self.compat_calls = []
+
+        def submit(self, bound_envelope):
+            self.submit_calls.append(bound_envelope)
+            from src.venue.polymarket_v2_adapter import SubmitResult
+
+            return SubmitResult(
+                status="accepted",
+                envelope=bound_envelope.with_updates(order_id="ord-bound"),
+            )
+
+        def submit_limit_order(self, **kwargs):  # pragma: no cover - tripwire
+            self.compat_calls.append(kwargs)
+            raise AssertionError("bound live submit must not use compatibility envelope path")
+
+    client = PolymarketClient()
+    fake_adapter = FakeAdapter()
+    client._v2_adapter = fake_adapter
+    client.bind_submission_envelope(envelope)
+
+    result = client.place_limit_order(token_id="yes-token", price=0.5, size=20.0, side="BUY")
+
+    assert fake_adapter.submit_calls == [envelope]
+    assert fake_adapter.compat_calls == []
+    assert result["orderID"] == "ord-bound"
+    assert result["_venue_submission_envelope"]["condition_id"] == "cond-bound"
+    assert not result["_venue_submission_envelope"]["condition_id"].startswith("legacy:")
+
+
+def test_polymarket_client_bound_envelope_rejects_submit_shape_mismatch(tmp_path):
+    from src.data.polymarket_client import PolymarketClient
+
+    envelope = _adapter(tmp_path, FakeOneStepClient())[0].create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="GTC",
+    )
+
+    class FakeAdapter:
+        def submit(self, bound_envelope):  # pragma: no cover - tripwire
+            raise AssertionError("mismatched bound envelope must fail before adapter submit")
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+    client.bind_submission_envelope(envelope)
+
+    result = client.place_limit_order(token_id="wrong-token", price=0.5, size=20.0, side="BUY")
+
+    assert result["success"] is False
+    assert result["errorCode"] == "BOUND_ENVELOPE_MISMATCH"
+    assert result["_venue_submission_envelope"]["condition_id"] == "cond-123"
+
+
+def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"base_fee": 30}
+
+    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
+
+    assert pm.PolymarketClient().get_fee_rate("token-1") == 30.0
+
+
+def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"feeSchedule": {"feesEnabled": True}}
+
+    monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
+
+    with pytest.raises(RuntimeError, match="base_fee"):
+        pm.PolymarketClient().get_fee_rate("token-1")
 
 
 def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(monkeypatch):

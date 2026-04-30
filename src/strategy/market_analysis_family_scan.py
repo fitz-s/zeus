@@ -37,7 +37,7 @@ def scan_full_hypothesis_family(
     *,
     n_bootstrap: int,
 ) -> list[FullFamilyHypothesis]:
-    """Scan every bin in both YES/NO directions.
+    """Scan every executable bin/direction hypothesis.
 
     `MarketAnalysis.find_edges()` intentionally returns only positive-CI edges.
     This function records the broader tested family, including hypotheses that
@@ -45,6 +45,11 @@ def scan_full_hypothesis_family(
     """
     if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
+    supports_buy_no = (
+        bool(analysis.supports_buy_no_edges())
+        if hasattr(analysis, "supports_buy_no_edges")
+        else len(analysis.bins) <= 2
+    )
     for idx, bin_obj in enumerate(analysis.bins):
         label = _label_for_bin(bin_obj)
 
@@ -67,6 +72,9 @@ def scan_full_hypothesis_family(
                 passed_prefilter=edge_yes > 0 and float(ci_lo_yes) > 0,
             )
         )
+
+        if not supports_buy_no:
+            continue
 
         p_model_no = 1.0 - float(analysis.p_cal[idx])
         p_market_no = 1.0 - float(analysis.p_market[idx])

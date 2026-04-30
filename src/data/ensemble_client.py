@@ -16,7 +16,9 @@ import numpy as np
 
 from src.config import City, ensemble_member_count
 from src.data.forecast_source_registry import (
+    ForecastSourceRole,
     gate_source,
+    gate_source_role,
     source_id_for_ensemble_model,
     stable_payload_hash,
 )
@@ -29,10 +31,15 @@ API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
 CACHE_TTL_SECONDS = 15 * 60
-_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str, int], dict] = {}
+_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str, int, ForecastSourceRole], dict] = {}
 
 
-def _cache_key(city: City, model: str, past_days: int = 0) -> tuple[str, float, float, str, str, int]:
+def _cache_key(
+    city: City,
+    model: str,
+    past_days: int = 0,
+    role: ForecastSourceRole = "entry_primary",
+) -> tuple[str, float, float, str, str, int, ForecastSourceRole]:
     return (
         city.name,
         float(city.lat),
@@ -40,6 +47,7 @@ def _cache_key(city: City, model: str, past_days: int = 0) -> tuple[str, float, 
         city.settlement_unit,
         model,
         past_days,
+        role,
     )
 
 
@@ -64,6 +72,7 @@ def fetch_ensemble(
     forecast_days: int = 8,
     model: str = "ecmwf_ifs025",
     past_days: int = 0,
+    role: ForecastSourceRole = "entry_primary",
 ) -> Optional[dict]:  # Spec §2.1
     """Fetch ensemble forecast from Open-Meteo.
 
@@ -79,12 +88,14 @@ def fetch_ensemble(
     """
     source_id = source_id_for_ensemble_model(model)
     source_spec = gate_source(source_id)
+    gate_source_role(source_spec, role)
     if source_spec.ingest_class is not None:
         return _fetch_registered_ingest_ensemble(
             city,
             forecast_days=forecast_days,
             model=model,
             past_days=past_days,
+            role=role,
             ingest_class=source_spec.ingest_class,
         )
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
@@ -102,7 +113,7 @@ def fetch_ensemble(
 
     fetch_time = datetime.now(timezone.utc)
     last_error = None
-    cache_key = _cache_key(city, model, past_days)
+    cache_key = _cache_key(city, model, past_days, role)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
         age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
@@ -125,6 +136,8 @@ def fetch_ensemble(
                 fetch_time,
                 source_id=source_spec.source_id,
                 authority_tier=source_spec.authority_tier,
+                degradation_level=source_spec.degradation_level,
+                forecast_source_role=role,
             )
             parsed["forecast_days"] = int(forecast_days)
             _ENSEMBLE_CACHE[cache_key] = parsed
@@ -153,6 +166,7 @@ def _fetch_registered_ingest_ensemble(
     forecast_days: int,
     model: str,
     past_days: int,
+    role: ForecastSourceRole,
     ingest_class,
 ) -> Optional[dict]:
     """Fetch an operator-gated registered ingest source without Open-Meteo.
@@ -164,7 +178,7 @@ def _fetch_registered_ingest_ensemble(
     """
 
     fetch_time = datetime.now(timezone.utc)
-    cache_key = _cache_key(city, model, past_days)
+    cache_key = _cache_key(city, model, past_days, role)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
         age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
@@ -175,13 +189,19 @@ def _fetch_registered_ingest_ensemble(
     lead_hours = tuple(range(0, max(1, int(forecast_days)) * 24))
     ingest = ingest_class()
     bundle = ingest.fetch(fetch_time, lead_hours)
-    parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time)
+    parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time, role=role)
     parsed["forecast_days"] = int(forecast_days)
     _ENSEMBLE_CACHE[cache_key] = parsed
     return _clone_result(parsed)
 
 
-def _parse_ingest_bundle(bundle, *, model: str, fetch_time: datetime) -> dict:
+def _parse_ingest_bundle(
+    bundle,
+    *,
+    model: str,
+    fetch_time: datetime,
+    role: ForecastSourceRole,
+) -> dict:
     raw = bundle.raw_payload
     if isinstance(raw, Mapping) and "hourly" in raw:
         parsed = _parse_response(
@@ -190,6 +210,8 @@ def _parse_ingest_bundle(bundle, *, model: str, fetch_time: datetime) -> dict:
             fetch_time,
             source_id=bundle.source_id,
             authority_tier=bundle.authority_tier,
+            degradation_level="OK",
+            forecast_source_role=role,
         )
         parsed["issue_time"] = bundle.run_init_utc
         parsed["raw_payload_hash"] = bundle.raw_payload_hash
@@ -220,6 +242,8 @@ def _parse_ingest_bundle(bundle, *, model: str, fetch_time: datetime) -> dict:
         "source_id": bundle.source_id,
         "raw_payload_hash": bundle.raw_payload_hash,
         "authority_tier": bundle.authority_tier,
+        "degradation_level": "OK",
+        "forecast_source_role": role,
         "n_members": int(members_hourly.shape[0]),
     }
 
@@ -262,6 +286,8 @@ def _parse_response(
     *,
     source_id: str | None = None,
     authority_tier: str = "FORECAST",
+    degradation_level: str = "OK",
+    forecast_source_role: ForecastSourceRole = "entry_primary",
 ) -> dict:
     """Parse Open-Meteo ensemble response into structured dict.
 
@@ -306,6 +332,8 @@ def _parse_response(
         "source_id": source_id or source_id_for_ensemble_model(model),
         "raw_payload_hash": stable_payload_hash(data),
         "authority_tier": authority_tier,
+        "degradation_level": degradation_level,
+        "forecast_source_role": forecast_source_role,
         "n_members": n_members,
     }
 

@@ -1,13 +1,18 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-29
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 """Shared pytest fixtures for R3 T1 fake venue parity tests."""
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tests.fakes.polymarket_v2 import FakeClock, FakeCollateralLedger, FakePolymarketVenue
+
+
+os.environ.setdefault("ZEUS_MODE", "live")
 
 
 @pytest.fixture

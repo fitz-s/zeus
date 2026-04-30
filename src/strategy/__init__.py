@@ -6,6 +6,7 @@
 from src.strategy.benchmark_suite import (
     BenchmarkEnvironment,
     BenchmarkObservation,
+    EvidenceGrade,
     PromotionDecision,
     PromotionVerdict,
     ReplayCorpus,
@@ -17,6 +18,7 @@ from src.strategy.benchmark_suite import (
 __all__ = [
     "BenchmarkEnvironment",
     "BenchmarkObservation",
+    "EvidenceGrade",
     "PromotionDecision",
     "PromotionVerdict",
     "ReplayCorpus",

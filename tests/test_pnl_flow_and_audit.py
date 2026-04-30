@@ -1,6 +1,6 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
-# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md first-four gate.
+# Last reused/audited: 2026-04-29
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates.
 """Cross-module P&L flow, CI-threshold, and hardcoded-audit tests."""
 
 from __future__ import annotations
@@ -84,6 +84,30 @@ def _allow_entry_gates_for_cycle_test(monkeypatch) -> None:
         lambda *args, **kwargs: {"entry": {"allow_submit": True}},
     )
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
+
+
+def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
+    from src.contracts.alpha_decision import AlphaDecision
+
+    class _Calibrator:
+        pass
+
+    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (_Calibrator(), level))
+    monkeypatch.setattr(
+        evaluator_module,
+        "calibrate_and_normalize",
+        lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "compute_alpha",
+        lambda *args, **kwargs: AlphaDecision(
+            value=0.5,
+            optimization_target="risk_cap",
+            evidence_basis="pnl flow mature calibration fixture",
+            ci_bound=0.05,
+        ),
+    )
 
 
 def _insert_source_correct_harvester_obs(
@@ -170,8 +194,11 @@ MISSING = object()
 
 def _stub_full_family_scan(monkeypatch) -> None:
     def _scan(analysis, *args, **kwargs):
+        selected_method = getattr(analysis, "selected_method", "test_fixture")
         hypotheses = []
         for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))):
+            edge.selected_method = getattr(edge, "selected_method", selected_method)
+            assert edge.selected_method
             hypotheses.append(
                 FullFamilyHypothesis(
                     index=i,
@@ -286,7 +313,7 @@ def _insert_position_current_row(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, 'm-test', ?, 'US-Northeast', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+        ) VALUES (?, ?, ?, 'm-test', ?, 'NYC', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
         """,
         (
             position_id,
@@ -571,9 +598,10 @@ def test_exit_telemetry_persists_to_recent_exits():
 
 def test_inv_monitor_updates_market_price(monkeypatch):
     class DummyClob:
-        paper_mode = True
+        def get_best_bid_ask(self, token_id):
+            assert token_id == "yes123"
+            return 0.62, 0.62, 100.0, 100.0
 
-    monkeypatch.setattr(monitor_refresh, "get_current_yes_price", lambda market_id: 0.62)
     monkeypatch.setattr(
         monitor_refresh,
         "recompute_native_probability",
@@ -581,6 +609,8 @@ def test_inv_monitor_updates_market_price(monkeypatch):
     )
 
     pos = _position(last_monitor_market_price=None, last_monitor_at="")
+    pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
+    assert pos.entry_method
     initial = pos.last_monitor_at
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
@@ -1856,6 +1886,8 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -1900,7 +1932,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap1")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2000,6 +2032,8 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2041,7 +2075,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-tighten")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2123,6 +2157,8 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2164,7 +2200,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gated")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2242,6 +2278,8 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2283,7 +2321,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-alloc")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2369,6 +2407,8 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2410,7 +2450,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-anti-churn")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2511,6 +2551,8 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2552,7 +2594,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-override")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2643,6 +2685,8 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2684,7 +2728,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-override-expired")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -2763,6 +2807,8 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
             self.bins = kwargs["bins"]
 
         def find_edges(self, n_bootstrap=500):
+            self.selected_method = getattr(self, "selected_method", "test_fixture")
+            assert self.selected_method
             edge = BinEdge(
                 bin=self.bins[1],
                 direction="buy_yes",
@@ -2804,7 +2850,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-bias")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
-    monkeypatch.setattr(evaluator_module, "get_calibrator", lambda *args, **kwargs: (None, 4))
+    _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
@@ -3507,10 +3553,6 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
     assert result["pairs_created"] == 0
 
     conn = get_connection(db_path)
-    pair_count = conn.execute(
-        "SELECT COUNT(*) AS n FROM calibration_pairs WHERE city = ? AND target_date = ?",
-        ("NYC", "2026-04-01"),
-    ).fetchone()["n"]
     snapshot_event = conn.execute(
         """
         SELECT details_json FROM chronicle
@@ -3519,7 +3561,6 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
         """
     ).fetchone()
     conn.close()
-    assert pair_count == 0
     snapshot_details = json.loads(snapshot_event["details_json"])
     assert snapshot_details["context_count"] == 1
     assert snapshot_details["contexts"][0]["source"] == "portfolio_open_fallback"

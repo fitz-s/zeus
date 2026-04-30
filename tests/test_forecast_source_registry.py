@@ -1,9 +1,9 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-04-29
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Protect R3 F1 forecast-source registry gates and provenance stamping.
 # Reuse: Run before forecast source, schema, ensemble fetch, or TIGGE gate changes.
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/F1.yaml
+# Authority basis: R3 F1 plus Phase 1D forecast source policy / Open-Meteo fallback gate.
 """R3 F1 forecast source registry and provenance antibodies."""
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from src.data.forecast_source_registry import (
     SourceNotEnabled,
     active_sources,
     gate_source,
+    gate_source_role,
     stable_payload_hash,
 )
 from src.signal.ensemble_signal import EnsembleSignal
@@ -86,6 +87,18 @@ def test_operator_decision_gated_source_blocked_when_env_flag_unset(tmp_path) ->
 
     with pytest.raises(SourceNotEnabled):
         gate_source("tigge", environ={}, root=tmp_path)
+
+
+def test_openmeteo_live_ensemble_is_monitor_fallback_not_entry_primary() -> None:
+    source = gate_source("openmeteo_ensemble_ecmwf_ifs025")
+
+    assert source.tier != "primary"
+    assert source.tier == "secondary"
+    assert source.degradation_level == "DEGRADED_FORECAST_FALLBACK"
+    assert "monitor_fallback" in source.allowed_roles
+    assert "entry_primary" not in source.allowed_roles
+    with pytest.raises(SourceNotEnabled, match="entry_primary"):
+        gate_source_role(source, "entry_primary")
 
 
 def test_gated_source_active_when_artifact_present_AND_env_flag_set(tmp_path) -> None:
@@ -303,12 +316,19 @@ def test_ensemble_fetch_result_carries_registry_provenance(monkeypatch) -> None:
 
     monkeypatch.setattr(ensemble_client.httpx, "get", lambda *_args, **_kwargs: Response())
 
-    result = ensemble_client.fetch_ensemble(city, forecast_days=1, model="ecmwf_ifs025")
+    result = ensemble_client.fetch_ensemble(
+        city,
+        forecast_days=1,
+        model="ecmwf_ifs025",
+        role="monitor_fallback",
+    )
 
     assert result is not None
     assert result["source_id"] == "openmeteo_ensemble_ecmwf_ifs025"
     assert result["raw_payload_hash"] == stable_payload_hash(payload)
     assert result["authority_tier"] == "FORECAST"
+    assert result["degradation_level"] == "DEGRADED_FORECAST_FALLBACK"
+    assert result["forecast_source_role"] == "monitor_fallback"
     assert result["captured_at"]
 
 
@@ -319,7 +339,7 @@ def test_ensemble_signal_math_bit_identical_with_registry_metadata_only() -> Non
         for h in range(24)
     ]
     members = np.tile(np.arange(24, dtype=float), (51, 1))
-    sem = SettlementSemantics.default_wu_fahrenheit("TEST")
+    sem = SettlementSemantics.for_city(city)
 
     with_metadata = {
         "members_hourly": members,

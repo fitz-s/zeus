@@ -866,7 +866,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     conn=conn,
                     exit_intent=exit_intent,
                 )
-                if "paper_exit" in outcome or "exit_filled" in outcome:
+                if outcome.startswith("exit_filled:"):
                     tracker.record_exit(pos)
                     tracker_dirty = True
                 summary["exits"] += 1
@@ -1057,6 +1057,97 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         except Exception as exc:
             deps.logger.warning("Availability fact write failed for %s: %s", scope_key, exc)
 
+    def _market_scan_authority() -> str:
+        getter = getattr(deps, "get_last_scan_authority", None)
+        if not callable(getter):
+            return "NEVER_FETCHED"
+        try:
+            return str(getter() or "NEVER_FETCHED").strip().upper()
+        except Exception as exc:
+            deps.logger.warning("Market scan authority read failed: %s", exc)
+            return "EMPTY_FALLBACK"
+
+    def _market_scan_availability_status(authority: str) -> str:
+        if authority == "STALE":
+            return "DATA_STALE"
+        if authority == "EMPTY_FALLBACK":
+            return "DATA_UNAVAILABLE"
+        if authority == "NEVER_FETCHED":
+            return "DATA_UNAVAILABLE"
+        if authority != "VERIFIED":
+            return "DATA_UNAVAILABLE"
+        return ""
+
+    def _record_forward_market_substrate(markets_to_record, authority: str) -> None:
+        try:
+            from src.state.db import log_forward_market_substrate
+
+            result = log_forward_market_substrate(
+                conn,
+                markets=markets_to_record,
+                recorded_at=decision_time.isoformat(),
+                scan_authority=authority,
+            )
+        except Exception as exc:
+            deps.logger.warning("Forward market substrate write failed: %s", exc)
+            summary["forward_market_substrate_status"] = "error"
+            summary["forward_market_substrate_error"] = str(exc)
+            summary["degraded"] = True
+            return
+
+        status = str(result.get("status", "") or "")
+        summary["forward_market_substrate_status"] = status
+        for key in (
+            "market_events_inserted",
+            "market_events_unchanged",
+            "market_events_conflicted",
+            "price_rows_inserted",
+            "price_rows_unchanged",
+            "price_rows_conflicted",
+            "markets_skipped_missing_facts",
+            "outcomes_skipped_missing_facts",
+            "prices_skipped_missing_facts",
+            "outcomes_skipped_with_outcome_fact",
+        ):
+            if key in result:
+                summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
+        if status in {"written_with_conflicts", "skipped_invalid_schema"}:
+            deps.logger.warning("Forward market substrate degraded: %s", result)
+            summary["degraded"] = True
+
+    def _execution_snapshot_fields(tokens: dict) -> dict:
+        tokens = tokens or {}
+        return {
+            "executable_snapshot_id": str(
+                tokens.get("executable_snapshot_id") or tokens.get("snapshot_id") or ""
+            ).strip(),
+            "executable_snapshot_min_tick_size": tokens.get(
+                "executable_snapshot_min_tick_size",
+                tokens.get("min_tick_size"),
+            ),
+            "executable_snapshot_min_order_size": tokens.get(
+                "executable_snapshot_min_order_size",
+                tokens.get("min_order_size"),
+            ),
+            "executable_snapshot_neg_risk": (
+                tokens["executable_snapshot_neg_risk"]
+                if "executable_snapshot_neg_risk" in tokens
+                else tokens.get("neg_risk")
+            ),
+        }
+
+    def _missing_execution_snapshot_fields(fields: dict) -> list[str]:
+        missing = []
+        if not fields["executable_snapshot_id"]:
+            missing.append("executable_snapshot_id")
+        if fields["executable_snapshot_min_tick_size"] is None:
+            missing.append("executable_snapshot_min_tick_size")
+        if fields["executable_snapshot_min_order_size"] is None:
+            missing.append("executable_snapshot_min_order_size")
+        if fields["executable_snapshot_neg_risk"] is None:
+            missing.append("executable_snapshot_neg_risk")
+        return missing
+
     params = deps.MODE_PARAMS[mode]
     markets = deps.find_weather_markets(min_hours_to_resolution=params.get("min_hours_to_resolution", 6))
     if "max_hours_since_open" in params:
@@ -1065,6 +1156,71 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
         markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+    scan_authority = _market_scan_authority()
+    summary["market_scan_authority"] = scan_authority
+    _record_forward_market_substrate(markets, scan_authority)
+    scan_availability_status = _market_scan_availability_status(scan_authority)
+    if scan_availability_status:
+        reasons = [f"market_scan_authority={scan_authority}"]
+        if not markets:
+            _record_availability_fact(
+                status=scan_availability_status,
+                reasons=reasons,
+                scope_type="cycle",
+                scope_key="gamma_active_events",
+                details={
+                    "mode": mode.value,
+                    "market_scan_authority": scan_authority,
+                    "availability_status": scan_availability_status,
+                },
+            )
+        for market in markets:
+            city = market.get("city")
+            city_name = str(getattr(city, "name", "") or "")
+            target_date = str(market.get("target_date", "") or "")
+            scope_key = _availability_scope_key(
+                city_name=city_name,
+                target_date=target_date,
+            )
+            _record_availability_fact(
+                status=scan_availability_status,
+                reasons=reasons,
+                scope_type="city_target",
+                scope_key=scope_key,
+                details={
+                    "city": city_name,
+                    "target_date": target_date,
+                    "mode": mode.value,
+                    "event_id": market.get("event_id", ""),
+                    "slug": market.get("slug", ""),
+                    "market_scan_authority": scan_authority,
+                    "availability_status": scan_availability_status,
+                },
+            )
+            artifact.add_no_trade(
+                deps.NoTradeCase(
+                    decision_id="",
+                    city=city_name,
+                    target_date=target_date,
+                    range_label="",
+                    direction="unknown",
+                    rejection_stage="MARKET_FILTER",
+                    strategy_key="",
+                    strategy="",
+                    edge_source="",
+                    availability_status=scan_availability_status,
+                    rejection_reasons=reasons,
+                    bin_labels=[
+                        outcome["title"]
+                        for outcome in market.get("outcomes", [])
+                        if not (outcome.get("range_low") is None and outcome.get("range_high") is None)
+                    ],
+                    market_hours_open=market.get("hours_since_open"),
+                    timestamp=decision_time.isoformat(),
+                )
+            )
+            summary["no_trades"] += 1
+        return portfolio_dirty, tracker_dirty
 
     for market in markets:
         city = market.get("city")
@@ -1291,6 +1447,105 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
+                    snapshot_fields = _execution_snapshot_fields(d.tokens)
+                    missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
+                    snapshot_capture_error = ""
+                    if str(env or "").strip().lower() == "live" and missing_snapshot_fields:
+                        capture_snapshot = getattr(deps, "capture_executable_market_snapshot", None)
+                        if callable(capture_snapshot):
+                            try:
+                                captured_snapshot_fields = capture_snapshot(
+                                    conn,
+                                    market=market,
+                                    decision=d,
+                                    clob=clob,
+                                    captured_at=datetime.now(timezone.utc),
+                                    scan_authority=scan_authority,
+                                )
+                            except Exception as exc:
+                                deps.logger.warning(
+                                    "Executable market snapshot capture failed for %s %s %s: %s",
+                                    city.name,
+                                    candidate.target_date,
+                                    d.edge.bin.label if d.edge else "",
+                                    exc,
+                                )
+                                if not isinstance(d.tokens, dict):
+                                    d.tokens = {}
+                                snapshot_capture_error = str(exc)
+                                d.tokens["executable_snapshot_capture_error"] = snapshot_capture_error
+                            else:
+                                if not isinstance(d.tokens, dict):
+                                    d.tokens = {}
+                                d.tokens.update(captured_snapshot_fields)
+                                snapshot_fields = _execution_snapshot_fields(d.tokens)
+                                missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
+                                try:
+                                    conn.commit()
+                                except Exception as exc:
+                                    deps.logger.warning(
+                                        "Executable market snapshot commit failed for %s %s %s: %s",
+                                        city.name,
+                                        candidate.target_date,
+                                        d.edge.bin.label if d.edge else "",
+                                        exc,
+                                    )
+                                    snapshot_capture_error = f"executable_snapshot_commit_failed:{exc}"
+                                    d.tokens["executable_snapshot_capture_error"] = snapshot_capture_error
+
+                    if str(env or "").strip().lower() == "live" and (missing_snapshot_fields or snapshot_capture_error):
+                        summary["no_trades"] += 1
+                        rejection_stage = "EXECUTION_FAILED"
+                        capture_error = snapshot_capture_error
+                        if isinstance(getattr(d, "tokens", None), dict):
+                            capture_error = capture_error or str(d.tokens.get("executable_snapshot_capture_error") or "")
+                        rejection_reasons = []
+                        if missing_snapshot_fields:
+                            rejection_reasons.append(
+                                "missing_executable_market_identity:" + ",".join(missing_snapshot_fields)
+                            )
+                        if capture_error:
+                            rejection_reasons.append(f"executable_snapshot_capture_failed:{capture_error}")
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
+                        artifact.add_no_trade(
+                            deps.NoTradeCase(
+                                decision_id=d.decision_id,
+                                city=city.name,
+                                target_date=candidate.target_date,
+                                range_label=d.edge.bin.label if d.edge else "",
+                                direction=d.edge.direction if d.edge else "",
+                                rejection_stage=rejection_stage,
+                                strategy=strategy_name,
+                                strategy_key=strategy_name,
+                                edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                availability_status=getattr(d, "availability_status", ""),
+                                rejection_reasons=rejection_reasons,
+                                best_edge=d.edge.edge if d.edge else 0.0,
+                                model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                market_price=d.edge.entry_price if d.edge else 0.0,
+                                decision_snapshot_id=d.decision_snapshot_id,
+                                selected_method=d.selected_method,
+                                settlement_semantics_json=d.settlement_semantics_json,
+                                epistemic_context_json=d.epistemic_context_json,
+                                edge_context_json=d.edge_context_json,
+                                applied_validations=list(d.applied_validations),
+                                bin_labels=parseable_labels,
+                                p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
+                                agreement=getattr(d, "agreement", ""),
+                                timestamp=decision_time.isoformat(),
+                            )
+                        )
+                        continue
                     _record_opportunity_fact(
                         candidate,
                         d,
@@ -1315,6 +1570,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         correlation_key=(
                             f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
                         ),
+                        executable_snapshot_id=snapshot_fields["executable_snapshot_id"],
+                        executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
+                        executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
+                        executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
                     )
                     # P1.S5: thread decision_id from d.decision_id so the
                     # executor can use a stable upstream ID for idempotency.

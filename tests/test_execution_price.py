@@ -1,6 +1,6 @@
 # Created: 2026-04-13
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Last reused/audited: 2026-04-29
+# Authority basis: midstream verdict v2 2026-04-23 plus DSA-09 stale EXECUTION_PRICE_SHADOW cleanup
 """Tests for F2/D3 ExecutionPrice contract wiring.
 
 Covers:
@@ -186,6 +186,13 @@ class TestEvaluatorWiring:
             "shadow-off path deleted in P10E."
         )
 
+    def test_settings_do_not_expose_execution_price_shadow_flag(self):
+        """DSA-09: stale rollback flag must not remain in operator settings."""
+        from src.config import Settings
+
+        flags = Settings()["feature_flags"]
+        assert "EXECUTION_PRICE_SHADOW" not in flags
+
     def test_evaluator_always_uses_fee_adjusted_size(self):
         """P10E: _size_at_execution_price_boundary always returns fee-adjusted size."""
         from src.engine.evaluator import _size_at_execution_price_boundary
@@ -251,7 +258,7 @@ class TestEvaluatorWiring:
             lon=-97.0403,
             timezone="America/Chicago",
             settlement_unit="F",
-            cluster="US-Texas-Triangle",
+            cluster="Dallas",
             wu_station="KDAL",
         )
 
@@ -295,6 +302,8 @@ class TestEvaluatorWiring:
             def __init__(self, *args, **kwargs):
                 self.bins = kwargs["bins"]
                 self.member_maxes = np.ones(51) * 40.0
+                self.entry_method = "ens_member_counting"
+                self.selected_method = "ens_member_counting"
 
             def forecast_context(self):
                 return {"uncertainty": {}, "location": {}}
@@ -380,10 +389,9 @@ class TestEvaluatorWiring:
             ),
         )
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
-        monkeypatch.setattr(
-            evaluator_module,
-            "scan_full_hypothesis_family",
-            lambda analysis, *args, **kwargs: [
+        def fake_scan_full_hypothesis_family(analysis, *args, **kwargs):
+            if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
+            return [
                 FullFamilyHypothesis(
                     index=1,
                     range_label=edge.bin.label,
@@ -400,8 +408,9 @@ class TestEvaluatorWiring:
                     passed_prefilter=True,
                 )
                 for edge in analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))
-            ],
-        )
+            ]
+
+        monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", fake_scan_full_hypothesis_family)
         monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
         monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
         monkeypatch.setattr(evaluator_module, "kelly_size", capture_kelly)

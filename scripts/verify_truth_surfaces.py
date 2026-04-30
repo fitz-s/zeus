@@ -8,7 +8,7 @@ NOT pytest — run directly to get PASS/FAIL for each surface invariant.
 Usage:
     python scripts/verify_truth_surfaces.py
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Diagnose truth-surface integrity and P0 training-readiness blockers.
 # Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
 
@@ -2839,7 +2839,7 @@ def check_3_json_active_vs_position_current(cur) -> tuple[str, str]:
         return FAIL, f"query error: {exc}"
 
     status = PASS if active_json == pc_count else WARN
-    return status, f"positions-paper.json active={active_json}, position_current={pc_count}"
+    return status, f"positions.json active={active_json}, position_current={pc_count}"
 
 
 def check_4_status_summary_risk_details() -> tuple[str, str]:
@@ -2970,7 +2970,7 @@ def run_checks() -> int:
          check_1_position_current_vs_trade_decisions(cur)),
         ("2. position_events covers all position_current",
          check_2_position_events_coverage(cur)),
-        ("3. positions-paper.json active == position_current",
+        ("3. positions.json active == position_current",
          check_3_json_active_vs_position_current(cur)),
         ("4. status_summary risk.details not None",
          check_4_status_summary_risk_details()),

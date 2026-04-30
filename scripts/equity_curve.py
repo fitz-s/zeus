@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Build a live-runtime equity curve from current truth files.
+# Reuse: Run after live-only truth-file helper changes or equity report routing changes.
 """Build a mode-aware equity curve from current truth files."""
 
 from __future__ import annotations
@@ -39,9 +42,9 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 
 def build_equity_curve(mode: str) -> dict:
-    status, status_truth = read_mode_truth_json("status_summary.json")
-    portfolio, portfolio_truth = read_mode_truth_json("positions.json")
-    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json")
+    status, status_truth = read_mode_truth_json("status_summary.json", mode=mode)
+    portfolio, portfolio_truth = read_mode_truth_json("positions.json", mode=mode)
+    _tracker, tracker_truth = read_mode_truth_json("strategy_tracker.json", mode=mode)
 
     initial = float(status["portfolio"]["initial_bankroll"])
     realized_now = float(status["portfolio"]["realized_pnl"])

@@ -17,17 +17,14 @@ required_idiom_fields:
 idioms:
   - id: SEMANTIC_PROVENANCE_GUARD
     exists: "Expose provenance fields to semantic_linter/static analysis in the same scope as probability/edge reads."
-    shape: "unreachable static hook"
+    shape: "legacy unreachable static hook; new or touched code should prefer executable same-scope provenance reads"
     owner_gate: scripts/semantic_linter.py
     examples:
       - src/strategy/market_analysis.py
       - src/strategy/market_analysis_family_scan.py
-      - src/engine/evaluator.py
-      - src/engine/monitor_refresh.py
       - src/engine/replay.py
       - src/engine/cycle_runtime.py
       - src/execution/executor.py
       - src/execution/exit_triggers.py
-      - src/execution/harvester.py
       - src/state/db.py
-    replacement_rule: "Equivalent linter-visible provenance hook plus tests/test_structural_linter.py coverage."
+    replacement_rule: "Equivalent linter-visible executable provenance read plus semantic-linter coverage."

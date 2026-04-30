@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: U1 antibodies for ExecutableMarketSnapshotV2 persistence and freshness gate.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
@@ -10,9 +10,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from src.data.market_scanner import (
+    ExecutableSnapshotCaptureError,
+    capture_executable_market_snapshot,
+)
 from src.contracts.executable_market_snapshot_v2 import (
     ExecutableMarketSnapshotV2,
     MarketNotTradableError,
@@ -29,6 +34,93 @@ NOW = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
+
+
+class FakeClobFacts:
+    def __init__(
+        self,
+        *,
+        market_info: dict | None = None,
+        orderbook: dict | None = None,
+        fee_rate=30,
+    ):
+        self.market_info = market_info if market_info is not None else {
+            "condition_id": "condition-1",
+            "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+            "feesEnabled": True,
+        }
+        self.orderbook = orderbook if orderbook is not None else {
+            "asset_id": "yes-token",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "neg_risk": False,
+            "bids": [{"price": "0.49", "size": "100"}],
+            "asks": [{"price": "0.51", "size": "100"}],
+        }
+        self.fee_rate = fee_rate
+
+    def get_clob_market_info(self, condition_id: str) -> dict:
+        assert condition_id == "condition-1"
+        return self.market_info
+
+    def get_orderbook_snapshot(self, token_id: str) -> dict:
+        assert token_id in {"yes-token", "no-token"}
+        return self.orderbook
+
+    def get_fee_rate(self, token_id: str) -> float:
+        if isinstance(self.fee_rate, BaseException):
+            raise self.fee_rate
+        return self.fee_rate
+
+
+def _market_for_capture(**outcome_overrides) -> dict:
+    outcome = {
+        "title": "Will NYC high temp be 39-40°F?",
+        "token_id": "yes-token",
+        "no_token_id": "no-token",
+        "price": 0.49,
+        "no_price": 0.51,
+        "range_low": 39,
+        "range_high": 40,
+        "market_id": "condition-1",
+        "condition_id": "condition-1",
+        "question_id": "question-1",
+        "gamma_market_id": "gamma-1",
+        "active": True,
+        "closed": False,
+        "accepting_orders": True,
+        "enable_orderbook": True,
+        "market_end_at": (NOW + timedelta(days=1)).isoformat(),
+        "token_map_raw": {"YES": "yes-token", "NO": "no-token"},
+        "raw_gamma_payload_hash": HASH_A,
+        "gamma_market_raw": {
+            "id": "gamma-1",
+            "conditionId": "condition-1",
+            "questionID": "question-1",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-token", "no-token"],
+        },
+    }
+    outcome.update(outcome_overrides)
+    return {
+        "event_id": "event-1",
+        "slug": "weather-nyc-high",
+        "outcomes": [outcome],
+    }
+
+
+def _decision_for_capture(direction: str = "buy_yes"):
+    return SimpleNamespace(
+        tokens={
+            "market_id": "condition-1",
+            "token_id": "yes-token",
+            "no_token_id": "no-token",
+        },
+        edge=SimpleNamespace(direction=direction),
+    )
 
 
 @pytest.fixture
@@ -182,6 +274,261 @@ def test_insert_snapshot_persists_all_fields(conn):
     assert loaded.sports_start_at == NOW + timedelta(minutes=30)
     assert loaded.fee_details == {"bps": 0, "source": "test"}
     assert loaded.token_map_raw == {"YES": "yes-token", "NO": "no-token"}
+
+
+def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn):
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.condition_id == "condition-1"
+    assert loaded.question_id == "question-1"
+    assert loaded.selected_outcome_token_id == "yes-token"
+    assert loaded.outcome_label == "YES"
+    assert loaded.min_tick_size == Decimal("0.01")
+    assert loaded.min_order_size == Decimal("5")
+    assert loaded.neg_risk is False
+    assert loaded.fee_details == {
+        "source": "clob_fee_rate",
+        "token_id": "yes-token",
+        "fee_rate_bps": 30.0,
+    }
+    assert loaded.authority_tier == "CLOB"
+    assert fields["executable_snapshot_min_tick_size"] == "0.01"
+    assert fields["executable_snapshot_min_order_size"] == "5"
+    assert fields["executable_snapshot_neg_risk"] is False
+
+
+def test_capture_executable_snapshot_selects_no_orderbook_for_buy_no(conn):
+    clob = FakeClobFacts(orderbook={
+        "asset_id": "no-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [{"price": "0.48", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}],
+    })
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(direction="buy_no"),
+        clob=clob,
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded.selected_outcome_token_id == "no-token"
+    assert loaded.outcome_label == "NO"
+    assert loaded.orderbook_top_bid == Decimal("0.48")
+    assert loaded.orderbook_top_ask == Decimal("0.52")
+
+
+@pytest.mark.parametrize(
+    "market_info",
+    [
+        {
+            "condition_id": "condition-1",
+            "t": [{"t": "yes-token", "o": "Yes"}, {"t": "no-token", "o": "No"}],
+        },
+        {
+            "condition_id": "condition-1",
+            "primary_token_id": "yes-token",
+            "secondary_token_id": "no-token",
+        },
+    ],
+)
+def test_capture_executable_snapshot_accepts_documented_clob_token_shapes(conn, market_info):
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(market_info=market_info),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.yes_token_id == "yes-token"
+    assert loaded.no_token_id == "no-token"
+
+
+def test_capture_executable_snapshot_requires_clob_token_proof(conn):
+    with pytest.raises(ExecutableSnapshotCaptureError, match="token map"):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(market_info={"condition_id": "condition-1"}),
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+        )
+
+
+def test_capture_executable_snapshot_uses_market_fact_methods_only(conn):
+    class FactOnlyClob(FakeClobFacts):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            self.calls.append("get_clob_market_info")
+            return super().get_clob_market_info(condition_id)
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            self.calls.append("get_orderbook_snapshot")
+            return super().get_orderbook_snapshot(token_id)
+
+        def get_fee_rate(self, token_id: str) -> float:
+            self.calls.append("get_fee_rate")
+            return super().get_fee_rate(token_id)
+
+        def cancel(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("snapshot capture must not touch cancel")
+
+        def redeem(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("snapshot capture must not touch redeem")
+
+        def place_limit_order(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("snapshot capture must not touch live submit")
+
+        def v2_preflight(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("snapshot capture must not touch live cutover/preflight")
+
+    clob = FactOnlyClob()
+
+    capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=clob,
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    assert clob.calls == ["get_clob_market_info", "get_orderbook_snapshot", "get_fee_rate"]
+
+
+@pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"])
+def test_capture_executable_snapshot_requires_verified_gamma_authority(conn, authority):
+    with pytest.raises(ExecutableSnapshotCaptureError, match="VERIFIED Gamma authority"):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(),
+            captured_at=NOW,
+            scan_authority=authority,
+        )
+
+
+@pytest.mark.parametrize(
+    ("clob", "match"),
+    [
+        (
+            FakeClobFacts(orderbook={
+                "asset_id": "yes-token",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.51", "size": "100"}],
+            }),
+            "tick_size",
+        ),
+        (
+            FakeClobFacts(orderbook={
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [],
+                "asks": [{"price": "0.51", "size": "100"}],
+            }),
+            "missing bids",
+        ),
+        (
+            FakeClobFacts(orderbook={
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.51", "size": "100"}],
+            }),
+            "neg_risk",
+        ),
+        (
+            FakeClobFacts(fee_rate=RuntimeError("fee endpoint down")),
+            "fee endpoint down",
+        ),
+    ],
+)
+def test_capture_executable_snapshot_fails_closed_on_missing_clob_facts(conn, clob, match):
+    with pytest.raises(ExecutableSnapshotCaptureError, match=match):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(),
+            clob=clob,
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+        )
+
+
+@pytest.mark.parametrize(
+    ("market", "clob", "match"),
+    [
+        (_market_for_capture(closed=True), FakeClobFacts(), "not currently tradable"),
+        (
+            _market_for_capture(),
+            FakeClobFacts(market_info={
+                "condition_id": "wrong-condition",
+                "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+            }),
+            "condition_id",
+        ),
+        (
+            _market_for_capture(),
+            FakeClobFacts(market_info={
+                "condition_id": "condition-1",
+                "tokens": [{"token_id": "yes-token"}, {"token_id": "wrong-no"}],
+            }),
+            "token map",
+        ),
+        (
+            _market_for_capture(),
+            FakeClobFacts(orderbook={
+                "asset_id": "wrong-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.51", "size": "100"}],
+            }),
+            "orderbook token_id",
+        ),
+    ],
+)
+def test_capture_executable_snapshot_fails_closed_on_gamma_clob_inconsistency(conn, market, clob, match):
+    with pytest.raises(ExecutableSnapshotCaptureError, match=match):
+        capture_executable_market_snapshot(
+            conn,
+            market=market,
+            decision=_decision_for_capture(),
+            clob=clob,
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+        )
 
 
 def test_update_snapshot_raises_via_trigger(conn):

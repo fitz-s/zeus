@@ -5,7 +5,7 @@ to audit *semantic correctness* of the trading system's internal state:
 
 - Event table parity (canonical vs legacy exit events)
 - Position lifecycle phase staleness
-- Paper/live environment contamination
+- Mode/env contamination in canonical rows
 - Portfolio loader data-source integrity
 - Trade activity liveness
 

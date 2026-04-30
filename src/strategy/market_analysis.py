@@ -173,12 +173,21 @@ class MarketAnalysis:
             "market_complete": self.market_complete,
         }
 
+    def supports_buy_no_edges(self) -> bool:
+        """Return whether local NO-side economics are executable for this market.
+
+        Multi-bin weather families have native NO tokens, but this analysis
+        object only receives YES-side VWMP. Until native NO-side book facts are
+        present, `1 - YES` is not an executable NO entry price.
+        """
+        return len(self.bins) <= 2
+
     def find_edges(
         self, n_bootstrap: int | None = None
     ) -> list[BinEdge]:
         """Scan all bins for edges. Returns edges with positive CI lower bound.
 
-        For each bin, considers both directions (buy_yes, buy_no).
+        For each bin, considers buy_yes and any executable buy_no direction.
         Uses double bootstrap to compute CI and p-value.
         """
         # Semantic Provenance Guard
@@ -213,7 +222,7 @@ class MarketAnalysis:
             # Buy NO direction: edge on the NO side
             # Restricted to binary markets since local `1-p` math on multi-bin
             # families generates synthetic edges decoupled from native NO-token VWMP
-            if len(self.bins) <= 2:
+            if self.supports_buy_no_edges():
                 p_model_no = 1.0 - float(self.p_cal[i])
                 p_market_no = 1.0 - float(self.p_market[i])
                 p_post_no = 1.0 - float(self.p_posterior[i])

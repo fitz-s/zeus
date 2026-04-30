@@ -19,7 +19,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Optional
 
 from src.config import get_mode, settings
@@ -51,39 +51,42 @@ MODE_TIMEOUTS = {
 }
 
 
-def _assert_cutover_allows_submit(intent_kind) -> None:
+def _assert_cutover_allows_submit(intent_kind) -> dict:
     """Fail before command persistence or SDK contact when cutover is not live."""
     from src.control.cutover_guard import assert_submit_allowed
 
     assert_submit_allowed(intent_kind)
+    return _capability_component("cutover_guard", intent_kind=str(getattr(intent_kind, "value", intent_kind)))
 
 
-def _assert_heartbeat_allows_submit(order_type: str = "GTC") -> None:
+def _assert_heartbeat_allows_submit(order_type: str = "GTC") -> dict:
     """Fail before command persistence or SDK contact when heartbeat is unhealthy."""
     from src.control.heartbeat_supervisor import assert_heartbeat_allows_order_type
 
     assert_heartbeat_allows_order_type(order_type)
+    return _capability_component("heartbeat_supervisor", order_type=order_type)
 
 
-def _assert_ws_gap_allows_submit(market_id: str | None = None) -> None:
+def _assert_ws_gap_allows_submit(market_id: str | None = None) -> dict:
     """Fail before command persistence or SDK contact when M3 user WS is gapped."""
     from src.control.ws_gap_guard import assert_ws_allows_submit
 
     assert_ws_allows_submit(market_id)
+    return _capability_component("ws_gap_guard", market_id=market_id or "")
 
 
-def _assert_risk_allocator_allows_submit(intent: ExecutionIntent) -> None:
+def _assert_risk_allocator_allows_submit(intent: ExecutionIntent):
     """Fail before command persistence or SDK contact when A2 allocator denies risk."""
     from src.risk_allocator import assert_global_allocation_allows
 
-    assert_global_allocation_allows(intent)
+    return assert_global_allocation_allows(intent)
 
 
-def _assert_risk_allocator_allows_exit_submit() -> None:
+def _assert_risk_allocator_allows_exit_submit():
     """Fail before exit command persistence/SDK contact when A2 kill switch is armed."""
     from src.risk_allocator import assert_global_submit_allows
 
-    assert_global_submit_allows(reduce_only=True)
+    return assert_global_submit_allows(reduce_only=True)
 
 
 def _select_risk_allocator_order_type(conn: sqlite3.Connection, snapshot_id: str) -> str:
@@ -137,18 +140,89 @@ def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
     return int(notional.to_integral_value(rounding=ROUND_CEILING))
 
 
-def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int | None = None) -> None:
+def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int | None = None) -> dict:
     """Fail before command persistence or SDK contact when pUSD is insufficient."""
     from src.state.collateral_ledger import assert_buy_preflight
 
     assert_buy_preflight(intent, spend_micro=spend_micro)
+    return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
 
 
-def _assert_collateral_allows_sell(token_id: str, shares: float) -> None:
+def _assert_collateral_allows_sell(token_id: str, shares: float) -> dict:
     """Fail before command persistence or SDK contact when CTF inventory is insufficient."""
     from src.state.collateral_ledger import assert_sell_preflight
 
     assert_sell_preflight(token_id, shares)
+    return _capability_component("collateral_ledger", collateral="CTF", token_id=token_id, shares=shares)
+
+
+def _capability_component(component: str, *, allowed: bool = True, reason: str = "allowed", **details) -> dict:
+    payload = {
+        "component": component,
+        "allowed": bool(allowed),
+        "reason": str(reason),
+    }
+    if details:
+        payload["details"] = {
+            key: _json_safe_string(value, "") if not isinstance(value, (int, float, bool)) else value
+            for key, value in details.items()
+        }
+    return payload
+
+
+def _component_from_result(component: str, result=None, **details) -> dict:
+    payload = _capability_component(
+        component,
+        allowed=bool(getattr(result, "allowed", True)),
+        reason=str(getattr(result, "reason", "allowed")),
+        **details,
+    )
+    for attr in (
+        "requested_micro",
+        "remaining_market_capacity_micro",
+        "confirmed_exposure_micro",
+        "optimistic_exposure_micro",
+        "weighted_existing_exposure_micro",
+        "reduce_only",
+    ):
+        if hasattr(result, attr):
+            payload.setdefault("details", {})[attr] = getattr(result, attr)
+    return payload
+
+
+def _build_execution_capability(
+    *,
+    action: str,
+    command_id: str,
+    intent_kind: str,
+    order_type: str,
+    token_id: str,
+    snapshot_id: str,
+    components: list[dict],
+    freshness_time: str,
+    mode: str = "submit",
+) -> dict:
+    normalized_components = [
+        component if isinstance(component, dict) else _capability_component("unknown_component")
+        for component in components
+    ]
+    proof = {
+        "schema_version": 1,
+        "action": action,
+        "intent_kind": intent_kind,
+        "mode": mode,
+        "allowed": all(bool(component.get("allowed")) for component in normalized_components),
+        "freshness_time": freshness_time,
+        "command_id": command_id,
+        "order_type": order_type,
+        "token_id": token_id,
+        "executable_snapshot_id": snapshot_id,
+        "components": normalized_components,
+    }
+    proof["capability_id"] = hashlib.sha256(
+        json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    return proof
 
 
 def _reserve_collateral_for_buy(
@@ -186,7 +260,35 @@ def _persist_pre_submit_envelope(
     post_only: bool,
     captured_at: str,
 ) -> str | None:
-    """Persist the U2 venue-submission envelope before SDK contact.
+    envelope = _build_pre_submit_envelope(
+        conn,
+        command_id=command_id,
+        snapshot_id=snapshot_id,
+        token_id=token_id,
+        side=side,
+        price=price,
+        size=size,
+        order_type=order_type,
+        post_only=post_only,
+        captured_at=captured_at,
+    )
+    return _persist_prebuilt_submit_envelope(conn, envelope, command_id=command_id)
+
+
+def _build_pre_submit_envelope(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    snapshot_id: str,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    order_type: str,
+    post_only: bool,
+    captured_at: str,
+):
+    """Build the U2 venue-submission envelope before SDK contact.
 
     This deliberately uses only the already-captured ExecutableMarketSnapshotV2
     plus the command's intended order shape.  It does not resolve keychain
@@ -198,7 +300,6 @@ def _persist_pre_submit_envelope(
 
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.snapshot_repo import get_snapshot
-    from src.state.venue_command_repo import insert_submission_envelope
     from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
 
     if not snapshot_id:
@@ -270,6 +371,19 @@ def _persist_pre_submit_envelope(
         error_message=None,
         captured_at=captured_at,
     )
+    return envelope
+
+
+def _persist_prebuilt_submit_envelope(
+    conn: sqlite3.Connection,
+    envelope,
+    *,
+    command_id: str,
+) -> str | None:
+    if envelope is None:
+        return None
+    from src.state.venue_command_repo import insert_submission_envelope
+
     return insert_submission_envelope(
         conn,
         envelope,
@@ -486,6 +600,12 @@ def create_execution_intent(
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
 
+    if executable_snapshot_min_tick_size is not None:
+        limit_price = _align_buy_limit_price_to_tick(
+            limit_price,
+            executable_snapshot_min_tick_size,
+        )
+
     if edge_direction.value == "buy_yes":
         order_token = token_id
     elif edge_direction.value == "buy_no":
@@ -523,6 +643,22 @@ def create_execution_intent(
         resolution_window=resolution_window or "default",
         correlation_key=correlation_key or event_id or market_id,
     )
+
+
+def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | str) -> float:
+    """Round a BUY limit down to the executable snapshot tick."""
+
+    tick = Decimal(str(min_tick_size))
+    if tick <= 0:
+        raise ValueError("executable_snapshot_min_tick_size must be positive")
+    price = Decimal(str(limit_price))
+    aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+    if aligned <= 0:
+        aligned = tick
+    upper = Decimal("1") - tick
+    if aligned >= Decimal("1"):
+        aligned = upper
+    return float(aligned)
 
 
 def execute_intent(
@@ -709,8 +845,8 @@ def execute_exit_order(
             idempotency_key=intent.idempotency_key,
         )
 
-    _assert_cutover_allows_submit(IntentKind.EXIT)
-    _assert_risk_allocator_allows_exit_submit()
+    cutover_component = _assert_cutover_allows_submit(IntentKind.EXIT)
+    risk_allocator_decision = _assert_risk_allocator_allows_exit_submit()
 
     # -----------------------------------------------------------------------
     # build phase — pure, no I/O (INV-30)
@@ -754,9 +890,9 @@ def execute_exit_order(
         )
     try:
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
-        _assert_heartbeat_allows_submit(order_type)
-        _assert_ws_gap_allows_submit(intent.token_id)
-        _assert_collateral_allows_sell(intent.token_id, shares)
+        heartbeat_component = _assert_heartbeat_allows_submit(order_type)
+        ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -894,7 +1030,32 @@ def execute_exit_order(
                 command_id=command_id,
                 event_type="SUBMIT_REQUESTED",
                 occurred_at=now_str,
-                payload={"order_type": order_type},
+                payload={
+                    "order_type": order_type,
+                    "execution_capability": _build_execution_capability(
+                        action="EXIT",
+                        command_id=command_id,
+                        intent_kind=IntentKind.EXIT.value,
+                        order_type=order_type,
+                        token_id=intent.token_id,
+                        snapshot_id=intent.executable_snapshot_id,
+                        freshness_time=now_str,
+                        components=[
+                            cutover_component,
+                            _component_from_result(
+                                "risk_allocator",
+                                risk_allocator_decision,
+                                reduce_only=True,
+                            ),
+                            _capability_component("order_type_selection", order_type=order_type),
+                            heartbeat_component,
+                            ws_gap_component,
+                            collateral_component,
+                            _capability_component("replacement_sell_guard"),
+                            _capability_component("executable_snapshot_gate"),
+                        ],
+                    ),
+                },
             )
             _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
             if not _own_conn:
@@ -1209,7 +1370,7 @@ def _live_order(
     from src.state.venue_command_repo import insert_command, append_event
     from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
 
-    _assert_cutover_allows_submit(IntentKind.ENTRY)
+    cutover_component = _assert_cutover_allows_submit(IntentKind.ENTRY)
 
     timeout = intent.timeout_seconds
 
@@ -1254,7 +1415,7 @@ def _live_order(
             order_role="entry",
         )
 
-    _assert_risk_allocator_allows_submit(intent)
+    risk_allocator_decision = _assert_risk_allocator_allows_submit(intent)
     required_pusd_micro = _buy_order_notional_micro(intent, shares)
 
     # -----------------------------------------------------------------------
@@ -1291,9 +1452,9 @@ def _live_order(
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
-        _assert_heartbeat_allows_submit(order_type)
-        _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
-        _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
+        heartbeat_component = _assert_heartbeat_allows_submit(order_type)
+        ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
+        collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -1347,7 +1508,7 @@ def _live_order(
             )
 
         try:
-            envelope_id = _persist_pre_submit_envelope(
+            pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
                 snapshot_id=intent.executable_snapshot_id,
@@ -1358,6 +1519,11 @@ def _live_order(
                 order_type=order_type,
                 post_only=False,
                 captured_at=now_str,
+            )
+            envelope_id = _persist_prebuilt_submit_envelope(
+                conn,
+                pre_submit_envelope,
+                command_id=command_id,
             )
             insert_command(
                 conn,
@@ -1387,6 +1553,27 @@ def _live_order(
                 payload={
                     "allocation": _allocation_payload_for_intent(intent),
                     "order_type": order_type,
+                    "execution_capability": _build_execution_capability(
+                        action="ENTRY",
+                        command_id=command_id,
+                        intent_kind=IntentKind.ENTRY.value,
+                        order_type=order_type,
+                        token_id=intent.token_id,
+                        snapshot_id=intent.executable_snapshot_id,
+                        freshness_time=now_str,
+                        components=[
+                            cutover_component,
+                            _component_from_result(
+                                "risk_allocator",
+                                risk_allocator_decision,
+                            ),
+                            _capability_component("order_type_selection", order_type=order_type),
+                            heartbeat_component,
+                            ws_gap_component,
+                            collateral_component,
+                            _capability_component("executable_snapshot_gate"),
+                        ],
+                    ),
                 },
             )
             _reserve_collateral_for_buy(
@@ -1554,6 +1741,8 @@ def _live_order(
             intent.token_id[:8], intent.token_id[-4:],
             intent.limit_price, shares, timeout,
         )
+        if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
+            client.bind_submission_envelope(pre_submit_envelope)
 
         # -----------------------------------------------------------------------
         # Phase 5: submit — SDK call (INV-30: row already SUBMITTING)

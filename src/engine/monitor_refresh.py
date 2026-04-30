@@ -12,7 +12,13 @@ import numpy as np
 
 from src.calibration.manager import get_calibrator, season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.config import cities_by_name, day0_n_mc, edge_n_bootstrap, ensemble_n_mc
+from src.config import (
+    cities_by_name,
+    day0_n_mc,
+    edge_n_bootstrap,
+    ensemble_n_mc,
+    ensemble_primary_model,
+)
 from src.contracts import (
     EntryMethod,
     recompute_native_probability,
@@ -20,7 +26,7 @@ from src.contracts import (
 )
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
-from src.data.market_scanner import _parse_temp_range, get_current_yes_price, get_sibling_outcomes
+from src.data.market_scanner import _parse_temp_range, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.time_context import lead_days_to_date_start
@@ -40,6 +46,22 @@ _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
+    """Expose degraded forecast authority in monitor/exit evidence."""
+
+    validations: list[str] = []
+    source_id = ens_result.get("source_id")
+    if source_id:
+        validations.append(f"forecast_source_id:{source_id}")
+    source_role = ens_result.get("forecast_source_role")
+    if source_role:
+        validations.append(f"forecast_source_role:{source_role}")
+    degradation_level = ens_result.get("degradation_level")
+    if degradation_level:
+        validations.append(f"forecast_degradation:{degradation_level}")
+    return validations
 
 
 def _build_all_bins(position: Position, city) -> tuple[list, int]:
@@ -107,18 +129,29 @@ def _refresh_ens_member_counting(
     # lines per cycle, inflating the audit trail and confusing operator
     # review.
     _position_metric_str = resolve_position_metric(position)[0]
+    temperature_metric = MetricIdentity.from_raw(_position_metric_str)
+    try:
+        entry_provenance = position.selected_method or position.entry_method
+    except AttributeError:
+        entry_provenance = ""
+    if not entry_provenance:
+        logger.debug("Monitor refresh missing entry provenance for %s", getattr(position, "trade_id", "?"))
 
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
     requested_lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
     if requested_lead_days < 0:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
 
-    ens_result = fetch_ensemble(city, forecast_days=int(requested_lead_days) + 2)
+    ens_result = fetch_ensemble(
+        city,
+        forecast_days=int(requested_lead_days) + 2,
+        model=ensemble_primary_model(),
+        role="monitor_fallback",
+    )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["fresh_ens_fetch"]
+    forecast_source_validations = _monitor_forecast_source_validations(ens_result)
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, ens_result.get("fetch_time")))
 
     semantics = SettlementSemantics.for_city(city)
@@ -129,6 +162,7 @@ def _refresh_ens_member_counting(
         target_d,
         settlement_semantics=semantics,
         decision_time=ens_result.get("fetch_time"),
+        temperature_metric=temperature_metric,
     )
 
     low, high = _parse_temp_range(position.bin_label)
@@ -165,17 +199,28 @@ def _refresh_ens_member_counting(
             bin_widths=[b.width for b in all_bins],
         )
         p_cal_yes = float(p_cal_vector[held_idx])
-        applied = ["fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration", "vector_normalization"]
+        applied = [
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+            "platt_recalibration",
+            "vector_normalization",
+        ]
     elif cal is not None:
         p_cal_yes = cal.predict_for_bin(
             float(p_raw_vector[0]),
             float(lead_days),
             bin_width=all_bins[0].width,
         )
-        applied = ["fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
+        applied = [
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+            "platt_recalibration",
+        ]
     else:
         p_cal_yes = float(p_raw_vector[held_idx])
-        applied = ["fresh_ens_fetch", "mc_instrument_noise"]
+        applied = ["fresh_ens_fetch", *forecast_source_validations, "mc_instrument_noise"]
 
     # Compute actual hours since position was entered (not hardcoded 48h)
     hours_since_open = 48.0
@@ -293,9 +338,12 @@ def _refresh_day0_observation(
     # into 1 for missing-metric positions.
     _position_metric_str = resolve_position_metric(position)[0]
     """Recompute fresh probability through the Day0 observation + ENS path."""
-
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
+    try:
+        entry_provenance = position.selected_method or position.entry_method
+    except AttributeError:
+        entry_provenance = ""
+    if not entry_provenance:
+        logger.debug("Day0 monitor refresh missing entry provenance for %s", getattr(position, "trade_id", "?"))
     obs = _fetch_day0_observation(city, target_d)
     if obs is None:
         _set_monitor_probability_fresh(position, False)
@@ -304,10 +352,16 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
 
-    ens_result = fetch_ensemble(city, forecast_days=2)
+    ens_result = fetch_ensemble(
+        city,
+        forecast_days=2,
+        model=ensemble_primary_model(),
+        role="monitor_fallback",
+    )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
+    forecast_source_validations = _monitor_forecast_source_validations(ens_result)
 
     low, high = _parse_temp_range(position.bin_label)
     if low is None and high is None:
@@ -359,6 +413,7 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
+    semantics = SettlementSemantics.for_city(city)
     day0 = Day0Router.route(Day0SignalInputs(
         temperature_metric=temperature_metric,
         observed_high_so_far=float(obs.high_so_far) if obs.high_so_far is not None else None,
@@ -371,6 +426,8 @@ def _refresh_day0_observation(
         observation_source=str(obs.source),
         observation_time=obs.observation_time,
         temporal_context=temporal_context,
+        round_fn=semantics.round_values,
+        precision=semantics.precision,
     ))
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
     all_bins, held_idx = _build_all_bins(position, city)
@@ -392,19 +449,41 @@ def _refresh_day0_observation(
             bin_widths=[b.width for b in all_bins],
         )
         p_cal_yes = float(p_cal_vector[held_idx])
-        applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration", "vector_normalization"]
+        applied = [
+            "day0_observation",
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+            "platt_recalibration",
+            "vector_normalization",
+        ]
     elif cal is not None:
         p_cal_yes = cal.predict_for_bin(
             float(p_raw_vector[0]),
             0.0,
             bin_width=all_bins[0].width,
         )
-        applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise", "platt_recalibration"]
+        applied = [
+            "day0_observation",
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+            "platt_recalibration",
+        ]
     else:
         p_cal_yes = float(p_raw_vector[held_idx])
-        applied = ["day0_observation", "fresh_ens_fetch", "mc_instrument_noise"]
+        applied = [
+            "day0_observation",
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "mc_instrument_noise",
+        ]
 
-    ensemble_spread = TemperatureDelta(float(np.std(extrema.maxes)), city.settlement_unit)
+    member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
+    if member_extrema is None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
+    ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
 
     hours_since_open = 48.0
     if position.entered_at:
@@ -587,8 +666,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
     Falls back to stored values if refresh fails.
     """
-    # Semantic Provenance Guard
-    if False: _ = None.selected_method; _ = None.entry_method
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None
@@ -609,45 +686,36 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     # 1. Refresh market price
     market_refreshed = False
-    if getattr(clob, "paper_mode", False):
+    tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+    if tid:
         try:
-            gamma_yes = get_current_yes_price(pos.market_id)
-            if gamma_yes is not None:
-                current_p_market = gamma_yes if pos.direction == "buy_yes" else 1.0 - gamma_yes
-                market_refreshed = True
+            bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
+            pos.last_monitor_best_bid = float(bid)
+            pos.last_monitor_best_ask = float(ask)
+            if pos.state == "day0_window":
+                current_p_market = bid
+            else:
+                current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
+            market_refreshed = True
+
+            # Injection Point 7: Data completeness - record microstructure snapshot
+            from src.state.db import log_microstructure
+
+            log_microstructure(
+                conn,
+                token_id=tid,
+                city=pos.city,
+                target_date=pos.target_date,
+                range_label=pos.bin_label,
+                price=float(current_p_market),
+                volume=float(bid_sz + ask_sz),
+                bid=float(bid),
+                ask=float(ask),
+                spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
+                source_timestamp=datetime.now(timezone.utc).isoformat(),
+            )
         except Exception as e:
-            logger.debug("Gamma refresh failed for %s: %s", pos.trade_id, e)
-    else:
-        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-        if tid:
-            try:
-                bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
-                pos.last_monitor_best_bid = float(bid)
-                pos.last_monitor_best_ask = float(ask)
-                if pos.state == "day0_window":
-                    current_p_market = bid
-                else:
-                    current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
-                market_refreshed = True
-
-                # Injection Point 7: Data completeness - record microstructure snapshot
-                from src.state.db import log_microstructure
-
-                log_microstructure(
-                    conn,
-                    token_id=tid,
-                    city=pos.city,
-                    target_date=pos.target_date,
-                    range_label=pos.bin_label,
-                    price=float(current_p_market),
-                    volume=float(bid_sz + ask_sz),
-                    bid=float(bid),
-                    ask=float(ask),
-                    spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                    source_timestamp=datetime.now(timezone.utc).isoformat(),
-                )
-            except Exception as e:
-                logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
+            logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
 
     if market_refreshed:
         pos.last_monitor_market_price = current_p_market

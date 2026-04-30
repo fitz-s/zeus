@@ -1,5 +1,5 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
 """Antibodies for S4 (economics tombstone) and S2 (skill purpose enforcement).
 
@@ -10,8 +10,9 @@ Verifies that:
 """
 
 import pytest
+import sqlite3
 
-from src.backtest.economics import run_economics
+from src.backtest.economics import check_economics_readiness, run_economics
 from src.backtest.purpose import (
     BacktestPurpose,
     DIAGNOSTIC_CONTRACT,
@@ -36,6 +37,138 @@ def test_economics_tombstone_ignores_args():
     """Even with arbitrary kwargs, the tombstone refuses."""
     with pytest.raises(PurposeContractViolation):
         run_economics("2026-04-01", "2026-04-27", contract=ECONOMICS_CONTRACT)
+
+
+def test_economics_readiness_reports_missing_connection():
+    readiness = check_economics_readiness(None)
+
+    assert readiness.ready is False
+    assert readiness.blockers == ("missing_connection",)
+    assert readiness.table_counts == ()
+
+
+def test_economics_readiness_reports_missing_and_empty_substrate():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('MATCHED')")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert readiness.count_for("market_events_v2") == 0
+    assert readiness.count_for("market_price_history") is None
+    assert "empty_table:market_events_v2" in readiness.blockers
+    assert "missing_table:market_price_history" in readiness.blockers
+    assert "no_confirmed_venue_trade_facts" in readiness.blockers
+    assert "economics_engine_not_implemented" in readiness.blockers
+
+
+def test_economics_readiness_requires_neg_risk_snapshot_fact():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute("CREATE TABLE market_price_history (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots ("
+        "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, raw_orderbook_hash TEXT)"
+    )
+    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    conn.execute("CREATE TABLE position_lots (state TEXT)")
+    conn.execute("CREATE TABLE probability_trace_fact (decision_snapshot_id TEXT)")
+    conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
+    conn.execute("CREATE TABLE selection_family_fact (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
+    conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
+    conn.execute("INSERT INTO market_events_v2 (outcome) VALUES ('YES')")
+    conn.execute("INSERT INTO market_price_history DEFAULT VALUES")
+    conn.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(min_tick_size, min_order_size, fee_details_json, raw_orderbook_hash) "
+        "VALUES ('0.01', '5', '{}', 'hash-orderbook')"
+    )
+    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('CONFIRMED')")
+    conn.execute("INSERT INTO position_lots (state) VALUES ('CONFIRMED_EXPOSURE')")
+    conn.execute("INSERT INTO probability_trace_fact (decision_snapshot_id) VALUES ('snap-1')")
+    conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
+    conn.execute("INSERT INTO selection_family_fact DEFAULT VALUES")
+    conn.execute("INSERT INTO selection_hypothesis_fact (selected_post_fdr) VALUES (1)")
+    conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+    conn.execute("INSERT INTO outcome_fact (decision_snapshot_id, outcome) VALUES ('snap-1', 1)")
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert "invalid_schema:executable_market_snapshots.fee_tick_min_order_neg_risk_orderbook" in readiness.blockers
+
+
+def test_economics_readiness_rejects_gamma_price_only_history():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE market_price_history (market_slug TEXT, token_id TEXT, price REAL, recorded_at TEXT)")
+    conn.execute(
+        "INSERT INTO market_price_history (market_slug, token_id, price, recorded_at) "
+        "VALUES ('market-slug', 'yes-token', 0.42, '2026-04-30T12:00:00+00:00')"
+    )
+
+    readiness = check_economics_readiness(conn)
+    conn.close()
+
+    assert readiness.ready is False
+    assert readiness.count_for("market_price_history") == 1
+    assert "market_price_history_lacks_full_linkage_contract" in readiness.blockers
+
+
+def test_economics_readiness_full_substrate_still_blocks_until_engine_implemented():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute(
+        "CREATE TABLE market_price_history ("
+        "id INTEGER PRIMARY KEY, market_price_linkage TEXT, source TEXT, "
+        "best_bid REAL, best_ask REAL, raw_orderbook_hash TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots ("
+        "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, neg_risk INTEGER, raw_orderbook_hash TEXT)"
+    )
+    conn.execute("CREATE TABLE venue_trade_facts (state TEXT)")
+    conn.execute("CREATE TABLE position_lots (state TEXT)")
+    conn.execute("CREATE TABLE probability_trace_fact (decision_snapshot_id TEXT)")
+    conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
+    conn.execute("CREATE TABLE selection_family_fact (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
+    conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
+    conn.execute("INSERT INTO market_events_v2 (outcome) VALUES ('YES')")
+    conn.execute(
+        "INSERT INTO market_price_history "
+        "(market_price_linkage, source, best_bid, best_ask, raw_orderbook_hash) "
+        "VALUES ('full', 'CLOB_WS_MARKET', 0.42, 0.44, 'hash-orderbook')"
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(min_tick_size, min_order_size, fee_details_json, neg_risk, raw_orderbook_hash) "
+        "VALUES ('0.01', '5', '{}', 0, 'hash-orderbook')"
+    )
+    conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('CONFIRMED')")
+    conn.execute("INSERT INTO position_lots (state) VALUES ('CONFIRMED_EXPOSURE')")
+    conn.execute("INSERT INTO probability_trace_fact (decision_snapshot_id) VALUES ('snap-1')")
+    conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
+    conn.execute("INSERT INTO selection_family_fact DEFAULT VALUES")
+    conn.execute("INSERT INTO selection_hypothesis_fact (selected_post_fdr) VALUES (1)")
+    conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+    conn.execute("INSERT INTO outcome_fact (decision_snapshot_id, outcome) VALUES ('snap-1', 1)")
+
+    readiness = check_economics_readiness(conn)
+
+    assert readiness.ready is False
+    assert readiness.blockers == ("economics_engine_not_implemented",)
+    with pytest.raises(PurposeContractViolation) as excinfo:
+        run_economics(conn=conn)
+    conn.close()
+    assert "ECONOMICS purpose is tombstoned" in str(excinfo.value)
+    assert "economics_engine_not_implemented" in str(excinfo.value)
 
 
 def test_run_skill_rejects_economics_contract():

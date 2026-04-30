@@ -30,7 +30,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 - Share quantization: BUY rounds UP, SELL rounds DOWN (0.01 increments)
 - Whale toxicity: cancel on adjacent bin sweeps (legacy predecessor lesson)
 - Dynamic limit: if within 5% of best ask, jump to ask for guaranteed fill
-- Live/backtest/shadow separation is explicit; execution code must not reintroduce paper/live split paths
+- Live/backtest/shadow separation is explicit; execution code must not reintroduce paper or fake/live split paths
 - All probabilities in exit triggers are in NATIVE space of position direction (buy_yes→P(YES), buy_no→P(NO))
 - Settlement redemption side effects flow through `settlement_commands.py`; do not call adapter redeem paths directly from harvester or collateral code.
 

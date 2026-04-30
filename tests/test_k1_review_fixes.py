@@ -1,3 +1,6 @@
+# Created: 2026-04-29
+# Last reused/audited: 2026-04-29
+# Authority basis: DSA-07 paper/live residue cleanup; K1 monitor authority gate reuse.
 """K1 package-review fixes — authority gate in monitor, _parse_boolish_text, quarantine guard."""
 import pytest
 from unittest.mock import MagicMock, patch
@@ -14,6 +17,7 @@ def test_monitor_refresh_ens_blocks_on_unverified_calibration():
     pos = Position.__new__(Position)
     pos.bin_label = "80-82°F"
     pos.direction = "buy_yes"
+    pos.entry_method = "ens_member_counting"
     pos.p_posterior = 0.42
     pos.entered_at = None
     pos.target_date = date(2026, 7, 15)
@@ -79,6 +83,7 @@ def test_monitor_refresh_ens_passes_with_verified_calibration():
     pos = Position.__new__(Position)
     pos.bin_label = "80-82°F"
     pos.direction = "buy_yes"
+    pos.entry_method = "ens_member_counting"
     pos.p_posterior = 0.42
     pos.entered_at = None
     pos.target_date = date(2026, 7, 15)
@@ -107,7 +112,6 @@ def test_monitor_refresh_ens_passes_with_verified_calibration():
          patch("src.engine.monitor_refresh.season_from_date", return_value="summer"), \
          patch("src.engine.monitor_refresh.compute_alpha") as mock_alpha, \
          patch("src.engine.monitor_refresh._check_persistence_anomaly", return_value=1.0), \
-         patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.50), \
          patch("src.engine.monitor_refresh.edge_n_bootstrap", return_value=100):
         
         import numpy as np

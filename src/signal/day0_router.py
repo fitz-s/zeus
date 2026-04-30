@@ -63,6 +63,12 @@ class Day0Router:
                 current_temp=inputs.current_temp,
                 hours_remaining=inputs.hours_remaining,
                 unit=inputs.unit,
+                observation_source=inputs.observation_source,
+                observation_time=inputs.observation_time,
+                current_utc_timestamp=inputs.current_utc_timestamp,
+                temporal_context=inputs.temporal_context,
+                round_fn=inputs.round_fn,
+                precision=inputs.precision,
             )
         return Day0HighSignal(
             observed_high_so_far=inputs.observed_high_so_far,  # type: ignore[arg-type]

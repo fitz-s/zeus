@@ -424,14 +424,15 @@ instead of reusing `MATCHED`/`FILLED` as generic success terminals.
 ### [MITIGATED 2026-04-30; RESIDUAL P2] Entry partial fills preserve filled exposure after remainder cancel
 
 **Location:** `src/execution/fill_tracker.py::_check_entry_fill`,
-`_record_partial_entry_observed`, `_mark_entry_filled`.
+`_record_partial_entry_observed`.
 **Original problem:** A `PARTIAL` entry could remain `pending_tracked`; after the
 remainder timed out and cancellation succeeded, the entire local position could
 be voided as `UNFILLED_ORDER`, losing already-filled shares.
 **Antibody deployed:** `PARTIAL` now records filled shares, fill price, and cost
-basis without marking the entry fully active. If the remainder is cancelled or
-expires after observed fill, the filled quantity is materialized instead of
-voiding the position.
+basis without marking the entry active or verified. If the remainder is
+cancelled or expires after observed fill, the position stays `pending_tracked`
+with `partial_remainder_cancelled` status instead of being voided or promoted to
+success before `CONFIRMED`.
 **Evidence:** `tests/test_live_safety_invariants.py::test_partial_remainder_cancel_preserves_filled_exposure`.
 **Residual:** Rich command-fact semantics for partial->failed/retrying and a
 confirmed optimistic-vs-final partial ledger remain a separate packet. The
@@ -1546,11 +1547,19 @@ cycle_runner._execute_monitoring_phase()
 **Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 
-### [OPEN] strategy_tracker can report profit that is not reconstructible from durable DB truth
-**Location:** `src/state/strategy_tracker.py`, `zeus/state/strategy_tracker-paper.json`, `zeus/state/positions-paper.json`, `zeus/state/zeus.db`
-**Problem:** `strategy_tracker-paper.json` currently reports `opening_inertia` cumulative PnL of `+247.83`, but the authoritative current-regime cash ledger in `positions-paper.json` only reflects `opening_inertia` realized PnL of `-2.21`. Several large positive `opening_inertia` trades in the tracker (for example `f4e0d2a6-b8a`, `b2086cca-a1a`, `836270b8-2cc`, `8d9071fa-fab`, `eebdb911-99e`, `16a62cac-696`) are not reconstructible from `trade_decisions` or `position_events` in the current DB snapshot.
-**Impact:** A non-authoritative attribution surface can be mistaken for wallet truth, creating a false belief that paper PnL is much higher than the bankroll snapshot actually shows.
-**Proposed antibody:** Rebuild tracker summaries only from durable settlement/exit events or stamp every non-DB-backed trade with explicit archival provenance; add a reconciliation test that tracker PnL must be derivable from durable event truth (or explicitly marked as legacy/archive-only).
+### [MITIGATED 2026-04-30] strategy_tracker no longer reports JSON PnL as independent truth
+**Location:** `src/state/strategy_tracker.py`, legacy `strategy_tracker-*.json` artifacts.
+**Original problem:** `strategy_tracker-paper.json` could report `opening_inertia`
+cumulative PnL that was not reconstructible from durable DB/event truth.
+**Antibody deployed:** `StrategyTracker` is now a no-write canonical projection:
+`record_*` methods are no-op compatibility shims, `save_tracker()` does not
+write disk, `load_tracker()` ignores legacy files, and `summary()` derives from
+`query_authoritative_settlement_rows()` / `position_events`.
+**Evidence:** `src/state/strategy_tracker.py` module contract and no-op
+`record_*` / `save_tracker()` implementations.
+**Residual:** Legacy `strategy_tracker-paper.json` references in tests or
+historical artifacts remain fixture/archive surfaces. They should not be used as
+runtime or wallet truth.
 
 (2 FIXED entries on Healthcheck assumptions + Day0 stale probability waiver
 archived to `known_gaps_archive.md` → "Tooling / Operator Health".)
@@ -1559,12 +1568,25 @@ archived to `known_gaps_archive.md` → "Tooling / Operator Health".)
 
 ## 2026-04-03 — edge-reversal follow-up triage
 
-### [OPEN] Paper positions have no token_id → chain_state=unknown → stale_legacy_fallback → RiskGuard RED
-**Location:** `src/execution/executor.py`, `src/state/portfolio.py`, `src/engine/cycle_runtime.py`
-**Problem (filed 2026-04-10):** 12 paper positions entered April 7 with no token_id. All have `chain_state="unknown"`, `token_id=""`. Canonical DB projection returns non-ok status → `load_portfolio()` falls back to stale JSON → RiskGuard sees broken portfolio → RED → all new entries blocked since April 7.
-**Evidence (2026-04-10):** `load_portfolio falling back to JSON because canonical projection is unavailable: stale_legacy_fallback` in both zeus-paper.log and riskguard.err. 12 positions in `positions-paper.json` with empty token_id. No new trades in cycle logs since April 7 despite active April 11 markets.
-**Impact:** Zero new trades for 3 days. Polymarket has 47 active April 11 markets with prices, but system cannot enter due to RED block.
-**Proposed antibody:** Add a canonical projection preflight in `load_portfolio()` that explicitly checks position chain state — if > N positions have `chain_state=unknown`, mark projection as `degraded` instead of `ok`, and require explicit handling rather than silent fallback.
+### [MITIGATED 2026-04-30] Paper JSON fallback no longer becomes portfolio authority
+**Location:** `src/state/portfolio.py::load_portfolio`,
+`src/engine/cycle_runtime.py`, `src/riskguard/riskguard.py`.
+**Original problem (filed 2026-04-10):** Paper positions with missing token ids
+could make canonical projection non-authoritative, after which
+`load_portfolio()` could fall back to stale JSON and let RiskGuard reason over a
+broken paper portfolio as if it were current truth.
+**Antibody deployed:** `load_portfolio()` is DB-first. If the DB connection or
+projection is not authoritative, it returns a degraded `PortfolioState`
+(`authority="unverified"`, `portfolio_loader_degraded=True`) and suppresses new
+entries; it does not promote deprecated JSON into authority. Chain-only
+quarantine evidence can still be rehydrated explicitly.
+**Evidence:** `src/state/portfolio.py::load_portfolio`,
+`tests/test_runtime_guards.py::test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades`,
+`test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json`,
+and `tests/test_truth_layer.py::test_load_portfolio_rejects_deprecated_state_file`.
+**Residual:** `positions-paper.json` remains in legacy fixtures/history and
+truth-surface stale-status tests. Those references are not live portfolio
+authority and can be cleaned in a separate test/docs hygiene packet.
 
 ### [MITIGATED] Missing monitor-to-exit chain escalates before settlement (2026-04-13)
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`

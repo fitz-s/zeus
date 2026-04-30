@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
+# Lifecycle: created=2026-04-19; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Phase 9C Gate F prep antibodies (R-BZ..R-CE). Dedicated test file
 #          per critic-carol cycle-3 L2 observation — P8/9A/9B antibodies were
 #          piled into test_phase8_shadow_code.py + test_dual_track_law_stubs.py;
@@ -10,11 +10,14 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 import json
+from types import SimpleNamespace
 import sqlite3
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -61,8 +64,8 @@ class TestRBZGetCalibratorMetricAware:
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
                  n_samples, brier_insample, fitted_at, is_active, authority)
             VALUES
-                ('high:US-Northeast:JJA:v1:width_normalized_density',
-                 'high', 'US-Northeast', 'JJA',
+                ('high:NYC:JJA:v1:width_normalized_density',
+                 'high', 'NYC', 'JJA',
                  'tigge_mx2t6_local_calendar_day_max_v1',
                  'width_normalized_density',
                  1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED')
@@ -76,8 +79,8 @@ class TestRBZGetCalibratorMetricAware:
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
                  n_samples, brier_insample, fitted_at, is_active, authority)
             VALUES
-                ('low:US-Northeast:JJA:v1:width_normalized_density',
-                 'low', 'US-Northeast', 'JJA',
+                ('low:NYC:JJA:v1:width_normalized_density',
+                 'low', 'NYC', 'JJA',
                  'tigge_mn2t6_local_calendar_day_min_v1',
                  'width_normalized_density',
                  4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED')
@@ -99,7 +102,7 @@ class TestRBZGetCalibratorMetricAware:
         city = City(
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
-            cluster="US-Northeast", wu_station="KNYC",
+            cluster="NYC", wu_station="KNYC",
         )
 
         # LOW path — must return the row with param_A=4.56, NOT 1.23
@@ -131,7 +134,7 @@ class TestRBZGetCalibratorMetricAware:
         city = City(
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
-            cluster="US-Northeast", wu_station="KNYC",
+            cluster="NYC", wu_station="KNYC",
         )
 
         cal_high, _ = get_calibrator(
@@ -155,7 +158,7 @@ class TestRBZGetCalibratorMetricAware:
         city = City(
             name="NYC", lat=40.7, lon=-74.0,
             timezone="America/New_York", settlement_unit="F",
-            cluster="US-Northeast", wu_station="KNYC",
+            cluster="NYC", wu_station="KNYC",
         )
 
         # No kwarg — should behave as 'high'
@@ -239,6 +242,188 @@ class TestRCADay0LowP_Vector:
                     f"R-CA.2: day0_low_nowcast_signal imports day0_high_signal "
                     f"module at L{imp.lineno}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# R-CA.3 / F01-F02 — monitor LOW metric and Day0 shoulder continuity
+# ---------------------------------------------------------------------------
+
+
+class TestRCAMonitorLowMetricContinuity:
+    """Phase 1C: held LOW positions must keep LOW probability semantics."""
+
+    @pytest.mark.parametrize(
+        ("raw_metric", "expected_is_low", "expected_pair_metric"),
+        [("high", False, "high"), ("low", True, None)],
+    )
+    def test_ens_monitor_threads_metric_identity_into_signal_and_calibration(
+        self, monkeypatch, raw_metric, expected_is_low, expected_pair_metric
+    ):
+        from src.engine import monitor_refresh
+        from src.types import Bin
+        from src.types.temperature import TemperatureDelta
+
+        captured: dict[str, object] = {}
+        position = SimpleNamespace(
+            temperature_metric=raw_metric,
+            bin_label="33-34°F",
+            market_id="m1",
+            direction="buy_yes",
+            p_posterior=0.42,
+            entered_at=None,
+            target_date="2026-07-15",
+            entry_model_agreement="AGREE",
+        )
+        city = SimpleNamespace(
+            name="NYC",
+            lat=40.7,
+            timezone="America/New_York",
+            cluster="NYC",
+            settlement_unit="F",
+            settlement_source_type="wu_icao",
+            wu_station="KLGA",
+        )
+
+        class DummyEnsembleSignal:
+            def __init__(self, *args, temperature_metric=None, **kwargs):
+                captured["signal_metric"] = temperature_metric
+                self.member_maxes = np.array([31.0, 32.0, 33.0], dtype=np.float64)
+
+            def p_raw_vector(self, bins, n_mc=None):
+                captured["bin_labels"] = [b.label for b in bins]
+                return np.array([0.8, 0.2], dtype=np.float64)
+
+            def spread(self):
+                return TemperatureDelta(1.0, "F")
+
+        def get_calibrator(conn, city_arg, target_date_arg, *, temperature_metric=None):
+            captured["calibrator_metric"] = temperature_metric
+            return None, 4
+
+        def get_pairs_for_bucket(conn, cluster, season, authority_filter="VERIFIED", bin_source_filter=None, *, metric=None):
+            captured["pairs_metric"] = metric
+            return []
+
+        monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {"members_hourly": np.ones((51, 24)), "times": ["2026-07-15T00:00:00Z"] * 24})
+        monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+        monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *a, **k: 3.0)
+        monkeypatch.setattr(monitor_refresh, "EnsembleSignal", DummyEnsembleSignal)
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_build_all_bins",
+            lambda *a, **k: (
+                [
+                    Bin(low=33, high=34, label="33-34°F", unit="F"),
+                    Bin(low=35, high=36, label="35-36°F", unit="F"),
+                ],
+                0,
+            ),
+        )
+        monkeypatch.setattr(monitor_refresh, "get_calibrator", get_calibrator)
+        monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", get_pairs_for_bucket)
+        monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *a, **k: "JJA")
+        monkeypatch.setattr(
+            monitor_refresh,
+            "compute_alpha",
+            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+        )
+        monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *a, **k: 1.0)
+
+        posterior, applied = monitor_refresh._refresh_ens_member_counting(
+            position=position,
+            current_p_market=0.50,
+            conn=SimpleNamespace(execute=lambda *a, **k: None),
+            city=city,
+            target_d=date(2026, 7, 15),
+        )
+
+        assert posterior == pytest.approx(0.8)
+        assert "alpha_posterior" in applied
+        assert captured["signal_metric"].is_low() is expected_is_low
+        assert captured["calibrator_metric"] == raw_metric
+        assert captured["pairs_metric"] == expected_pair_metric
+
+    def test_day0_low_monitor_uses_remaining_mins_and_open_shoulder_bins(self, monkeypatch):
+        from src.engine import monitor_refresh
+
+        position = SimpleNamespace(
+            temperature_metric="low",
+            bin_label="32°F or below",
+            market_id="m-low",
+            direction="buy_yes",
+            p_posterior=0.25,
+            entered_at=None,
+            target_date="2026-04-29",
+            entry_model_agreement="AGREE",
+        )
+        city = SimpleNamespace(
+            name="NYC",
+            lat=40.7,
+            timezone="America/New_York",
+            cluster="NYC",
+            settlement_unit="F",
+            settlement_source_type="wu_icao",
+            wu_station="KLGA",
+        )
+        mins = np.array([31.0, 31.5, 32.0, 32.2], dtype=np.float64)
+        now = datetime(2026, 4, 29, 18, 0, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_fetch_day0_observation",
+            lambda *a, **k: SimpleNamespace(
+                high_so_far=None,
+                low_so_far=32.0,
+                current_temp=35.0,
+                source="wu_api",
+                observation_time="2026-04-29T17:45:00+00:00",
+            ),
+        )
+        monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {"members_hourly": np.ones((51, 24)), "times": ["2026-04-29T00:00:00Z"] * 24})
+        monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+        monkeypatch.setattr(
+            "src.signal.diurnal.build_day0_temporal_context",
+            lambda *a, **k: SimpleNamespace(current_utc_timestamp=now),
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "remaining_member_extrema_for_day0",
+            lambda *a, **k: (SimpleNamespace(maxes=None, mins=mins), 2.0),
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_build_all_bins",
+            lambda *a, **k: (
+                [
+                    monitor_refresh.Bin(low=None, high=32, label="32°F or below", unit="F"),
+                    monitor_refresh.Bin(low=33, high=34, label="33-34°F", unit="F"),
+                    monitor_refresh.Bin(low=35, high=None, label="35°F or higher", unit="F"),
+                ],
+                0,
+            ),
+        )
+        monkeypatch.setattr(monitor_refresh, "get_calibrator", lambda *a, **k: (None, 4))
+        monkeypatch.setattr("src.calibration.store.get_pairs_for_bucket", lambda *a, **k: [])
+        monkeypatch.setattr(monitor_refresh, "season_from_date", lambda *a, **k: "MAM")
+        monkeypatch.setattr(
+            monitor_refresh,
+            "compute_alpha",
+            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+        )
+
+        posterior, applied = monitor_refresh._refresh_day0_observation(
+            position=position,
+            current_p_market=0.10,
+            conn=SimpleNamespace(execute=lambda *a, **k: None),
+            city=city,
+            target_d=date(2026, 4, 29),
+        )
+
+        bootstrap = getattr(position, "_bootstrap_context")
+        np.testing.assert_allclose(bootstrap["member_extrema"], mins)
+        assert bootstrap["p_raw"][0] > 0.0
+        assert posterior > 0.0
+        assert "alpha_posterior" in applied
 
 
 # ---------------------------------------------------------------------------

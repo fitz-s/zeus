@@ -1,3 +1,6 @@
+# Created: 2026-04-29
+# Last reused/audited: 2026-04-29
+# Authority basis: DSA-07 paper/live residue cleanup; bootstrap exit symmetry reuse.
 """Tests for A1: bootstrap symmetry at exit.
 
 Verifies that monitor refresh produces fresh bootstrap CI bounds
@@ -46,8 +49,8 @@ def _make_position(bin_label="50-51°F", market_id="cond_B", direction="buy_yes"
     pos.last_exit_edge_context = None
     pos.decision_snapshot_id = "snap_001"
     pos.trade_id = "trade_001"
-    pos.token_id = None
-    pos.no_token_id = None
+    pos.token_id = "tok_yes_001"
+    pos.no_token_id = "tok_no_001"
     pos.state = "open"
     pos.city = "chicago"
     pos.last_monitor_best_bid = None
@@ -68,6 +71,12 @@ def _siblings():
         {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
         {"title": "52-53°F", "market_id": "cond_C", "range_low": 52.0, "range_high": 53.0},
     ]
+
+
+def _live_clob_at(price: float):
+    clob = MagicMock()
+    clob.get_best_bid_ask.return_value = (price, price, 100.0, 100.0)
+    return clob
 
 
 class TestBootstrapContextStashing:
@@ -158,11 +167,9 @@ class TestBootstrapCIInRefreshPosition:
 
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = None
-        clob = MagicMock()
-        clob.paper_mode = True
+        clob = _live_clob_at(0.45)
 
-        with patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.45), \
-             patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
+        with patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
              patch("src.engine.monitor_refresh.recompute_native_probability", return_value=0.50):
             result = refresh_position(conn, clob, pos)
 
@@ -204,11 +211,9 @@ class TestBootstrapCIInRefreshPosition:
 
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = None
-        clob = MagicMock()
-        clob.paper_mode = True
+        clob = _live_clob_at(0.40)
 
-        with patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.40), \
-             patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
+        with patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
              patch("src.engine.monitor_refresh.recompute_native_probability", return_value=0.50):
             result = refresh_position(conn, clob, pos)
 
@@ -260,13 +265,10 @@ class TestBootstrapCIInRefreshPosition:
 
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = None
-        clob = MagicMock()
-        clob.paper_mode = True
+        clob = _live_clob_at(0.60)
 
-        # current_p_market for buy_no is NO-side (1 - gamma_yes)
-        # If gamma_yes = 0.40, then NO price = 0.60
-        with patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.40), \
-             patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
+        # current_p_market for buy_no is the NO-token best executable price.
+        with patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
              patch("src.engine.monitor_refresh.recompute_native_probability", return_value=0.55):
             result = refresh_position(conn, clob, pos)
 
@@ -303,11 +305,9 @@ class TestBootstrapCIInRefreshPosition:
 
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = None
-        clob = MagicMock()
-        clob.paper_mode = True
+        clob = _live_clob_at(0.40)
 
-        with patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.40), \
-             patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
+        with patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
              patch("src.engine.monitor_refresh.recompute_native_probability", return_value=0.50):
             result = refresh_position(conn, clob, pos)
 
@@ -369,11 +369,9 @@ class TestDay0WindowBootstrapPropagation:
 
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = None
-        clob = MagicMock()
-        clob.paper_mode = True
+        clob = _live_clob_at(0.40)
 
-        with patch("src.engine.monitor_refresh.get_current_yes_price", return_value=0.40), \
-             patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
+        with patch("src.engine.monitor_refresh.cities_by_name", {"chicago": MagicMock(timezone="America/Chicago", settlement_unit="F", name="chicago")}), \
              patch("src.engine.monitor_refresh.recompute_native_probability", side_effect=mock_recompute), \
              patch("src.engine.monitor_refresh.replace", return_value=refresh_pos_mock):
             result = refresh_position(conn, clob, pos)

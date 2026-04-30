@@ -1,3 +1,6 @@
+# Created: 2026-04-29
+# Last reused/audited: 2026-04-29
+# Authority basis: DSA-07 paper/live residue cleanup; transitional monitor integration reuse.
 import pytest
 import numpy as np
 from src.contracts.semantic_types import Direction, EntryMethod
@@ -53,10 +56,8 @@ from src.engine.cycle_runner import _execute_monitoring_phase, CycleArtifact
 from src.state.portfolio import PortfolioState
 
 class MockClob:
-    paper_mode = True
-
     def get_best_bid_ask(self, tid):
-        return 0.40, 0.42, 100, 100
+        return 0.40, 0.40, 100, 100
 
     def get_balance(self):
         return 500.0
@@ -90,6 +91,7 @@ def test_full_monitoring_pipeline(monkeypatch):
     
     # Mock refresh_position to return an EdgeContext that triggers divergent panic
     def mock_refresh(conn, clob, position):
+        _ = position.entry_method
         position.last_monitor_market_price = 0.40
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_prob = 0.20
@@ -134,8 +136,6 @@ def test_refresh_position_true_metrics(monkeypatch):
                     return {"price": 0.60} # Price 1h ago was 0.60
             return MockCursor()
     
-    # Mock external price fetching
-    monkeypatch.setattr("src.engine.monitor_refresh.get_current_yes_price", lambda *args, **kwargs: 0.40)
     monkeypatch.setattr("src.engine.monitor_refresh.recompute_native_probability", lambda *args, **kwargs: 0.40)
     
     edge_ctx = refresh_position(MockConn(), MockClob(), pos)

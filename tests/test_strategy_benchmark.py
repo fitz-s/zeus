@@ -1,7 +1,7 @@
 # Created: 2026-04-27
 # Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml
-# Purpose: Lock INV-NEW-Q StrategyBenchmarkSuite replay/paper/shadow promotion gate.
+# Purpose: Lock StrategyBenchmarkSuite evidence-grade and economics promotion gate.
 # Reuse: Run for A1 benchmark/promotion-gate changes and future strategy candidate wiring.
 """R3 A1 StrategyBenchmarkSuite acceptance tests."""
 
@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from src.strategy.benchmark_suite import (
     BenchmarkEnvironment,
     BenchmarkObservation,
+    EvidenceGrade,
     PromotionVerdict,
     ReplayCorpus,
     SemanticDriftFinding,
@@ -83,6 +84,7 @@ def test_benchmark_metrics_computed_for_replay():
     metrics = suite.evaluate_replay(STRATEGY, _corpus())
 
     assert metrics.environment is BenchmarkEnvironment.REPLAY
+    assert metrics.evidence_grade is EvidenceGrade.DIAGNOSTIC_REPLAY
     assert metrics.sample_count == 2
     assert metrics.ev_after_fees_slippage > 0
     assert metrics.realized_spread_capture == 2.5
@@ -91,15 +93,16 @@ def test_benchmark_metrics_computed_for_replay():
 
 
 @pytest.mark.parametrize("state", ["MATCHED", "MINED"])
-def test_paper_benchmark_matched_mined_are_not_success_finality(state):
+def test_simulated_venue_benchmark_matched_mined_are_not_success_finality(state):
     venue = FakePolymarketVenue()
     result = venue.submit_limit_order(token_id="token-a", price=0.50, size=10, side="BUY")
     venue.force_partial_fill(result.envelope.order_id or "", 4)
     venue._trades[-1]["state"] = state
 
-    metrics = StrategyBenchmarkSuite().evaluate_paper(STRATEGY, venue, duration_hours=1)
+    metrics = StrategyBenchmarkSuite().evaluate_simulated_venue(STRATEGY, venue, duration_hours=1)
 
-    assert metrics.environment is BenchmarkEnvironment.PAPER
+    assert metrics.environment is BenchmarkEnvironment.SIMULATED_VENUE
+    assert metrics.evidence_grade is EvidenceGrade.SIMULATED_VENUE_EVIDENCE
     assert metrics.sample_count == 1
     assert metrics.ev_after_fees_slippage < 0
     assert metrics.alpha_pnl == 0.0
@@ -108,15 +111,16 @@ def test_paper_benchmark_matched_mined_are_not_success_finality(state):
     assert metrics.capital_lock_cost > 0
 
 
-def test_paper_benchmark_confirmed_trade_counts_as_success_finality():
+def test_simulated_venue_benchmark_confirmed_trade_counts_as_success_finality():
     venue = FakePolymarketVenue()
     result = venue.submit_limit_order(token_id="token-a", price=0.50, size=10, side="BUY")
     venue.force_partial_fill(result.envelope.order_id or "", 4)
     venue._trades[-1]["state"] = "CONFIRMED"
 
-    metrics = StrategyBenchmarkSuite().evaluate_paper(STRATEGY, venue, duration_hours=1)
+    metrics = StrategyBenchmarkSuite().evaluate_simulated_venue(STRATEGY, venue, duration_hours=1)
 
-    assert metrics.environment is BenchmarkEnvironment.PAPER
+    assert metrics.environment is BenchmarkEnvironment.SIMULATED_VENUE
+    assert metrics.evidence_grade is EvidenceGrade.SIMULATED_VENUE_EVIDENCE
     assert metrics.sample_count == 1
     assert metrics.ev_after_fees_slippage > 0
     assert metrics.alpha_pnl > 0
@@ -124,28 +128,86 @@ def test_paper_benchmark_confirmed_trade_counts_as_success_finality():
     assert metrics.fill_probability == 1.0
 
 
-def test_benchmark_metrics_computed_for_live_shadow():
-    suite = StrategyBenchmarkSuite(shadow_corpora={STRATEGY: _corpus()})
+def test_benchmark_metrics_computed_for_read_only_live():
+    suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
 
-    metrics = suite.evaluate_live_shadow(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
+    metrics = suite.evaluate_read_only_live(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
 
-    assert metrics.environment is BenchmarkEnvironment.SHADOW
+    assert metrics.environment is BenchmarkEnvironment.READ_ONLY_LIVE
+    assert metrics.evidence_grade is EvidenceGrade.READ_ONLY_LIVE_EVIDENCE
     assert metrics.sample_count == 2
     assert metrics.ev_after_fees_slippage > 0
 
 
-def test_promotion_blocked_unless_replay_paper_shadow_all_pass():
-    suite = StrategyBenchmarkSuite(shadow_corpora={STRATEGY: _corpus()})
+def test_promotion_blocked_without_promotion_grade_economics():
+    suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
     replay = suite.evaluate_replay(STRATEGY, _corpus())
-    paper = replace(suite.evaluate_replay(STRATEGY, _corpus()), environment=BenchmarkEnvironment.PAPER)
-    shadow = suite.evaluate_live_shadow(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
+    simulated = replace(
+        suite.evaluate_replay(STRATEGY, _corpus()),
+        environment=BenchmarkEnvironment.SIMULATED_VENUE,
+        evidence_grade=EvidenceGrade.SIMULATED_VENUE_EVIDENCE,
+    )
+    read_only_live = suite.evaluate_read_only_live(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
 
-    assert suite.promotion_decision(replay, paper, shadow).verdict is PromotionVerdict.PROMOTE
+    decision = suite.promotion_decision(replay, simulated, read_only_live)
 
-    blocked_shadow = StrategyBenchmarkSuite().evaluate_live_shadow(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
-    blocked = suite.promotion_decision(replay, paper, blocked_shadow)
+    assert decision.verdict is PromotionVerdict.BLOCK
+    assert "promotion_grade_economics: missing promotion-grade economics evidence" in decision.reasons
+
+
+def test_promotion_requires_economics_evidence_grade():
+    suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
+    replay = suite.evaluate_replay(STRATEGY, _corpus())
+    simulated = replace(
+        suite.evaluate_replay(STRATEGY, _corpus()),
+        environment=BenchmarkEnvironment.SIMULATED_VENUE,
+        evidence_grade=EvidenceGrade.SIMULATED_VENUE_EVIDENCE,
+    )
+    read_only_live = suite.evaluate_read_only_live(STRATEGY, capital_cap_micro=100_000, duration_hours=2)
+
+    wrong_economics = replace(replay, evidence_grade=EvidenceGrade.DIAGNOSTIC_REPLAY)
+    blocked = suite.promotion_decision(replay, simulated, read_only_live, economics=wrong_economics)
+
     assert blocked.verdict is PromotionVerdict.BLOCK
-    assert any("shadow" in reason for reason in blocked.reasons)
+    assert any("promotion_grade_economics: wrong evidence grade" in reason for reason in blocked.reasons)
+
+    economics = replace(
+        replay,
+        environment=BenchmarkEnvironment.PROMOTION_GRADE_ECONOMICS,
+        evidence_grade=EvidenceGrade.PROMOTION_GRADE_ECONOMICS,
+    )
+    assert suite.promotion_decision(replay, simulated, read_only_live, economics=economics).verdict is PromotionVerdict.PROMOTE
+
+
+def test_benchmark_api_uses_evidence_class_names_not_runtime_paper_shadow():
+    assert "PAPER" not in BenchmarkEnvironment.__members__
+    assert "SHADOW" not in BenchmarkEnvironment.__members__
+    assert "LIVE" not in BenchmarkEnvironment.__members__
+
+    suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
+    assert not hasattr(suite, "evaluate_" + "paper")
+    assert not hasattr(suite, "evaluate_live_" + "shadow")
+
+
+def test_promotion_decision_uses_evidence_grades_not_legacy_environment_labels():
+    suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
+    base = suite.evaluate_replay(STRATEGY, _corpus())
+    simulated = replace(
+        base,
+        evidence_grade=EvidenceGrade.SIMULATED_VENUE_EVIDENCE,
+    )
+    read_only_live = replace(
+        base,
+        evidence_grade=EvidenceGrade.READ_ONLY_LIVE_EVIDENCE,
+    )
+    economics = replace(
+        base,
+        evidence_grade=EvidenceGrade.PROMOTION_GRADE_ECONOMICS,
+    )
+
+    decision = suite.promotion_decision(base, simulated, read_only_live, economics=economics)
+
+    assert decision.verdict is PromotionVerdict.PROMOTE
 
 
 def test_pnl_split_into_alpha_spread_fees_slippage_failed_settlement_capital_lock():
@@ -176,7 +238,7 @@ def test_pnl_split_into_alpha_spread_fees_slippage_failed_settlement_capital_loc
     assert metrics.ev_after_fees_slippage == 4.0
 
 
-def test_backtest_to_paper_to_live_semantic_drift_report_empty_or_explicitly_waived():
+def test_supporting_evidence_semantic_drift_report_empty_or_explicitly_waived():
     suite = StrategyBenchmarkSuite()
     waived = (SemanticDriftFinding("KNOWN_FIXTURE_DELTA", "fixture uses deterministic fake fills", waived=True),)
     clean = suite.evaluate_replay(STRATEGY, _corpus())
@@ -185,7 +247,22 @@ def test_backtest_to_paper_to_live_semantic_drift_report_empty_or_explicitly_wai
 
     assert clean.unwaived_semantic_drift == ()
     assert waived_metrics.unwaived_semantic_drift == ()
-    assert suite.promotion_decision(clean, replace(clean, environment=BenchmarkEnvironment.PAPER), unwaived).verdict is PromotionVerdict.BLOCK
+    simulated = replace(
+        clean,
+        environment=BenchmarkEnvironment.SIMULATED_VENUE,
+        evidence_grade=EvidenceGrade.SIMULATED_VENUE_EVIDENCE,
+    )
+    read_only_live = replace(
+        unwaived,
+        environment=BenchmarkEnvironment.READ_ONLY_LIVE,
+        evidence_grade=EvidenceGrade.READ_ONLY_LIVE_EVIDENCE,
+    )
+    economics = replace(
+        clean,
+        environment=BenchmarkEnvironment.PROMOTION_GRADE_ECONOMICS,
+        evidence_grade=EvidenceGrade.PROMOTION_GRADE_ECONOMICS,
+    )
+    assert suite.promotion_decision(clean, simulated, read_only_live, economics=economics).verdict is PromotionVerdict.BLOCK
 
 
 def test_calibration_error_vs_market_implied_p_computed():
@@ -201,8 +278,35 @@ def test_strategy_benchmark_runs_are_persisted_to_supplied_connection_only():
 
     run_id = suite.record_benchmark_run(conn, metrics, PromotionVerdict.NEEDS_REVIEW)
 
-    row = conn.execute("SELECT run_id, strategy_key, environment, promotion_verdict FROM strategy_benchmark_runs").fetchone()
-    assert row == (run_id, STRATEGY, "replay", "NEEDS_REVIEW")
+    row = conn.execute(
+        "SELECT run_id, strategy_key, environment, evidence_grade, promotion_verdict FROM strategy_benchmark_runs"
+    ).fetchone()
+    assert row == (run_id, STRATEGY, "replay", "diagnostic_replay", "NEEDS_REVIEW")
+
+
+def test_strategy_benchmark_runs_missing_evidence_grade_fails_closed_without_migration():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE strategy_benchmark_runs (
+          run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          strategy_key TEXT NOT NULL,
+          environment TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          metrics_json TEXT NOT NULL,
+          promotion_verdict TEXT
+        )
+        """
+    )
+    suite = StrategyBenchmarkSuite()
+    metrics = suite.evaluate_replay(STRATEGY, _corpus())
+
+    with pytest.raises(RuntimeError, match="missing evidence_grade"):
+        suite.record_benchmark_run(conn, metrics, PromotionVerdict.NEEDS_REVIEW)
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(strategy_benchmark_runs)").fetchall()}
+    assert "evidence_grade" not in cols
 
 
 def test_data_lake_fetch_replay_corpus_is_read_only_and_filterable():

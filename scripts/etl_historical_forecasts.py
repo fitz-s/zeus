@@ -66,18 +66,24 @@ def run_etl() -> dict:
     print(f"historical_forecasts has {existing} existing rows. Running incremental sync...")
 
     # F11.5-migrate (2026-04-28): SKILL eligibility filter wired in.
-    # availability_provenance IS NULL clause tolerates pre-F11 legacy DBs;
-    # post-F11 backfilled rows must be tier'd SKILL-eligible (FETCH_TIME /
-    # RECORDED / DERIVED_FROM_DISSEMINATION) — RECONSTRUCTED rows
-    # (heuristic timestamps from ICON / UKMO / OpenMeteo redistributors)
-    # are excluded from training-grade ETL output.
+    # availability_provenance IS NULL remains tolerated for non-Open-Meteo
+    # legacy rows, but Open-Meteo previous-runs without provenance is too weak
+    # for skill ETL once the column exists. Post-F11 backfilled rows must be
+    # tier'd SKILL-eligible (FETCH_TIME / RECORDED /
+    # DERIVED_FROM_DISSEMINATION); RECONSTRUCTED rows are excluded.
     from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
     rows = zeus.execute(f"""
         SELECT city, target_date, source, forecast_high, forecast_low, lead_days,
                forecast_basis_date, forecast_issue_time, temp_unit
         FROM forecasts
         WHERE forecast_high IS NOT NULL
-          AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
+          AND (
+            {SKILL_ELIGIBLE_SQL}
+            OR (
+              availability_provenance IS NULL
+              AND source != 'openmeteo_previous_runs'
+            )
+          )
     """).fetchall()
 
     print(f"Source rows: {len(rows):,}")

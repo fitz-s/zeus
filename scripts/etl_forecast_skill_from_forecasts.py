@@ -112,10 +112,11 @@ def run_etl(*, dry_run: bool = False) -> dict:
     # to HIGH rows or a future LOW settlement would spuriously match and
     # corrupt the forecast_skill row.
     # F11.5-migrate (2026-04-28): SKILL eligibility filter wired into the
-    # forecasts side of the JOIN. availability_provenance IS NULL clause
-    # tolerates pre-F11 legacy DBs; post-F11 backfilled rows are filtered
-    # to SKILL-eligible tier (RECONSTRUCTED rows excluded — they would
-    # corrupt forecast skill scoring with heuristic timestamps).
+    # forecasts side of the JOIN. availability_provenance IS NULL remains
+    # tolerated for non-Open-Meteo legacy rows, but Open-Meteo previous-runs
+    # without provenance is too weak for skill ETL once the column exists.
+    # Post-F11 backfilled rows are filtered to SKILL-eligible tier
+    # (RECONSTRUCTED rows excluded).
     from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
     # Qualify the column reference with the `f` alias since we're inside a JOIN.
     skill_filter_qualified = SKILL_ELIGIBLE_SQL.replace(
@@ -135,7 +136,13 @@ def run_etl(*, dry_run: bool = False) -> dict:
         WHERE f.forecast_high IS NOT NULL
           AND f.lead_days IS NOT NULL
           AND s.settlement_value IS NOT NULL
-          AND (f.availability_provenance IS NULL OR {skill_filter_qualified})
+          AND (
+            {skill_filter_qualified}
+            OR (
+              f.availability_provenance IS NULL
+              AND f.source != 'openmeteo_previous_runs'
+            )
+          )
         ORDER BY f.city, f.target_date, f.source, f.lead_days
         """
     ).fetchall()

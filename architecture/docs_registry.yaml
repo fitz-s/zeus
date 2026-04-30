@@ -547,6 +547,25 @@ entries:
   current_tense_allowed: false
   refresh_source: n/a
 
+- path: docs/operations/task_2026-04-29_design_simplification_audit/
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: false
+  current_role: first-principles audit plus phased repair evidence for live-money design simplification; packet-local evidence only, not live-deploy, production DB mutation, source-routing, or calibration authority
+  canonical_replaced_by: []
+  next_action: archive_after_closeout
+  lifecycle_state: transitional
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+
 
 - path: docs/operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md
   doc_class: operations

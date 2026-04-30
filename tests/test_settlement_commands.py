@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: R3 R1 settlement/redeem command ledger packet
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Lock R3 R1 redeem command durability, Q-FX-1 gating, and tx-hash recovery.
 # Reuse: Run for settlement/redeem, harvester redemption, collateral FX gate, or payout-asset changes.
 """Regression tests for R3 R1 durable settlement/redeem commands."""
@@ -126,6 +126,72 @@ def test_redeem_lifecycle_atomic_states(conn, monkeypatch):
         (command_id,),
     ).fetchall()
     assert all(len(row["payload_hash"]) == 64 for row in event_hashes)
+
+
+def test_redeem_submitted_persists_execution_capability_before_adapter_contact(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+    command_id = request_redeem(
+        "condition-capability",
+        "pUSD",
+        market_id="market-capability",
+        pusd_amount_micro=2_000_000,
+        token_amounts={"yes-token": "2"},
+        conn=conn,
+        requested_at=NOW,
+    )
+    seen: list[str] = []
+
+    class InspectingRedeemAdapter:
+        calls: list[str]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def redeem(self, condition_id: str):
+            row = conn.execute(
+                """
+                SELECT payload_json
+                  FROM settlement_command_events
+                 WHERE command_id = ?
+                   AND event_type = 'REDEEM_SUBMITTED'
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (command_id,),
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row["payload_json"])
+            capability = payload["execution_capability"]
+            assert payload["pre_side_effect"] is True
+            assert condition_id == "condition-capability"
+            assert capability["schema_version"] == 1
+            assert capability["action"] == "REDEEM"
+            assert capability["intent_kind"] == "REDEEM"
+            assert capability["mode"] == "redeem"
+            assert capability["allowed"] is True
+            assert len(capability["capability_id"]) == 32
+            assert capability["command_id"] == command_id
+            assert capability["condition_id"] == "condition-capability"
+            assert capability["market_id"] == "market-capability"
+            assert capability["payout_asset"] == "pUSD"
+            assert {component["component"] for component in capability["components"]} >= {
+                "redeem_command_state",
+                "payout_asset_fx_classification",
+                "cutover_guard",
+            }
+            seen.append(capability["capability_id"])
+            self.calls.append(condition_id)
+            return {"success": True, "tx_hash": "0xcapability"}
+
+    adapter = InspectingRedeemAdapter()
+    result = submit_redeem(command_id, adapter, object(), conn=conn, submitted_at=NOW)
+
+    assert adapter.calls == ["condition-capability"]
+    assert len(seen) == 1
+    assert result.state is SettlementState.REDEEM_TX_HASHED
 
 
 def test_redeem_crash_after_tx_hash_recovers_by_chain_receipt(conn, monkeypatch):

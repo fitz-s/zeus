@@ -43,7 +43,7 @@ DB tables directly.
 
 The venue adapter is a live-money boundary, but it does not define settlement,
 lifecycle, or risk law. It implements R3 Z2 and inherits INV-24, INV-25,
-INV-28, INV-30, NC-NEW-G, INV-NEW-B, and T1's INV-NEW-M paper/live parity
+INV-28, INV-30, NC-NEW-G, INV-NEW-B, and T1's INV-NEW-M fake/live adapter parity
 contract.
 
 ## 6. Public interfaces

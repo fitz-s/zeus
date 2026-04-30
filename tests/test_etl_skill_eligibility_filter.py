@@ -9,7 +9,8 @@ Locks the wiring of SKILL_ELIGIBLE_SQL into:
 
 After F11 backfill, RECONSTRUCTED rows (ICON / UKMO / OpenMeteo) must NOT
 flow into training/skill ETL output. DERIVED_FROM_DISSEMINATION + RECORDED
-+ FETCH_TIME rows pass through. Pre-F11 legacy NULL rows are tolerated.
++ FETCH_TIME rows pass through. Migrated-schema NULL rows remain tolerated only
+for non-Open-Meteo sources.
 """
 
 import sqlite3
@@ -18,7 +19,7 @@ import pytest
 
 
 def _seed_forecasts_with_mixed_provenance(conn: sqlite3.Connection) -> None:
-    """6 forecast rows: 3 SKILL-eligible + 2 RECONSTRUCTED + 1 NULL legacy."""
+    """7 forecast rows: 3 SKILL-eligible + 2 RECONSTRUCTED + 2 NULL legacy."""
     conn.execute("""
         CREATE TABLE forecasts (
             id INTEGER PRIMARY KEY,
@@ -39,8 +40,10 @@ def _seed_forecasts_with_mixed_provenance(conn: sqlite3.Connection) -> None:
         (3, "NYC", "2026-04-30", "ukmo_previous_runs", "2026-04-28", "2026-04-28T12:00Z", 2, 48.0, 70.0, 56.0, "F", "t", "t", "ukmo", "h", "t", "non_promotion", None, None, "recorded"),
         (4, "NYC", "2026-04-30", "icon_previous_runs", "2026-04-28", "2026-04-28T12:00Z", 2, 48.0, 71.0, 57.0, "F", "t", "t", "icon", "h", "t", "non_promotion", None, None, "reconstructed"),
         (5, "NYC", "2026-04-30", "openmeteo_previous_runs", "2026-04-28", "2026-04-28T12:00Z", 2, 48.0, 73.0, 59.0, "F", "t", "t", "om", "h", "t", "non_promotion", None, None, "reconstructed"),
-        # Pre-F11 legacy row
+        # Open-Meteo NULL provenance row — excluded once the provenance column exists.
         (6, "NYC", "2026-04-30", "openmeteo_previous_runs", "2026-04-27", None, 3, 72.0, 70.5, 56.5, "F", "t", "t", "om", "h", "t", "non_promotion", None, None, None),
+        # Non-Open-Meteo NULL provenance row — preserved as migrated-schema legacy tolerance.
+        (7, "NYC", "2026-04-30", "gfs_previous_runs", "2026-04-27", None, 3, 72.0, 69.5, 55.5, "F", "t", "t", "gfs", "h", "t", "non_promotion", None, None, None),
     ]
     conn.executemany(
         "INSERT INTO forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -77,20 +80,26 @@ def db_with_mixed_provenance():
 
 def test_etl_historical_forecasts_filter_excludes_reconstructed(db_with_mixed_provenance):
     """SELECT pattern from etl_historical_forecasts.py must include only
-    SKILL-eligible + legacy NULL rows."""
+    SKILL-eligible + non-Open-Meteo legacy NULL rows."""
     from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
 
     rows = db_with_mixed_provenance.execute(f"""
         SELECT id, source, availability_provenance
         FROM forecasts
         WHERE forecast_high IS NOT NULL
-          AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
+          AND (
+            {SKILL_ELIGIBLE_SQL}
+            OR (
+              availability_provenance IS NULL
+              AND source != 'openmeteo_previous_runs'
+            )
+          )
         ORDER BY id
     """).fetchall()
     ids = [r["id"] for r in rows]
     # 3 SKILL-eligible (ECMWF DERIVED, GFS FETCH_TIME, UKMO RECORDED)
-    # + 1 legacy NULL = 4 total. ICON + OpenMeteo RECONSTRUCTED excluded.
-    assert ids == [1, 2, 3, 6]
+    # + 1 non-Open-Meteo legacy NULL = 4 total. ICON + both weak OpenMeteo rows excluded.
+    assert ids == [1, 2, 3, 7]
     # Sanity: no row in result has provenance = 'reconstructed'
     assert all(r["availability_provenance"] != "reconstructed" for r in rows)
 
@@ -113,12 +122,18 @@ def test_etl_forecast_skill_join_filter_excludes_reconstructed(db_with_mixed_pro
         WHERE f.forecast_high IS NOT NULL
           AND f.lead_days IS NOT NULL
           AND s.settlement_value IS NOT NULL
-          AND (f.availability_provenance IS NULL OR {skill_filter_qualified})
+          AND (
+            {skill_filter_qualified}
+            OR (
+              f.availability_provenance IS NULL
+              AND f.source != 'openmeteo_previous_runs'
+            )
+          )
         ORDER BY f.id
     """).fetchall()
     ids = [r["id"] for r in rows]
-    # Same expected set: ECMWF + GFS + UKMO + legacy NULL
-    assert ids == [1, 2, 3, 6]
+    # Same expected set: ECMWF + GFS + UKMO + non-Open-Meteo legacy NULL
+    assert ids == [1, 2, 3, 7]
     assert all(r["availability_provenance"] != "reconstructed" for r in rows)
 
 

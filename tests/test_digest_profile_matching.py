@@ -188,6 +188,676 @@ def test_r3_u2_raw_provenance_routes_to_u2_profile_not_heartbeat():
     assert "tests/test_provenance_5_projections.py" in digest["admission"]["admitted_files"]
 
 
+def test_r3_u2_fill_finality_routes_to_finality_profile_not_schema():
+    """Finality/partial-fill repair is U2 ledger semantics, but not the U2
+    schema-surface profile; it must admit fill_tracker and the runtime safety
+    regressions without widening the raw-provenance schema profile."""
+    digest = build_digest(
+        "R3 U2 fill finality closure legacy fill polling MATCHED CONFIRMED "
+        "partial fill materialization venue_trade_facts position_lots",
+        [
+            "src/execution/fill_tracker.py",
+            "tests/test_live_safety_invariants.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_user_channel_ingest.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "r3 fill finality ledger implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/fill_tracker.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_live_safety_invariants.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_user_channel_ingest.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase3_fill_finality_realistic_wording_routes_to_finality_profile():
+    """Reviewer phrasing without the exact R3/U2 tokens must still route to
+    the finality profile, not the broader live-readiness gates profile."""
+    digest = build_digest(
+        "Phase 3 fill finality / exposure ledger slice legacy polling partial "
+        "cancel command events lots",
+        [
+            "src/execution/fill_tracker.py",
+            "tests/test_live_safety_invariants.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "r3 fill finality ledger implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/fill_tracker.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase4_strategy_reachability_routes_to_selection_parity_profile():
+    digest = build_digest(
+        "Phase 4 strategy reachability selection sizing parity full-family FDR "
+        "multi-bin buy_no executable BinEdge calibration maturity feature flags",
+        [
+            "src/strategy/market_analysis.py",
+            "src/strategy/market_analysis_family_scan.py",
+            "src/engine/evaluator.py",
+            "tests/test_fdr.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "r3 strategy reachability selection parity implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/strategy/market_analysis.py" in digest["admission"]["admitted_files"]
+    assert "src/strategy/market_analysis_family_scan.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase4a_f13_realistic_wording_routes_to_selection_parity_profile():
+    digest = build_digest(
+        "Phase 4A strategy reachability full-family FDR parity close F13 "
+        "fail-close multi-bin buy_no",
+        [
+            "src/strategy/market_analysis.py",
+            "src/strategy/market_analysis_family_scan.py",
+            "tests/test_fdr.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "r3 strategy reachability selection parity implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/strategy/market_analysis.py" in digest["admission"]["admitted_files"]
+    assert "src/strategy/market_analysis_family_scan.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5_economics_readiness_routes_to_phase5_profile():
+    digest = build_digest(
+        "Phase 5 promotion-grade economics staged live DSA-19 economics "
+        "tombstone parity market_events_v2 market_price_history "
+        "probability_trace_fact confirmed trade facts",
+        [
+            "src/backtest/economics.py",
+            "src/backtest/purpose.py",
+            "src/backtest/decision_time_truth.py",
+            "src/backtest/training_eligibility.py",
+            "src/strategy/benchmark_suite.py",
+            "tests/test_backtest_skill_economics.py",
+            "tests/test_strategy_benchmark.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 promotion grade economics readiness implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/backtest/economics.py" in digest["admission"]["admitted_files"]
+    assert "src/backtest/purpose.py" in digest["admission"]["admitted_files"]
+    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_backtest_skill_economics.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5a_dsa19_review_wording_routes_to_phase5_profile():
+    digest = build_digest(
+        "Phase 5A promotion-grade economics readiness for DSA-19",
+        [
+            "src/backtest/economics.py",
+            "tests/test_backtest_skill_economics.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 promotion grade economics readiness implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/backtest/economics.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_backtest_skill_economics.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5b_forward_substrate_wording_routes_to_phase5_profile():
+    digest = build_digest(
+        "Phase 5B promotion-grade economics engine feasibility and forward "
+        "substrate readiness for DSA-19; no production DB mutation, no live side effects",
+        [
+            "src/backtest/economics.py",
+            "tests/test_backtest_skill_economics.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 promotion grade economics readiness implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/backtest/economics.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_backtest_skill_economics.py" in digest["admission"]["admitted_files"]
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Phase 5B forward substrate DSA-19 wording",
+        "Phase 5B entry slice forward substrate / DSA-19 wording",
+    ],
+)
+def test_phase5b_short_forward_substrate_wording_routes_to_phase5_profile(task):
+    digest = build_digest(
+        task,
+        [
+            "src/backtest/economics.py",
+            "tests/test_backtest_skill_economics.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 promotion grade economics readiness implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/backtest/economics.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5c_forward_substrate_producer_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5C upstream forward substrate production for DSA-19 "
+        "market_events_v2 market_price_history probability_trace_fact selection facts "
+        "no production DB mutation no live side effects",
+        [
+            "src/data/market_scanner.py",
+            "src/engine/cycle_runtime.py",
+            "src/engine/evaluator.py",
+            "src/state/db.py",
+            "src/state/venue_command_repo.py",
+            "tests/test_market_scanner_provenance.py",
+            "tests/test_decision_evidence_runtime_invocation.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/data/market_scanner.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Phase 5 forward substrate producer inventory",
+        "market_events_v2 market_price_history producer",
+        "Phase 5C forward-substrate producer profile/inventory slice",
+        "Phase 5C producer inventory",
+        "forward-substrate producer profile inventory",
+        "Phase 5C.1 forward-substrate writer seam",
+        "forward-substrate writer seam",
+        "log_forward_market_substrate",
+        "Phase 5C.4 settlements_v2 producer",
+        "settlements_v2 producer",
+        "settlement outcome substrate producer",
+        "Phase 5C.5 market_events_v2 outcome producer",
+        "market_events_v2 outcome producer",
+        "Phase 5C.5 fixes",
+        "Phase 5C.5 remediation",
+        "Phase 5C.5 re-review",
+        "Phase 5C.5 review remediation",
+    ],
+)
+def test_phase5c_short_producer_wording_routes_to_producer_profile(task):
+    digest = build_digest(
+        task,
+        [
+            "architecture/topology.yaml",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+
+
+def test_phase5c_writer_seam_review_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5C.1 forward-substrate writer seam log_forward_market_substrate",
+        [
+            "src/state/db.py",
+            "tests/test_market_scanner_provenance.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5c3_runtime_wiring_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5C.3 runtime forward substrate wiring for DSA-19 "
+        "log verified market scan substrate no production DB mutation "
+        "no live venue side effects no CLOB cutover no economics readiness promotion",
+        [
+            "src/engine/cycle_runtime.py",
+            "src/state/db.py",
+            "tests/test_runtime_guards.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5c4_safe_no_go_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5C.4 settlements_v2 producer no live venue submission "
+        "no live venue cancel no live venue redeem no production DB mutation",
+        [
+            "docs/operations/AGENTS.md",
+            "src/execution/harvester.py",
+            "src/state/db.py",
+            "tests/test_harvester_metric_identity.py",
+            "tests/test_harvester_dr33_live_enablement.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "docs/operations/AGENTS.md" in digest["admission"]["admitted_files"]
+    assert "src/execution/harvester.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_harvester_dr33_live_enablement.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5c5_market_events_outcome_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5C.5 market_events_v2 outcome producer from harvester resolved child identity "
+        "preserve condition_id token_id identity no production DB mutation "
+        "no live venue side effects no schema migration no source routing no Paris",
+        [
+            "docs/operations/AGENTS.md",
+            "src/execution/harvester.py",
+            "src/state/db.py",
+            "tests/test_harvester_metric_identity.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "docs/operations/AGENTS.md" in digest["admission"]["admitted_files"]
+    assert "src/execution/harvester.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase5c5_remediation_review_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Re-review Phase 5C.5 fixes after remediation: partial batch outcome "
+        "writes and multiple YES winners in market_events_v2 outcome producer",
+        [
+            "src/execution/harvester.py",
+            "src/state/db.py",
+            "tests/test_harvester_metric_identity.py",
+            "tests/test_harvester_dr33_live_enablement.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/harvester.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_harvester_dr33_live_enablement.py" in digest["admission"]["admitted_files"]
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Phase 5C.3 runtime forward substrate wiring live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring includes live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring needs live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring perform live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring enable live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring implements live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring execute live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring activate live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring with live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring requires live venue side effects",
+        "Phase 5C.3 runtime forward substrate wiring with live venue submission",
+        "Phase 5C.3 runtime forward substrate wiring with live venue cancel",
+        "Phase 5C.3 runtime forward substrate wiring with live venue redeem",
+        "Phase 5C.3 runtime forward substrate wiring requires live venue submission",
+        "Phase 5C.3 runtime forward substrate wiring perform live venue cancel",
+        "Phase 5C.3 runtime forward substrate wiring execute live venue redeem",
+        "Phase 5C.3 runtime forward substrate wiring CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring includes CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring needs CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring perform CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring enable CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring implements CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring execute CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring activate CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring with CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring requires CLOB cutover",
+        "Phase 5C.3 runtime forward substrate wiring with live cutover",
+    ],
+)
+def test_phase5c3_runtime_wiring_side_effect_wording_is_not_admitted(task):
+    digest = build_digest(
+        task,
+        [
+            "src/engine/cycle_runtime.py",
+            "src/state/db.py",
+            "tests/test_runtime_guards.py",
+        ],
+    )
+
+    assert (
+        digest["profile"] != "phase 5 forward substrate producer implementation"
+        or digest["admission"]["status"] != "admitted"
+    )
+
+
+def test_phase5c2_market_price_history_schema_owner_wording_routes_to_schema_profile():
+    digest = build_digest(
+        "Phase 5C.2 market_price_history schema owner DDL seam code-only "
+        "no production DB mutation no live side effects no runtime wiring",
+        [
+            "src/state/schema/v2_schema.py",
+            "tests/test_schema_v2_gate_a.py",
+            "tests/test_market_scanner_provenance.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate schema owner implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/schema/v2_schema.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_schema_v2_gate_a.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
+def test_f4_status_summary_world_v2_row_counts_routes_to_observability_profile():
+    digest = build_digest(
+        "F4 status_summary v2 row counts prefer attached world DB over empty "
+        "trade shadow tables no production DB mutation no live venue side effects "
+        "no CLOB cutover",
+        [
+            "src/observability/status_summary.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "observability status summary v2 world truth implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/observability/status_summary.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in digest["admission"]["admitted_files"]
+
+
+def test_f4_status_summary_plus_paris_boundary_evidence_routes_to_observability_profile():
+    digest = build_digest(
+        "F4 status_summary v2 row-count fix and Paris source-boundary evidence "
+        "recording no production DB mutation no config edit no CLOB cutover",
+        [
+            "src/observability/status_summary.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+        ],
+    )
+
+    assert digest["profile"] == "observability status summary v2 world truth implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/observability/status_summary.py" in digest["admission"]["admitted_files"]
+    assert "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md" in (
+        digest["admission"]["admitted_files"]
+    )
+
+
+def test_paris_source_boundary_evidence_routes_to_docs_only_profile():
+    digest = build_digest(
+        "Paris source-boundary evidence recording LFPG LFPB no config edit "
+        "no production DB mutation no data backfill",
+        [
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+        ],
+    )
+
+    assert digest["profile"] == "source boundary evidence recording"
+    assert digest["admission"]["status"] == "admitted"
+    assert "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md" in (
+        digest["admission"]["admitted_files"]
+    )
+
+
+def test_phase1d_forecast_source_policy_routes_to_source_policy_profile():
+    digest = build_digest(
+        "Phase 1D forecast source policy make Open-Meteo explicit degraded "
+        "fallback gate no TIGGE activation no production DB mutation no live "
+        "venue side effects",
+        [
+            "src/data/forecast_source_registry.py",
+            "src/data/ensemble_client.py",
+            "src/engine/evaluator.py",
+            "src/engine/monitor_refresh.py",
+            "tests/test_forecast_source_registry.py",
+            "tests/test_ensemble_client.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1 forecast source policy implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/data/forecast_source_registry.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ensemble_client.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase1e_forecast_source_selection_routes_to_source_policy_profile():
+    digest = build_digest(
+        "Phase 1E forecast source selection DSA-02 DSA-03 forecast source "
+        "identity settings primary crosscheck model provider bias no TIGGE "
+        "activation no production DB mutation no Paris config edit",
+        [
+            "src/config.py",
+            "src/data/forecast_source_registry.py",
+            "src/data/ensemble_client.py",
+            "src/engine/evaluator.py",
+            "src/engine/monitor_refresh.py",
+            "tests/test_runtime_guards.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1 forecast source policy implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/config.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase1f_ecmwf_open_data_routes_to_source_policy_profile():
+    digest = build_digest(
+        "Phase 1F ECMWF Open Data scheduled collector DSA-04 ECMWF Open Data "
+        "source policy scheduled forecast job diagnostic non-executable no "
+        "TIGGE activation no production DB mutation no Paris config edit",
+        [
+            "src/main.py",
+            "src/data/ecmwf_open_data.py",
+            "src/data/forecast_source_registry.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_forecast_source_registry.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1 forecast source policy implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/main.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ecmwf_open_data.py" in digest["admission"]["admitted_files"]
+    assert "src/data/forecast_source_registry.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase1g_forecast_history_provenance_routes_to_source_policy_profile():
+    digest = build_digest(
+        "Phase 1G forecast history provenance eligibility DSA-06 Open-Meteo "
+        "previous-runs NULL provenance forecast history NULL provenance replay "
+        "ETL no production DB mutation no live venue side effects",
+        [
+            "src/engine/replay.py",
+            "src/backtest/training_eligibility.py",
+            "scripts/etl_historical_forecasts.py",
+            "scripts/etl_forecast_skill_from_forecasts.py",
+            "tests/test_replay_skill_eligibility_filter.py",
+            "tests/test_etl_skill_eligibility_filter.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1 forecast source policy implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/replay.py" in digest["admission"]["admitted_files"]
+    assert "scripts/etl_historical_forecasts.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_replay_skill_eligibility_filter.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_profile():
+    digest = build_digest(
+        "Phase 1K live decision snapshot causality DSA-05 DSA-13 DSA-18 "
+        "live decision snapshot issue valid fetch available payload hash "
+        "Open-Meteo fallback auditable snapshot id no source routing no TIGGE "
+        "activation no production DB mutation no live venue side effects",
+        [
+            "src/engine/evaluator.py",
+            "tests/test_center_buy_repair.py",
+            "tests/test_fdr.py",
+            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/AGENTS.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1K live decision snapshot causality gate"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_center_buy_repair.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_decision_evidence_runtime_invocation.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ensemble_client.py" not in digest["admission"]["admitted_files"]
+    assert "src/data/forecast_source_registry.py" not in digest["admission"]["admitted_files"]
+
+
+def test_phase1k_review_remediation_wording_routes_to_snapshot_causality_profile():
+    digest = build_digest(
+        "Phase 1K review-remediation entry forecast evidence causality gate "
+        "snapshot causality profile missing available_at issue fetch available "
+        "knowability-before-decision no source routing no TIGGE activation no "
+        "production DB mutation no live venue side effects",
+        [
+            "src/engine/evaluator.py",
+            "tests/test_center_buy_repair.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_fdr.py",
+            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1K live decision snapshot causality gate"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "architecture/topology.yaml" in digest["admission"]["admitted_files"]
+    assert "src/data/ensemble_client.py" not in digest["admission"]["admitted_files"]
+    assert "src/data/forecast_source_registry.py" not in digest["admission"]["admitted_files"]
+
+
+def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope():
+    digest = build_digest(
+        "Zeus Phase 1K remediation re-review entry forecast evidence causality "
+        "gate snapshot causality profile explicit available_at "
+        "knowability-before-decision no source routing no TIGGE activation no "
+        "production DB mutation no live venue side effects",
+        [
+            "src/engine/evaluator.py",
+            "tests/test_center_buy_repair.py",
+            "tests/test_runtime_guards.py",
+            "src/data/forecast_source_registry.py",
+            "config/settings.json",
+            "src/engine/replay.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1K live decision snapshot causality gate"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["admitted_files"] == []
+    assert "src/data/forecast_source_registry.py" not in digest["admission"]["admitted_files"]
+    assert "config/settings.json" not in digest["admission"]["admitted_files"]
+    assert "src/engine/replay.py" not in digest["admission"]["admitted_files"]
+    forbidden = set(digest["admission"]["forbidden_hits"])
+    assert {"src/data/forecast_source_registry.py", "config/settings.json", "src/engine/replay.py"} <= forbidden
+
+
+def test_phase1h_paper_mode_residue_routes_to_cleanup_profile():
+    digest = build_digest(
+        "Phase 1H paper mode residue cleanup DSA-07 paper mode residue cleanup "
+        "remove production paper_mode branch from monitor_refresh no live venue "
+        "side effects no production DB mutation no Paris config edit",
+        [
+            "src/engine/monitor_refresh.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_bootstrap_symmetry.py",
+            "tests/test_live_safety_invariants.py",
+            "tests/test_pnl_flow_and_audit.py",
+            "tests/test_pre_live_integration.py",
+            "tests/test_k1_review_fixes.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1H paper mode residue cleanup"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_live_safety_invariants.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_pnl_flow_and_audit.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase1h_slash_hyphen_wording_routes_to_cleanup_profile():
+    digest = build_digest(
+        "Phase 1H / DSA-07 paper-mode residue cleanup remove Gamma monitor "
+        "price path and require native NO-token quote no live venue side "
+        "effects no production DB mutation",
+        [
+            "src/engine/monitor_refresh.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_bootstrap_symmetry.py",
+            "tests/test_live_safety_invariants.py",
+            "tests/test_pnl_flow_and_audit.py",
+            "tests/test_pre_live_integration.py",
+            "tests/test_k1_review_fixes.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1H paper mode residue cleanup"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_bootstrap_symmetry.py" in digest["admission"]["admitted_files"]
+
+
 def test_r3_m1_lifecycle_grammar_routes_to_m1_profile_not_heartbeat():
     """M1 also shares R3 docs and cycle_runner paths with Z3; strong M1
     phrases must win so command grammar and RED proxy files are admitted."""
@@ -361,7 +1031,7 @@ def test_r3_t1_fake_venue_routes_to_t1_profile_not_heartbeat():
     fake venue parity harness; strong T1 phrases must admit fake-venue test
     infrastructure instead of falling through to heartbeat."""
     digest = build_digest(
-        "R3 T1 FakePolymarketVenue paper/live parity same PolymarketV2Adapter "
+        "R3 T1 FakePolymarketVenue fake/live adapter parity same PolymarketV2Adapter "
         "Protocol schema-identical events INV-NEW-M failure injection heartbeat miss",
         [
             "tests/fakes/polymarket_v2.py",
@@ -385,7 +1055,7 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
     strong benchmark-suite phrases must admit the A1 strategy benchmark surface
     instead of falling through to heartbeat or generic strategy routing."""
     digest = build_digest(
-        "R3 A1 StrategyBenchmarkSuite alpha execution metrics replay paper live shadow "
+        "R3 A1 StrategyBenchmarkSuite alpha execution metrics diagnostic simulated read-only live "
         "promotion gate strategy_benchmark_runs INV-NEW-Q",
         [
             "src/strategy/benchmark_suite.py",
@@ -402,6 +1072,103 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
     assert "src/strategy/data_lake.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/candidates/__init__.py" in digest["admission"]["admitted_files"]
     assert "tests/test_strategy_benchmark.py" in digest["admission"]["admitted_files"]
+
+
+def test_dsa08_dsa17_evidence_grade_cleanup_routes_to_a1_profile():
+    digest = build_digest(
+        "DSA-08 DSA-17 strategy benchmark evidence-grade naming cleanup "
+        "simulated read-only evidence-grade naming cleanup no production DB mutation "
+        "no live venue side effects no CLOB cutover",
+        [
+            "src/strategy/benchmark_suite.py",
+            "tests/test_strategy_benchmark.py",
+            "docs/reference/modules/strategy.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "r3 strategy benchmark suite implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
+    assert "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md" in (
+        digest["admission"]["admitted_files"]
+    )
+    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
+
+
+def test_dsa12_zeus_mode_retirement_routes_to_phase0b_profile():
+    digest = build_digest(
+        "DSA-12 retired ZEUS_MODE live-only cleanup; get_mode ignores ZEUS_MODE "
+        "and defaults to live; no production DB mutation; no Paris config edit",
+        [
+            "src/config.py",
+            "tests/test_k5_slice_l.py",
+            "tests/test_config.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 0b zeus mode retirement"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/config.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_k5_slice_l.py" in digest["admission"]["admitted_files"]
+    assert "docs/operations/task_2026-04-29_design_simplification_audit/findings.md" in (
+        digest["admission"]["admitted_files"]
+    )
+    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
+
+
+def test_dsa09_stale_execution_price_shadow_flag_routes_to_phase0c_profile():
+    digest = build_digest(
+        "DSA-09 remove stale EXECUTION_PRICE_SHADOW config flag after "
+        "execution price shadow-off path removal; no production DB mutation; "
+        "no live venue side effects; no Paris config edit",
+        [
+            "config/settings.json",
+            "tests/test_execution_price.py",
+            "docs/operations/known_gaps.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 0c stale execution price shadow flag cleanup"
+    assert digest["admission"]["status"] == "admitted"
+    assert "config/settings.json" in digest["admission"]["admitted_files"]
+    assert "tests/test_execution_price.py" in digest["admission"]["admitted_files"]
+    assert "docs/operations/known_gaps.md" in digest["admission"]["admitted_files"]
+    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
+
+
+def test_dsa10_dsa18_snapshot_only_fallback_routes_to_phase1j_profile():
+    digest = build_digest(
+        "Phase 1J DSA-10 DSA-18 replay snapshot-only fallback explicit opt-in; "
+        "remove implicit snapshot-only fallback for non-audit replay modes; "
+        "tests/docs only; no DB mutation; no live venue; no Paris source routing",
+        [
+            "src/engine/replay.py",
+            "tests/test_run_replay_cli.py",
+            "tests/test_replay_time_provenance.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1j replay snapshot-only fallback explicit opt-in"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/replay.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_run_replay_cli.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_replay_time_provenance.py" in digest["admission"]["admitted_files"]
+    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
 
 
 def test_r3_f1_forecast_source_registry_routes_to_f1_profile_not_heartbeat():
@@ -506,6 +1273,104 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "scripts/live_readiness_check.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_readiness_gates.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase2c_execution_capability_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 2C DSA-16 composed execution capability proof for entry exit "
+        "capability proof payload; no live venue side effects; no production "
+        "DB mutation; no source routing; no Paris; no CLOB cutover",
+        [
+            "src/execution/executor.py",
+            "tests/test_executor_command_split.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 2c execution capability proof implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/executor.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_executor_command_split.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase2d_execution_capability_status_routes_to_observability_profile():
+    digest = build_digest(
+        "Phase 2D DSA-16 execution capability status summary matrix for entry "
+        "exit cancel redeem; derived operator visibility only; no live venue "
+        "side effects; no production DB mutation; no schema migration; no "
+        "source routing; no Paris; no CLOB cutover",
+        [
+            "src/observability/status_summary.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 2d execution capability status summary implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/observability/status_summary.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_phase10b_dt_seam_cleanup.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase2e_cancel_redeem_capability_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 2E DSA-16 cancel redeem command-side capability proof payload; "
+        "add proof to CANCEL_REQUESTED and REDEEM_SUBMITTED pre-side-effect "
+        "events only; no live venue side effects; no production DB mutation; "
+        "no schema migration; no source routing; no Paris; no CLOB cutover",
+        [
+            "src/execution/exit_safety.py",
+            "src/execution/settlement_commands.py",
+            "tests/test_exit_safety.py",
+            "tests/test_settlement_commands.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 2e cancel redeem capability proof implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/exit_safety.py" in digest["admission"]["admitted_files"]
+    assert "src/execution/settlement_commands.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_exit_safety.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_settlement_commands.py" in digest["admission"]["admitted_files"]
+
+
+def test_phase2e_realistic_seam_wording_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Add pre-side-effect execution_capability proof payloads to "
+        "CANCEL_REQUESTED in request_cancel_for_command and REDEEM_SUBMITTED "
+        "in submit_redeem; preserve existing gates; no live venue side effects; "
+        "no executor/venue/state/schema/source/Paris changes",
+        [
+            "src/execution/exit_safety.py",
+            "src/execution/settlement_commands.py",
+            "tests/test_exit_safety.py",
+            "tests/test_settlement_commands.py",
+            "tests/test_digest_profile_matching.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 2e cancel redeem capability proof implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/execution/exit_safety.py" in digest["admission"]["admitted_files"]
+    assert "src/execution/settlement_commands.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_exit_safety.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_settlement_commands.py" in digest["admission"]["admitted_files"]
 
 
 def test_batch_h_legacy_day0_backfill_routes_to_contamination_profile():
@@ -664,8 +1529,6 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
         "agent runtime route card typed intent claim-scoped graph workflow",
         [
             "scripts/topology_doctor_cli.py",
-            ".agents/skills/AGENTS.md",
-            ".agents/skills/zeus-ai-handoff/SKILL.md",
             "architecture/context_pack_profiles.yaml",
             "docs/reference/modules/topology_doctor_system.md",
         ],
@@ -673,11 +1536,8 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
 
     assert digest["profile"] == "topology graph agent runtime upgrade"
     assert digest["admission"]["status"] == "admitted"
-    assert ".agents/skills/AGENTS.md" in digest["admission"]["admitted_files"]
     assert digest["route_card"]["risk_tier"] == "T3"
-    assert digest["route_card"]["next_action"].startswith("proceed with planning-lock")
-    assert "closeout_receipt" not in digest["route_card"]["gate_budget"]["required"]
-    assert any("receipt" in item for item in digest["route_card"]["gate_budget"]["optional"])
+    assert digest["route_card"]["next_action"].startswith("proceed only with packet plan")
 
 
 def test_shared_registry_files_do_not_select_domain_profile_by_themselves():

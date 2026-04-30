@@ -1,8 +1,10 @@
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-19; last_reused=never
+# Created: 2026-04-19
+# Last reused/audited: 2026-04-29
+# Authority basis: Phase 10B DT-Seam Cleanup and 2026-04-29 design simplification audit F4.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
-# Authority basis: phase10b_contract.md v2
 
 from __future__ import annotations
 
@@ -341,8 +343,8 @@ class TestRCOFDRFamilyIdMetricAware:
 class TestRCPV2RowCountSensor:
     """R-CP.1/2: status_summary v2 row-count sensor and discrepancy flag.
 
-    R-CP.1: v2_row_counts dict is populated with actual sqlite COUNT queries
-            (not hardcoded) for 5 v2 tables.
+    R-CP.1: v2_row_counts dict is populated from live sqlite table metadata
+            (not hardcoded and not unqualified) for 5 v2 tables.
     R-CP.2: discrepancy flag fires when dual_track_scaffold_claimed=True AND
             any v2 table has 0 rows.
     """
@@ -376,7 +378,7 @@ class TestRCPV2RowCountSensor:
         return conn
 
     def test_r_cp_1_v2_row_counts_queries_actual_tables(self):
-        """R-CP.1: _get_v2_row_counts returns real COUNT(*) from 5 tables."""
+        """R-CP.1: _get_v2_row_counts returns real table row signals."""
         from src.observability.status_summary import _get_v2_row_counts
 
         empty_conn = self._make_empty_v2_conn()
@@ -399,6 +401,62 @@ class TestRCPV2RowCountSensor:
         counts_populated = _get_v2_row_counts(populated_conn)
         assert counts_populated["platt_models_v2"] == 1, (
             "_get_v2_row_counts must return actual row count, not hardcoded 0"
+        )
+
+    def test_r_cp_1b_prefers_attached_world_over_empty_trade_shadow(self, tmp_path):
+        """F4: attached world data tables outrank empty trade shadow tables."""
+        from src.observability.status_summary import _V2_TABLES, _get_v2_row_counts
+
+        trade_conn = self._make_empty_v2_conn()
+        world_path = tmp_path / "world.db"
+        world_conn = sqlite3.connect(str(world_path))
+        expected_counts: dict[str, int] = {}
+        for index, table in enumerate(_V2_TABLES, start=1):
+            world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+            for _ in range(index):
+                world_conn.execute(f"INSERT INTO {table} DEFAULT VALUES")
+            expected_counts[table] = index
+        world_conn.commit()
+        world_conn.close()
+
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        counts = _get_v2_row_counts(trade_conn)
+
+        assert counts == expected_counts
+
+    def test_r_cp_1d_v2_row_counts_avoid_full_table_count_scans(self):
+        """F4 latency guard: status writes must not run COUNT(*) over large v2 tables."""
+        from src.observability.status_summary import _get_v2_row_counts
+
+        conn = self._make_populated_v2_conn()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+
+        counts = _get_v2_row_counts(conn)
+
+        assert counts["platt_models_v2"] == 1
+        assert not any("COUNT(*)" in statement.upper() for statement in statements), (
+            "v2 status row-count telemetry must not full-scan large tables every cycle"
+        )
+
+    def test_r_cp_1c_existing_empty_world_table_does_not_fallback_to_trade_shadow(self, tmp_path):
+        """F4 pair-negative: an existing world table is the authority even if empty."""
+        from src.observability.status_summary import _V2_TABLES, _get_v2_row_counts
+
+        trade_conn = self._make_populated_v2_conn()
+        world_path = tmp_path / "world.db"
+        world_conn = sqlite3.connect(str(world_path))
+        for table in _V2_TABLES:
+            world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+        world_conn.commit()
+        world_conn.close()
+
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        counts = _get_v2_row_counts(trade_conn)
+
+        assert all(count == 0 for count in counts.values()), (
+            "Present world v2 tables must be reported as world truth, not "
+            "replaced by populated trade shadow rows"
         )
 
     def test_r_cp_2_discrepancy_flag_fires_when_claim_true_and_zero_rows(self):
@@ -453,3 +511,145 @@ class TestRCPV2RowCountSensor:
         assert all(v == 0 for v in counts.values()), (
             "Missing v2 table must return 0 count, not raise exception"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2D — DSA-16 derived execution capability status matrix
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2DExecutionCapabilityStatus:
+    """Derived operator visibility for composed execution gates.
+
+    This status output must not become a live-action authority surface. It
+    summarizes global blockers and leaves per-intent gates unresolved.
+    """
+
+    def _allowing_cutover(self):
+        return {
+            "state": "LIVE_ENABLED",
+            "entry": {"allow_submit": True, "block_reason": None},
+            "exit": {"allow_submit": True, "block_reason": None},
+            "cancel": {"allow_cancel": True, "block_reason": None},
+            "redemption": {"allow_redemption": True, "block_reason": None},
+        }
+
+    def _blocking_cutover(self):
+        return {
+            "state": "NORMAL",
+            "entry": {"allow_submit": False, "block_reason": "NORMAL:ENTRY"},
+            "exit": {"allow_submit": False, "block_reason": "NORMAL:EXIT"},
+            "cancel": {"allow_cancel": False, "block_reason": "NORMAL:CANCEL"},
+            "redemption": {"allow_redemption": False, "block_reason": "NORMAL"},
+        }
+
+    def _allowing_heartbeat(self):
+        return {
+            "health": "HEALTHY",
+            "last_error": None,
+            "entry": {"allow_submit": True, "required_order_types": ["GTC", "GTD"]},
+        }
+
+    def _allowing_ws_gap(self):
+        return {
+            "connected": True,
+            "subscription_state": "SUBSCRIBED",
+            "gap_reason": "message_received",
+            "m5_reconcile_required": False,
+            "entry": {"allow_submit": True},
+        }
+
+    def _allowing_risk_allocator(self):
+        return {
+            "configured": True,
+            "kill_switch_reason": None,
+            "reduce_only": False,
+            "entry": {"allow_submit": True, "reason": "ok"},
+        }
+
+    def _allowing_collateral(self):
+        return {
+            "configured": True,
+            "authority_tier": "CHAIN",
+            "captured_at": "2026-04-29T00:00:00+00:00",
+            "reason": "ok",
+        }
+
+    def test_phase2d_matrix_blocks_global_actions_on_cutover(self, monkeypatch):
+        from src.observability import status_summary as status_summary_module
+
+        monkeypatch.setattr(status_summary_module, "_cutover_summary", self._blocking_cutover)
+        monkeypatch.setattr(status_summary_module, "_heartbeat_summary", self._allowing_heartbeat)
+        monkeypatch.setattr(status_summary_module, "_ws_gap_summary", self._allowing_ws_gap)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_risk_allocator_summary",
+            self._allowing_risk_allocator,
+        )
+        monkeypatch.setattr(status_summary_module, "_collateral_summary", self._allowing_collateral)
+
+        matrix = status_summary_module._get_execution_capability_status()
+
+        assert matrix["derived_only"] is True
+        assert matrix["live_action_authorized"] is False
+        for action, allow_key in (
+            ("entry", "global_allow_submit"),
+            ("exit", "global_allow_submit"),
+            ("cancel", "global_allow_cancel"),
+            ("redeem", "global_allow_redeem"),
+        ):
+            assert matrix[action]["status"] == "blocked"
+            assert matrix[action][allow_key] is False
+            assert matrix[action]["live_action_authorized"] is False
+            assert "cutover_guard" in matrix[action]["blocked_components"]
+
+    def test_phase2d_matrix_keeps_per_intent_gates_unresolved(self, monkeypatch):
+        from src.observability import status_summary as status_summary_module
+
+        monkeypatch.setattr(status_summary_module, "_cutover_summary", self._allowing_cutover)
+        monkeypatch.setattr(status_summary_module, "_heartbeat_summary", self._allowing_heartbeat)
+        monkeypatch.setattr(status_summary_module, "_ws_gap_summary", self._allowing_ws_gap)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_risk_allocator_summary",
+            self._allowing_risk_allocator,
+        )
+        monkeypatch.setattr(status_summary_module, "_collateral_summary", self._allowing_collateral)
+
+        matrix = status_summary_module._get_execution_capability_status()
+
+        assert matrix["entry"]["status"] == "requires_intent"
+        assert matrix["entry"]["global_allow_submit"] is True
+        assert matrix["exit"]["status"] == "requires_intent"
+        assert matrix["exit"]["global_allow_submit"] is True
+        assert matrix["cancel"]["status"] == "requires_intent"
+        assert matrix["cancel"]["global_allow_cancel"] is True
+        assert matrix["redeem"]["status"] == "requires_intent"
+        assert matrix["redeem"]["global_allow_redeem"] is True
+
+        entry_unresolved = {
+            component["component"]
+            for component in matrix["entry"]["required_intent_components"]
+        }
+        exit_unresolved = {
+            component["component"]
+            for component in matrix["exit"]["required_intent_components"]
+        }
+        cancel_unresolved = {
+            component["component"]
+            for component in matrix["cancel"]["required_intent_components"]
+        }
+        assert "executable_snapshot_gate" in entry_unresolved
+        assert "risk_allocator_capacity" in entry_unresolved
+        assert "collateral_buy_amount" in entry_unresolved
+        assert "executable_snapshot_gate" in exit_unresolved
+        assert "replacement_sell_guard" in exit_unresolved
+        assert "collateral_sell_inventory" in exit_unresolved
+        assert "cancel_command_identity" in cancel_unresolved
+        assert "venue_order_cancelability" in cancel_unresolved
+
+    def test_phase2d_status_summary_does_not_import_executor_authority(self):
+        source = Path("src/observability/status_summary.py").read_text()
+
+        assert "src.execution.executor" not in source
+        assert "execute_intent" not in source

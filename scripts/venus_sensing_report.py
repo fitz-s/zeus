@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Venus daemon-independent sensing report, including source-contract drift watch and quarantine.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
 """Venus sensing report generator.
@@ -299,7 +299,7 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
     pc_count = pc.get("count", 0)
     td_vs_pc = {"td_entered": td_entered, "pc_count": pc_count, "gap": td_entered - pc_count}
 
-    # position_current vs positions-paper.json active count
+    # position_current vs positions.json active count
     pj_active = pj.get("active_count", 0)
     pc_vs_json = {"pc": pc_count, "json_active": pj_active, "match": pc_count == pj_active}
 
