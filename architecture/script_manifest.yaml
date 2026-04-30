@@ -341,6 +341,7 @@ scripts:
     write_targets: [observations]
     observability: [state/backfill_manifest_wu_daily_all_*.json]
     required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
+    reason: "WU ICAO daily observation backfill; Phase B source-conversion lane derives station identity from config/cities.json and supports explicit start/end date scope."
   baseline_experiment.py: {class: diagnostic_report_writer, write_targets: [state/baseline_results.json, stdout]}
   build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
   capture_replay_artifact.py: {class: shadow_artifact_writer}
@@ -468,7 +469,7 @@ scripts:
     dangerous_if_run: true
     required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]
     required_tests: [tests/test_authority_gate.py]
-    reason: "Narrow high-track repair helper: rebuild settlements only from observations with authority='VERIFIED'; dry-run by default."
+    reason: "Scoped high/low repair helper: rebuild settlements only from observations with authority='VERIFIED'; dry-run by default; source-conversion apply lane must pass city/date/metric filters."
   r3_drift_check.py:
     class: validation
     module_owner: scripts
@@ -556,6 +557,16 @@ scripts:
     required_tests: [tests/test_market_scanner_provenance.py]
     reason: "Cron-safe source-contract watch for Polymarket active weather markets; detects missing, ambiguous, unsupported, or changed resolutionSource metadata, persists city source quarantine for ALERT mismatches, prints single-city conversion plans, and reports recorded source-conversion history."
     promotion_barrier: "Quarantine may block new entries only; release requires config/source-validity/backfill/settlement/calibration/verification evidence plus per-field evidence_refs and does not authorize DB backfills or live placement."
+  source_contract_auto_convert.py:
+    class: runtime_support
+    canonical_command: "python3 scripts/source_contract_auto_convert.py [--city CITY] [--json] [--discord --discord-required] [--write-mini-report] [--execute-apply --force --db PATH --config-path PATH --source-validity-path PATH --station-metadata-path PATH --evidence-root-base PATH] [--receipt-dir PATH] [--quarantine-path PATH] [--lock-path PATH]"
+    read_targets: [config/cities.json, state/source_contract_quarantine.json, state/zeus-world.db]
+    write_targets: [stdout, state/source_contract_quarantine.json, state/source_contract_auto_convert, config/cities.json, state/zeus-world.db, docs/operations/current_source_validity.md]
+    external_inputs: [Polymarket Gamma API, Weather Underground API, NOAA AviationWeather stationinfo API, api.weather.gov points API for US grid changes, Discord webhook optional]
+    required_helpers: [scripts.watch_source_contract, scripts.backfill_wu_daily_all, scripts.rebuild_settlements, scripts.rebuild_calibration_pairs_v2, scripts.refit_platt_v2, src.data.market_scanner, src.riskguard.discord_alerts]
+    required_tests: [tests/test_market_scanner_provenance.py]
+    reason: "Cron-safe source-contract transition controller that reuses the source watch, computes deterministic conversion/date scopes, keeps affected cities quarantined, writes durable receipts under a cron lock, emits mini-model execution contracts/reports with locator/write-scope safety, and can execute Phase B same-provider WU station conversions only behind explicit apply/force plus evidence gates."
+    promotion_barrier: "Default is plan/dry-run. Apply mode is limited to auto-confirmed same-provider WU station changes with exact station metadata, scoped DB commands, backup/DB path evidence, verification, and complete release evidence refs; no live venue placement."
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
   bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
   code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}

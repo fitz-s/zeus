@@ -1,4 +1,7 @@
 # Created: 2026-04-12
+# Lifecycle: created=2026-04-12; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Exercise settlement and calibration rebuild pipelines on synthetic DB fixtures.
+# Reuse: Inspect rebuild_settlements.py and rebuild_calibration_pairs_canonical.py before changing expectations.
 # Last reused/audited: 2026-04-28
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch B source-family rebuild gate.
 """K4 rebuild pipeline end-to-end test.

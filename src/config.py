@@ -246,18 +246,108 @@ def load_cities(path: Optional[Path] = None) -> list[City]:
     return result
 
 
-# Module-level singletons — initialized once at import
+def _build_cities_by_alias(loaded_cities: list[City]) -> dict[str, City]:
+    aliases: dict[str, City] = {}
+    for c in loaded_cities:
+        for alias in c.aliases:
+            alias_lower = alias.lower()
+            if alias_lower in aliases:
+                raise ValueError(
+                    f"Alias conflict: {alias!r} maps to both "
+                    f"{aliases[alias_lower].name!r} and {c.name!r}"
+                )
+            aliases[alias_lower] = c
+    return aliases
+
+
+def _cities_config_mtime_ns(path: Path | None = None) -> int:
+    city_path = path or (CONFIG_DIR / "cities.json")
+    try:
+        return city_path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
+class _RuntimeCityMap(dict):
+    """Dict that refreshes config/cities.json before read access.
+
+    Many live modules import ``cities_by_name`` once at startup. Keeping this
+    object identity stable, and mutating it in place on reload, lets those
+    imports observe source-conversion config changes without a daemon restart.
+    """
+
+    def _refresh(self) -> None:
+        reload_cities_if_changed()
+
+    def __getitem__(self, key):
+        self._refresh()
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._refresh()
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        self._refresh()
+        return super().__contains__(key)
+
+    def values(self):
+        self._refresh()
+        return super().values()
+
+    def items(self):
+        self._refresh()
+        return super().items()
+
+    def keys(self):
+        self._refresh()
+        return super().keys()
+
+    def copy(self):
+        self._refresh()
+        return dict(self)
+
+
+# Module-level singletons. Source-conversion apply can update cities.json while
+# the daemon process is alive, so scanner-facing callers use the refresh helpers
+# below instead of assuming these bindings never change.
 settings = Settings()
 cities = load_cities()
-cities_by_name: dict[str, City] = {c.name: c for c in cities}
-# Also index by alias for market title matching
-cities_by_alias: dict[str, City] = {}
-for c in cities:
-    for alias in c.aliases:
-        alias_lower = alias.lower()
-        if alias_lower in cities_by_alias:
-            raise ValueError(f"Alias conflict: {alias!r} maps to both {cities_by_alias[alias_lower].name!r} and {c.name!r}")
-        cities_by_alias[alias_lower] = c
+cities_by_name: dict[str, City] = _RuntimeCityMap({c.name: c for c in cities})
+cities_by_alias: dict[str, City] = _RuntimeCityMap(_build_cities_by_alias(cities))
+_cities_loaded_mtime_ns = _cities_config_mtime_ns()
+
+
+def reload_cities_if_changed(*, force: bool = False) -> bool:
+    """Reload city config if config/cities.json changed on disk.
+
+    Returns True when the module-level city indexes were refreshed. This keeps
+    source-conversion runtime changes visible to market discovery without
+    requiring a daemon restart for new-entry gating.
+    """
+
+    global _cities_loaded_mtime_ns
+    current_mtime = _cities_config_mtime_ns()
+    if not force and current_mtime == _cities_loaded_mtime_ns:
+        return False
+    loaded = load_cities()
+    cities[:] = loaded
+    dict.clear(cities_by_name)
+    dict.update(cities_by_name, {c.name: c for c in loaded})
+    dict.clear(cities_by_alias)
+    dict.update(cities_by_alias, _build_cities_by_alias(loaded))
+    _cities_loaded_mtime_ns = current_mtime
+    return True
+
+
+def runtime_cities() -> list[City]:
+    reload_cities_if_changed()
+    return list(cities)
+
+
+def runtime_cities_by_name() -> dict[str, City]:
+    reload_cities_if_changed()
+    return dict(cities_by_name)
 
 
 def validate_cities_config(city_list: list[City] | None = None) -> list[str]:

@@ -139,6 +139,8 @@ def _fetch_eligible_snapshots_v2(
     conn: sqlite3.Connection,
     city_filter: Optional[str],
     spec: "CalibrationMetricSpec | None" = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> list[sqlite3.Row]:
     """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
     track = spec.identity.temperature_metric if spec is not None else "high"
@@ -154,6 +156,12 @@ def _fetch_eligible_snapshots_v2(
     if city_filter:
         where += " AND city = ?"
         params.append(city_filter)
+    if start_date:
+        where += " AND target_date >= ?"
+        params.append(start_date)
+    if end_date:
+        where += " AND target_date <= ?"
+        params.append(end_date)
     sql = f"""
         SELECT snapshot_id, city, target_date, issue_time, lead_hours,
                available_at, members_json, data_version
@@ -193,17 +201,64 @@ def _fetch_verified_observation(
     ).fetchone()
 
 
-def _collect_pre_delete_count(conn: sqlite3.Connection, *, spec: CalibrationMetricSpec) -> int:
+def _scoped_pair_predicate(
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> tuple[str, list]:
+    where = "bin_source = ? AND temperature_metric = ?"
+    params: list = [CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric]
+    if city_filter:
+        where += " AND city = ?"
+        params.append(city_filter)
+    if start_date:
+        where += " AND target_date >= ?"
+        params.append(start_date)
+    if end_date:
+        where += " AND target_date <= ?"
+        params.append(end_date)
+    return where, params
+
+
+def _collect_pre_delete_count(
+    conn: sqlite3.Connection,
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    where, params = _scoped_pair_predicate(
+        spec=spec,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
     return conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE bin_source = ? AND temperature_metric = ?",
-        (CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric),
+        f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
+        tuple(params),
     ).fetchone()[0]
 
 
-def _delete_canonical_v2_slice(conn: sqlite3.Connection, *, spec: CalibrationMetricSpec) -> None:
+def _delete_canonical_v2_slice(
+    conn: sqlite3.Connection,
+    *,
+    spec: CalibrationMetricSpec,
+    city_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> None:
+    where, params = _scoped_pair_predicate(
+        spec=spec,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
     conn.execute(
-        "DELETE FROM calibration_pairs_v2 WHERE bin_source = ? AND temperature_metric = ?",
-        (CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric),
+        f"DELETE FROM calibration_pairs_v2 WHERE {where}",
+        tuple(params),
     )
 
 
@@ -338,6 +393,8 @@ def rebuild_v2(
     force: bool,
     spec: CalibrationMetricSpec,
     city_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
     _skip_commit: bool = False,
@@ -358,11 +415,19 @@ def rebuild_v2(
     print(f"Mode:              {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     if city_filter:
         print(f"City filter:       {city_filter}")
+    if start_date or end_date:
+        print(f"Date filter:       {start_date or '-inf'}..{end_date or '+inf'}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {n_mc or 'default (ensemble_n_mc())'}")
 
-    snapshots = _fetch_eligible_snapshots_v2(conn, city_filter=city_filter, spec=spec)
+    snapshots = _fetch_eligible_snapshots_v2(
+        conn,
+        city_filter=city_filter,
+        spec=spec,
+        start_date=start_date,
+        end_date=end_date,
+    )
     stats.snapshots_scanned = len(snapshots)
 
     eligible: list[sqlite3.Row] = []
@@ -380,7 +445,13 @@ def rebuild_v2(
     print(f"  quarantined:        {stats.snapshots_quarantined}")
     print(f"  eligible:           {stats.snapshots_eligible}")
 
-    stats.pre_delete_v2_pairs = _collect_pre_delete_count(conn, spec=spec)
+    stats.pre_delete_v2_pairs = _collect_pre_delete_count(
+        conn,
+        spec=spec,
+        city_filter=city_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
     if dry_run:
@@ -402,7 +473,13 @@ def rebuild_v2(
 
     conn.execute("SAVEPOINT v2_rebuild")
     try:
-        _delete_canonical_v2_slice(conn, spec=spec)
+        _delete_canonical_v2_slice(
+            conn,
+            spec=spec,
+            city_filter=city_filter,
+            start_date=start_date,
+            end_date=end_date,
+        )
         start = time.monotonic()
         missing_city_count = 0
         for snap in eligible:
@@ -489,6 +566,9 @@ def rebuild_all_v2(
     dry_run: bool,
     force: bool,
     city_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    temperature_metric: str = "all",
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> dict[str, RebuildStatsV2]:
@@ -501,13 +581,19 @@ def rebuild_all_v2(
 
     conn.execute("SAVEPOINT v2_rebuild_all")
     try:
-        for spec in METRIC_SPECS:
+        specs = [
+            spec for spec in METRIC_SPECS
+            if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
+        ]
+        for spec in specs:
             stats = rebuild_v2(
                 conn,
                 dry_run=dry_run,
                 force=force,
                 spec=spec,
                 city_filter=city_filter,
+                start_date=start_date,
+                end_date=end_date,
                 n_mc=n_mc,
                 rng=rng,
                 _skip_commit=True,
@@ -570,6 +656,21 @@ def main() -> int:
         help="Limit rebuild to a single city name.",
     )
     parser.add_argument(
+        "--start-date", dest="start_date", default=None,
+        help="Limit rebuild to snapshots on/after YYYY-MM-DD.",
+    )
+    parser.add_argument(
+        "--end-date", dest="end_date", default=None,
+        help="Limit rebuild to snapshots on/before YYYY-MM-DD.",
+    )
+    parser.add_argument(
+        "--temperature-metric",
+        dest="temperature_metric",
+        choices=("high", "low", "all"),
+        default="all",
+        help="Metric track to rebuild (default: all).",
+    )
+    parser.add_argument(
         "--db", dest="db_path", default=None,
         help="Path to the world DB (default: production zeus-world.db).",
     )
@@ -602,6 +703,9 @@ def main() -> int:
             dry_run=args.dry_run,
             force=args.force,
             city_filter=args.city,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            temperature_metric=args.temperature_metric,
             n_mc=args.n_mc,
         )
     except Exception as e:
