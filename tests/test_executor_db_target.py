@@ -12,6 +12,7 @@ This test verifies the post-fix behavior: the command row lands in zeus_trades.d
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -83,6 +84,46 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
     return snapshot_id
 
 
+def _decision_source_context():
+    from src.contracts.execution_intent import DecisionSourceContext
+
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-04-27T00:00:00+00:00",
+        forecast_valid_time="2026-04-27T06:00:00+00:00",
+        forecast_fetch_time="2026-04-27T01:00:00+00:00",
+        forecast_available_at="2026-04-27T00:30:00+00:00",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-04-27T02:00:00+00:00",
+        decision_time_status="OK",
+    )
+
+
+def _capture_bound_submission_envelope(mock_client):
+    bound = {}
+    mock_client.bind_submission_envelope.side_effect = lambda envelope: bound.__setitem__("envelope", envelope)
+    return bound
+
+
+def _final_submit_result(bound: dict, *, order_id: str) -> dict:
+    envelope = bound.get("envelope")
+    if envelope is None:
+        raise AssertionError("test client did not receive a bound submission envelope")
+    final = envelope.with_updates(
+        raw_response_json=json.dumps({"orderID": order_id, "status": "LIVE"}, sort_keys=True, separators=(",", ":")),
+        order_id=order_id,
+    )
+    return {
+        "orderID": order_id,
+        "status": "LIVE",
+        "_venue_submission_envelope": final.to_dict(),
+    }
+
+
 def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36):
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
@@ -107,6 +148,7 @@ def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "to
         executable_snapshot_min_tick_size=Decimal("0.01"),
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
+        decision_source_context=_decision_source_context(),
     )
 
 
@@ -171,7 +213,10 @@ class TestExecutorDbTarget:
 
         mock_client = MagicMock()
         mock_client.v2_preflight.return_value = None
-        mock_client.place_limit_order.return_value = {"orderID": "ord-dbtarget-001"}
+        bound = _capture_bound_submission_envelope(mock_client)
+        mock_client.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="ord-dbtarget-001")
+        )
 
         with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
             with patch("src.execution.executor.alert_trade", lambda **kw: None):
@@ -235,7 +280,10 @@ class TestExecutorDbTarget:
         trades_conn.commit()
 
         mock_client = MagicMock()
-        mock_client.place_limit_order.return_value = {"orderID": "ord-exit-dbtarget-001"}
+        bound = _capture_bound_submission_envelope(mock_client)
+        mock_client.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-dbtarget-001")
+        )
 
         with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
             with patch("src.execution.executor.alert_trade", lambda **kw: None):

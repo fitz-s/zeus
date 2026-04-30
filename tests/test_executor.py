@@ -7,6 +7,7 @@
 """Tests for executor and portfolio."""
 
 import sqlite3
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -116,6 +117,25 @@ def _ensure_snapshot(conn, *, token_id: str) -> str:
         ),
     )
     return snapshot_id
+
+
+def _final_submit_result(bound_envelope, *, order_id: str | None, status: str = "OPEN") -> dict:
+    if bound_envelope is None:
+        raise AssertionError("test client did not receive a bound submission envelope")
+    raw_response = {"status": status}
+    if order_id is not None:
+        raw_response["orderID"] = order_id
+    final = bound_envelope.with_updates(
+        raw_response_json=json.dumps(raw_response, sort_keys=True, separators=(",", ":")),
+        order_id=order_id,
+    )
+    result = {
+        "status": status,
+        "_venue_submission_envelope": final.to_dict(),
+    }
+    if order_id is not None:
+        result["orderID"] = order_id
+    return result
 
 
 class TestPortfolio:
@@ -345,7 +365,10 @@ class TestExecutor:
 
         class DummyClient:
             def __init__(self):
-                pass
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
 
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 captured.update(
@@ -355,7 +378,7 @@ class TestExecutor:
                     side=side,
                     order_type=order_type,
                 )
-                return {"orderID": "sell-1", "status": "OPEN"}
+                return _final_submit_result(self.bound_envelope, order_id="sell-1")
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
 
@@ -384,10 +407,13 @@ class TestExecutor:
     def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
         class DummyClient:
             def __init__(self):
-                pass
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
 
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
-                return {"status": "OPEN"}
+                return _final_submit_result(self.bound_envelope, order_id=None)
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
 

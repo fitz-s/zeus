@@ -14,6 +14,7 @@ submitting. Tests that call _live_order without an explicit conn use the
 `_mem_conn` autouse fixture to supply an in-memory DB with schema.
 """
 import sqlite3
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -141,10 +142,35 @@ def _ensure_snapshot(conn, *, token_id: str) -> str:
     return snapshot_id
 
 
+def _capture_bound_submission_envelope(mock_client):
+    bound = {}
+    mock_client.bind_submission_envelope.side_effect = lambda envelope: bound.__setitem__("envelope", envelope)
+    return bound
+
+
+def _final_submit_result(bound: dict, *, order_id: str, order_key: str = "orderID") -> dict:
+    envelope = bound.get("envelope")
+    if envelope is None:
+        raise AssertionError("test client did not receive a bound submission envelope")
+    raw_response = {order_key: order_id, "status": "LIVE"}
+    final = envelope.with_updates(
+        raw_response_json=json.dumps(raw_response, sort_keys=True, separators=(",", ":")),
+        order_id=order_id,
+    )
+    return {
+        order_key: order_id,
+        "status": "LIVE",
+        "_venue_submission_envelope": final.to_dict(),
+    }
+
+
 class TestLiveOrderHappyPath:
     def test_successful_order_returns_pending(self, monkeypatch):
         mock_client = MagicMock()
-        mock_client.place_limit_order.return_value = {"orderID": "ord-123"}
+        bound = _capture_bound_submission_envelope(mock_client)
+        mock_client.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="ord-123")
+        )
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
             lambda: mock_client,
@@ -164,7 +190,10 @@ class TestLiveOrderHappyPath:
     def test_order_id_fallback_chain(self, monkeypatch):
         """orderID -> orderId -> id -> trade_id."""
         mock_client = MagicMock()
-        mock_client.place_limit_order.return_value = {"id": "fallback-id"}
+        bound = _capture_bound_submission_envelope(mock_client)
+        mock_client.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="fallback-id", order_key="id")
+        )
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
             lambda: mock_client,
@@ -189,8 +218,9 @@ class TestLiveOrderErrorModes:
 
         result = _live_order("trade-3", _make_intent(), shares=10.0)
 
-        assert result.status == "rejected"
-        assert "clob_returned_none" in result.reason
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert "final_submission_envelope_persistence_failed" in result.reason
 
     def test_clob_raises_exception(self, monkeypatch):
         mock_client = MagicMock()
@@ -208,7 +238,10 @@ class TestLiveOrderErrorModes:
 
     def test_discord_alert_failure_does_not_block_order(self, monkeypatch):
         mock_client = MagicMock()
-        mock_client.place_limit_order.return_value = {"orderID": "ord-ok"}
+        bound = _capture_bound_submission_envelope(mock_client)
+        mock_client.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="ord-ok")
+        )
         monkeypatch.setattr(
             "src.data.polymarket_client.PolymarketClient",
             lambda: mock_client,

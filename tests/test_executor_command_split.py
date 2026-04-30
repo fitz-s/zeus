@@ -15,6 +15,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch, call
+import json
 
 import pytest
 
@@ -241,6 +242,51 @@ def _make_exit_intent(
     )
 
 
+def _capture_bound_submission_envelope(mock_client):
+    bound = {}
+    mock_client.bind_submission_envelope.side_effect = lambda envelope: bound.__setitem__("envelope", envelope)
+    return bound
+
+
+def _final_submit_result(
+    bound: dict,
+    *,
+    order_id: str | None = None,
+    status: str = "LIVE",
+    success: bool | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict:
+    envelope = bound.get("envelope")
+    if envelope is None:
+        raise AssertionError("test client did not receive a bound submission envelope")
+    raw_payload = {"status": status}
+    if order_id is not None:
+        raw_payload["orderID"] = order_id
+    if success is not None:
+        raw_payload["success"] = success
+    changes = {
+        "raw_response_json": json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
+        "order_id": order_id,
+    }
+    if error_code is not None:
+        changes["error_code"] = error_code
+        changes["error_message"] = error_message or ""
+    final = envelope.with_updates(**changes)
+    result = {
+        "status": status,
+        "_venue_submission_envelope": final.to_dict(),
+    }
+    if order_id is not None:
+        result["orderID"] = order_id
+    if success is not None:
+        result["success"] = success
+    if error_code is not None:
+        result["errorCode"] = error_code
+        result["errorMessage"] = error_message or ""
+    return result
+
+
 # ---------------------------------------------------------------------------
 # TestLiveOrderCommandSplit — entry path (_live_order / IntentKind.ENTRY)
 # ---------------------------------------------------------------------------
@@ -275,10 +321,11 @@ class TestLiveOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
 
             def spy_place(**kwargs):
                 call_log.append("place_limit_order")
-                return {"orderID": "ord-test-001"}
+                return _final_submit_result(bound, order_id="ord-test-001")
 
             mock_inst.place_limit_order.side_effect = spy_place
 
@@ -321,7 +368,10 @@ class TestLiveOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             mock_inst.v2_preflight.return_value = None
-            mock_inst.place_limit_order.return_value = {"orderID": "ord-entry-capability"}
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-entry-capability")
+            )
 
             result = _live_order(
                 trade_id="trd-entry-capability",
@@ -485,7 +535,15 @@ class TestLiveOrderCommandSplit:
                 observed["durable_command_state"] = command_rows[0]["state"] if command_rows else None
                 observed["durable_envelope_count"] = envelope_count
                 observed["durable_submit_requested_count"] = requested_count
-                return {"orderID": "ord-entry-durable", "status": "LIVE"}
+                final = observed["bound_envelope"].with_updates(
+                    raw_response_json='{"orderID":"ord-entry-durable"}',
+                    order_id="ord-entry-durable",
+                )
+                return {
+                    "orderID": "ord-entry-durable",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
 
         with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
             result = execute_intent(
@@ -502,6 +560,124 @@ class TestLiveOrderCommandSplit:
         assert observed["durable_envelope_count"] == 1
         assert observed["durable_submit_requested_count"] == 1
         assert observed["submit_kwargs"]["token_id"] == token_id
+
+    def test_entry_persists_final_submit_envelope_as_append_only_row(self, mem_conn, monkeypatch):
+        """Entry ACK keeps command on pre-submit envelope and appends final SDK envelope."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_entry_intent(mem_conn)
+
+        class FinalEnvelopeClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def v2_preflight(self):
+                return None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def place_limit_order(self, **kwargs):
+                assert self.bound_envelope is not None
+                final = self.bound_envelope.with_updates(
+                    raw_response_json='{"orderID":"ord-entry-final"}',
+                    order_id="ord-entry-final",
+                )
+                return {
+                    "orderID": "ord-entry-final",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        with patch("src.data.polymarket_client.PolymarketClient", return_value=FinalEnvelopeClient()):
+            result = _live_order(
+                trade_id="trd-entry-final-envelope",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-final-envelope",
+            )
+
+        assert result.status == "pending"
+        command = mem_conn.execute(
+            "SELECT command_id, envelope_id FROM venue_commands WHERE position_id = ?",
+            ("trd-entry-final-envelope",),
+        ).fetchone()
+        rows = mem_conn.execute(
+            "SELECT envelope_id, order_id FROM venue_submission_envelopes ORDER BY captured_at, envelope_id"
+        ).fetchall()
+        assert len(rows) == 2
+        pre_ids = {row["envelope_id"] for row in rows if row["order_id"] is None}
+        final_rows = [row for row in rows if row["order_id"] == "ord-entry-final"]
+        assert command["envelope_id"] in pre_ids
+        assert len(final_rows) == 1
+        assert final_rows[0]["envelope_id"] != command["envelope_id"]
+
+        ack = [e for e in list_events(mem_conn, command["command_id"]) if e["event_type"] == "SUBMIT_ACKED"][0]
+        payload = json.loads(ack["payload_json"])
+        assert payload["final_submission_envelope_id"] == final_rows[0]["envelope_id"]
+        assert payload["final_submission_envelope_stage"] == "post_submit_result"
+
+    def test_entry_missing_final_submit_envelope_goes_review_required(self, mem_conn, monkeypatch):
+        """A post-submit ACK-shaped result without final envelope cannot become ACKED."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_entry_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            mock_inst.place_limit_order.return_value = {"orderID": "ord-entry-no-envelope", "status": "LIVE"}
+
+            result = _live_order(
+                trade_id="trd-entry-no-final-envelope",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-no-final-envelope",
+            )
+
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        command = mem_conn.execute(
+            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            ("trd-entry-no-final-envelope",),
+        ).fetchone()
+        assert command["state"] == "REVIEW_REQUIRED"
+        events = list_events(mem_conn, command["command_id"])
+        event_types = [event["event_type"] for event in events]
+        assert "REVIEW_REQUIRED" in event_types
+        assert "SUBMIT_ACKED" not in event_types
+        assert "SUBMIT_REJECTED" not in event_types
+        review = [event for event in events if event["event_type"] == "REVIEW_REQUIRED"][0]
+        payload = json.loads(review["payload_json"])
+        assert payload["reason"] == "final_submission_envelope_persistence_failed"
+        assert payload["venue_order_id"] == "ord-entry-no-envelope"
 
     def test_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill: place_limit_order raises RuntimeError.
@@ -555,7 +731,7 @@ class TestLiveOrderCommandSplit:
         assert "SUBMIT_TIMEOUT_UNKNOWN" in event_types
 
     def test_submit_rejected_writes_event_with_state_rejected(self, mem_conn):
-        """place_limit_order returns None -> state=REJECTED."""
+        """place_limit_order returns None -> REVIEW_REQUIRED, not normal rejected."""
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command
 
@@ -586,12 +762,13 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-003",
             )
 
-        assert result.status == "rejected"
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
-        assert cmd["state"] == "REJECTED", (
-            f"Expected state=REJECTED after None return, got {cmd['state']!r}"
+        assert cmd["state"] == "REVIEW_REQUIRED", (
+            f"Expected state=REVIEW_REQUIRED after None return, got {cmd['state']!r}"
         )
 
     def test_submit_missing_order_id_rejects_without_submit_acked(self, mem_conn):
@@ -615,7 +792,10 @@ class TestLiveOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             mock_inst.v2_preflight.return_value = None
-            mock_inst.place_limit_order.return_value = {"success": True, "status": "LIVE"}
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, success=True, status="LIVE")
+            )
 
             result = _live_order(
                 trade_id="trd-missing-order-id",
@@ -655,12 +835,14 @@ class TestLiveOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             mock_inst.v2_preflight.return_value = None
-            mock_inst.place_limit_order.return_value = {
-                "success": False,
-                "status": "rejected",
-                "errorCode": "INSUFFICIENT_BALANCE",
-                "errorMessage": "not enough funds",
-            }
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+                bound,
+                success=False,
+                status="rejected",
+                error_code="INSUFFICIENT_BALANCE",
+                error_message="not enough funds",
+            )
 
             result = _live_order(
                 trade_id="trd-success-false",
@@ -678,6 +860,9 @@ class TestLiveOrderCommandSplit:
         event_types = [event["event_type"] for event in list_events(mem_conn, command_ids_seen[0])]
         assert "SUBMIT_REJECTED" in event_types
         assert "SUBMIT_ACKED" not in event_types
+        rejected = [event for event in list_events(mem_conn, command_ids_seen[0]) if event["event_type"] == "SUBMIT_REJECTED"][0]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["final_submission_envelope_id"]
 
     def test_submit_acked_writes_event_with_state_acked(self, mem_conn):
         """place_limit_order returns orderID -> state=ACKED, venue_order_id set."""
@@ -700,7 +885,10 @@ class TestLiveOrderCommandSplit:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
             mock_inst.v2_preflight.return_value = None
-            mock_inst.place_limit_order.return_value = {"orderID": "ord-acked-001"}
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-acked-001")
+            )
 
             result = _live_order(
                 trade_id="trd-004",
@@ -902,10 +1090,11 @@ class TestExitOrderCommandSplit:
         ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
 
             def spy_place(**kwargs):
                 call_log.append("place_limit_order")
-                return {"orderID": "ord-exit-001"}
+                return _final_submit_result(bound, order_id="ord-exit-001")
 
             mock_inst.place_limit_order.side_effect = spy_place
 
@@ -942,7 +1131,10 @@ class TestExitOrderCommandSplit:
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
-            mock_inst.place_limit_order.return_value = {"orderID": "ord-exit-capability"}
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-capability")
+            )
 
             result = execute_exit_order(
                 intent=intent,
@@ -982,6 +1174,125 @@ class TestExitOrderCommandSplit:
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["reason"] == "not_applicable_reduce_only"
 
+    def test_exit_binds_pre_submit_and_persists_final_submit_envelope(self, mem_conn, monkeypatch):
+        """Exit ACK uses the U1 pre-submit envelope and appends final SDK facts."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "FOK")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-final-envelope")
+
+        class FinalEnvelopeClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def place_limit_order(self, **kwargs):
+                assert self.bound_envelope is not None
+                assert self.bound_envelope.side == "SELL"
+                final = self.bound_envelope.with_updates(
+                    raw_response_json='{"orderID":"ord-exit-final"}',
+                    order_id="ord-exit-final",
+                )
+                return {
+                    "orderID": "ord-exit-final",
+                    "status": "LIVE",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        with patch("src.data.polymarket_client.PolymarketClient", return_value=FinalEnvelopeClient()):
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-final-envelope",
+            )
+
+        assert result.status == "pending"
+        command = mem_conn.execute(
+            "SELECT command_id, envelope_id FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-final-envelope",),
+        ).fetchone()
+        rows = mem_conn.execute(
+            "SELECT envelope_id, order_id, side FROM venue_submission_envelopes"
+        ).fetchall()
+        assert len(rows) == 2
+        final_rows = [row for row in rows if row["order_id"] == "ord-exit-final"]
+        assert len(final_rows) == 1
+        assert final_rows[0]["side"] == "SELL"
+        assert final_rows[0]["envelope_id"] != command["envelope_id"]
+
+        ack = [e for e in list_events(mem_conn, command["command_id"]) if e["event_type"] == "SUBMIT_ACKED"][0]
+        payload = json.loads(ack["payload_json"])
+        assert payload["final_submission_envelope_id"] == final_rows[0]["envelope_id"]
+        assert payload["final_submission_envelope_stage"] == "post_submit_result"
+
+    def test_exit_submit_rejected_persists_final_submit_envelope(self, mem_conn, monkeypatch):
+        """Exit SUBMIT_REJECTED must cite the final SDK envelope row."""
+        import json
+
+        import src.execution.executor as executor_module
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_exit_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "FOK")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_exit_intent(mem_conn, trade_id="trd-exit-final-rejected")
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+                bound,
+                success=False,
+                status="rejected",
+                error_code="POST_ONLY_REJECTED",
+                error_message="would cross spread",
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-final-rejected",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "POST_ONLY_REJECTED"
+        command = mem_conn.execute(
+            "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
+            ("trd-exit-final-rejected",),
+        ).fetchone()
+        assert command["state"] == "REJECTED"
+        rejected = [
+            event for event in list_events(mem_conn, command["command_id"])
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][0]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["final_submission_envelope_id"]
+        row = mem_conn.execute(
+            "SELECT error_code FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (payload["final_submission_envelope_id"],),
+        ).fetchone()
+        assert row["error_code"] == "POST_ONLY_REJECTED"
+
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.
 
@@ -1020,7 +1331,7 @@ class TestExitOrderCommandSplit:
         assert "SUBMIT_TIMEOUT_UNKNOWN" in event_types
 
     def test_exit_submit_rejected_writes_event_with_state_rejected(self, mem_conn):
-        """place_limit_order returns None (exit path) -> state=REJECTED."""
+        """place_limit_order returns None (exit path) -> REVIEW_REQUIRED."""
         from src.execution.executor import execute_exit_order
         from src.state.venue_command_repo import get_command
 
@@ -1047,11 +1358,12 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-003",
             )
 
-        assert result.status == "rejected"
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
-        assert cmd["state"] == "REJECTED"
+        assert cmd["state"] == "REVIEW_REQUIRED"
 
     def test_exit_submit_acked_writes_event_with_state_acked(self, mem_conn):
         """place_limit_order returns orderID (exit path) -> state=ACKED."""
@@ -1073,7 +1385,10 @@ class TestExitOrderCommandSplit:
         ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
             MockClient.return_value = mock_inst
-            mock_inst.place_limit_order.return_value = {"orderID": "ord-exit-acked-001"}
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-acked-001")
+            )
 
             result = execute_exit_order(
                 intent=intent,
@@ -1407,7 +1722,10 @@ def test_synthetic_decision_id_emits_warning(mem_conn, caplog):
         mock_inst = MagicMock()
         MockClient.return_value = mock_inst
         mock_inst.v2_preflight.return_value = None
-        mock_inst.place_limit_order.return_value = {"orderID": "ord-synth-001"}
+        bound = _capture_bound_submission_envelope(mock_inst)
+        mock_inst.place_limit_order.side_effect = (
+            lambda **kwargs: _final_submit_result(bound, order_id="ord-synth-001")
+        )
 
         with patch("src.execution.executor.alert_trade", lambda **kw: None):
             with caplog.at_level(logging.WARNING, logger="src.execution.executor"):

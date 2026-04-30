@@ -422,6 +422,87 @@ def _persist_prebuilt_submit_envelope(
     )
 
 
+class FinalSubmissionEnvelopePersistenceError(RuntimeError):
+    """Raised when post-submit SDK provenance cannot be persisted."""
+
+
+def _persist_final_submission_envelope_payload(
+    conn: sqlite3.Connection,
+    result,
+    *,
+    command_id: str,
+) -> dict[str, str]:
+    """Persist the SDK-returned submission envelope as a second append-only row.
+
+    The command row keeps pointing at the pre-side-effect envelope.  This helper
+    pins the post-submit SDK response/signature facts and returns a compact
+    event payload reference so ACK/REJECTED events can prove which final
+    envelope row they observed.
+    """
+
+    if not isinstance(result, dict):
+        raise FinalSubmissionEnvelopePersistenceError(
+            f"submit result must be a dict, got {type(result).__name__}"
+        )
+    envelope_payload = result.get("_venue_submission_envelope")
+    if envelope_payload is None:
+        raise FinalSubmissionEnvelopePersistenceError(
+            "submit result missing _venue_submission_envelope"
+        )
+    if not isinstance(envelope_payload, dict):
+        raise FinalSubmissionEnvelopePersistenceError(
+            f"_venue_submission_envelope must be dict, got {type(envelope_payload).__name__}"
+        )
+
+    try:
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+        from src.state.venue_command_repo import insert_submission_envelope
+
+        envelope = VenueSubmissionEnvelope.from_dict(envelope_payload)
+        envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
+        try:
+            envelope_id = insert_submission_envelope(conn, envelope)
+        except sqlite3.IntegrityError:
+            if conn.execute(
+                "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+                (envelope_id,),
+            ).fetchone() is None:
+                raise
+        return {
+            "final_submission_envelope_stage": "post_submit_result",
+            "final_submission_envelope_id": envelope_id,
+            "final_submission_envelope_command_id": command_id,
+        }
+    except Exception as exc:
+        raise FinalSubmissionEnvelopePersistenceError(str(exc)) from exc
+
+
+def _submit_result_order_id(result) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    return result.get("orderID") or result.get("orderId") or result.get("id") or None
+
+
+def _submit_result_review_required_payload(
+    result,
+    *,
+    reason: str,
+    detail: str,
+    idempotency_key: str,
+) -> dict[str, str]:
+    payload = {
+        "reason": reason,
+        "detail": detail,
+        "idempotency_key": idempotency_key,
+    }
+    order_id = _submit_result_order_id(result)
+    if order_id:
+        payload["venue_order_id"] = str(order_id)
+    if isinstance(result, dict) and result.get("status") is not None:
+        payload["venue_status"] = str(result.get("status"))
+    return payload
+
+
 @dataclass
 class OrderResult:
     """Result of an order attempt."""
@@ -1014,7 +1095,7 @@ def execute_exit_order(
             )
 
         try:
-            envelope_id = _persist_pre_submit_envelope(
+            pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
                 snapshot_id=intent.executable_snapshot_id,
@@ -1025,6 +1106,11 @@ def execute_exit_order(
                 order_type=order_type,
                 post_only=False,
                 captured_at=now_str,
+            )
+            envelope_id = _persist_prebuilt_submit_envelope(
+                conn,
+                pre_submit_envelope,
+                command_id=command_id,
             )
             insert_command(
                 conn,
@@ -1193,6 +1279,8 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 command_state="REJECTED",
             )
+        if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
+            client.bind_submission_envelope(pre_submit_envelope)
         try:
             result = client.place_limit_order(
                 token_id=intent.token_id,
@@ -1249,33 +1337,77 @@ def execute_exit_order(
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
+                    event_type="REVIEW_REQUIRED",
                     occurred_at=ack_time,
-                    payload={"reason": "clob_returned_none"},
+                    payload={
+                        "reason": "final_submission_envelope_persistence_failed",
+                        "detail": "place_limit_order returned None",
+                        "idempotency_key": idem.value,
+                    },
                 )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "execute_exit_order: SUBMIT_REJECTED append_event failed (command_id=%s): %s",
+                    "execute_exit_order: REVIEW_REQUIRED append_event failed after missing final "
+                    "submission envelope (command_id=%s): %s",
                     command_id, inner,
                 )
             return OrderResult(
                 trade_id=intent.trade_id,
-                status="rejected",
-                reason="clob_returned_none",
+                status="unknown_side_effect",
+                reason="final_submission_envelope_persistence_failed: place_limit_order returned None",
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
                 intent_id=intent.intent_id,
-                idempotency_key=intent.idempotency_key,
+                idempotency_key=idem.value,
+                command_state="REVIEW_REQUIRED",
             )
 
-        order_id = (
-            result.get("orderID")
-            or result.get("orderId")
-            or result.get("id")
-        )
+        try:
+            final_envelope_payload = _persist_final_submission_envelope_payload(
+                conn,
+                result,
+                command_id=command_id,
+            )
+        except FinalSubmissionEnvelopePersistenceError as exc:
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="REVIEW_REQUIRED",
+                    occurred_at=ack_time,
+                    payload=_submit_result_review_required_payload(
+                        result,
+                        reason="final_submission_envelope_persistence_failed",
+                        detail=str(exc),
+                        idempotency_key=idem.value,
+                    ),
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "execute_exit_order: REVIEW_REQUIRED append_event failed after final "
+                    "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
+                    command_id, inner, exc,
+                )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="unknown_side_effect",
+                reason=f"final_submission_envelope_persistence_failed: {exc}",
+                order_id=_submit_result_order_id(result),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                external_order_id=_submit_result_order_id(result),
+                venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
+                idempotency_key=idem.value,
+                command_state="REVIEW_REQUIRED",
+            )
+        order_id = _submit_result_order_id(result)
         if result.get("success") is False:
             rejection_reason = (
                 result.get("errorCode")
@@ -1292,6 +1424,7 @@ def execute_exit_order(
                     payload={
                         "reason": str(rejection_reason),
                         "detail": result.get("errorMessage") or result.get("error_message") or "",
+                        **final_envelope_payload,
                     },
                 )
                 if _own_conn:
@@ -1320,7 +1453,7 @@ def execute_exit_order(
                     command_id=command_id,
                     event_type="SUBMIT_REJECTED",
                     occurred_at=ack_time,
-                    payload={"reason": "missing_order_id"},
+                    payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
                 if _own_conn:
                     conn.commit()
@@ -1349,7 +1482,11 @@ def execute_exit_order(
                 command_id=command_id,
                 event_type="SUBMIT_ACKED",
                 occurred_at=ack_time,
-                payload={"venue_order_id": order_id, "order_type": order_type},
+                payload={
+                    "venue_order_id": order_id,
+                    "order_type": order_type,
+                    **final_envelope_payload,
+                },
             )
             if _own_conn:
                 conn.commit()
@@ -1869,28 +2006,74 @@ def _live_order(
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
+                    event_type="REVIEW_REQUIRED",
                     occurred_at=ack_time,
-                    payload={"reason": "clob_returned_none"},
+                    payload={
+                        "reason": "final_submission_envelope_persistence_failed",
+                        "detail": "place_limit_order returned None",
+                        "idempotency_key": idem.value,
+                    },
                 )
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
                 logger.error(
-                    "_live_order: SUBMIT_REJECTED append_event failed (command_id=%s): %s",
+                    "_live_order: REVIEW_REQUIRED append_event failed after missing final "
+                    "submission envelope (command_id=%s): %s",
                     command_id, inner,
                 )
             return OrderResult(
-                trade_id=trade_id, status="rejected",
-                reason="clob_returned_none",
+                trade_id=trade_id,
+                status="unknown_side_effect",
+                reason="final_submission_envelope_persistence_failed: place_limit_order returned None",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REVIEW_REQUIRED",
             )
 
-        order_id = (
-            result.get("orderID")
-            or result.get("orderId")
-            or result.get("id")
-            or None
-        )
+        try:
+            final_envelope_payload = _persist_final_submission_envelope_payload(
+                conn,
+                result,
+                command_id=command_id,
+            )
+        except FinalSubmissionEnvelopePersistenceError as exc:
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="REVIEW_REQUIRED",
+                    occurred_at=ack_time,
+                    payload=_submit_result_review_required_payload(
+                        result,
+                        reason="final_submission_envelope_persistence_failed",
+                        detail=str(exc),
+                        idempotency_key=idem.value,
+                    ),
+                )
+                if _own_conn:
+                    conn.commit()
+            except Exception as inner:
+                logger.error(
+                    "_live_order: REVIEW_REQUIRED append_event failed after final "
+                    "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
+                    command_id, inner, exc,
+                )
+            return OrderResult(
+                trade_id=trade_id,
+                status="unknown_side_effect",
+                reason=f"final_submission_envelope_persistence_failed: {exc}",
+                order_id=_submit_result_order_id(result),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
+                idempotency_key=idem.value,
+                command_state="REVIEW_REQUIRED",
+            )
+        order_id = _submit_result_order_id(result)
         if result.get("success") is False:
             rejection_reason = (
                 result.get("errorCode")
@@ -1907,6 +2090,7 @@ def _live_order(
                     payload={
                         "reason": str(rejection_reason),
                         "detail": result.get("errorMessage") or result.get("error_message") or "",
+                        **final_envelope_payload,
                     },
                 )
                 if _own_conn:
@@ -1934,7 +2118,7 @@ def _live_order(
                     command_id=command_id,
                     event_type="SUBMIT_REJECTED",
                     occurred_at=ack_time,
-                    payload={"reason": "missing_order_id"},
+                    payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
                 if _own_conn:
                     conn.commit()
@@ -1965,6 +2149,7 @@ def _live_order(
                     "venue_order_id": order_id,
                     "venue_status": str(result.get("status") or ""),
                     "order_type": order_type,
+                    **final_envelope_payload,
                 },
             )
             if _own_conn:
