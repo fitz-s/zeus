@@ -74,6 +74,10 @@ The mode is the contract; the tool surface is runtime-specific:
 - Critic gates apply to Mode C/D batch boundaries and escalated merge conflicts.
   They do not apply to Mode A/B direct work, clean cross-worktree merges, or
   narrow mechanical conflict resolution.
+- Artifacts are claim-scoped. Do not create `evidence.md`, `findings.md`,
+  receipts, work logs, or review records just because prior packets had them.
+  Create them only when the selected mode, active packet, closeout gate, or
+  future handoff consumes that file.
 
 ### §3.1 Scope-lock subclause
 
@@ -125,7 +129,7 @@ End this phase only when the next artifact can state: objective, non-goals, inva
 
 **Mode A (Direct)**: no handoff docs; just edit + commit + verify.
 
-**Mode B (Subagent)**: `task_packet.md` in active packet folder; include the 7-item Execution Prompt Shape (§7).
+**Mode B (Subagent)**: `task_packet.md` in active packet folder; include the 7-item Execution Prompt Shape (§7). Do not add a separate evidence/findings stack unless the task is an audit/review or the packet explicitly needs durable evidence.
 
 **Mode C (Longlast multi-batch)**: full set:
 - `project_brief.md` — context + goal
@@ -141,6 +145,9 @@ End this phase only when the next artifact can state: objective, non-goals, inva
 **Mode D (Adversarial debate)**: per `docs/methodology/adversarial_debate_for_project_evaluation.md` §2: TOPIC.md + judge_ledger.md + per-round evidence + verdict.md.
 
 Use only the subset the task actually needs.
+`findings.md` is an audit/review artifact name, not a default implementation
+artifact. `evidence.md` is for durable evidence that a gate or future handoff
+will actually read, not for duplicating every command result.
 
 ---
 

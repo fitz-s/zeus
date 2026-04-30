@@ -142,3 +142,32 @@ Next: review and merge only after normal branch critic/PR process; graph-impact 
   - `python -m pytest -q tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or runtime_claim or route_card or warning_lifecycle or migration_notes or issue_schema or operation_task_folder'` -> 80 passed, 196 deselected
   - `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or map_maintenance or route_card or runtime_claim or graph_claim or impact or module_book or module_manifest or runtime_command or dispatch_guidance or graph_health or live_side_effect or warning_lifecycle or warning_deferral or migration_notes or issue_schema or operation_task_folder or semantic_boot'` -> 168 passed, 161 deselected
   - `git diff --check` -> clean
+
+## 2026-04-30 Claim-Scoped Workflow Pruning Follow-Up
+
+Date: 2026-04-30
+Branch: `agent-runtime-flow-pruning-2026-04-30`
+Task: Reduce repeated agent-runtime ceremony without weakening high-risk gates.
+Changed files: `.agents/skills/zeus-ai-handoff/SKILL.md`, `AGENTS.md`, `docs/operations/AGENTS.md`, `docs/operations/current_state.md`, `docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json`, `docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/work_log.md`, `scripts/topology_doctor.py`, `scripts/topology_doctor_digest.py`, `tests/test_digest_profile_matching.py`, `tests/test_topology_doctor.py`
+Summary: T0 read-only authority references now remain advisory instead of
+write-admission blockers. T3 route cards keep planning-lock and focused gates,
+but make work records, receipts, and critic review conditional on packet
+closeout, explicit claims, or semantic ambiguity. Root/handoff/operations
+guidance now states that `evidence.md` and `findings.md` are packet-local
+artifact names, not universal implementation requirements. `current_state.md`
+no longer points at archived packet paths as active operations surfaces.
+Verification:
+- `python -m pytest -q tests/test_topology_doctor.py -k 'runtime_route_card or read_only_runtime or navigation_without_graph_claim or graph_impact_claim or live_side_effect_claim or semantic_boot_claim'` -> 13 passed, 271 deselected
+- `python -m pytest -q tests/test_topology_doctor.py -k 'navigation or digest or context_pack or closeout or code_review_graph or runtime_route_card or read_only_runtime'` -> 83 passed, 201 deselected
+- `python -m pytest -q tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py` -> 47 passed
+- `python scripts/topology_doctor.py --schema --json` -> ok true
+- `python scripts/topology_doctor.py runtime ... --write-intent read_only --route-card-only --json` -> ok true
+- `python scripts/topology_doctor.py --navigation ... --write-intent edit --json` -> ok true, direct_blockers=[]
+- `python scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md --json` -> ok true
+- `python scripts/topology_doctor.py --map-maintenance ... --map-maintenance-mode closeout --json` -> ok true
+- `python scripts/topology_doctor.py --work-record ... --work-record-path docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/work_log.md --json` -> ok true
+- `python scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json --json` -> ok true
+- `python scripts/topology_doctor.py closeout ... --receipt-path docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json --json` -> ok true
+- `git diff --check` -> clean
+Next: Ready for scoped review/merge; no standalone `evidence.md` or
+`findings.md` artifact was created for this follow-up.

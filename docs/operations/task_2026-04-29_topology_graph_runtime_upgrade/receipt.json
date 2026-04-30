@@ -17,6 +17,8 @@
     "tests/AGENTS.md"
   ],
   "allowed_files": [
+    ".agents/skills/zeus-ai-handoff/SKILL.md",
+    "AGENTS.md",
     "architecture/context_pack_profiles.yaml",
     "architecture/digest_profiles.py",
     "architecture/map_maintenance.yaml",
@@ -24,6 +26,7 @@
     "architecture/topology.yaml",
     "architecture/topology_schema.yaml",
     "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
     "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/**",
     "docs/reference/modules/closeout_and_receipts_system.md",
@@ -50,6 +53,8 @@
     "src/**"
   ],
   "changed_files": [
+    ".agents/skills/zeus-ai-handoff/SKILL.md",
+    "AGENTS.md",
     "architecture/context_pack_profiles.yaml",
     "architecture/digest_profiles.py",
     "architecture/map_maintenance.yaml",
@@ -57,6 +62,7 @@
     "architecture/topology.yaml",
     "architecture/topology_schema.yaml",
     "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
     "docs/operations/runtime_artifact_inventory.md",
     "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/evidence/analysis_index.md",
     "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/implementation_plan.md",
@@ -130,7 +136,19 @@
     "digest profile mirror check: ok",
     "pytest digest profile suite: 37 passed",
     "pytest topology doctor runtime slice: 69 passed, 182 deselected",
-    "topology closeout: ok true"
+    "topology closeout: ok true",
+    "2026-04-30 claim-scoped anti-bureaucracy follow-up applied: read-only authority references no longer create write-admission blockers; T3 route cards keep receipt/critic/work-record conditional on packet closeout, explicit claims, or semantic ambiguity; packet-local evidence/findings wording clarified in AGENTS and handoff surfaces; current_state archived packet paths now route through archive registry.",
+    "pytest runtime route-card/read-only slice: 13 passed, 271 deselected",
+    "pytest topology doctor runtime/navigation/closeout/graph slice: 83 passed, 201 deselected",
+    "pytest digest profile suite: 47 passed",
+    "schema check: ok true",
+    "navigation for this follow-up: ok true, direct_blockers=[]",
+    "planning-lock for this follow-up with packet plan evidence: ok true",
+    "map-maintenance for this follow-up: ok true",
+    "work-record check for this follow-up: ok true",
+    "change-receipts check for this follow-up: ok true",
+    "topology closeout for this follow-up: ok true",
+    "git diff --check: clean"
   ],
   "tests_evidence": [
     "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/work_log.md",
