@@ -106,6 +106,68 @@ def test_data_backfill_phrase_routes_to_backfill_profile():
     assert digest["admission"]["status"] == "admitted"
 
 
+def test_source_contract_market_scanner_routes_to_data_profile():
+    digest = build_digest(
+        "implement source contract gate in market scanner for settlement source drift",
+        ["src/data/market_scanner.py", "tests/test_market_scanner_provenance.py"],
+    )
+    assert digest["profile"] == "modify data ingestion"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/data/market_scanner.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_market_scanner_provenance.py" in digest["admission"]["admitted_files"]
+
+
+def test_source_contract_watch_script_routes_to_script_profile():
+    digest = build_digest(
+        "add diagnostic script for settlement source contract watch",
+        [
+            "scripts/watch_source_contract.py",
+            "architecture/script_manifest.yaml",
+            "tests/test_market_scanner_provenance.py",
+        ],
+        intent="add or change script",
+        task_class="runtime_support",
+        write_intent="add",
+    )
+    assert digest["profile"] == "add or change script"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
+
+
+def test_source_watch_venus_sensing_integration_routes_to_script_profile():
+    digest = build_digest(
+        "add or change script: runtime_support source-contract watch integration for Venus sensing report",
+        [
+            "scripts/venus_sensing_report.py",
+            "scripts/watch_source_contract.py",
+            "tests/test_market_scanner_provenance.py",
+            "architecture/script_manifest.yaml",
+        ],
+        intent="add or change script",
+        task_class="runtime_support",
+        write_intent="change",
+    )
+    assert digest["profile"] == "add or change script"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/venus_sensing_report.py" in digest["admission"]["admitted_files"]
+    assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
+
+
+def test_source_current_fact_refresh_routes_to_current_fact_profile():
+    digest = build_digest(
+        "current source validity refresh for source-contract drift current fact",
+        [
+            "docs/operations/current_source_validity.md",
+            "scripts/watch_source_contract.py",
+            "tests/test_market_scanner_provenance.py",
+        ],
+    )
+    assert digest["profile"] == "refresh source current fact"
+    assert digest["admission"]["status"] == "admitted"
+    assert "docs/operations/current_source_validity.md" in digest["admission"]["admitted_files"]
+    assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
+
+
 def test_r3_u2_raw_provenance_routes_to_u2_profile_not_heartbeat():
     """U2 shares broad R3 packet docs paths with earlier phases; strong U2
     phrases must win over Z3's broad docs file-pattern hit so state/schema
