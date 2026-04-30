@@ -719,6 +719,8 @@ def _reconcile_admission(
     requested_files: list[str] | Iterable[Any] | None,
     resolution: dict[str, Any],
     topology: dict[str, Any],
+    *,
+    write_intent: str | None = None,
 ) -> dict[str, Any]:
     """Decide which requested files are admitted for write under this profile.
 
@@ -738,6 +740,9 @@ def _reconcile_admission(
     # prefixes, deduplicate while preserving order. All downstream comparisons
     # operate on these canonical strings.
     requested = _normalize_paths(requested_files)
+    intent = (write_intent or "").strip().lower()
+    normalized_intent = intent.replace("_", "-").replace(" ", "-")
+    read_only = normalized_intent in {"read-only", "readonly", "none"}
 
     # 1. Ambiguity short-circuits.
     if resolution.get("ambiguous"):
@@ -763,6 +768,27 @@ def _reconcile_admission(
     # 2. Generic fallback: never admits caller files.
     if selected_profile is None:
         forbidden_hits = [f for f in requested if _matches_any(f, list(_GENERIC_FORBIDDEN_FILES))]
+        if read_only:
+            return {
+                "status": "advisory_only",
+                "profile_id": "generic",
+                "confidence": resolution.get("confidence", 0.0),
+                "admitted_files": [],
+                "profile_suggested_files": [],
+                "out_of_scope_files": list(requested),
+                "forbidden_hits": [],
+                "companion_required": [],
+                "decision_basis": {
+                    "task_phrases": [],
+                    "file_globs": [],
+                    "negative_hits": [],
+                    "selected_by": resolution.get("selected_by", "fallback"),
+                    "candidates": resolution.get("candidates", []),
+                    "why": resolution.get("why", []) + [
+                        "read-only intent: requested files are context references, not write admission"
+                    ],
+                },
+            }
         return {
             "status": "blocked" if forbidden_hits else "advisory_only",
             "profile_id": "generic",
@@ -789,6 +815,27 @@ def _reconcile_admission(
 
     # 3. forbidden-wins.
     forbidden_hits = [f for f in requested if _matches_any(f, forbidden_combined)]
+    if read_only:
+        return {
+            "status": "advisory_only",
+            "profile_id": selected_profile.get("id"),
+            "confidence": resolution.get("confidence", 0.0),
+            "admitted_files": [],
+            "profile_suggested_files": allowed,
+            "out_of_scope_files": list(requested),
+            "forbidden_hits": [],
+            "companion_required": [],
+            "decision_basis": {
+                "task_phrases": _decision_phrases(resolution),
+                "file_globs": _decision_globs(resolution),
+                "negative_hits": _decision_negatives(resolution),
+                "selected_by": resolution.get("selected_by", "fallback"),
+                "candidates": resolution.get("candidates", []),
+                "why": resolution.get("why", []) + [
+                    "read-only intent: forbidden/out-of-scope files may be cited but not edited"
+                ],
+            },
+        }
 
     # 4. Detect route_contract_conflict: a requested file simultaneously
     # appears (verbatim or by glob) in both the profile's allowed list and
@@ -980,7 +1027,7 @@ def build_digest(
                 selected = profile
                 break
 
-    admission = _reconcile_admission(selected, requested, resolution, topology)
+    admission = _reconcile_admission(selected, requested, resolution, topology, write_intent=write_intent)
     evidence_class = resolution.get("evidence_class") or resolution.get("selected_by") or "none"
     profile_selection = {
         "selected_by": resolution.get("selected_by"),

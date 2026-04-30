@@ -36,7 +36,10 @@ bounded impact summary without pretending every file is source.
 ## Hidden obligations
 
 - Navigation must not treat unrelated repo-health drift as a direct blocker, but it must continue to expose that drift.
-- Closeout must block missing work records, missing receipts, changed-file companion failures, and changed-file law violations.
+- When packet closeout or `packet_closeout_complete` is the active claim,
+  closeout must block missing work records, missing receipts, changed-file
+  companion failures, and changed-file law violations. Those artifact gates are
+  not default prerequisites for direct T0/T1 edits.
 - JSON issue compatibility is durable: `code`, `path`, `message`, and `severity` remain present in legacy output.
 - Typed issue metadata is additive and exists to route repair work, not to invent new law.
 - Every new top-level script/test/doc route needs its owning manifest updated when the manifest owns that class of fact.

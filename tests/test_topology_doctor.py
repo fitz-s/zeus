@@ -4551,6 +4551,100 @@ def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
 
 
+def test_read_only_runtime_can_reference_forbidden_authority_without_write_admission():
+    for write_intent in ("read_only", "read-only", "read only"):
+        digest = topology_doctor.build_digest(
+            "read-only delivery law review for process burden",
+            ["docs/authority/zeus_current_delivery.md"],
+            intent="topology graph agent runtime upgrade",
+            task_class="agent_runtime",
+            write_intent=write_intent,
+        )
+
+        assert digest["route_card"]["risk_tier"] == "T0"
+        assert digest["admission"]["status"] == "advisory_only"
+        assert digest["admission"]["admitted_files"] == []
+        assert digest["admission"]["forbidden_hits"] == []
+        assert "read-only" in " ".join(digest["admission"]["decision_basis"]["why"])
+
+
+def test_runtime_route_card_t3_keeps_closeout_receipt_conditional():
+    digest = topology_doctor.build_digest(
+        "agent runtime route card implementation",
+        ["scripts/topology_doctor.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["risk_tier"] == "T3"
+    assert "closeout_receipt" not in card["gate_budget"]["required"]
+    assert "packet closeout" in card["next_action"]
+    assert any("receipt" in item for item in card["gate_budget"]["optional"])
+
+
+def test_runtime_route_card_t1_omits_packet_ceremony():
+    digest = topology_doctor.build_digest(
+        "narrow digest profile regression test update",
+        ["tests/test_digest_profile_matching.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+    route_text = " ".join(
+        card["gate_budget"]["required"]
+        + card["gate_budget"]["optional"]
+        + card["expansion_hints"]
+        + [card["next_action"]]
+    ).lower()
+
+    assert card["risk_tier"] == "T1"
+    assert "evidence.md" not in route_text
+    assert "findings" not in route_text
+    assert "critic" not in route_text
+    assert "receipt" not in route_text
+    assert "work_log" not in route_text
+
+
+def test_runtime_reference_docs_keep_artifacts_claim_scoped():
+    topology_text = (
+        topology_doctor.ROOT / "docs/reference/modules/topology_system.md"
+    ).read_text()
+    doctor_text = (
+        topology_doctor.ROOT / "docs/reference/modules/topology_doctor_system.md"
+    ).read_text()
+    closeout_text = (
+        topology_doctor.ROOT / "docs/reference/modules/closeout_and_receipts_system.md"
+    ).read_text()
+
+    combined = "\n".join([topology_text, doctor_text, closeout_text])
+
+    assert "T3 work gets packet evidence, planning lock, and closeout receipts" not in combined
+    assert "Close with changed-file `closeout`, targeted tests" not in combined
+    assert "default artifact stack" in closeout_text
+    assert "direct T0/T1 edits" in doctor_text
+    assert "packet closeout, explicit claims, or semantic ambiguity" in topology_text
+
+
+def test_zeus_handoff_skill_keeps_reads_and_artifacts_mode_scoped():
+    text = (
+        topology_doctor.ROOT / ".agents/skills/zeus-ai-handoff/SKILL.md"
+    ).read_text()
+    registry_text = (
+        topology_doctor.ROOT / ".agents/skills/AGENTS.md"
+    ).read_text()
+
+    assert "## §1 Required Reads (always)" not in text
+    assert "## §1 Scope Reads (mode-scoped)" in text
+    assert "C if >4 files or multi-week" not in text
+    assert "candidate set, not a mandatory bundle" in text
+    assert "do not create placeholder files" in text
+    assert "Mode A (Direct)**: no handoff docs" in text
+    assert "v2.2 (2026-04-30)" in registry_text
+
+
 def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 

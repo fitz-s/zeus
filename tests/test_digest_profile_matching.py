@@ -664,6 +664,8 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
         "agent runtime route card typed intent claim-scoped graph workflow",
         [
             "scripts/topology_doctor_cli.py",
+            ".agents/skills/AGENTS.md",
+            ".agents/skills/zeus-ai-handoff/SKILL.md",
             "architecture/context_pack_profiles.yaml",
             "docs/reference/modules/topology_doctor_system.md",
         ],
@@ -671,8 +673,11 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
 
     assert digest["profile"] == "topology graph agent runtime upgrade"
     assert digest["admission"]["status"] == "admitted"
+    assert ".agents/skills/AGENTS.md" in digest["admission"]["admitted_files"]
     assert digest["route_card"]["risk_tier"] == "T3"
-    assert digest["route_card"]["next_action"].startswith("proceed only with packet plan")
+    assert digest["route_card"]["next_action"].startswith("proceed with planning-lock")
+    assert "closeout_receipt" not in digest["route_card"]["gate_budget"]["required"]
+    assert any("receipt" in item for item in digest["route_card"]["gate_budget"]["optional"])
 
 
 def test_shared_registry_files_do_not_select_domain_profile_by_themselves():
