@@ -550,8 +550,27 @@ scripts:
   validate_assumptions.py: {class: enforcement}
   validate_dynamic_alpha.py: {class: diagnostic}
   venus_autonomy_gate.py: {class: runtime_support}
-  venus_sensing_report.py: {class: runtime_support}
+  venus_sensing_report.py:
+    class: runtime_support
+    canonical_command: "python3 scripts/venus_sensing_report.py"
+    read_targets: [state/zeus.db, state/risk_state.db, state/positions.json, config/cities.json, state/source_contract_quarantine.json]
+    write_targets: [stdout, state/venus_sensing_report.json, state/source_contract_quarantine.json]
+    external_inputs: [Polymarket Gamma API]
+    required_helpers: [scripts.watch_source_contract, src.data.market_scanner]
+    required_tests: [tests/test_market_scanner_provenance.py]
+    reason: "Venus boundary report for daemon-independent sensing; includes source-contract watch so external cron can detect Polymarket settlement-source drift even when the live daemon is paused."
+    promotion_barrier: "Source-contract quarantine may block new entries only; it does not authorize config promotion, production DB mutation, backfill, settlement rebuild, calibration rebuild, or live placement."
   verify_truth_surfaces.py: {class: diagnostic}
+  watch_source_contract.py:
+    class: runtime_support
+    canonical_command: "python3 scripts/watch_source_contract.py [--city CITY|--conversion-plan CITY|--history [CITY]|--release-city CITY --release-evidence PATH] [--json] [--fail-on WARN|ALERT|DATA_UNAVAILABLE] [--report-only] [--quarantine-path PATH]"
+    read_targets: [config/cities.json, state/source_contract_quarantine.json]
+    write_targets: [stdout, state/source_contract_quarantine.json]
+    external_inputs: [Polymarket Gamma API]
+    required_helpers: [src.data.market_scanner]
+    required_tests: [tests/test_market_scanner_provenance.py]
+    reason: "Cron-safe source-contract watch for Polymarket active weather markets; detects missing, ambiguous, unsupported, or changed resolutionSource metadata, persists city source quarantine for ALERT mismatches, prints single-city conversion plans, and reports recorded source-conversion history."
+    promotion_barrier: "Quarantine may block new entries only; release requires config/source-validity/backfill/settlement/calibration/verification evidence plus per-field evidence_refs and does not authorize DB backfills or live placement."
   oracle_snapshot_listener.py: {class: runtime_support, canonical_command: "python3 scripts/oracle_snapshot_listener.py", reason: "Cron 10:00 UTC — captures WU/HKO API responses at PM settlement window for oracle error rate calibration. Writes to raw/oracle_shadow_snapshots/{city}/{date}.json."}
   bridge_oracle_to_calibration.py: {class: config_writer, canonical_command: "python3 scripts/bridge_oracle_to_calibration.py", write_targets: [data/oracle_error_rates.json], target_db: data/oracle_error_rates.json, external_inputs: [raw/oracle_shadow_snapshots, state/zeus-world.db], apply_flag: implicit, unguarded_write_rationale: "Existing bridge writes the oracle error-rate data artifact directly; output is evidence/config input and must be reviewed before promotion.", reason: "Compares oracle shadow snapshots vs PM settlements, updates data/oracle_error_rates.json."}
   code_review_graph_mcp_readonly.py: {class: utility, canonical_command: DO_NOT_RUN, reason: Zeus-safe MCP facade exposing Code Review Graph review/search tools without source-writing apply_refactor}

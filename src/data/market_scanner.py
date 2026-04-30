@@ -6,15 +6,17 @@ Parses bin structure, token IDs, and prices from market data.
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
 
-from src.config import City, cities_by_name
+from src.config import City, cities_by_name, state_path
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,13 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 # Authority literal follows the house pattern established in
 # src/contracts/observation_atom.py::ObservationAtom.authority.
 ScanAuthority = Literal["VERIFIED", "STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"]
+SourceContractStatus = Literal[
+    "MATCH",
+    "MISSING",
+    "AMBIGUOUS",
+    "MISMATCH",
+    "UNSUPPORTED",
+]
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,30 @@ class MarketSnapshot:
     fetched_at_utc: datetime | None = None
     stale_age_seconds: float | None = None
 
+
+@dataclass(frozen=True)
+class SourceContractCheck:
+    """Settlement-source proof extracted from Gamma resolution metadata."""
+
+    status: SourceContractStatus
+    reason: str
+    resolution_sources: tuple[str, ...]
+    source_family: str | None
+    station_id: str | None
+    configured_source_family: str
+    configured_station_id: str | None
+
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "resolution_sources": list(self.resolution_sources),
+            "source_family": self.source_family,
+            "station_id": self.station_id,
+            "configured_source_family": self.configured_source_family,
+            "configured_station_id": self.configured_station_id,
+        }
+
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
 
@@ -72,6 +105,363 @@ _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
 _ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
+SOURCE_CONTRACT_QUARANTINE_PATH_ENV = "ZEUS_SOURCE_CONTRACT_QUARANTINE_PATH"
+SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION = 1
+SOURCE_CONTRACT_ALERT_STATUSES = frozenset({"AMBIGUOUS", "MISMATCH", "UNSUPPORTED"})
+REQUIRED_SOURCE_CONVERSION_EVIDENCE = (
+    "config_updated",
+    "source_validity_updated",
+    "backfill_completed",
+    "settlements_rebuilt",
+    "calibration_rebuilt",
+    "verification_passed",
+)
+SOURCE_CONVERSION_EVIDENCE_DESCRIPTIONS = {
+    "config_updated": "config/cities.json reflects the new settlement source contract.",
+    "source_validity_updated": "docs/operations/current_source_validity.md records fresh source audit evidence.",
+    "backfill_completed": "affected city/date/metric/source-role rows have been backfilled or explicitly declared not required.",
+    "settlements_rebuilt": "affected settlement rows have been rebuilt or quarantined with row-level provenance.",
+    "calibration_rebuilt": "affected calibration pairs and Platt calibration buckets have been rebuilt.",
+    "verification_passed": "focused scanner/watch/rebuild/calibration verification has passed.",
+}
+
+
+def source_contract_quarantine_path(path: str | Path | None = None) -> Path:
+    if path is not None:
+        return Path(path)
+    override = os.environ.get(SOURCE_CONTRACT_QUARANTINE_PATH_ENV)
+    if override:
+        return Path(override)
+    return state_path("source_contract_quarantine.json")
+
+
+def _empty_source_contract_quarantine_payload() -> dict:
+    return {
+        "schema_version": SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION,
+        "updated_at": None,
+        "cities": {},
+        "transition_history": [],
+    }
+
+
+def _canonical_city_name(city_name: str) -> str:
+    candidate = str(city_name or "").strip()
+    if not candidate:
+        raise ValueError("source-contract quarantine requires city_name")
+    for configured_name in cities_by_name:
+        if configured_name.lower() == candidate.lower():
+            return configured_name
+    return candidate
+
+
+def load_source_contract_quarantines(path: str | Path | None = None) -> dict:
+    quarantine_path = source_contract_quarantine_path(path)
+    try:
+        payload = json.loads(quarantine_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _empty_source_contract_quarantine_payload()
+    if not isinstance(payload, dict):
+        raise ValueError(f"{quarantine_path} must contain a JSON object")
+    cities = payload.get("cities")
+    if not isinstance(cities, dict):
+        raise ValueError(f"{quarantine_path} missing object field 'cities'")
+    transition_history = payload.setdefault("transition_history", [])
+    if not isinstance(transition_history, list):
+        raise ValueError(f"{quarantine_path} field 'transition_history' must be a list")
+    return payload
+
+
+def _write_source_contract_quarantines(payload: dict, path: str | Path | None = None) -> Path:
+    quarantine_path = source_contract_quarantine_path(path)
+    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = quarantine_path.with_name(f".{quarantine_path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(quarantine_path)
+    return quarantine_path
+
+
+def active_source_contract_quarantines(path: str | Path | None = None) -> dict[str, dict]:
+    payload = load_source_contract_quarantines(path)
+    active: dict[str, dict] = {}
+    for city_name, entry in payload.get("cities", {}).items():
+        if isinstance(entry, dict) and entry.get("status") == "active":
+            active[str(city_name)] = dict(entry)
+    return active
+
+
+def is_city_source_quarantined(city_name: str, path: str | Path | None = None) -> bool:
+    try:
+        canonical = _canonical_city_name(city_name)
+        return canonical in active_source_contract_quarantines(path)
+    except Exception as exc:
+        logger.error(
+            "Source-contract quarantine state unreadable; blocking new entries fail-closed: %s",
+            exc,
+        )
+        return True
+
+
+def _evidence_ref_present(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        return any(_evidence_ref_present(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _evidence_ref_present(value.get(key))
+            for key in ("evidence_ref", "receipt", "path", "url", "command", "artifact")
+        )
+    return False
+
+
+def missing_source_conversion_evidence(evidence: dict) -> list[str]:
+    release_evidence = dict(evidence or {})
+    evidence_refs = release_evidence.get("evidence_refs", {})
+    if not isinstance(evidence_refs, dict):
+        evidence_refs = {}
+    missing: list[str] = []
+    for key in REQUIRED_SOURCE_CONVERSION_EVIDENCE:
+        if not release_evidence.get(key):
+            missing.append(key)
+            continue
+        ref_value = evidence_refs.get(key)
+        if not _evidence_ref_present(ref_value):
+            missing.append(f"{key}:evidence_ref")
+    return missing
+
+
+def _sorted_unique(values) -> list[str]:
+    normalized = {
+        str(value).strip()
+        for value in values
+        if value is not None and str(value).strip()
+    }
+    return sorted(normalized)
+
+
+def source_contract_transition_branch(entry: dict | None) -> str:
+    """Classify the source-change branch represented by a quarantine entry."""
+    if not isinstance(entry, dict):
+        return "no_active_quarantine"
+    events = ((entry.get("evidence") or {}).get("events") or [])
+    statuses = set()
+    observed_families = set()
+    configured_families = set()
+    observed_stations = set()
+    configured_stations = set()
+    for event in events:
+        contract = event.get("source_contract") or {}
+        if contract.get("status"):
+            statuses.add(str(contract["status"]))
+        if contract.get("source_family"):
+            observed_families.add(str(contract["source_family"]))
+        if contract.get("configured_source_family"):
+            configured_families.add(str(contract["configured_source_family"]))
+        if contract.get("station_id"):
+            observed_stations.add(str(contract["station_id"]))
+        if contract.get("configured_station_id"):
+            configured_stations.add(str(contract["configured_station_id"]))
+    if "UNSUPPORTED" in statuses:
+        return "unsupported_source_requires_manual_provider_adapter_review"
+    if "AMBIGUOUS" in statuses:
+        return "ambiguous_source_requires_manual_market_attestation"
+    if len(observed_families | configured_families) > 1:
+        return "provider_family_change_requires_new_source_role"
+    if observed_stations and configured_stations and observed_stations != configured_stations:
+        return "same_provider_station_change"
+    if "MISMATCH" in statuses:
+        return "source_contract_mismatch"
+    return "source_contract_review"
+
+
+def _source_contract_transition_record(
+    *,
+    city: str,
+    entry: dict,
+    release_evidence: dict,
+    released_at: str,
+    released_by: str,
+) -> dict:
+    events = ((entry.get("evidence") or {}).get("events") or [])
+    contracts = [
+        event.get("source_contract") or {}
+        for event in events
+        if isinstance(event, dict)
+    ]
+    evidence_refs = release_evidence.get("evidence_refs", {})
+    if not isinstance(evidence_refs, dict):
+        evidence_refs = {}
+
+    completed_evidence = {
+        key: {
+            "completed": bool(release_evidence.get(key)),
+            "evidence_ref": evidence_refs.get(key),
+        }
+        for key in REQUIRED_SOURCE_CONVERSION_EVIDENCE
+    }
+    affected_dates = _sorted_unique(event.get("target_date") for event in events)
+    event_ids = _sorted_unique(event.get("event_id") for event in events)
+    resolution_sources = _sorted_unique(
+        source
+        for contract in contracts
+        for source in (contract.get("resolution_sources") or [])
+    )
+    from_families = _sorted_unique(
+        contract.get("configured_source_family") for contract in contracts
+    )
+    from_stations = _sorted_unique(
+        contract.get("configured_station_id") for contract in contracts
+    )
+    to_families = _sorted_unique(contract.get("source_family") for contract in contracts)
+    to_stations = _sorted_unique(contract.get("station_id") for contract in contracts)
+
+    return {
+        "schema_version": SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION,
+        "city": city,
+        "status": "released",
+        "reason": entry.get("reason"),
+        "transition_branch": source_contract_transition_branch(entry),
+        "detected_at": entry.get("first_seen_at"),
+        "last_seen_at": entry.get("last_seen_at"),
+        "released_at": released_at,
+        "released_by": str(released_by or "unknown"),
+        "affected_target_dates": affected_dates,
+        "first_affected_target_date": affected_dates[0] if affected_dates else None,
+        "last_affected_target_date": affected_dates[-1] if affected_dates else None,
+        "event_ids": event_ids,
+        "affected_event_count": len(event_ids),
+        "from_source_contract": {
+            "source_families": from_families,
+            "station_ids": from_stations,
+        },
+        "to_source_contract": {
+            "source_families": to_families,
+            "station_ids": to_stations,
+            "resolution_sources": resolution_sources,
+        },
+        "completed_release_evidence": completed_evidence,
+    }
+
+
+def source_contract_transition_history(
+    city_name: str | None = None,
+    *,
+    path: str | Path | None = None,
+) -> list[dict]:
+    """Return recorded source-contract conversion history, optionally by city."""
+    payload = load_source_contract_quarantines(path)
+    history = [
+        dict(record)
+        for record in payload.get("transition_history", [])
+        if isinstance(record, dict)
+    ]
+    if city_name is None:
+        return history
+    canonical = _canonical_city_name(city_name)
+    return [
+        record
+        for record in history
+        if str(record.get("city") or "").lower() == canonical.lower()
+    ]
+
+
+def upsert_source_contract_quarantine(
+    city_name: str,
+    *,
+    reason: str,
+    evidence: dict,
+    observed_at: str | None = None,
+    source: str = "watch_source_contract",
+    path: str | Path | None = None,
+) -> dict:
+    canonical = _canonical_city_name(city_name)
+    now = observed_at or datetime.now(timezone.utc).isoformat()
+    payload = load_source_contract_quarantines(path)
+    cities = payload.setdefault("cities", {})
+    existing = cities.get(canonical, {}) if isinstance(cities.get(canonical), dict) else {}
+    first_seen_at = (
+        existing.get("first_seen_at")
+        if existing.get("status") == "active"
+        else now
+    )
+    entry = {
+        "city": canonical,
+        "status": "active",
+        "reason": str(reason or "source_contract_mismatch"),
+        "first_seen_at": first_seen_at,
+        "last_seen_at": now,
+        "source": str(source or "watch_source_contract"),
+        "evidence": dict(evidence or {}),
+    }
+    cities[canonical] = entry
+    payload["schema_version"] = SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION
+    payload["updated_at"] = now
+    quarantine_path = _write_source_contract_quarantines(payload, path)
+    return {
+        "status": "written",
+        "city": canonical,
+        "path": str(quarantine_path),
+        "entry": entry,
+    }
+
+
+def release_source_contract_quarantine(
+    city_name: str,
+    *,
+    released_by: str,
+    evidence: dict,
+    released_at: str | None = None,
+    path: str | Path | None = None,
+) -> dict:
+    canonical = _canonical_city_name(city_name)
+    release_evidence = dict(evidence or {})
+    missing = missing_source_conversion_evidence(release_evidence)
+    if missing:
+        return {
+            "status": "blocked",
+            "city": canonical,
+            "missing_evidence": missing,
+        }
+
+    now = released_at or datetime.now(timezone.utc).isoformat()
+    payload = load_source_contract_quarantines(path)
+    cities = payload.setdefault("cities", {})
+    entry = cities.get(canonical)
+    if not isinstance(entry, dict) or entry.get("status") != "active":
+        return {"status": "noop", "city": canonical, "reason": "not_active"}
+
+    released_entry = dict(entry)
+    transition_record = _source_contract_transition_record(
+        city=canonical,
+        entry=released_entry,
+        release_evidence=release_evidence,
+        released_at=now,
+        released_by=str(released_by or "unknown"),
+    )
+    released_entry.update(
+        {
+            "status": "released",
+            "released_at": now,
+            "released_by": str(released_by or "unknown"),
+            "release_evidence": release_evidence,
+            "transition_record": transition_record,
+        }
+    )
+    cities[canonical] = released_entry
+    payload.setdefault("transition_history", []).append(transition_record)
+    payload["schema_version"] = SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION
+    payload["updated_at"] = now
+    quarantine_path = _write_source_contract_quarantines(payload, path)
+    return {
+        "status": "released",
+        "city": canonical,
+        "path": str(quarantine_path),
+        "entry": released_entry,
+        "transition_record": transition_record,
+    }
 
 
 def infer_temperature_metric(*text_surfaces: str) -> str:
@@ -126,6 +516,27 @@ def find_weather_markets(
     for event in events:
         parsed = _parse_event(event, now, min_hours_to_resolution)
         if parsed is not None:
+            source_contract = parsed.get("source_contract", {})
+            if source_contract.get("status") != "MATCH":
+                logger.warning(
+                    "Skipping Gamma market without matched settlement source contract: "
+                    "city=%s status=%s reason=%s event=%s",
+                    parsed.get("city").name if parsed.get("city") else "?",
+                    source_contract.get("status"),
+                    source_contract.get("reason"),
+                    parsed.get("event_id"),
+                )
+                continue
+            city = parsed.get("city")
+            city_name = city.name if city else ""
+            if city_name and is_city_source_quarantined(city_name):
+                logger.warning(
+                    "Skipping Gamma market while city source-contract quarantine is active: "
+                    "city=%s event=%s",
+                    city_name,
+                    parsed.get("event_id"),
+                )
+                continue
             results.append(parsed)
 
     logger.info("Found %d active weather markets", len(results))
@@ -348,6 +759,18 @@ def _parse_event(
             event.get("id") or event.get("slug"),
         )
         return None
+    source_contract = _check_source_contract(event, city)
+    if source_contract.status in {"AMBIGUOUS", "MISMATCH", "UNSUPPORTED"}:
+        logger.warning(
+            "Rejecting Gamma market source contract mismatch: city=%s status=%s "
+            "reason=%s event=%s sources=%s",
+            city.name,
+            source_contract.status,
+            source_contract.reason,
+            event.get("id") or event.get("slug"),
+            list(source_contract.resolution_sources),
+        )
+        return None
 
     # Parse target date from slug or end date
     target_date = _parse_target_date(event, city)
@@ -416,6 +839,11 @@ def _parse_event(
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         "outcomes": outcomes,
+        "resolution_source": source_contract.resolution_sources[0]
+        if source_contract.resolution_sources
+        else "",
+        "resolution_sources": list(source_contract.resolution_sources),
+        "source_contract": source_contract.as_dict(),
     }
 
 
@@ -503,6 +931,216 @@ def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None
             if _token_in_text(token, combined):
                 return f"matched {matched_city.name} but text references {city.name} via {token!r}"
     return None
+
+
+def _collect_resolution_sources(event: dict) -> tuple[str, ...]:
+    """Collect explicit settlement source fields from a Gamma event payload."""
+    values: list[str] = []
+    source_keys = (
+        "resolutionSource",
+        "resolution_source",
+        "resolutionSourceUrl",
+        "resolution_source_url",
+    )
+
+    def add_value(value) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                values.append(stripped)
+            return
+        if isinstance(value, dict):
+            for key in ("url", "href", "source", "name", "title", "label"):
+                add_value(value.get(key))
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                add_value(item)
+
+    for key in source_keys:
+        add_value(event.get(key))
+    for market in event.get("markets", []) or []:
+        for key in source_keys:
+            add_value(market.get(key))
+
+    deduped: list[str] = []
+    seen = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        identity = normalized.lower()
+        if identity not in seen:
+            seen.add(identity)
+            deduped.append(normalized)
+    return tuple(deduped)
+
+
+def _infer_source_family(source: str) -> str | None:
+    text = source.lower()
+    if "weather.gov.hk" in text or "hko.gov.hk" in text or "hong kong observatory" in text:
+        return "hko"
+    if "wunderground.com" in text or "weather underground" in text or "wunderground" in text:
+        return "wu_icao"
+    if "weather.gov/wrh/timeseries" in text or "api.weather.gov" in text:
+        return "noaa"
+    if "cwa.gov.tw" in text or "cwb.gov.tw" in text or "central weather administration" in text:
+        return "cwa_station"
+    if re.search(r"(?<![a-z0-9])noaa(?![a-z0-9])", text):
+        return "noaa"
+    return None
+
+
+def _is_url_like_source(source: str) -> bool:
+    text = source.lower()
+    return "://" in text or text.startswith("www.") or re.search(r"\.[a-z]{2,}(/|$)", text) is not None
+
+
+def _configured_station_id(city: City) -> str | None:
+    station = city.wu_station
+    if station is None:
+        return None
+    station = str(station).strip()
+    return station.upper() if station else None
+
+
+def _extract_station_id(source: str, city: City) -> str | None:
+    text = source.strip()
+    m = re.search(
+        r"wunderground\.com/history/(?:daily|weekly|monthly)/[^?#\s]+/([A-Za-z0-9]{3,6})(?:[/?#\s]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).upper()
+
+    m = re.search(r"[?&]site=([A-Za-z0-9]{3,6})(?:[&#\s]|$)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+
+    expected = _configured_station_id(city)
+    if expected and _token_in_text(expected.lower(), text.lower()):
+        return expected
+    return None
+
+
+def _check_source_contract(event: dict, city: City) -> SourceContractCheck:
+    """Compare Gamma resolutionSource metadata against configured settlement source."""
+    sources = _collect_resolution_sources(event)
+    expected_family = city.settlement_source_type or "wu_icao"
+    expected_station = _configured_station_id(city)
+
+    if not sources:
+        return SourceContractCheck(
+            status="MISSING",
+            reason="Gamma payload has no resolutionSource field",
+            resolution_sources=(),
+            source_family=None,
+            station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+
+    families: set[str] = set()
+    stations: set[str] = set()
+    unsupported: list[str] = []
+
+    for source in sources:
+        family = _infer_source_family(source)
+        station = _extract_station_id(source, city)
+        if _is_url_like_source(source) and family is None:
+            unsupported.append(source)
+            continue
+        if family is None and station == expected_station:
+            family = expected_family
+        if family is not None:
+            families.add(family)
+        if station is not None:
+            stations.add(station)
+
+    if unsupported:
+        return SourceContractCheck(
+            status="UNSUPPORTED",
+            reason="resolutionSource URL domain is not a supported settlement source",
+            resolution_sources=sources,
+            source_family=None,
+            station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+    if len(families) > 1:
+        return SourceContractCheck(
+            status="AMBIGUOUS",
+            reason=f"multiple settlement source families observed: {sorted(families)}",
+            resolution_sources=sources,
+            source_family=None,
+            station_id=next(iter(stations)) if len(stations) == 1 else None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+    if len(stations) > 1:
+        return SourceContractCheck(
+            status="AMBIGUOUS",
+            reason=f"multiple settlement stations observed: {sorted(stations)}",
+            resolution_sources=sources,
+            source_family=next(iter(families)) if len(families) == 1 else None,
+            station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+
+    source_family = next(iter(families)) if families else None
+    station_id = next(iter(stations)) if stations else None
+    if source_family is not None and source_family != expected_family:
+        return SourceContractCheck(
+            status="MISMATCH",
+            reason=f"source family {source_family!r} != configured {expected_family!r}",
+            resolution_sources=sources,
+            source_family=source_family,
+            station_id=station_id,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+    if expected_station and source_family is not None and station_id is None:
+        return SourceContractCheck(
+            status="UNSUPPORTED",
+            reason="resolutionSource does not prove the configured settlement station",
+            resolution_sources=sources,
+            source_family=source_family,
+            station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+    if expected_station and station_id and station_id != expected_station:
+        return SourceContractCheck(
+            status="MISMATCH",
+            reason=f"station {station_id!r} != configured {expected_station!r}",
+            resolution_sources=sources,
+            source_family=source_family,
+            station_id=station_id,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+    if source_family is None and station_id is None:
+        return SourceContractCheck(
+            status="UNSUPPORTED",
+            reason="resolutionSource has no supported provider or configured station proof",
+            resolution_sources=sources,
+            source_family=None,
+            station_id=None,
+            configured_source_family=expected_family,
+            configured_station_id=expected_station,
+        )
+
+    return SourceContractCheck(
+        status="MATCH",
+        reason="resolutionSource matches configured settlement source contract",
+        resolution_sources=sources,
+        source_family=source_family or expected_family,
+        station_id=station_id,
+        configured_source_family=expected_family,
+        configured_station_id=expected_station,
+    )
 
 
 def _parse_target_date(event: dict, city: Optional["City"] = None) -> Optional[str]:
