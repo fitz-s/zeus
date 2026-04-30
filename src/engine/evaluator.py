@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 from src.calibration.manager import get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-from src.config import CONFIG_DIR, City, edge_n_bootstrap, ensemble_crosscheck_member_count, settings
+from src.config import CONFIG_DIR, City, edge_n_bootstrap, ensemble_crosscheck_member_count, ensemble_member_count, settings
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -459,6 +460,80 @@ def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str
     return None
 
 
+def _valid_probability_vector(values: np.ndarray, expected_len: int) -> bool:
+    try:
+        arr = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    if arr.shape != (expected_len,):
+        return False
+    if not np.all(np.isfinite(arr)):
+        return False
+    if np.any(arr < 0.0):
+        return False
+    if np.any(arr > 1.0):
+        return False
+    total = float(np.sum(arr))
+    return bool(np.isfinite(total) and np.isclose(total, 1.0, rtol=1e-6, atol=1e-6))
+
+
+def _parse_forecast_timestamp(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _forecast_times_as_strings(times: list) -> list[str]:
+    return [
+        ts.isoformat() if isinstance(ts, datetime) else str(ts)
+        for ts in times
+    ]
+
+
+def _remaining_hour_indices_for_day0(
+    target_day_indices: np.ndarray,
+    *,
+    times: list[str],
+    timezone_name: str,
+    now: datetime,
+) -> np.ndarray:
+    tz = ZoneInfo(timezone_name)
+    now_local = now.astimezone(tz)
+    remaining = [
+        int(idx)
+        for idx in target_day_indices
+        if _parse_forecast_timestamp(times[int(idx)]).astimezone(tz) >= now_local
+    ]
+    return np.array(remaining, dtype=int)
+
+
+def _validate_ensemble_for_required_hours(
+    result: dict,
+    *,
+    expected_members: int | None = None,
+    required_hour_indices: np.ndarray | None,
+) -> bool:
+    try:
+        if required_hour_indices is None:
+            if expected_members is None:
+                return validate_ensemble(result)
+            return validate_ensemble(result, expected_members=expected_members)
+        if expected_members is None:
+            return validate_ensemble(result, required_hour_indices=required_hour_indices)
+        return validate_ensemble(
+            result,
+            expected_members=expected_members,
+            required_hour_indices=required_hour_indices,
+        )
+    except TypeError as e:
+        if "required_hour_indices" not in str(e):
+            raise
+        if expected_members is None:
+            return validate_ensemble(result)
+        return validate_ensemble(result, expected_members=expected_members)
+
+
 def _selection_hypothesis_id(
     *,
     family_id: str,
@@ -878,12 +953,87 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
         )]
-    if ens_result is None or not validate_ensemble(ens_result):
+    if ens_result is None:
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
             rejection_reasons=["ENS fetch failed or < 51 members"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch"],
+        )]
+    n_members_meta = ens_result.get("n_members")
+    if n_members_meta is not None and int(n_members_meta) < ensemble_member_count():
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["ENS fetch failed or < 51 members"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch"],
+        )]
+    try:
+        ens_times = _forecast_times_as_strings(ens_result["times"])
+    except (KeyError, TypeError) as e:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[str(e)],
+            availability_status="DATA_STALE",
+            selected_method=selected_method,
+            applied_validations=["ens_fetch"],
+        )]
+    try:
+        ens_tz_hours = select_hours_for_target_date(
+            target_d,
+            city.timezone,
+            times=ens_times,
+        )
+    except ValueError:
+        ens_tz_hours = None
+    day0_temporal_context = None
+    required_hour_indices = ens_tz_hours
+    if is_day0_mode:
+        day0_temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
+        if day0_temporal_context is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["Solar/DST context unavailable for Day0"],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "solar_context"],
+            )]
+        if ens_tz_hours is not None:
+            required_hour_indices = _remaining_hour_indices_for_day0(
+                ens_tz_hours,
+                times=ens_times,
+                timezone_name=city.timezone,
+                now=day0_temporal_context.current_utc_timestamp,
+            )
+            if len(required_hour_indices) == 0:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=["No Day0 forecast hours remain for target date"],
+                    availability_status="DATA_STALE",
+                    selected_method=selected_method,
+                    applied_validations=["day0_observation", "ens_fetch"],
+                )]
+    if not _validate_ensemble_for_required_hours(
+        ens_result,
+        required_hour_indices=required_hour_indices,
+    ):
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["ENS fetch failed, < 51 members, or insufficient finite required-hour members"],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
@@ -895,7 +1045,7 @@ def evaluate_candidate(
     try:
         ens = EnsembleSignal(
             ens_result["members_hourly"],
-            ens_result["times"],
+            ens_times,
             city, 
             target_d, 
             settlement_semantics=settlement_semantics,
@@ -917,17 +1067,7 @@ def evaluate_candidate(
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, decision_reference))
 
     if is_day0_mode:
-        temporal_context = _get_day0_temporal_context(city, target_d, candidate.observation)
-        if temporal_context is None:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
-                rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["Solar/DST context unavailable for Day0"],
-                availability_status="DATA_STALE",
-                selected_method=selected_method,
-                applied_validations=["day0_observation", "solar_context"],
-            )]
+        temporal_context = day0_temporal_context
 
         extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
@@ -1006,17 +1146,41 @@ def evaluate_candidate(
         p_raw = day0.p_vector(bins)
         day0_forecast_context = day0.forecast_context()
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
+        required_member_floor = ensemble_member_count() if required_hour_indices is not None else 1
+        if raw_arr is None or np.count_nonzero(np.isfinite(raw_arr)) < required_member_floor:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["Day0 forecast has insufficient finite remaining ensemble members"],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "ens_fetch"],
+            )]
         ensemble_spread = TemperatureDelta(
             float(np.std(raw_arr)), city.settlement_unit
         )
+        analysis_member_extrema = raw_arr
         entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0
     else:
         p_raw = ens.p_raw_vector(bins)
         day0_forecast_context = None
         ensemble_spread = ens.spread()
+        analysis_member_extrema = ens.member_extrema
         entry_validations = ["ens_fetch", "mc_instrument_noise"]
         lead_days_for_calibration = lead_days
+
+    if not _valid_probability_vector(p_raw, len(bins)):
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["P_raw is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=entry_validations,
+        )]
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate)
     snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
@@ -1099,6 +1263,19 @@ def evaluate_candidate(
         # market-fusion authority gate is not applicable to Platt rows.
         _authority_verified = True
         p_cal = p_raw.copy()
+
+    if not _valid_probability_vector(p_cal, len(bins)):
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["P_cal is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=entry_validations,
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+        )]
 
     # Market prices via VWMP
     p_market = np.zeros(len(bins))
@@ -1187,10 +1364,7 @@ def evaluate_candidate(
                 p_market=p_market,
                 agreement="CROSSCHECK_UNAVAILABLE",
             )]
-        if gfs_result is None or not validate_ensemble(
-            gfs_result,
-            expected_members=ensemble_crosscheck_member_count(),
-        ):
+        if gfs_result is None:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
@@ -1209,8 +1383,27 @@ def evaluate_candidate(
             gfs_tz_hours = select_hours_for_target_date(
                 target_d,
                 city.timezone,
-                times=gfs_result["times"],
+                times=_forecast_times_as_strings(gfs_result["times"]),
             )
+            if not _validate_ensemble_for_required_hours(
+                gfs_result,
+                expected_members=ensemble_crosscheck_member_count(),
+                required_hour_indices=gfs_tz_hours,
+            ):
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=["GFS crosscheck unavailable"],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=[*entry_validations, "gfs_crosscheck_unavailable"],
+                    decision_snapshot_id=snapshot_id,
+                    p_raw=p_raw,
+                    p_cal=p_cal,
+                    p_market=p_market,
+                    agreement="CROSSCHECK_UNAVAILABLE",
+                )]
             gfs_metric_values = (
                 gfs_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
                 if temperature_metric.is_low()
@@ -1329,7 +1522,7 @@ def evaluate_candidate(
         p_market=p_market,
         alpha=alpha,
         bins=bins,
-        member_maxes=ens.member_extrema,
+        member_maxes=analysis_member_extrema,
         calibrator=cal,
         lead_days=lead_days_for_calibration,
         unit=city.settlement_unit,

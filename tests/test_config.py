@@ -1,3 +1,6 @@
+# Created: pre-Phase-0
+# Last reused/audited: 2026-04-30
+# Authority basis: Phase 10 DT-close B001 config contract + first-principles ZEUS_MODE cleanup 2026-04-30
 """Tests for config loader and city metadata."""
 
 import json
@@ -21,14 +24,35 @@ from src.config import (
     ensemble_member_count,
     ensemble_n_mc,
     ensemble_unimodal_range_epsilon,
+    get_mode,
     load_cities,
+    mode_state_path,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 
 
-## Paper mode test removed — Zeus is live-only (Phase 1 decommission).
-## Original test asserted Settings().mode == "paper", which is no longer valid.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_get_mode_is_live_constant_not_env_authority(monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "paper")
+
+    assert get_mode() == "live"
+
+
+def test_mode_state_path_rejects_non_live_runtime_modes():
+    with pytest.raises(ValueError, match="runtime state is live-only"):
+        mode_state_path("status_summary.json", mode="paper")
+
+
+def test_settings_mode_key_is_legacy_optional(tmp_path):
+    data = json.loads((PROJECT_ROOT / "config/settings.json").read_text())
+    data.pop("mode", None)
+    path = tmp_path / "settings-no-mode.json"
+    path.write_text(json.dumps(data))
+
+    assert Settings(path=path).mode == "live"
 
 
 def test_settings_missing_key_raises():
@@ -101,8 +125,8 @@ def test_city_without_explicit_cluster_is_rejected(tmp_path):
 
 
 def test_calibration_manager_cluster_taxonomy_matches_config():
-    manager_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src/calibration/manager.py").read_text()
-    refit_source = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/scripts/refit_platt.py").read_text()
+    manager_source = (PROJECT_ROOT / "src/calibration/manager.py").read_text()
+    refit_source = (PROJECT_ROOT / "scripts/refit_platt.py").read_text()
 
     assert tuple(calibration_clusters()) == tuple(ALL_CLUSTERS)
     assert "calibration_clusters()" in manager_source

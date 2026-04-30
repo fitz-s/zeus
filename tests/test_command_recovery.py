@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-26; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -217,6 +218,18 @@ def _advance_to_unknown(conn, command_id="cmd-001", venue_order_id=None):
                  occurred_at="2026-04-26T00:02:00Z")
 
 
+def _advance_to_unknown_side_effect(conn, command_id="cmd-001", venue_order_id=None):
+    """Advance to SUBMIT_UNKNOWN_SIDE_EFFECT for idempotency-key recovery."""
+    from src.state.venue_command_repo import append_event
+    _advance_to_submitting(conn, command_id=command_id, venue_order_id=venue_order_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_TIMEOUT_UNKNOWN",
+        occurred_at="2026-04-26T00:02:00Z",
+    )
+
+
 def _advance_to_cancel_pending(conn, command_id="cmd-001", venue_order_id=None):
     """Advance to CANCEL_PENDING (INTENT_CREATED u2192 SUBMITTING u2192 ACKED u2192 CANCEL_PENDING)."""
     from src.state.venue_command_repo import append_event
@@ -396,6 +409,51 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
 
+    @pytest.mark.parametrize("venue_status", ["MATCHED", "MINED"])
+    def test_unknown_side_effect_matched_or_mined_stays_partial_not_fill_finality(
+        self,
+        conn,
+        venue_status,
+    ):
+        _insert(conn)
+        _advance_to_unknown_side_effect(conn)
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = {
+            "orderID": f"vord-{venue_status.lower()}",
+            "status": venue_status,
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert "PARTIAL_FILL_OBSERVED" in event_types
+        assert "FILL_CONFIRMED" not in event_types
+
+    @pytest.mark.parametrize("venue_status", ["FILLED", "CONFIRMED"])
+    def test_unknown_side_effect_confirmed_or_filled_reaches_fill_finality(
+        self,
+        conn,
+        venue_status,
+    ):
+        _insert(conn)
+        _advance_to_unknown_side_effect(conn)
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = {
+            "orderID": f"vord-{venue_status.lower()}",
+            "status": venue_status,
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert "FILL_CONFIRMED" in event_types
+
     # Supplementary: summary dict has all expected keys
     def test_summary_has_all_keys(self, conn, mock_client):
         mock_client.get_order.return_value = None
@@ -442,13 +500,8 @@ class TestRecoveryCycleIntegration:
         # We cannot easily run a full cycle without live deps, so instead we verify
         # the import and call structure from the cycle_runner source.
         # Approach: import cycle_runner, parse for the recovery call.
-        from pathlib import Path
-        cr_src = Path(
-            "src/engine/cycle_runner.py"
-        ).read_text(encoding="utf-8") if False else open(
-            "/Users/leofitz/.openclaw/workspace-venus/zeus-pr18-fix-plan-20260426/src/engine/cycle_runner.py",
-            encoding="utf-8"
-        ).read()
+        repo_root = Path(__file__).resolve().parents[1]
+        cr_src = (repo_root / "src/engine/cycle_runner.py").read_text(encoding="utf-8")
 
         # Assert both the import and the call appear in the source
         assert "reconcile_unresolved_commands" in cr_src, (

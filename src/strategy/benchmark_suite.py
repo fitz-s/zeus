@@ -388,23 +388,23 @@ def _paper_observations_from_fake_venue(strategy_key: str, fake_venue: VenueLike
         raw = dict(getattr(trade, "raw", {}) or {})
         state = str(raw.get("state", "")).upper()
         size = _safe_float(raw.get("size"), default=0.0)
-        is_match = state == "MATCHED"
+        is_confirmed = state == "CONFIRMED"
         is_failed = state == "FAILED"
         yield BenchmarkObservation(
             strategy_key=strategy_key,
             observed_at=_parse_datetime(raw.get("observed_at"), observed_at),
-            alpha_pnl=size * 0.01 if is_match else 0.0,
-            spread_pnl=size * 0.005 if is_match else 0.0,
-            fees=size * 0.001 if is_match else 0.0,
-            slippage=size * 0.001 if is_match else 0.0,
+            alpha_pnl=size * 0.01 if is_confirmed else 0.0,
+            spread_pnl=size * 0.005 if is_confirmed else 0.0,
+            fees=size * 0.001 if is_confirmed else 0.0,
+            slippage=size * 0.001 if is_confirmed else 0.0,
             failed_settlement_cost=size * 0.01 if is_failed else 0.0,
             capital_lock_cost=size * 0.0005,
-            fill_probability=1.0 if is_match else 0.0,
-            adverse_selection_bps=5.0 if is_match else 50.0,
+            fill_probability=1.0 if is_confirmed else 0.0,
+            adverse_selection_bps=5.0 if is_confirmed else 50.0,
             time_to_resolution_hours=1.0,
-            liquidity_decay=0.0 if is_match else 0.02,
+            liquidity_decay=0.0 if is_confirmed else 0.02,
             opportunity_cost=size * 0.0005,
-            calibrated_probability=0.55 if is_match else 0.45,
+            calibrated_probability=0.55 if is_confirmed else 0.45,
             market_implied_probability=0.50,
             capital_at_risk=max(size, 1.0),
         )

@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-30
+# Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30
 """Cross-module relationship tests.
 
 These tests verify that when Module A's output flows to Module B,
@@ -453,12 +456,10 @@ def test_exit_lifecycle_fill_statuses_match_fill_tracker():
     decide the same thing in a different code path. If they diverge,
     one path will see fills the other misses — exits get stranded.
 
-    Current KNOWN divergence (as of discovery):
-      exit_lifecycle: {"MATCHED", "FILLED"}
-      fill_tracker:   {"FILLED", "MATCHED", "PARTIALLY_FILLED"}
-
-    PARTIALLY_FILLED orders seen by fill_tracker as fills will NOT be
-    recognized as fills by exit_lifecycle — position stays open forever.
+    First-principles finality: MATCHED/MINED are optimistic observations.
+    Both modules should share the final-only set, currently
+    {"CONFIRMED", "FILLED"}, so one path cannot economically close while
+    the other keeps waiting.
     """
     from src.execution.exit_lifecycle import FILL_STATUSES as lifecycle_statuses
     from src.execution.fill_tracker import FILL_STATUSES as tracker_statuses

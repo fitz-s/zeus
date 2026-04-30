@@ -28,6 +28,22 @@ RAW_PROBABILITY_SPACE = "raw_probability"
 WIDTH_NORMALIZED_SPACE = "width_normalized_density"
 
 
+def _finite_positive_width(bin_width: float | None) -> float | None:
+    if bin_width is None:
+        return None
+    try:
+        width = float(bin_width)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "bin_width must be finite and >0, or None only for known open-shoulder bins"
+        )
+    if not np.isfinite(width) or width <= 0:
+        raise ValueError(
+            "bin_width must be finite and >0, or None only for known open-shoulder bins"
+        )
+    return width
+
+
 def normalize_bin_probability_for_calibration(
     p_raw: float,
     *,
@@ -39,11 +55,13 @@ def normalize_bin_probability_for_calibration(
     approximate per-degree density rather than raw probability mass.
 
     Shoulder bins remain in raw probability space because they are open-ended
-    tail events and do not have a finite width.
+    tail events and do not have a finite width. ``bin_width=None`` is reserved
+    for those known shoulders; corrupt finite widths must fail closed.
     """
-    if bin_width is None or bin_width <= 0:
+    width = _finite_positive_width(bin_width)
+    if width is None:
         return float(p_raw)
-    return float(p_raw) / float(bin_width)
+    return float(p_raw) / width
 
 
 def logit_safe(p: float | np.ndarray, eps: float = P_CLAMP_LOW):
@@ -196,7 +214,7 @@ class ExtendedPlattCalibrator:
         """Build feature matrix: [logit(P_raw), lead_days]."""
         if bin_widths is not None:
             p_raw = np.array([
-                normalize_bin_probability_for_calibration(float(p), bin_width=float(w) if w is not None else None)
+                normalize_bin_probability_for_calibration(float(p), bin_width=w)
                 for p, w in zip(p_raw, bin_widths)
             ], dtype=np.float64)
         logits = logit_safe(p_raw)

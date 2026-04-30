@@ -411,7 +411,6 @@ categories:
     - tests/test_calibration_quality.py
     - tests/test_live_execution.py
     - tests/test_pre_live_integration.py
-    - tests/test_runtime_artifact_refresh.py
     - tests/test_strategy_tracker_regime.py
     - tests/test_truth_layer.py
 

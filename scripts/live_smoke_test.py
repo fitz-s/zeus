@@ -1,3 +1,6 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-30
+# Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; live smoke remains explicit operator path.
 """P12 Live Smoke Test — minimal $0.01 order to verify CLOB connectivity.
 
 This script:
@@ -9,7 +12,7 @@ This script:
 6. Cancels the order
 7. Logs everything
 
-Run: ZEUS_MODE=live python scripts/live_smoke_test.py
+Run: python scripts/live_smoke_test.py
 
 This does NOT use the daemon or CycleRunner. It tests the raw CLOB API path only.
 """

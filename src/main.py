@@ -600,14 +600,6 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
 
 
 def main():
-    if "ZEUS_MODE" not in os.environ:
-        sys.exit("FATAL: ZEUS_MODE not set. Launch with ZEUS_MODE=live")
-    if os.environ["ZEUS_MODE"] != "live":
-        sys.exit(
-            f"FATAL: ZEUS_MODE={os.environ['ZEUS_MODE']!r} is not valid. "
-            "Must be exactly 'live'."
-        )
-
     mode = get_mode()
     once = "--once" in sys.argv
     logging.basicConfig(

@@ -6,7 +6,6 @@ Narrow-by-intent: each command does exactly one thing.
 
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 from typing import Iterable
@@ -28,7 +27,7 @@ DEFAULT_EDGE_THRESHOLD_MULTIPLIER = 1.0
 TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 
 # G6 antibody (2026-04-26): typed allowlist of strategies permitted to execute
-# under ZEUS_MODE=live. Universe of buildable strategies lives in
+# in the live runtime. Universe of buildable strategies lives in
 # src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries); this set is the
 # subset operator-approved for live execution. Expansion REQUIRES an explicit
 # packet — accidental drift caught by tests/test_live_safe_strategies.py.
@@ -47,17 +46,10 @@ COMMANDS = {
 def assert_live_safe_strategies_under_live_mode(enabled: Iterable[str]) -> None:
     """Refuse daemon launch if any enabled strategy is outside LIVE_SAFE_STRATEGIES under live mode.
 
-    Helper called from src/main.py boot path AFTER ZEUS_MODE=live validation.
-    Exits via SystemExit (not RuntimeError) to match the existing FATAL boot
-    pattern at src/main.py:472-477 — daemon launchers consume SystemExit
-    cleanly; an unhandled RuntimeError would leak past launchd and create
-    zombie state.
-
-    Silent under any non-'live' ZEUS_MODE (paper/test/unset) — live-only
-    enforcement; experimental sessions remain free to run arbitrary strategies.
+    Helper called from src/main.py boot path. Runtime is live-only, so this
+    guard is unconditional and no longer reads the retired ZEUS_MODE switch.
+    Exits via SystemExit so daemon launchers consume the fatal refusal cleanly.
     """
-    if os.environ.get("ZEUS_MODE") != "live":
-        return
     enabled_set = frozenset(enabled)
     offenders = sorted(enabled_set - LIVE_SAFE_STRATEGIES)
     if offenders:

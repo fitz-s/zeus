@@ -1,3 +1,6 @@
+# Created: 2026-04-30
+# Last reused/audited: 2026-04-30
+# Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract.
 from __future__ import annotations
 import pytest
 
@@ -145,7 +148,7 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
 
     result = healthcheck.check()
 
-    assert result["mode"] == "paper"
+    assert result["mode"] == "live"
     assert result["daemon_alive"] is True
     assert result["riskguard_alive"] is True
     assert result["status_path"] == str(status_path)
