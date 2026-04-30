@@ -1,6 +1,6 @@
 ---
 name: zeus-ai-handoff
-description: General-purpose handoff workflow for Zeus — covers any AI-to-AI or session-to-session handoff. Selects the right execution mode (direct / subagent / longlast multi-batch / adversarial debate) per task scale + risk; preserves Zeus authority surfaces; encodes proven discipline (disk-first, critic-gate, bidirectional grep, co-tenant git hygiene, verdict erratum). Use when adapting a Zeus change of any size, converting a request into a packet-ready plan, preparing a handoff bundle, or starting a multi-batch execution across longlast teammates. Replaces v1 single-mode workflow with a 4-mode playbook validated by Tier 1 + 3-round debate cycle 2026-04-27.
+description: General-purpose handoff workflow for Zeus — covers any AI-to-AI or session-to-session handoff. Selects the right execution mode (direct / subagent / runtime multi-batch / adversarial debate) per task scale + risk; preserves Zeus authority surfaces; encodes proven discipline (disk-first, scoped critic-gate, bidirectional grep, co-tenant git hygiene, verdict erratum). Use when adapting a Zeus change of any size, converting a request into a packet-ready plan, preparing a handoff bundle, or starting a multi-batch execution across the available agent runtime. Replaces v1 single-mode workflow with a 4-mode playbook validated by Tier 1 + 3-round debate cycle 2026-04-27.
 ---
 
 # Zeus AI Handoff (v2)
@@ -53,12 +53,27 @@ Before choosing artifacts or dispatching, pick ONE mode based on task profile:
 |---|---|---|
 | Single file edit, ≤30 min, reversible | **A. Direct** | No handoff overhead needed |
 | 1-3 files, clear spec, ≤2h, low stakes | **B. Subagent** | One-shot Agent dispatch with explicit task |
-| Multi-batch (4+ items), implementation pipeline, K0/K1 zone touched | **C. Longlast executor + critic-gate** | Tier 1 pattern; per-batch critic verdict before next |
+| Multi-batch (4+ items), implementation pipeline, K0/K1 zone touched | **C. Runtime multi-batch executor + critic-gate** | Tier 1 pattern; per-batch critic verdict before next |
 | High-stakes architecture/strategy decision; multiple valid approaches; team disagreement | **D. Adversarial debate** | 3-round methodology in `docs/methodology/adversarial_debate_for_project_evaluation.md` |
 
 **Default if uncertain**: B (subagent) for mid-size; C if >4 files or multi-week.
 
 **Anti-pattern**: using D (full debate) for what should be A or B is the most common mistake — wastes 70+ min on a 30-min decision. Use methodology §11 ROI signals to check.
+
+### §3.0 Runtime surface selection
+
+The mode is the contract; the tool surface is runtime-specific:
+
+- In Codex App / plain Codex, use Codex native subagents only for bounded
+  independent work that materially improves throughput or review quality.
+- In OMX CLI/runtime sessions, longlast/team surfaces are valid for durable
+  multi-batch coordination when the runtime state and messaging layer exist.
+- Do not hardcode provider model names such as `opus` or `sonnet` in new
+  dispatches. Inherit the active repo/runtime model by default and choose the
+  role/reasoning effort for the work.
+- Critic gates apply to Mode C/D batch boundaries and escalated merge conflicts.
+  They do not apply to Mode A/B direct work, clean cross-worktree merges, or
+  narrow mechanical conflict resolution.
 
 ### §3.1 Scope-lock subclause
 
@@ -137,18 +152,26 @@ Use only the subset the task actually needs.
 3. Commit message via HEREDOC; verify with `git log -1`
 
 ### §6.B Subagent
-1. Spawn Agent (general-purpose, model per CLAUDE.md routing)
+1. Use the available bounded delegation surface (Codex native subagent in
+   Codex App / plain Codex; runtime Agent/teammate only when that runtime is
+   active). Inherit the active model by default.
 2. Provide §7 Execution Prompt Shape verbatim
 3. Receive output; verify; commit per §6.A
 
-### §6.C Longlast executor + critic-gate (Tier 1 pattern)
-1. Spawn `executor-<topic>` (longlast, model=opus for HIGH risk else sonnet, team_name)
-2. Spawn `critic-<topic>` (longlast, opus, team_name) — independent, gates each batch
-3. Per batch:
-   - Executor: write changes; SendMessage `BATCH_X_DONE`
-   - Critic: independent review (10-attack template); SendMessage `BATCH_X_REVIEW APPROVE/REVISE/BLOCK`
+### §6.C Runtime multi-batch executor + critic-gate (Tier 1 pattern)
+1. Choose the available runtime surface:
+   - Codex App / plain Codex: bounded native subagents for executor and critic lanes.
+   - OMX runtime: longlast/team executor and critic lanes.
+2. Spawn `executor-<topic>` with the role suited to implementation.
+3. Spawn `critic-<topic>` independently; inherit the active repo/runtime model
+   unless the active model contract says otherwise.
+4. Per batch:
+   - Executor: write changes; signal `BATCH_X_DONE` through the runtime status
+     channel or final output
+   - Critic: independent review (10-attack template); signal
+     `BATCH_X_REVIEW APPROVE/REVISE/BLOCK`
    - Team-lead: dispatch next batch only after critic APPROVE
-4. Honor methodology §5 critic-gate workflow
+5. Honor methodology §5 critic-gate workflow
 
 ### §6.D Adversarial debate (if Mode D selected)
 Follow `docs/methodology/adversarial_debate_for_project_evaluation.md` end-to-end (§2 setup → §3 mechanics → §8 verdict structure). Mode D is reserved for high-stakes multi-valid-approach decisions; methodology §0 has the ROI signals.
@@ -167,7 +190,7 @@ When handing a task to a coding surface:
 6. Required verification + rollback note
 7. Instruction to preserve unrelated dirty work (co-tenant safe staging)
 
-**Mode C addition**: also specify (a) which batch this is in the multi-batch plan, (b) the SendMessage status format expected, (c) the critic that will review.
+**Mode C addition**: also specify (a) which batch this is in the multi-batch plan, (b) the runtime status format expected, (c) the critic that will review.
 
 ---
 
@@ -176,7 +199,7 @@ When handing a task to a coding surface:
 These are PROVEN patterns from Tier 1 + 3-round debate cycle 2026-04-27. Bake into every handoff:
 
 ### §8.1 Disk-first
-Every artifact lands on disk BEFORE SendMessage notification. SendMessage delivery is asymmetric and can drop silently (memory `feedback_converged_results_to_disk`); disk is canonical record. Recovery: if a teammate goes idle without SendMessage, **disk-poll** the expected output file path; if found, treat as delivered.
+Every artifact lands on disk BEFORE runtime notification. Team/message delivery can be asymmetric and can drop silently (memory `feedback_converged_results_to_disk`); disk is canonical record. Recovery: if a teammate goes idle without notification, **disk-poll** the expected output file path; if found, treat as delivered.
 
 ### §8.2 file:line citations grep-verified within 10 min
 Before any "lock" event (concession, contract, dispatch, commit), every file:line reference must be grep-re-verified. Citations rot fast (~20-30% premise mismatch in 1 week per memory `feedback_zeus_plan_citations_rot_fast`). Use symbol-anchored citations (function name + sentinel comment) where possible — surveys line-number drift.
@@ -195,7 +218,7 @@ With multiple agents/sessions active in shared repo:
 Executor must NOT self-approve over multi-batch work. Independent critic dispatched in parallel. Team-lead waits for critic APPROVE before next dispatch. Memory `feedback_executor_commit_boundary_gate`.
 
 ### §8.6 Idle-only bootstrap
-Spawn longlast teammates with idle-only boot prompt: read context → write boot evidence → SendMessage BOOT_ACK → idle. Substantive work only after team-lead dispatches. Memory `feedback_idle_only_bootstrap`.
+For long-running teammate runtimes, spawn with an idle-only boot prompt: read context → write boot evidence → SendMessage BOOT_ACK → idle. Substantive work only after team-lead dispatches. For one-shot Codex native subagents, give a bounded task directly instead of creating idle ceremony. Memory `feedback_idle_only_bootstrap`.
 
 ### §8.7 Verdict-level erratum pattern
 When implementation discovers prior debate / verdict / plan was based on incomplete evidence:
@@ -284,7 +307,9 @@ Before calling the handoff ready (any mode):
 
 - Trivial task (typo, single comment fix, obvious one-liner): just do it
 - Task already covered by another SKILL (`.claude/skills/zeus-phase-discipline/SKILL.md` for r3 phase work; `zeus-task-boot-*` for specific task classes): use that instead
-- Task is purely investigation / research with no commit at the end: use Agent with `explore` subagent_type directly
+- Task is purely investigation / research with no commit at the end: use the
+  lightest read-only path (`rg`, `omx explore` when OMX runtime is active, or a
+  bounded explorer subagent when delegation is explicitly chosen)
 
 ---
 
@@ -304,3 +329,4 @@ When promoting to OMC/global skill: copy to `~/.claude/skills/zeus-ai-handoff/SK
 
 v1 (2026-04-19): single-mode workflow adapted from external starter kit.
 v2 (2026-04-28): 4-mode playbook + discipline patterns + failure recovery + erratum pattern. Distilled from Tier 1 batch execution + 3-round adversarial debate cycle 2026-04-27. Validates pattern reusability beyond debate-specific use.
+v2.1 (2026-04-30): runtime-neutral dispatch language plus scoped critic-gate boundaries after conflict-first merge protocol correction.

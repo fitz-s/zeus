@@ -131,7 +131,7 @@ admission_envelope:
     semantic_file_patterns: files that can select a profile by file evidence
     companion_file_patterns: files admitted or maintained with a profile but not sufficient to select it
     shared_companion_patterns: global registry/control-plane files that never select domain semantics alone
-    legacy_file_patterns: existing file_patterns remain supported; non-shared entries behave as semantic until migrated
+    legacy_file_patterns: existing file_patterns remain supported; non-shared entries behave as semantic until migrated, but high-fanout files that match multiple profiles require typed intent or profile-specific task wording
   ok_semantics:
     description: >
       Top-level `ok` denotes command success (no exception raised by the digest
