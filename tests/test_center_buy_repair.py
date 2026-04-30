@@ -1,5 +1,5 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-29_design_simplification_audit Phase 1A/1B evaluator gates
 from __future__ import annotations
 
@@ -68,6 +68,7 @@ def _patch_evaluator(
     snapshot_id: str = "snap-1",
     ens_overrides: dict | None = None,
     store_calls: list[str] | None = None,
+    p_raw_store_result=None,
 ):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
@@ -158,7 +159,7 @@ def _patch_evaluator(
         return snapshot_id
 
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", _store)
-    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: p_raw_store_result)
     calibrator = object() if calibration_level < 4 else None
     monkeypatch.setattr(
         evaluator_module,
@@ -402,3 +403,32 @@ def test_empty_decision_snapshot_id_blocks_before_edge_selection(monkeypatch):
         "ENS snapshot persistence failed: decision_snapshot_id unavailable"
     ]
     assert "ens_snapshot_persistence" in decisions[0].applied_validations
+
+
+def test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection(monkeypatch):
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        snapshot_id="snap-1",
+        p_raw_store_result=False,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].edge is None
+    assert decisions[0].strategy_key == ""
+    assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
+    assert decisions[0].availability_status == "DATA_UNAVAILABLE"
+    assert decisions[0].rejection_reasons == [
+        "ENS snapshot p_raw persistence failed: canonical p_raw unavailable"
+    ]
+    assert "ens_snapshot_p_raw_persistence" in decisions[0].applied_validations

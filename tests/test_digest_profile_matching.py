@@ -7,7 +7,7 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
 # Reuse: When adding a new profile, add adversarial cases here first.
@@ -808,6 +808,55 @@ def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope
     assert "src/engine/replay.py" not in digest["admission"]["admitted_files"]
     forbidden = set(digest["admission"]["forbidden_hits"])
     assert {"src/data/forecast_source_registry.py", "config/settings.json", "src/engine/replay.py"} <= forbidden
+
+
+def test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile():
+    digest = build_digest(
+        "DSA-13 canonical snapshot authority ensemble_snapshots_v2 canonical "
+        "live snapshots legacy ensemble_snapshots projection diagnostic no "
+        "production DB mutation no live venue side effects no source routing "
+        "no Paris config edit",
+        [
+            "src/engine/evaluator.py",
+            "src/engine/replay.py",
+            "src/execution/harvester.py",
+            "src/observability/status_summary.py",
+            "src/state/schema/v2_schema.py",
+            "tests/test_decision_evidence_runtime_invocation.py",
+            "tests/test_replay_time_provenance.py",
+            "tests/test_harvester_metric_identity.py",
+            "tests/test_phase10b_dt_seam_cleanup.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1L canonical snapshot authority"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/replay.py" in digest["admission"]["admitted_files"]
+    assert "src/execution/harvester.py" in digest["admission"]["admitted_files"]
+    assert "src/observability/status_summary.py" in digest["admission"]["admitted_files"]
+    assert "src/data/ensemble_client.py" not in digest["admission"]["admitted_files"]
+    assert "config/cities.json" not in digest["admission"]["admitted_files"]
+
+
+def test_dsa13_canonical_snapshot_authority_blocks_live_side_effect_scope():
+    digest = build_digest(
+        "DSA-13 canonical snapshot authority live decision snapshot table "
+        "authority",
+        [
+            "src/engine/evaluator.py",
+            "src/venue/polymarket_v2_adapter.py",
+            "state/zeus-world.db",
+        ],
+    )
+
+    assert digest["profile"] == "phase 1L canonical snapshot authority"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["admitted_files"] == []
+    forbidden = set(digest["admission"]["forbidden_hits"])
+    assert {"src/venue/polymarket_v2_adapter.py", "state/zeus-world.db"} <= forbidden
 
 
 def test_phase1h_paper_mode_residue_routes_to_cleanup_profile():

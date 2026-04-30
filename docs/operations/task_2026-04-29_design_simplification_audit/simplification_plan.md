@@ -763,6 +763,19 @@ Current status (2026-04-29):
   files through the broader source-policy route. This does not choose the
   canonical live snapshot table, activate TIGGE/direct ECMWF, promote
   Open-Meteo, or implement the full cross-path timestamp contract.
+- Phase 1L canonical snapshot authority is repaired for the live evaluator
+  writer: `ensemble_snapshots_v2` is the canonical write target when present
+  and attached `world` v2 is preferred over trade/main shadow tables. Legacy
+  `ensemble_snapshots` is now a same-ID compatibility projection after the v2
+  insert, and `p_raw_json` updates mirror into both surfaces. The v2 row carries
+  metric identity, members unit, source/degradation provenance,
+  `training_allowed`, and `causality_status`, so Open-Meteo-style missing
+  issue time remains auditable but not training evidence. Critic remediation
+  prevents v2/legacy ID collision corruption, prevents v2 conflict fallback to
+  legacy authority, and makes canonical p_raw persistence fail closed before
+  executable edge selection. This does not promote replay/harvester legacy
+  readers to authority, mutate production DB rows, change source routing,
+  activate TIGGE/direct ECMWF, or decide Paris.
 
 Exit criteria:
 

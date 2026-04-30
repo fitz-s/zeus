@@ -5336,9 +5336,21 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
         ens_result,
     )
     evaluator_module._store_snapshot_p_raw(conn, snapshot_id, np.array([0.2, 0.3, 0.5]))
-    row = conn.execute(
+    v2_row = conn.execute(
         """
-        SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json
+        SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json,
+               temperature_metric, physical_quantity, observation_field,
+               data_version, training_allowed, causality_status, authority,
+               members_unit, unit
+        FROM ensemble_snapshots_v2
+        WHERE snapshot_id = ? AND city = ? AND target_date = ?
+        """,
+        (snapshot_id, NYC.name, "2026-01-15"),
+    ).fetchone()
+    legacy_row = conn.execute(
+        """
+        SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json,
+               data_version, authority, temperature_metric
         FROM ensemble_snapshots
         WHERE snapshot_id = ? AND city = ? AND target_date = ?
         """,
@@ -5347,12 +5359,30 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     conn.close()
 
     assert snapshot_id
-    assert row is not None
-    assert row["issue_time"] is None
-    assert row["valid_time"] == "2026-01-14T05:00:00+00:00"
-    assert row["available_at"] == "2026-01-14T06:05:00+00:00"
-    assert row["fetch_time"] == "2026-01-14T06:05:00+00:00"
-    assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert v2_row is not None
+    assert v2_row["issue_time"] is None
+    assert v2_row["valid_time"] == "2026-01-14T05:00:00+00:00"
+    assert v2_row["available_at"] == "2026-01-14T06:05:00+00:00"
+    assert v2_row["fetch_time"] == "2026-01-14T06:05:00+00:00"
+    assert json.loads(v2_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+    assert v2_row["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
+    assert v2_row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
+    assert v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert v2_row["training_allowed"] == 0
+    assert v2_row["causality_status"] == "UNKNOWN"
+    assert v2_row["authority"] == "VERIFIED"
+    assert v2_row["members_unit"] == "degF"
+    assert v2_row["unit"] == "F"
+    assert legacy_row is not None
+    assert legacy_row["issue_time"] is None
+    assert legacy_row["valid_time"] == v2_row["valid_time"]
+    assert legacy_row["available_at"] == v2_row["available_at"]
+    assert legacy_row["fetch_time"] == v2_row["fetch_time"]
+    assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert legacy_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert legacy_row["authority"] == "VERIFIED"
+    assert legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
 
 
 def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
@@ -5396,12 +5426,25 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     )
     evaluator_module._store_snapshot_p_raw(conn, snapshot_id, np.array([0.2, 0.3, 0.5]))
 
-    main_count = conn.execute(
+    main_legacy_count = conn.execute(
         "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
-    world_row = conn.execute(
+    main_v2_count = conn.execute(
+        "SELECT COUNT(*) FROM main.ensemble_snapshots_v2 WHERE city = 'NYC'"
+    ).fetchone()[0]
+    world_v2_row = conn.execute(
         """
-        SELECT p_raw_json
+        SELECT p_raw_json, data_version, training_allowed, causality_status,
+               temperature_metric, physical_quantity, observation_field,
+               members_unit, unit
+        FROM world.ensemble_snapshots_v2
+        WHERE snapshot_id = ? AND city = 'NYC'
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    world_legacy_row = conn.execute(
+        """
+        SELECT p_raw_json, data_version, authority, temperature_metric
         FROM world.ensemble_snapshots
         WHERE snapshot_id = ? AND city = 'NYC'
         """,
@@ -5410,9 +5453,175 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     conn.close()
 
     assert snapshot_id
-    assert main_count == 0
-    assert world_row is not None
-    assert json.loads(world_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert main_legacy_count == 0
+    assert main_v2_count == 0
+    assert world_v2_row is not None
+    assert json.loads(world_v2_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert world_v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert world_v2_row["training_allowed"] == 1
+    assert world_v2_row["causality_status"] == "OK"
+    assert world_v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+    assert world_v2_row["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
+    assert world_v2_row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
+    assert world_v2_row["members_unit"] == "degF"
+    assert world_v2_row["unit"] == "F"
+    assert world_legacy_row is not None
+    assert json.loads(world_legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    assert world_legacy_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert world_legacy_row["authority"] == "VERIFIED"
+    assert world_legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+
+
+def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at,
+         fetch_time, lead_hours, members_json, spread, is_bimodal,
+         model_version, data_version, authority, temperature_metric)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "OLD",
+            "2026-01-01",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T01:00:00+00:00",
+            "2026-01-01T00:05:00+00:00",
+            "2026-01-01T00:05:00+00:00",
+            1.0,
+            "[1.0]",
+            0.0,
+            0,
+            "old_model",
+            HIGH_LOCALDAY_MAX.data_version,
+            "VERIFIED",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+        ),
+    )
+    conn.commit()
+
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    ens = type(
+        "DummyEns",
+        (),
+        {
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
+            "spread_float": lambda self: 1.25,
+            "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
+        },
+    )()
+    ens_result = {
+        "issue_time": datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+        "fetch_time": fetch_time,
+        "model": "ecmwf_ifs025",
+    }
+
+    snapshot_id = evaluator_module._store_ens_snapshot(
+        conn,
+        NYC,
+        "2026-01-15",
+        ens,
+        ens_result,
+    )
+    old_row = conn.execute(
+        "SELECT city, target_date, p_raw_json FROM ensemble_snapshots WHERE snapshot_id = 1"
+    ).fetchone()
+    v2_count = conn.execute(
+        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = 'NYC'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert snapshot_id == ""
+    assert old_row["city"] == "OLD"
+    assert old_row["target_date"] == "2026-01-01"
+    assert old_row["p_raw_json"] is None
+    assert v2_count == 0
+
+
+def test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    issue_time = "2026-01-14T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2
+        (city, target_date, temperature_metric, physical_quantity,
+         observation_field, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, spread, is_bimodal, model_version,
+         data_version, training_allowed, causality_status, boundary_ambiguous,
+         provenance_json, authority, members_unit, unit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            NYC.name,
+            "2026-01-15",
+            HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
+            issue_time,
+            "2026-01-14T01:00:00+00:00",
+            "2026-01-14T00:10:00+00:00",
+            "2026-01-14T00:10:00+00:00",
+            1.0,
+            "[40.0, 41.0, 42.0]",
+            1.0,
+            0,
+            "old_model",
+            HIGH_LOCALDAY_MAX.data_version,
+            1,
+            "OK",
+            0,
+            "{}",
+            "VERIFIED",
+            "degF",
+            "F",
+        ),
+    )
+    conn.commit()
+
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    ens = type(
+        "DummyEns",
+        (),
+        {
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
+            "spread_float": lambda self: 1.25,
+            "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
+        },
+    )()
+    ens_result = {
+        "issue_time": datetime(2026, 1, 14, 0, 0, tzinfo=timezone.utc),
+        "fetch_time": fetch_time,
+        "model": "ecmwf_ifs025",
+    }
+
+    snapshot_id = evaluator_module._store_ens_snapshot(
+        conn,
+        NYC,
+        "2026-01-15",
+        ens,
+        ens_result,
+    )
+    legacy_count = conn.execute(
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?",
+        (NYC.name,),
+    ).fetchone()[0]
+    v2_count = conn.execute(
+        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = ?",
+        (NYC.name,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert snapshot_id == ""
+    assert legacy_count == 0
+    assert v2_count == 1
 
 
 def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypatch, tmp_path):
