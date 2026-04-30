@@ -1,12 +1,12 @@
 # architecture/worktree_merge_protocol.yaml
 # Codified protocol for cross-session/worktree merges into Zeus branches.
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-04-30
 # Authority basis: contamination remediation verdict.md §6 Stage 4 Gate B
 # Plan evidence: docs/operations/task_2026-04-28_contamination_remediation/STAGE4_PROCESS_GATES_AE_PLAN.md §2
 # Cross-references: AGENTS.md "Cross-session merge protocol" + .agents/skills/zeus-ai-handoff/SKILL.md §8.8
 
-version: "1.0"
+version: "1.1"
 
 trigger_commands:
   - "git merge"
@@ -19,11 +19,28 @@ trigger_conditions:
   - any_command_in_trigger_commands
   - working_branch in [main, plan-pre5, "plan-*", "release-*"]
 
-required_evidence:
+default_flow:
+  mode: conflict_first_advisory
+  steps:
+    - inspect_merge_surface: "git merge-tree, git merge --no-commit, or equivalent conflict view"
+    - no_conflicts: "merge normally; run scoped verification"
+    - narrow_mechanical_conflicts: "resolve directly or manually choose correct side; run affected checks"
+    - broad_or_high_risk_conflicts: "escalate to MERGE_AUDIT_EVIDENCE critic verdict"
+
+escalation_triggers:
+  - broad_conflict_surface
+  - multi_zone_conflict
+  - K0_or_K1_or_architecture_authority_conflict
+  - schema_lifecycle_db_control_or_live_surface_conflict
+  - ambiguous_truth_owner_or_semantic_route
+  - drift_keyword_scan_hits
+
+escalated_evidence:
   env_var: MERGE_AUDIT_EVIDENCE
   format: |
     Path to critic verdict file documenting:
     - diff_scope: (files + LOC)
+    - conflict_scope: (conflicted files + why direct resolution is unsafe)
     - authoring session identifier
     - drift_keyword_scan: bidirectional grep results against drift_keywords_for_grep below
     - critic_verdict: APPROVE | REVISE | BLOCK
@@ -31,10 +48,11 @@ required_evidence:
 
 validation_steps:
   pre_merge:
-    - check_env_var_set: MERGE_AUDIT_EVIDENCE
-    - check_evidence_file_exists: $MERGE_AUDIT_EVIDENCE
-    - check_evidence_contains: ["critic_verdict:", "diff_scope:", "drift_keyword_scan:"]
-    - check_critic_verdict: in [APPROVE, REVISE]
+    - print_conflict_first_protocol
+    - allow_without_evidence_by_default
+    - if_env_var_set_check_evidence_file_exists: $MERGE_AUDIT_EVIDENCE
+    - if_env_var_set_check_evidence_contains: ["critic_verdict:", "diff_scope:", "drift_keyword_scan:"]
+    - if_env_var_set_check_critic_verdict: in [APPROVE, REVISE]
   on_block:
     - exit_code: 2
     - message: "Merge BLOCKED — see $MERGE_AUDIT_EVIDENCE for defects"
@@ -44,10 +62,13 @@ validation_steps:
   on_approve:
     - exit_code: 0
     - message: "Merge gate PASSED via $MERGE_AUDIT_EVIDENCE"
+  on_no_evidence:
+    - exit_code: 0
+    - message: "Merge allowed; inspect conflicts first and escalate only for broad/high-risk conflict surfaces"
 
 advisory_mode:
-  enabled: false
-  default_state_2026: "blocking"
+  enabled: true
+  default_state_2026: "conflict_first"
 
 drift_keywords_for_grep:
   # Bidirectional grep targets (forward + reverse per methodology §5.Y)
@@ -65,7 +86,7 @@ drift_keywords_for_grep:
 
 escalation:
   on_repeated_block: "Operator notify; consider freezing target branch"
-  on_advisory_only: "Document warning in branch handoff"
+  on_advisory_only: "Document conflict-first handling in branch handoff when conflicts existed"
 
 cross_references:
   - .claude/hooks/pre-merge-contamination-check.sh
