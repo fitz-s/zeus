@@ -827,11 +827,20 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             # For buy_no, current_p_market is native NO-side — convert back to YES.
             p_market_yes = current_p_market if pos.direction == "buy_yes" else 1.0 - current_p_market
             p_market_arr[held_idx] = p_market_yes
+            p_market_no_arr = None
+            buy_no_quote_available = None
+            if pos.direction == "buy_no" and len(bins) > 2:
+                p_market_no_arr = np.zeros(len(bins))
+                p_market_no_arr[held_idx] = current_p_market
+                buy_no_quote_available = np.zeros(len(bins), dtype=bool)
+                buy_no_quote_available[held_idx] = True
 
             analysis = MarketAnalysis(
                 p_raw=bootstrap_ctx["p_raw"],
                 p_cal=bootstrap_ctx["p_cal"],
                 p_market=p_market_arr,
+                p_market_no=p_market_no_arr,
+                buy_no_quote_available=buy_no_quote_available,
                 alpha=bootstrap_ctx["alpha"],
                 bins=bins,
                 member_maxes=bootstrap_ctx["member_extrema"],

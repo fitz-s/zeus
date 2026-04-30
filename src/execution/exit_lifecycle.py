@@ -735,15 +735,11 @@ def _latest_exit_snapshot_context(
             SELECT snapshot_id, min_tick_size, min_order_size, neg_risk
               FROM executable_market_snapshots
              WHERE freshness_deadline >= ?
-               AND (
-                 selected_outcome_token_id = ?
-                 OR yes_token_id = ?
-                 OR no_token_id = ?
-               )
+               AND selected_outcome_token_id = ?
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
-            (now_s, token_id, token_id, token_id),
+            (now_s, token_id),
         ).fetchone()
     except sqlite3.OperationalError:
         row = None
