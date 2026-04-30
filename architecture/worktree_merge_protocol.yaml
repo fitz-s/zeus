@@ -44,7 +44,12 @@ escalated_evidence:
     - authoring session identifier
     - drift_keyword_scan: bidirectional grep results against drift_keywords_for_grep below
     - critic_verdict: APPROVE | REVISE | BLOCK
-    - critic identifier (critic-opus dispatch ID or critic-* longlast name)
+    - critic identifier (independent reviewer in the active runtime)
+  critic_runtime_rule: >
+    Escalated merge critic evidence comes from the active runtime's native
+    review surface. Independence means separate role/context from the merge
+    author, not invoking another vendor CLI. Cross-platform critic dispatch is
+    allowed only when the operator explicitly requests it.
 
 validation_steps:
   pre_merge:
