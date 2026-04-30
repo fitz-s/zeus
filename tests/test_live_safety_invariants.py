@@ -1,5 +1,5 @@
 # Created: 2026-03-31
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-04-30
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -229,6 +229,32 @@ def test_fill_tracker_keeps_verified_entry_local_only_until_chain_seen():
     assert pos.cost_basis_usd == pytest.approx(11.0)
     assert pos.fill_quality == pytest.approx(0.10)
     assert tracker.entries == ["test_001"]
+
+
+def test_fill_tracker_keeps_matched_entry_pending_until_final_confirmation():
+    """MATCHED is optimistic execution truth; it must not activate entry state."""
+    from src.execution.fill_tracker import check_pending_entries
+
+    pos = _make_position(
+        state="pending_tracked",
+        order_id="buy_123",
+        entry_order_id="buy_123",
+        entry_fill_verified=False,
+        entered_at="",
+        chain_state="unknown",
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(order_status="MATCHED")
+
+    stats = check_pending_entries(portfolio, clob)
+
+    assert stats["entered"] == 0
+    assert stats["voided"] == 0
+    assert stats["still_pending"] == 1
+    assert stats["dirty"] is True
+    assert pos.state == "pending_tracked"
+    assert pos.entry_fill_verified is False
+    assert pos.order_status == "matched"
 
 
 def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
@@ -1363,6 +1389,31 @@ def test_deferred_fill_logs_last_monitor_best_bid(tmp_path):
     assert fill_event["details"]["fill_price"] == pytest.approx(0.39)
     assert fill_event["details"]["best_bid"] == pytest.approx(0.39)
     assert fill_event["details"]["current_market_price"] == pytest.approx(0.44)
+
+
+def test_pending_exit_matched_status_does_not_economically_close():
+    """MATCHED exit status is not finality and must keep the position pending."""
+    pos = _make_position(
+        state="day0_window",
+        exit_state="sell_pending",
+        last_exit_order_id="sell-order-1",
+        exit_reason="DEFERRED_SELL_FILL",
+        last_monitor_market_price=0.44,
+        last_monitor_best_bid=0.39,
+        entry_fill_verified=True,
+    )
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob(sell_result={"status": "MATCHED", "avgPrice": 0.39})
+
+    stats = check_pending_exits(portfolio, clob, conn=None)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos in portfolio.positions
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "sell_pending"
+    assert pos.exit_price in (None, 0.0)
 
 
 def test_exit_authority_fails_closed_on_incomplete_context():

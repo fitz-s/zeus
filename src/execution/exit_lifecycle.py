@@ -151,8 +151,9 @@ def place_sell_order(
     )
 
 
-# CLOB statuses that indicate a fill
-FILL_STATUSES = frozenset({"MATCHED", "FILLED"})
+# Statuses that indicate final fill authority. MATCHED/MINED are optimistic
+# trade observations; they must not economically close positions.
+FILL_STATUSES = frozenset({"FILLED", "CONFIRMED"})
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})

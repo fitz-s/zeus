@@ -1,3 +1,7 @@
+# Created: 2026-04-30
+# Last reused/audited: 2026-04-30
+# Authority basis: first-principles safety implementation 2026-04-30
+
 """Tests for MarketAnalysis and market fusion.
 
 Covers:
@@ -12,7 +16,7 @@ import pytest
 
 from src.strategy.market_fusion import vwmp, compute_alpha, compute_posterior
 from src.strategy.market_analysis import MarketAnalysis
-from src.calibration.platt import ExtendedPlattCalibrator
+from src.calibration.platt import ExtendedPlattCalibrator, WIDTH_NORMALIZED_SPACE
 from src.types import Bin, BinEdge
 from src.types.temperature import TemperatureDelta
 
@@ -256,6 +260,83 @@ class TestMarketAnalysis:
             Bin(low=49, high=50, label="49-50", unit="F"),
             Bin(low=51, high=None, label="51 or higher", unit="F"),
         ]
+
+    @pytest.mark.parametrize(
+        "field,bad_values,match",
+        [
+            ("p_raw", np.array([np.nan, 1.0]), "p_raw must be finite"),
+            ("p_cal", np.array([0.5, np.inf]), "p_cal must be finite"),
+            ("p_market", np.array([0.5, -0.1]), "p_market must be non-negative"),
+            ("p_raw", np.array([1.2, 0.1]), "p_raw components must be <= 1"),
+            ("p_cal", np.array([0.2, 0.2]), "p_cal must sum to 1.0"),
+            ("p_market", np.array([1.2, 0.2]), "p_market components must be <= 1"),
+        ],
+    )
+    def test_rejects_invalid_probability_vectors(self, field, bad_values, match):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        kwargs = {
+            "p_raw": np.array([0.5, 0.5]),
+            "p_cal": np.array([0.5, 0.5]),
+            "p_market": np.array([0.5, 0.5]),
+            "alpha": 0.5,
+            "bins": bins,
+            "member_maxes": np.array([30.0, 31.0, 32.0]),
+            "unit": "F",
+        }
+        kwargs[field] = bad_values
+
+        with pytest.raises(ValueError, match=match):
+            MarketAnalysis(**kwargs)
+
+    def test_rejects_nonfinite_member_extrema_before_bootstrap(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+
+        with pytest.raises(ValueError, match="member_maxes must be finite"):
+            MarketAnalysis(
+                p_raw=np.array([0.5, 0.5]),
+                p_cal=np.array([0.5, 0.5]),
+                p_market=np.array([0.5, 0.5]),
+                alpha=0.5,
+                bins=bins,
+                member_maxes=np.array([30.0, np.nan, 32.0]),
+                unit="F",
+            )
+
+    def test_width_normalized_bootstrap_keeps_open_shoulders_raw(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        calibrator = ExtendedPlattCalibrator()
+        calibrator.fitted = True
+        calibrator.A = 1.0
+        calibrator.B = 0.0
+        calibrator.C = 0.0
+        calibrator.input_space = WIDTH_NORMALIZED_SPACE
+        calibrator.bootstrap_params = [(1.0, 0.0, 0.0)]
+
+        ma = MarketAnalysis(
+            p_raw=np.array([1.0, 0.0]),
+            p_cal=np.array([1.0, 0.0]),
+            p_market=np.array([0.5, 0.5]),
+            alpha=0.8,
+            bins=bins,
+            member_maxes=np.array([30.0, 30.0, 30.0]),
+            calibrator=calibrator,
+            unit="F",
+            rng_seed=1,
+        )
+        ma._sigma = 0.0
+
+        ci_lo, ci_hi, p_value = ma._bootstrap_bin(0, 5)
+
+        assert np.isfinite([ci_lo, ci_hi, p_value]).all()
 
     def test_mispriced_market_finds_edges(self):
         """Model says center bin is 30% but market prices at 10% → edge exists."""

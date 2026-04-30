@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Enforce R3 G1 live-readiness gate aggregation without live side effects.
 # Reuse: Run before live-readiness, staged-smoke, cutover, or operator-deploy gate decisions.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
 """R3 G1 live-readiness gate orchestrator.
 
@@ -157,11 +157,17 @@ GATES: tuple[GateSpec, ...] = (
     ),
     GateSpec(
         "G1-10",
-        "MATCHED-not-final gate",
+        "Optimistic-not-final gate",
         "M3/U2",
-        "MATCHED event cannot final-close position lots",
+        "MATCHED/MINED cannot final-close; CONFIRMED is success finality",
         "pytest",
-        ("tests/test_user_channel_ingest.py::test_matched_event_does_not_final_close_lot",),
+        (
+            "tests/test_user_channel_ingest.py::test_matched_event_does_not_final_close_lot",
+            "tests/test_user_channel_ingest.py::test_mined_event_is_optimistic_exposure_not_finality",
+            "tests/test_user_channel_ingest.py::test_confirmed_event_finalizes_trade_and_permits_canonical_pnl",
+            "tests/test_exchange_reconcile.py::test_nonconfirmed_full_size_trade_is_optimistic_exposure_not_fill_finality",
+            "tests/test_exchange_reconcile.py::test_confirmed_full_size_trade_is_required_for_fill_finality",
+        ),
     ),
     GateSpec(
         "G1-11",
@@ -207,9 +213,13 @@ GATES: tuple[GateSpec, ...] = (
         "G1-16",
         "Strategy benchmark gate",
         "A1",
-        "Replay/paper/shadow promotion gate blocks unsafe strategies",
+        "Replay/paper/shadow promotion gate blocks unsafe strategies and optimistic success samples",
         "pytest",
-        ("tests/test_strategy_benchmark.py::test_promotion_blocked_unless_replay_paper_shadow_all_pass",),
+        (
+            "tests/test_strategy_benchmark.py::test_promotion_blocked_unless_replay_paper_shadow_all_pass",
+            "tests/test_strategy_benchmark.py::test_paper_benchmark_matched_mined_are_not_success_finality",
+            "tests/test_strategy_benchmark.py::test_paper_benchmark_confirmed_trade_counts_as_success_finality",
+        ),
     ),
     GateSpec(
         "G1-17",

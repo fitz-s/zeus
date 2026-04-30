@@ -1,4 +1,5 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Created: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml
 # Purpose: Lock INV-NEW-Q StrategyBenchmarkSuite replay/paper/shadow promotion gate.
 # Reuse: Run for A1 benchmark/promotion-gate changes and future strategy candidate wiring.
@@ -89,16 +90,37 @@ def test_benchmark_metrics_computed_for_replay():
     assert metrics.time_to_resolution_risk == 10 / 3
 
 
-def test_benchmark_metrics_computed_for_paper_against_fake_venue():
+@pytest.mark.parametrize("state", ["MATCHED", "MINED"])
+def test_paper_benchmark_matched_mined_are_not_success_finality(state):
     venue = FakePolymarketVenue()
     result = venue.submit_limit_order(token_id="token-a", price=0.50, size=10, side="BUY")
     venue.force_partial_fill(result.envelope.order_id or "", 4)
+    venue._trades[-1]["state"] = state
+
+    metrics = StrategyBenchmarkSuite().evaluate_paper(STRATEGY, venue, duration_hours=1)
+
+    assert metrics.environment is BenchmarkEnvironment.PAPER
+    assert metrics.sample_count == 1
+    assert metrics.ev_after_fees_slippage < 0
+    assert metrics.alpha_pnl == 0.0
+    assert metrics.spread_pnl == 0.0
+    assert metrics.fill_probability == 0.0
+    assert metrics.capital_lock_cost > 0
+
+
+def test_paper_benchmark_confirmed_trade_counts_as_success_finality():
+    venue = FakePolymarketVenue()
+    result = venue.submit_limit_order(token_id="token-a", price=0.50, size=10, side="BUY")
+    venue.force_partial_fill(result.envelope.order_id or "", 4)
+    venue._trades[-1]["state"] = "CONFIRMED"
 
     metrics = StrategyBenchmarkSuite().evaluate_paper(STRATEGY, venue, duration_hours=1)
 
     assert metrics.environment is BenchmarkEnvironment.PAPER
     assert metrics.sample_count == 1
     assert metrics.ev_after_fees_slippage > 0
+    assert metrics.alpha_pnl > 0
+    assert metrics.spread_pnl > 0
     assert metrics.fill_probability == 1.0
 
 

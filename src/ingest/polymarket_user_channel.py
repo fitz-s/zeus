@@ -417,9 +417,10 @@ class PolymarketUserChannelIngestor:
                 confirmation_count=message.get("confirmation_count"),
             )
             command_event = None
-            if status == "MATCHED":
+            if status in {"MATCHED", "MINED"}:
                 command_event = "PARTIAL_FILL_OBSERVED"
-                self._append_position_lot(conn, command, fact_id, "OPTIMISTIC_EXPOSURE", message, observed)
+                if self._optimistic_trade_fact_for_trade(conn, trade_id) is None:
+                    self._append_position_lot(conn, command, fact_id, "OPTIMISTIC_EXPOSURE", message, observed)
             elif status == "CONFIRMED":
                 command_event = "FILL_CONFIRMED"
                 self._append_position_lot(conn, command, fact_id, "CONFIRMED_EXPOSURE", message, observed)
@@ -438,6 +439,24 @@ class PolymarketUserChannelIngestor:
         finally:
             if self.own_connection:
                 conn.close()
+
+    def _optimistic_trade_fact_for_trade(self, conn: Any, trade_id: str) -> int | None:
+        row = conn.execute(
+            """
+            SELECT lot.source_trade_fact_id
+              FROM position_lots lot
+              JOIN venue_trade_facts tf
+                ON tf.trade_fact_id = lot.source_trade_fact_id
+             WHERE tf.trade_id = ?
+               AND lot.state = 'OPTIMISTIC_EXPOSURE'
+             ORDER BY tf.local_sequence DESC, lot.lot_id DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["source_trade_fact_id"])
 
     def _append_position_lot(
         self,
@@ -469,19 +488,12 @@ class PolymarketUserChannelIngestor:
         )
 
     def _rollback_failed_trade(self, conn: Any, trade_id: str, failed_fact_id: int, observed: datetime) -> int | None:
-        matched = conn.execute(
-            """
-            SELECT trade_fact_id FROM venue_trade_facts
-            WHERE trade_id = ? AND state = 'MATCHED'
-            ORDER BY local_sequence DESC LIMIT 1
-            """,
-            (trade_id,),
-        ).fetchone()
-        if matched is None:
+        optimistic_fact_id = self._optimistic_trade_fact_for_trade(conn, trade_id)
+        if optimistic_fact_id is None:
             return None
         return rollback_optimistic_lot_for_failed_trade(
             conn,
-            source_trade_fact_id=int(matched["trade_fact_id"]),
+            source_trade_fact_id=optimistic_fact_id,
             failed_trade_fact_id=failed_fact_id,
             state_changed_at=observed,
         )

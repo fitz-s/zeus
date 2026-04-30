@@ -1,3 +1,6 @@
+# Created: 2026-04-30
+# Last reused/audited: 2026-04-30
+# Authority basis: first-principles safety implementation 2026-04-30
 """Tests for ensemble client caching and request behavior."""
 
 from datetime import datetime, timezone
@@ -79,3 +82,63 @@ def test_fetch_ensemble_cache_key_includes_model(monkeypatch):
     ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="gfs025")
 
     assert calls["n"] == 2
+
+
+def test_validate_ensemble_rejects_insufficient_finite_members_for_required_hours():
+    members = np.ones((51, 4), dtype=np.float64)
+    members[:2, 1] = np.nan
+    result = {
+        "members_hourly": members,
+        "n_members": 51,
+    }
+
+    assert not ensemble_client.validate_ensemble(
+        result,
+        expected_members=51,
+        required_hour_indices=[1, 2],
+    )
+
+
+def test_validate_ensemble_ignores_non_target_hour_nans_for_required_hours():
+    members = np.ones((51, 4), dtype=np.float64)
+    members[:, 3] = np.nan
+    result = {
+        "members_hourly": members,
+        "n_members": 51,
+    }
+
+    assert ensemble_client.validate_ensemble(
+        result,
+        expected_members=51,
+        required_hour_indices=[1, 2],
+    )
+
+
+def test_validate_ensemble_rejects_extra_nonfinite_rows_for_required_hours():
+    members = np.ones((52, 4), dtype=np.float64)
+    members[51, 1] = np.nan
+    result = {
+        "members_hourly": members,
+        "n_members": 52,
+    }
+
+    assert not ensemble_client.validate_ensemble(
+        result,
+        expected_members=51,
+        required_hour_indices=[1, 2],
+    )
+
+
+def test_validate_ensemble_ignores_irrelevant_hour_nans_for_required_hours():
+    members = np.ones((51, 10), dtype=np.float64)
+    members[:, [0, 3, 4, 5, 6, 7, 8, 9]] = np.nan
+    result = {
+        "members_hourly": members,
+        "n_members": 51,
+    }
+
+    assert ensemble_client.validate_ensemble(
+        result,
+        expected_members=51,
+        required_hour_indices=[1, 2],
+    )
