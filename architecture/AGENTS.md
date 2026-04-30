@@ -70,7 +70,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `ast_rules/semgrep_zeus.yml` | Semgrep rules for code enforcement |
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
-| `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — env var MERGE_AUDIT_EVIDENCE + critic verdict required for merge into protected branches |
+| `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — conflict-first merge inspection; MERGE_AUDIT_EVIDENCE critic verdict required only for escalated broad/high-risk conflict surfaces |
 
 ## Subdirectory navigation
 

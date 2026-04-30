@@ -23,7 +23,7 @@
           {
             "type": "command",
             "command": ".claude/hooks/pre-merge-contamination-check.sh",
-            "description": "Block git merge/pull/cherry-pick/rebase/am on protected branches without MERGE_AUDIT_EVIDENCE (verdict.md §6 Stage 4 Gate B; contamination remediation 2026-04-28)"
+            "description": "Advise conflict-first handling for git merge/pull/cherry-pick/rebase/am on protected branches; validate MERGE_AUDIT_EVIDENCE only for escalated broad/high-risk conflict surfaces"
           }
         ]
       }

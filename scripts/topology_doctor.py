@@ -241,6 +241,7 @@ def _issue_metadata_for_code(code: str, path: str) -> dict[str, Any]:
         ("code_review_graph", "code_review_graph", "architecture/code_review_graph_protocol.yaml", "refresh_graph"),
         ("module_book", "module_books", "architecture/module_manifest.yaml", "update_companion"),
         ("module_manifest", "module_books", "architecture/module_manifest.yaml", "update_companion"),
+        ("digest_profile_", "schema_law", "architecture/topology.yaml", "update_companion"),
     )
     for prefix, lane, owner_manifest, repair_kind in families:
         if code.startswith(prefix):
@@ -1616,6 +1617,7 @@ def build_runtime_route_card(
     claims: list[str] | None = None,
 ) -> dict[str, Any]:
     admission = digest.get("admission") or {}
+    profile_selection = digest.get("profile_selection") or {}
     status = str(admission.get("status") or "advisory_only")
     risk_tier = _runtime_risk_tier(files, task=task, write_intent=write_intent)
     gate_budget = RUNTIME_RISK_GATE_BUDGETS[risk_tier]
@@ -1628,6 +1630,10 @@ def build_runtime_route_card(
         "intent": intent,
         "task_class": task_class,
         "write_intent": write_intent,
+        "selection_evidence_class": profile_selection.get("evidence_class"),
+        "needs_typed_intent": bool(profile_selection.get("needs_typed_intent")),
+        "companion_files": list(profile_selection.get("companion_file_hits") or [])
+        + list(profile_selection.get("shared_file_hits") or []),
         "admission_status": status,
         "risk_tier": risk_tier,
         "gate_budget": gate_budget,
@@ -1825,6 +1831,8 @@ def run_navigation(
     if admission_issue is not None:
         direct_blockers = direct_blockers + [admission_issue]
     repo_health_warnings = [issue for issue in issues if issue not in direct_blockers]
+    task_blockers = list(direct_blockers)
+    admission_blockers = [admission_issue] if admission_issue is not None else []
     legacy_blocking = [issue for issue in issues if issue.get("severity") == "error"]
     route_context = {
         "mode": "navigation_strict_health" if strict_health else "navigation",
@@ -1872,6 +1880,14 @@ def run_navigation(
             for lane, result in checks.items()
         },
         "issues": issues,
+        "issues_contract": "legacy_aggregate_not_task_blockers",
+        "task_blockers": task_blockers,
+        "admission_blockers": admission_blockers,
+        "profile_selection_warnings": [
+            issue for issue in task_blockers if issue.get("lane") == "navigation"
+        ],
+        "global_health_warnings": [] if strict_health else repo_health_warnings,
+        "legacy_issues": issues,
         "direct_blockers": legacy_blocking if strict_health else direct_blockers,
         "route_context": route_context,
         "repo_health_warnings": [] if strict_health else repo_health_warnings,

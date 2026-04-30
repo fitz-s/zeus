@@ -641,6 +641,26 @@ core_map_profiles:
       - {from: settlement_semantics, to: market_analysis, required: true, proof: {kind: import_or_call, path: src/strategy/market_analysis.py, module: src.contracts.settlement_semantics, symbol: round_wmo_half_up_values}}
       - {from: oracle_penalty, to: evaluator, required: true, proof: {kind: import_or_call, path: src/engine/evaluator.py, module: src.strategy.oracle_penalty, symbol: get_oracle_info}}
 
+digest_profile_selection:
+  shared_companion_patterns:
+    - "AGENTS.md"
+    - "workspace_map.md"
+    - "docs/AGENTS.md"
+    - "docs/README.md"
+    - "docs/operations/AGENTS.md"
+    - "docs/operations/current_state.md"
+    - "tests/AGENTS.md"
+    - "architecture/AGENTS.md"
+    - "architecture/topology.yaml"
+    - "architecture/digest_profiles.py"
+    - "architecture/docs_registry.yaml"
+    - "architecture/test_topology.yaml"
+    - "architecture/module_manifest.yaml"
+    - "architecture/source_rationale.yaml"
+    - "tests/test_digest_profile_matching.py"
+    - "tests/test_digest_profiles_equivalence.py"
+    - "tests/test_topology_doctor.py"
+
 digest_profiles:
   - id: "change settlement rounding"
     # Migrated to typed match_policy 2026-04-25: blocks substring-collisions
@@ -1046,6 +1066,10 @@ digest_profiles:
       - "Graph evidence is derived context and may block only graph-impact claims unless graph files are directly changed."
       - "Workflow, skill-use, and work-ethic guidance must reduce decisions; do not add ceremony without a consuming test or runtime output."
     allowed_files:
+      - "AGENTS.md"
+      - ".agents/skills/zeus-ai-handoff/SKILL.md"
+      - ".claude/hooks/pre-merge-contamination-check.sh"
+      - ".claude/settings.json"
       - "scripts/topology_doctor.py"
       - "scripts/topology_doctor_cli.py"
       - "scripts/topology_doctor_docs_checks.py"
@@ -1054,9 +1078,12 @@ digest_profiles:
       - "scripts/topology_doctor_context_pack.py"
       - "scripts/topology_doctor_closeout.py"
       - "scripts/topology_doctor_code_review_graph.py"
+      - "scripts/topology_doctor_registry_checks.py"
+      - "architecture/AGENTS.md"
       - "architecture/topology.yaml"
       - "architecture/digest_profiles.py"
       - "architecture/topology_schema.yaml"
+      - "architecture/worktree_merge_protocol.yaml"
       - "architecture/context_pack_profiles.yaml"
       - "architecture/map_maintenance.yaml"
       - "architecture/task_boot_profiles.yaml"
@@ -1064,6 +1091,8 @@ digest_profiles:
       - "docs/operations/current_state.md"
       - "docs/operations/runtime_artifact_inventory.md"
       - "docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/**"
+      - "docs/operations/task_2026-04-29_topology_profile_resolver_stability/**"
+      - "docs/operations/task_2026-04-30_merge_protocol_conflict_first/**"
       - "docs/reference/modules/topology_system.md"
       - "docs/reference/modules/topology_doctor_system.md"
       - "docs/reference/modules/code_review_graph.md"
@@ -1202,6 +1231,9 @@ digest_profiles:
         - "StrategyBenchmarkSuite"
       single_terms_can_select: false
       min_confidence: 0.5
+    semantic_file_patterns:
+      - "scripts/live_readiness_check.py"
+      - "tests/test_live_readiness_gates.py"
     file_patterns:
       - "docs/AGENTS.md"
       - "docs/README.md"
