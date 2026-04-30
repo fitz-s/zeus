@@ -65,12 +65,6 @@ only when the active packet, closeout gate, audit/review task, or future handoff
 consumes them. Direct T0/T1 work should not create packet evidence just to make
 the workflow look complete.
 
-The operation-end feedback capsule is a closeout habit, not a packet filename.
-For direct work, keep it in the final response. For packet closeout, append it
-to an already-required work log or receipt. It should briefly capture context
-recovery, Zeus improvement insights, and topology helped/blocked notes without
-creating standalone evidence/findings files or widening the active packet.
-
 Tracked packet evidence in this live router is limited to the current or
 retained rows below. Closed packet evidence is archived under
 `docs/operations/_archive/` or `docs/archives/packets/` and indexed in
@@ -131,6 +125,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-29_design_simplification_audit/findings.md` | packet evidence | Ranked first-principles findings, repair flows, and phase status notes |
 | `task_2026-04-29_design_simplification_audit/simplification_plan.md` | packet evidence | Phased live-flow simplification and repair plan |
 | `task_2026-04-29_design_simplification_audit/evidence.md` | packet evidence | Command outputs, probes, reviews, and verification receipts for the packet |
+| `task_2026-04-29_design_simplification_audit/native_multibin_buy_no_implementation_spec.md` | packet evidence | Native executable multi-bin buy_no implementation handoff; no live authorization or production mutation by presence alone |
 | `task_2026-04-27_harness_debate/` | packet evidence | Harness debate packet evidence and implementation errata preserved from worktree merge |
 | `task_2026-04-27_backtest_first_principles_review/` | packet evidence | Backtest first-principles review packet preserved from worktree merge; planning/evidence only, not live authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |
@@ -152,10 +147,6 @@ archive_registry entry becomes its single source of historical truth.
   `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`; do not create
   sibling top-level folders for phases of the same package.
 - Do not leave completed packet material in the live pointer after closeout.
-- At operation close, recycle context: promote durable lessons through the
-  owning manifest/module book/test/source when in scope, summarize transient
-  lessons in the final response or active packet closeout surface, and discard
-  scratch context that no future agent should load by default.
 - Runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
   before they are treated as durable work evidence.
 - `state/daemon-heartbeat.json` and `state/status_summary.json` are live
