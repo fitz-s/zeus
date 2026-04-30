@@ -1652,7 +1652,45 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
     assert digest["profile"] == "topology graph agent runtime upgrade"
     assert digest["admission"]["status"] == "admitted"
     assert digest["route_card"]["risk_tier"] == "T3"
-    assert digest["route_card"]["next_action"].startswith("proceed only with packet plan")
+    assert digest["route_card"]["next_action"].startswith("proceed with planning-lock")
+
+
+def test_direct_operation_feedback_capsule_routes_without_persisted_files():
+    digest = build_digest(
+        "回收 context 和体验: Operation Feedback Capsule with topology helped/blocked note",
+        [],
+    )
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["route_card"]["risk_tier"] == "T0"
+    assert "final response" in " ".join(digest["required_law"])
+
+
+def test_operation_feedback_capsule_admits_existing_packet_work_log_only():
+    digest = build_digest(
+        "operation feedback capsule for packet closeout",
+        ["docs/operations/task_2026-04-30_merge_protocol_conflict_first/work_log.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["admission"]["admitted_files"] == [
+        "docs/operations/task_2026-04-30_merge_protocol_conflict_first/work_log.md"
+    ]
+
+
+def test_operation_feedback_capsule_blocks_omx_context_handoff_files():
+    digest = build_digest(
+        "operation feedback capsule persist runtime handoff",
+        [".omx/context/runtime_handoff.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["forbidden_hits"] == [".omx/context/runtime_handoff.md"]
 
 
 def test_shared_registry_files_do_not_select_domain_profile_by_themselves():

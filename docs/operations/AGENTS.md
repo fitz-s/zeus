@@ -65,6 +65,15 @@ only when the active packet, closeout gate, audit/review task, or future handoff
 consumes them. Direct T0/T1 work should not create packet evidence just to make
 the workflow look complete.
 
+The operation-end feedback capsule is a closeout habit, not a packet filename.
+For direct work, keep it in the final response. For packet closeout, append it
+to an already-required work log or receipt. It should briefly capture context
+recovery, Zeus improvement insights, and topology helped/blocked notes without
+creating standalone evidence/findings files or widening the active packet. If
+an agent needs a route card for this habit, use intent
+`direct operation feedback capsule`; do not persist capsules under
+`.omx/context/` or invent `handoff` files in packet folders.
+
 Tracked packet evidence in this live router is limited to the current or
 retained rows below. Closed packet evidence is archived under
 `docs/operations/_archive/` or `docs/archives/packets/` and indexed in
@@ -162,3 +171,6 @@ archive_registry entry becomes its single source of historical truth.
 - Dense module rehydration packets may change routing, manifests, module books,
   and scoped routers, but they must not silently widen into runtime/source
   semantics without an explicit packet scope change.
+- When closeout reports unrelated global script/docs/test drift, phrase the
+  result as changed-surface status plus repo-wide drift summary. Do not repair
+  unrelated weekly diagnostics just to make a narrow packet look globally clean.
