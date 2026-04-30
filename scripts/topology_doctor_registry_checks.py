@@ -85,6 +85,73 @@ def check_schema(api: Any, topology: dict[str, Any], schema: dict[str, Any]) -> 
     for key in schema.get("required_top_level_keys", []):
         if key not in topology:
             issues.append(api._issue("missing_schema_key", "architecture/topology.yaml", key))
+    issues.extend(check_digest_profile_selection(api, topology))
+    return issues
+
+
+def check_digest_profile_selection(api: Any, topology: dict[str, Any]) -> list[Any]:
+    selection = topology.get("digest_profile_selection")
+    if not isinstance(selection, dict):
+        return [
+            api._issue(
+                "digest_profile_selection_missing",
+                "architecture/topology.yaml:digest_profile_selection",
+                "digest profile selection contract is missing",
+            )
+        ]
+
+    raw_shared_patterns = selection.get("shared_companion_patterns")
+    if not raw_shared_patterns:
+        return [
+            api._issue(
+                "digest_profile_selection_shared_pattern_missing",
+                "architecture/topology.yaml:digest_profile_selection.shared_companion_patterns",
+                "shared companion patterns must be listed explicitly",
+            )
+        ]
+
+    issues: list[Any] = []
+    shared_patterns: set[str] = set()
+    for pattern in raw_shared_patterns:
+        if not isinstance(pattern, str) or not pattern.strip():
+            issues.append(
+                api._issue(
+                    "digest_profile_selection_shared_pattern_invalid",
+                    "architecture/topology.yaml:digest_profile_selection.shared_companion_patterns",
+                    "shared companion patterns must be non-empty strings",
+                )
+            )
+            continue
+        shared_patterns.add(pattern.strip())
+
+    for profile in topology.get("digest_profiles", []) or []:
+        profile_id = str(profile.get("id") or "<missing-id>")
+        semantic_patterns = {str(pattern) for pattern in profile.get("semantic_file_patterns", []) or []}
+        companion_patterns = {str(pattern) for pattern in profile.get("companion_file_patterns", []) or []}
+        conflicting_patterns = sorted(semantic_patterns & companion_patterns)
+        if conflicting_patterns:
+            issues.append(
+                api._issue(
+                    "digest_profile_selection_conflicting_pattern",
+                    f"architecture/topology.yaml:digest_profiles[{profile_id}]",
+                    "file patterns cannot be both semantic and companion evidence: "
+                    + ", ".join(conflicting_patterns),
+                )
+            )
+
+        legacy_patterns = {str(pattern) for pattern in profile.get("file_patterns", []) or []}
+        legacy_non_shared_patterns = sorted(legacy_patterns - shared_patterns)
+        strong_phrases = [phrase for phrase in profile.get("strong_phrases", []) or [] if str(phrase).strip()]
+        if legacy_patterns and not semantic_patterns and not legacy_non_shared_patterns and not strong_phrases:
+            issues.append(
+                api._issue(
+                    "digest_profile_selector_shared_only",
+                    f"architecture/topology.yaml:digest_profiles[{profile_id}]",
+                    "profile would be selectable only by shared companion files; add semantic_file_patterns "
+                    "or strong_phrases, or remove the profile-specific selector",
+                )
+            )
+
     return issues
 
 

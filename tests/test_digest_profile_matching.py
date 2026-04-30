@@ -30,6 +30,7 @@ def test_generic_source_word_does_not_route_to_data_ingestion():
     assert digest["profile"] == "generic"
     assert digest["admission"]["status"] == "advisory_only"
     assert digest["admission"]["admitted_files"] == []
+    assert digest["profile_selection"]["evidence_class"] in {"fallback", "weak_term_nonselectable"}
 
 
 def test_generic_test_word_does_not_route_to_test_profile():
@@ -610,6 +611,48 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
     assert digest["admission"]["status"] == "admitted"
     assert digest["route_card"]["risk_tier"] == "T3"
     assert digest["route_card"]["next_action"].startswith("proceed only with packet plan")
+
+
+def test_shared_registry_files_do_not_select_domain_profile_by_themselves():
+    digest = build_digest(
+        "topology navigation output contract false restriction cleanup",
+        [
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+            "architecture/docs_registry.yaml",
+            "architecture/test_topology.yaml",
+            "scripts/topology_doctor.py",
+            "scripts/topology_doctor_digest.py",
+            "scripts/topology_doctor_docs_checks.py",
+        ],
+    )
+
+    assert digest["profile"] != "r3 live readiness gates implementation"
+    assert digest["admission"]["status"] in {"advisory_only", "ambiguous"}
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["decision_basis"]["selected_by"] == "shared_file_only"
+    assert digest["profile_selection"]["evidence_class"] == "shared_file_only"
+    assert digest["profile_selection"]["needs_typed_intent"] is True
+    assert "architecture/topology.yaml" in digest["profile_selection"]["shared_file_hits"]
+
+
+def test_profile_specific_files_still_select_live_readiness():
+    digest = build_digest(
+        "live readiness gate registration fix",
+        [
+            "scripts/live_readiness_check.py",
+            "tests/test_live_readiness_gates.py",
+        ],
+    )
+
+    assert digest["profile"] == "r3 live readiness gates implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["evidence_class"] == "semantic_file"
+    assert digest["profile_selection"]["needs_typed_intent"] is False
+    assert digest["admission"]["admitted_files"] == [
+        "scripts/live_readiness_check.py",
+        "tests/test_live_readiness_gates.py",
+    ]
 
 
 def test_typed_intent_overrides_phrase_scoring_without_bypassing_admission():

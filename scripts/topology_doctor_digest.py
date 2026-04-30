@@ -128,6 +128,24 @@ _GENERIC_FALSE_POSITIVE_TOKENS = frozenset(
 )
 
 
+_DEFAULT_SHARED_COMPANION_FILE_PATTERNS = (
+    "AGENTS.md",
+    "workspace_map.md",
+    "docs/AGENTS.md",
+    "docs/README.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current_state.md",
+    "tests/AGENTS.md",
+    "architecture/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/digest_profiles.py",
+    "architecture/docs_registry.yaml",
+    "architecture/test_topology.yaml",
+    "architecture/module_manifest.yaml",
+    "architecture/source_rationale.yaml",
+)
+
+
 # ---------------------------------------------------------------------------
 # Existing helpers (unchanged)
 # ---------------------------------------------------------------------------
@@ -263,26 +281,91 @@ def _profile_match_policy(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _unique(items: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(items))
+
+
+def _profile_selection_config(topology: dict[str, Any]) -> dict[str, Any]:
+    return topology.get("digest_profile_selection") or {}
+
+
+def _shared_companion_patterns(topology: dict[str, Any]) -> list[str]:
+    configured = _profile_selection_config(topology).get("shared_companion_patterns") or []
+    return _unique([str(pattern) for pattern in configured] or list(_DEFAULT_SHARED_COMPANION_FILE_PATTERNS))
+
+
+def _pattern_hits(files: list[str], patterns: Iterable[Any]) -> list[str]:
+    normalized_patterns = [str(pattern) for pattern in patterns or [] if str(pattern)]
+    return _unique(
+        f
+        for f in files
+        for pattern in normalized_patterns
+        if fnmatch(f, pattern)
+    )
+
+
+def _matches_pattern_set(path: str, patterns: Iterable[Any]) -> bool:
+    return any(fnmatch(path, str(pattern)) for pattern in patterns or [] if str(pattern))
+
+
+def _file_evidence_for_profile(
+    profile: dict[str, Any],
+    files: list[str],
+    shared_patterns: list[str],
+) -> dict[str, list[str]]:
+    legacy_patterns = list(profile.get("file_patterns", []) or [])
+    semantic_patterns = list(profile.get("semantic_file_patterns", []) or [])
+    companion_patterns = list(profile.get("companion_file_patterns", []) or [])
+
+    legacy_hits = _pattern_hits(files, legacy_patterns)
+    explicit_semantic_hits = _pattern_hits(files, semantic_patterns)
+    explicit_companion_hits = _pattern_hits(files, companion_patterns)
+    explicit_semantic = set(explicit_semantic_hits)
+    explicit_companion = set(explicit_companion_hits)
+
+    shared_hits = [
+        path
+        for path in legacy_hits
+        if path not in explicit_semantic and _matches_pattern_set(path, shared_patterns)
+    ]
+    shared = set(shared_hits)
+    semantic_hits = _unique(
+        explicit_semantic_hits
+        + [
+            path
+            for path in legacy_hits
+            if path not in shared and path not in explicit_companion
+        ]
+    )
+    companion_hits = _unique(explicit_companion_hits)
+    return {
+        "file_hits": _unique(legacy_hits + explicit_semantic_hits + explicit_companion_hits),
+        "semantic_file_hits": semantic_hits,
+        "companion_file_hits": companion_hits,
+        "shared_file_hits": _unique(shared_hits),
+    }
+
+
 def _evidence_for_profile(
-    profile: dict[str, Any], task_lower: str, files: list[str]
+    profile: dict[str, Any],
+    task_lower: str,
+    files: list[str],
+    shared_patterns: list[str],
 ) -> dict[str, Any]:
     policy = _profile_match_policy(profile)
     strong_hits = [p for p in policy["strong_phrases"] if _phrase_hit(p, task_lower)]
     weak_hits = [t for t in policy["weak_terms"] if _word_boundary_hit(t, task_lower)]
     negative_hits = [p for p in policy["negative_phrases"] if _phrase_hit(p, task_lower)]
-    file_globs = profile.get("file_patterns", []) or []
-    file_hits = [
-        f for f in files for pat in file_globs if fnmatch(f, pat)
-    ]
-    # Distinct files only, preserving order.
-    file_hits = list(dict.fromkeys(file_hits))
+    file_evidence = _file_evidence_for_profile(profile, files, shared_patterns)
 
     # Confidence score (bounded [0, 1]).
     score = 0.0
     if strong_hits:
         score = max(score, 0.85)
-    if file_hits:
+    if file_evidence["semantic_file_hits"]:
         score = max(score, 0.75)
+    elif file_evidence["companion_file_hits"] or file_evidence["shared_file_hits"]:
+        score = max(score, 0.25)
     if weak_hits and policy["single_terms_can_select"]:
         # Domain-specific weak terms (declared explicitly) carry weight.
         score = max(score, 0.6)
@@ -296,24 +379,48 @@ def _evidence_for_profile(
         "strong_hits": strong_hits,
         "weak_hits": weak_hits,
         "negative_hits": negative_hits,
-        "file_hits": file_hits,
+        **file_evidence,
         "policy": policy,
         "score": score,
+        "evidence_class": _evidence_class(strong_hits, weak_hits, policy, file_evidence),
     }
+
+
+def _evidence_class(
+    strong_hits: list[str],
+    weak_hits: list[str],
+    policy: dict[str, Any],
+    file_evidence: dict[str, list[str]],
+) -> str:
+    if strong_hits:
+        return "semantic_phrase"
+    if file_evidence["semantic_file_hits"]:
+        return "semantic_file"
+    if weak_hits and policy["single_terms_can_select"]:
+        return "weak_term"
+    if file_evidence["shared_file_hits"]:
+        return "shared_file_only"
+    if file_evidence["companion_file_hits"]:
+        return "companion_file_only"
+    if weak_hits:
+        return "weak_term_nonselectable"
+    return "none"
 
 
 def _collect_evidence(
     topology: dict[str, Any], task: str, files: list[str]
 ) -> dict[str, Any]:
     task_lower = task.lower()
+    shared_patterns = _shared_companion_patterns(topology)
     per_profile = [
-        _evidence_for_profile(profile, task_lower, files)
+        _evidence_for_profile(profile, task_lower, files, shared_patterns)
         for profile in topology.get("digest_profiles", []) or []
     ]
     return {
         "task": task,
         "task_lower": task_lower,
         "files": list(files),
+        "shared_companion_patterns": shared_patterns,
         "per_profile": per_profile,
     }
 
@@ -331,7 +438,9 @@ def _resolve_profile(
     Output shape:
         {
             "profile_id": str | None,
-            "selected_by": "phrase" | "file" | "weak_term" | "fallback",
+            "selected_by": "phrase" | "file" | "weak_term" | "fallback" |
+                "shared_file_only" | "companion_file_only" |
+                "weak_term_nonselectable" | "typed_intent",
             "confidence": float,
             "candidates": [...],
             "ambiguous": bool,
@@ -376,9 +485,32 @@ def _resolve_profile(
             ],
         }
 
+    weak_selectable = bool(top["weak_hits"] and top["policy"]["single_terms_can_select"])
+    if not top["strong_hits"] and not top["semantic_file_hits"] and not weak_selectable:
+        selected_by = top.get("evidence_class") or "shared_file_only"
+        return {
+            "profile_id": None,
+            "selected_by": selected_by,
+            "confidence": 0.0,
+            "candidates": [c["profile_id"] for c in candidates],
+            "ambiguous": False,
+            "strong_hits": list(top.get("strong_hits") or []),
+            "weak_hits": list(top.get("weak_hits") or []),
+            "negative_hits": list(top.get("negative_hits") or []),
+            "file_hits": list(top.get("file_hits") or []),
+            "semantic_file_hits": list(top.get("semantic_file_hits") or []),
+            "companion_file_hits": list(top.get("companion_file_hits") or []),
+            "shared_file_hits": list(top.get("shared_file_hits") or []),
+            "evidence_class": selected_by,
+            "why": [
+                f"{selected_by}: {top['profile_id']} matched only non-semantic routing evidence; "
+                "pass typed intent or include a semantic profile phrase/file"
+            ],
+        }
+
     selected_by = (
         "phrase" if top["strong_hits"]
-        else "file" if top["file_hits"]
+        else "file" if top["semantic_file_hits"]
         else "weak_term"
     )
 
@@ -419,9 +551,18 @@ def _resolve_profile(
         "confidence": top["score"],
         "candidates": [c["profile_id"] for c in candidates],
         "ambiguous": False,
+        "strong_hits": list(top.get("strong_hits") or []),
+        "weak_hits": list(top.get("weak_hits") or []),
+        "negative_hits": list(top.get("negative_hits") or []),
+        "file_hits": list(top.get("file_hits") or []),
+        "semantic_file_hits": list(top.get("semantic_file_hits") or []),
+        "companion_file_hits": list(top.get("companion_file_hits") or []),
+        "shared_file_hits": list(top.get("shared_file_hits") or []),
+        "evidence_class": top.get("evidence_class"),
         "why": [
             f"selected by {selected_by}: "
-            f"strong_hits={top['strong_hits']} file_hits={top['file_hits']}"
+            f"strong_hits={top['strong_hits']} semantic_file_hits={top['semantic_file_hits']} "
+            f"shared_file_hits={top['shared_file_hits']}"
         ],
     }
 
@@ -456,6 +597,10 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
                 "ambiguous": False,
                 "strong_hits": [profile_id],
                 "file_hits": [],
+                "semantic_file_hits": [],
+                "companion_file_hits": [],
+                "shared_file_hits": [],
+                "evidence_class": "typed_intent",
                 "negative_hits": [],
                 "why": [f"selected by typed intent: {profile_id}"],
             }
@@ -467,6 +612,10 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
         "ambiguous": True,
         "strong_hits": [],
         "file_hits": [],
+        "semantic_file_hits": [],
+        "companion_file_hits": [],
+        "shared_file_hits": [],
+        "evidence_class": "typed_intent_invalid",
         "negative_hits": [],
         "why": [f"typed intent did not match a digest profile: {intent!r}"],
     }
@@ -562,7 +711,7 @@ def _reconcile_admission(
                 "task_phrases": [],
                 "file_globs": [],
                 "negative_hits": [],
-                "selected_by": "fallback",
+                "selected_by": resolution.get("selected_by", "fallback"),
                 "candidates": resolution.get("candidates", []),
                 "why": resolution.get("why", []),
             },
@@ -767,6 +916,22 @@ def build_digest(
                 break
 
     admission = _reconcile_admission(selected, requested, resolution, topology)
+    evidence_class = resolution.get("evidence_class") or resolution.get("selected_by") or "none"
+    profile_selection = {
+        "selected_by": resolution.get("selected_by"),
+        "confidence": resolution.get("confidence", 0.0),
+        "candidates": list(resolution.get("candidates") or []),
+        "evidence_class": evidence_class,
+        "semantic_file_hits": list(resolution.get("semantic_file_hits") or []),
+        "companion_file_hits": list(resolution.get("companion_file_hits") or []),
+        "shared_file_hits": list(resolution.get("shared_file_hits") or []),
+        "needs_typed_intent": resolution.get("selected_by") in {
+            "shared_file_only",
+            "companion_file_only",
+            "weak_term_nonselectable",
+            "typed_intent_invalid",
+        } or bool(resolution.get("ambiguous")),
+    }
 
     if selected is None:
         selected = {
@@ -796,6 +961,7 @@ def build_digest(
         "command_ok": True,
         "schema_version": "2",
         "admission": admission,
+        "profile_selection": profile_selection,
         "ok_semantics": "command_success_only_not_write_authorization",
         "typed_runtime_inputs": {
             "intent": intent,
