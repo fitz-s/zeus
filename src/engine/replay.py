@@ -39,8 +39,10 @@ BACKTEST_AUTHORITY_SCOPE = "diagnostic_non_promotion"
 WU_SWEEP_LANE = "wu_settlement_sweep"
 TRADE_HISTORY_LANE = "trade_history_audit"
 PROBABILITY_EPS = 1e-12
+LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
+LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
-    "shadow_signals",
+    LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
     "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
@@ -311,9 +313,9 @@ class ReplayContext:
         # filters at the SQL layer. RECONSTRUCTED rows (heuristic timestamp)
         # are excluded; backfilled rows whose availability_provenance is
         # populated as DERIVED/RECORDED/FETCH_TIME pass through. Pre-F11
-        # legacy DBs (no availability_provenance column) are tolerated via the
-        # IS NULL clause so the existing diagnostic_non_promotion replay
-        # behavior on un-migrated DBs continues unchanged.
+        # schemas without the provenance column still fall back below, but
+        # migrated schemas must not admit Open-Meteo previous-runs rows whose
+        # provenance remains NULL.
         from src.backtest.training_eligibility import SKILL_ELIGIBLE_SQL
         query_with_provenance = f"""
                 SELECT source, forecast_basis_date, forecast_issue_time, lead_days,
@@ -322,7 +324,13 @@ class ReplayContext:
                 WHERE city = ?
                   AND target_date = ?
                   AND {_forecast_col} IS NOT NULL
-                  AND (availability_provenance IS NULL OR {SKILL_ELIGIBLE_SQL})
+                  AND (
+                    {SKILL_ELIGIBLE_SQL}
+                    OR (
+                      availability_provenance IS NULL
+                      AND source != 'openmeteo_previous_runs'
+                    )
+                  )
                 ORDER BY lead_days ASC, source ASC, forecast_basis_date ASC
                 """
         query_legacy = f"""
@@ -534,7 +542,7 @@ class ReplayContext:
                 shadow = self.conn.execute(
                     f"""
                     SELECT timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json
-                    FROM {self._sp}shadow_signals
+                    FROM {self._sp}{LEGACY_SHADOW_SIGNAL_TABLE}
                     WHERE city = ? AND target_date = ?
                     ORDER BY datetime(timestamp) ASC
                     LIMIT 1
@@ -579,7 +587,10 @@ class ReplayContext:
                     "trade_id": "",
                     "decision_time": shadow["timestamp"],
                     "snapshot_id": int(shadow["decision_snapshot_id"]) if str(shadow["decision_snapshot_id"]).isdigit() else shadow["decision_snapshot_id"],
-                    "source": "shadow_signals",
+                    "source": LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
+                    "decision_reference_source": LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
+                    "storage_source": LEGACY_SHADOW_SIGNAL_TABLE,
+                    "authority_scope": BACKTEST_AUTHORITY_SCOPE,
                     "bin_labels": bin_labels,
                     "p_raw_vector": p_raw_vector,
                     "p_cal_vector": p_cal_vector,
@@ -1398,6 +1409,14 @@ def _replay_one_settlement(
     ]
     if decision_reference_source in DIAGNOSTIC_REPLAY_REFERENCE_SOURCES:
         provenance_validations.append("diagnostic_reference")
+        provenance_validations.append(
+            f"authority_scope:{decision_ref.get('authority_scope') or BACKTEST_AUTHORITY_SCOPE}"
+        )
+    decision_reference_storage_source = decision_ref.get("storage_source")
+    if decision_reference_storage_source:
+        provenance_validations.append(
+            f"decision_reference_storage_source:{decision_reference_storage_source}"
+        )
     if hours_since_open_fallback:
         provenance_validations.append("hours_since_open_fallback=48.0")
 
@@ -2229,7 +2248,7 @@ def run_replay(
     ctx = ReplayContext(
         conn,
         overrides=overrides,
-        allow_snapshot_only_reference=(allow_snapshot_only_reference or mode != "audit"),
+        allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
 
     # Get all settlements in date range
@@ -2355,6 +2374,7 @@ def run_replay(
         **linkage_info,
         **_replay_provenance_limitations(summary.outcomes),
         "forecast_rows_fallback": allow_snapshot_only_reference,
+        "authority_scope": BACKTEST_AUTHORITY_SCOPE,
         "promotion_authority": False,
         "missing_parity_dimensions": missing_parity,
     }

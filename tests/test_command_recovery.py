@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -258,6 +259,123 @@ def _get_events(conn, command_id):
     return list_events(conn, command_id)
 
 
+def _connect_file_db(path):
+    from src.state.db import init_schema
+
+    c = sqlite3.connect(path)
+    c.row_factory = sqlite3.Row
+    init_schema(c)
+    return c
+
+
+@pytest.mark.parametrize("partial_status", ["PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"])
+def test_partial_polling_with_trade_id_projects_optimistic_lot(tmp_path, partial_status):
+    """PARTIAL with real trade id is optimistic exposure, not synthetic finality."""
+    from src.execution.fill_tracker import _maybe_append_venue_fill_observation
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "partial-fill.db"
+    conn = _connect_file_db(db_path)
+    _insert(
+        conn,
+        command_id="cmd-partial",
+        position_id="runtime-pos-partial",
+        decision_id="dec-partial",
+        token_id="tok-partial",
+        side="BUY",
+        size=10.0,
+        price=0.5,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        ("vord-partial", "cmd-partial"),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_decisions (
+            market_id, bin_label, direction, size_usd, price, timestamp,
+            p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+            status, runtime_trade_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "mkt-001",
+            "50-51°F",
+            "buy_yes",
+            10.0,
+            0.5,
+            _NOW.isoformat(),
+            0.6,
+            0.6,
+            0.1,
+            0.05,
+            0.15,
+            0.0,
+            "pending",
+            "runtime-pos-partial",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    pos = Position(
+        trade_id="runtime-pos-partial",
+        market_id="mkt-001",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-04-26",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.5,
+        shares=20.0,
+        state="pending_tracked",
+        order_id="vord-partial",
+        entry_order_id="vord-partial",
+    )
+    deps = SimpleNamespace(get_connection=lambda: _connect_file_db(db_path))
+
+    assert _maybe_append_venue_fill_observation(
+        pos,
+        {
+            "status": partial_status,
+            "trade_id": "venue-trade-partial",
+            "filled_size": "4",
+            "price": "0.5",
+        },
+        status=partial_status,
+        shares=4.0,
+        fill_price=0.5,
+        observed_at=_NOW,
+        deps=deps,
+    )
+
+    verify = _connect_file_db(db_path)
+    try:
+        order_fact = verify.execute(
+            "SELECT state, matched_size FROM venue_order_facts WHERE venue_order_id = ?",
+            ("vord-partial",),
+        ).fetchone()
+        trade_fact = verify.execute(
+            "SELECT trade_fact_id, state, filled_size FROM venue_trade_facts WHERE trade_id = ?",
+            ("venue-trade-partial",),
+        ).fetchone()
+        lot = verify.execute(
+            "SELECT state, shares FROM position_lots WHERE source_trade_fact_id = ?",
+            (trade_fact["trade_fact_id"],),
+        ).fetchone()
+    finally:
+        verify.close()
+
+    assert dict(order_fact) == {"state": "PARTIALLY_MATCHED", "matched_size": "4.0"}
+    assert {key: trade_fact[key] for key in ("state", "filled_size")} == {
+        "state": "MATCHED",
+        "filled_size": "4.0",
+    }
+    assert dict(lot) == {"state": "OPTIMISTIC_EXPOSURE", "shares": 4}
+
+
 # ---------------------------------------------------------------------------
 # TestRecoveryResolutionTable
 # ---------------------------------------------------------------------------
@@ -409,8 +527,8 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
 
-    @pytest.mark.parametrize("venue_status", ["MATCHED", "MINED"])
-    def test_unknown_side_effect_matched_or_mined_stays_partial_not_fill_finality(
+    @pytest.mark.parametrize("venue_status", ["MATCHED", "MINED", "FILLED"])
+    def test_unknown_side_effect_nonconfirmed_status_stays_partial_not_fill_finality(
         self,
         conn,
         venue_status,
@@ -432,18 +550,16 @@ class TestRecoveryResolutionTable:
         assert "PARTIAL_FILL_OBSERVED" in event_types
         assert "FILL_CONFIRMED" not in event_types
 
-    @pytest.mark.parametrize("venue_status", ["FILLED", "CONFIRMED"])
-    def test_unknown_side_effect_confirmed_or_filled_reaches_fill_finality(
+    def test_unknown_side_effect_confirmed_reaches_fill_finality(
         self,
         conn,
-        venue_status,
     ):
         _insert(conn)
         _advance_to_unknown_side_effect(conn)
         client = MagicMock()
         client.find_order_by_idempotency_key.return_value = {
-            "orderID": f"vord-{venue_status.lower()}",
-            "status": venue_status,
+            "orderID": "vord-confirmed",
+            "status": "CONFIRMED",
         }
 
         from src.execution.command_recovery import reconcile_unresolved_commands
