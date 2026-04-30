@@ -14,6 +14,12 @@ from typing import Any, Optional
 
 import httpx
 
+from src.contracts.executable_market_snapshot_v2 import (
+    MarketSnapshotMismatchError,
+    canonicalize_fee_details,
+    fee_rate_fraction_from_details,
+)
+
 logger = logging.getLogger(__name__)
 
 CLOB_BASE = "https://clob.polymarket.com"
@@ -212,28 +218,27 @@ class PolymarketClient:
         return float(best_bid), float(best_ask), float(bid_size), float(ask_size)
 
     def get_fee_rate(self, token_id: str) -> float:
-        """Fetch the token-specific Polymarket taker fee rate."""
+        """Fetch the token-specific Polymarket taker fee as a fraction."""
+
+        return fee_rate_fraction_from_details(self.get_fee_rate_details(token_id))
+
+    def get_fee_rate_details(self, token_id: str) -> dict[str, Any]:
+        """Fetch token-specific fee metadata with explicit fraction/bps units."""
+
         resp = httpx.get(f"{CLOB_BASE}/fee-rate", params={"token_id": token_id}, timeout=15.0)
         resp.raise_for_status()
         data = resp.json()
         schedule = data.get("feeSchedule") if isinstance(data, dict) else None
         if not isinstance(schedule, dict):
             schedule = data if isinstance(data, dict) else {}
-        if schedule.get("feesEnabled") is False:
-            return 0.0
-        for key in (
-            "base_fee",
-            "baseFee",
-            "fee_rate_bps",
-            "feeRateBps",
-            "feeRate",
-            "fee_rate",
-            "takerFeeRate",
-            "taker_fee_rate",
-        ):
-            if key in schedule and schedule[key] is not None:
-                return float(schedule[key])
-        raise RuntimeError(f"Fee-rate response missing base_fee/feeRate for {token_id}")
+        try:
+            return canonicalize_fee_details(
+                schedule,
+                source="clob_fee_rate",
+                token_id=token_id,
+            )
+        except MarketSnapshotMismatchError as exc:
+            raise RuntimeError(f"Fee-rate response missing base_fee/feeRate for {token_id}: {exc}") from exc
 
     def bind_submission_envelope(self, envelope: Any) -> None:
         """Bind the next limit-order submit to executable snapshot provenance."""

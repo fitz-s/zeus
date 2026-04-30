@@ -14,7 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, Optional
+import math
+from typing import Any, Literal, Mapping, Optional
 
 
 AuthorityTier = Literal["GAMMA", "DATA", "CLOB", "CHAIN"]
@@ -37,6 +38,16 @@ class MarketSnapshotMismatchError(MarketSnapshotError):
 
 class MarketNotTradableError(MarketSnapshotError):
     """Raised when snapshot tradability flags forbid submission."""
+
+
+FEE_RATE_BPS_FIELDS = ("fee_rate_bps", "feeRateBps", "base_fee", "baseFee", "bps")
+FEE_RATE_FRACTION_FIELDS = (
+    "fee_rate_fraction",
+    "feeRate",
+    "fee_rate",
+    "takerFeeRate",
+    "taker_fee_rate",
+)
 
 
 @dataclass(frozen=True)
@@ -234,6 +245,176 @@ def assert_snapshot_executable(
         raise MarketSnapshotMismatchError(
             f"size {submitted_size} is below snapshot min_order_size {snapshot.min_order_size}"
         )
+
+
+def canonicalize_fee_details(
+    fee_details: Mapping[str, Any],
+    *,
+    source: str | None = None,
+    token_id: str | None = None,
+) -> dict[str, Any]:
+    """Return fee metadata with both fraction and bps units made explicit.
+
+    Polymarket exposes two fee-rate shapes in current docs/API surfaces:
+    ``/fee-rate`` returns ``base_fee`` in basis points, while market fee
+    schedules use a fraction coefficient consumed by ``feeRate * p * (1-p)``.
+    Snapshot/envelope consumers must not infer units from field names later.
+    """
+
+    if not isinstance(fee_details, Mapping):
+        raise MarketSnapshotMismatchError("fee_details must be a mapping")
+
+    canonical = dict(fee_details)
+    if source:
+        _assert_expected_fee_metadata(canonical, "source", source)
+        canonical.setdefault("source", source)
+    if token_id:
+        _assert_expected_fee_metadata(canonical, "token_id", token_id)
+        canonical.setdefault("token_id", token_id)
+
+    if canonical.get("feesEnabled") is False:
+        return _finalize_fee_details(
+            canonical,
+            fee_rate_fraction=0.0,
+            fee_rate_bps=0.0,
+            source_field="feesEnabled",
+            raw_unit="disabled",
+        )
+
+    fraction_value, fraction_field = _first_fee_value(canonical, FEE_RATE_FRACTION_FIELDS)
+    bps_value, bps_field = _first_fee_value(canonical, FEE_RATE_BPS_FIELDS)
+
+    fraction: float | None = None
+    bps: float | None = None
+    source_field: str | None = None
+    raw_unit: str | None = None
+
+    if fraction_field is not None:
+        fraction = _validate_fee_rate_fraction(fraction_value, fraction_field)
+        bps = fraction * 10_000.0
+        source_field = fraction_field
+        raw_unit = "fraction"
+    if bps_field is not None:
+        bps_from_field = _validate_fee_rate_bps(bps_value, bps_field)
+        fraction_from_bps = bps_from_field / 10_000.0
+        if fraction is not None and not math.isclose(fraction, fraction_from_bps, rel_tol=0.0, abs_tol=1e-12):
+            raise MarketSnapshotMismatchError(
+                "fee_details contains inconsistent fee-rate units: "
+                f"{fraction_field}={fraction_value!r} vs {bps_field}={bps_value!r}"
+            )
+        fraction = fraction_from_bps
+        bps = bps_from_field
+        source_field = bps_field
+        raw_unit = "bps"
+
+    if fraction is None or bps is None or source_field is None or raw_unit is None:
+        raise MarketSnapshotMismatchError(
+            "fee_details missing fee_rate_fraction/feeRate or fee_rate_bps/base_fee/bps"
+        )
+
+    return _finalize_fee_details(
+        canonical,
+        fee_rate_fraction=fraction,
+        fee_rate_bps=bps,
+        source_field=source_field,
+        raw_unit=raw_unit,
+    )
+
+
+def canonicalize_legacy_fee_rate_value(
+    value: Any,
+    *,
+    source: str,
+    token_id: str,
+) -> dict[str, Any]:
+    """Canonicalize legacy ``get_fee_rate`` values and mark unit inference."""
+
+    numeric = _as_fee_float(value, "legacy_get_fee_rate")
+    if numeric > 1.0:
+        details = canonicalize_fee_details(
+            {
+                "source": source,
+                "token_id": token_id,
+                "fee_rate_bps": numeric,
+                "fee_rate_unit_inferred": "legacy_get_fee_rate_gt_1_bps",
+            }
+        )
+    else:
+        details = canonicalize_fee_details(
+            {
+                "source": source,
+                "token_id": token_id,
+                "fee_rate_fraction": numeric,
+                "fee_rate_unit_inferred": "legacy_get_fee_rate_lte_1_fraction",
+            }
+        )
+    return details
+
+
+def fee_rate_fraction_from_details(fee_details: Mapping[str, Any]) -> float:
+    """Extract the canonical fraction coefficient for fee math."""
+
+    return _validate_fee_rate_fraction(
+        canonicalize_fee_details(fee_details)["fee_rate_fraction"],
+        "fee_rate_fraction",
+    )
+
+
+def _first_fee_value(details: Mapping[str, Any], fields: tuple[str, ...]) -> tuple[Any, str | None]:
+    for field in fields:
+        value = details.get(field)
+        if value is not None:
+            return value, field
+    return None, None
+
+
+def _assert_expected_fee_metadata(details: Mapping[str, Any], field_name: str, expected: str) -> None:
+    actual = details.get(field_name)
+    if actual is None or str(actual).strip() == "":
+        return
+    if str(actual) != str(expected):
+        raise MarketSnapshotMismatchError(
+            f"fee_details {field_name} {actual!r} does not match expected {expected!r}"
+        )
+
+
+def _finalize_fee_details(
+    details: dict[str, Any],
+    *,
+    fee_rate_fraction: float,
+    fee_rate_bps: float,
+    source_field: str,
+    raw_unit: str,
+) -> dict[str, Any]:
+    details["fee_rate_fraction"] = fee_rate_fraction
+    details["fee_rate_bps"] = fee_rate_bps
+    details["fee_rate_source_field"] = details.get("fee_rate_source_field") or source_field
+    details["fee_rate_raw_unit"] = details.get("fee_rate_raw_unit") or raw_unit
+    return details
+
+
+def _validate_fee_rate_fraction(value: Any, field_name: str) -> float:
+    rate = _as_fee_float(value, field_name)
+    if rate < 0.0 or rate > 1.0:
+        raise MarketSnapshotMismatchError(f"{field_name} must be in [0, 1], got {rate}")
+    return rate
+
+
+def _validate_fee_rate_bps(value: Any, field_name: str) -> float:
+    bps = _as_fee_float(value, field_name)
+    if bps < 0.0 or bps > 10_000.0:
+        raise MarketSnapshotMismatchError(f"{field_name} must be in [0, 10000], got {bps}")
+    return bps
+
+
+def _as_fee_float(value: Any, field_name: str) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MarketSnapshotMismatchError(f"{field_name} must be numeric") from exc
+    if not math.isfinite(numeric):
+        raise MarketSnapshotMismatchError(f"{field_name} must be finite")
+    return numeric
 
 
 def _as_decimal(value: Any, field_name: str) -> Decimal:

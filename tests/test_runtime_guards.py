@@ -37,7 +37,6 @@ from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
-from src.types.metric_identity import HIGH_LOCALDAY_MAX
 from src.execution.executor import OrderResult, create_execution_intent
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
@@ -61,6 +60,25 @@ from src.state.strategy_tracker import StrategyTracker
 from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.types.temperature import TemperatureDelta
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+
+def test_evaluator_fee_rate_uses_canonical_fraction_from_clob_details():
+    class FakeClob:
+        def get_fee_rate_details(self, token_id):
+            assert token_id == "yes-token"
+            return {"base_fee": "30", "source": "clob_fee_rate"}
+
+    assert evaluator_module._fee_rate_for_token(FakeClob(), "yes-token") == pytest.approx(0.003)
+
+
+def test_evaluator_fee_rate_canonicalizes_legacy_bps_values():
+    class FakeClob:
+        def get_fee_rate(self, token_id):
+            assert token_id == "yes-token"
+            return 30
+
+    assert evaluator_module._fee_rate_for_token(FakeClob(), "yes-token") == pytest.approx(0.003)
 
 
 @pytest.fixture(autouse=True)

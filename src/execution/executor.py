@@ -330,6 +330,7 @@ def _build_pre_submit_envelope(
     """
 
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+    from src.contracts.executable_market_snapshot_v2 import canonicalize_fee_details
     from src.state.snapshot_repo import get_snapshot
     from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
 
@@ -389,7 +390,7 @@ def _build_pre_submit_envelope(
         tick_size=snapshot.min_tick_size,
         min_order_size=snapshot.min_order_size,
         neg_risk=snapshot.neg_risk,
-        fee_details=snapshot.fee_details,
+        fee_details=canonicalize_fee_details(snapshot.fee_details),
         canonical_pre_sign_payload_hash=payload_hash,
         signed_order=None,
         signed_order_hash=None,

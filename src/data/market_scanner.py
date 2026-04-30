@@ -24,6 +24,9 @@ from src.config import City, cities_by_name, state_path
 from src.contracts.executable_market_snapshot_v2 import (
     FRESHNESS_WINDOW_DEFAULT,
     ExecutableMarketSnapshotV2,
+    MarketSnapshotMismatchError,
+    canonicalize_legacy_fee_rate_value,
+    canonicalize_fee_details,
 )
 from src.state.snapshot_repo import insert_snapshot
 
@@ -1442,7 +1445,7 @@ def capture_executable_market_snapshot(
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
     raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
-    fee_rate = _fetch_fee_rate(clob, selected_token)
+    fee_details = _fetch_fee_details(clob, selected_token)
     _assert_clob_identity(
         raw_clob_market=raw_clob_market,
         raw_orderbook=raw_orderbook,
@@ -1500,11 +1503,7 @@ def capture_executable_market_snapshot(
         sports_start_at=_datetime_fact(outcome, "sports_start_at"),
         min_tick_size=min_tick_size,
         min_order_size=min_order_size,
-        fee_details={
-            "source": "clob_fee_rate",
-            "token_id": selected_token,
-            "fee_rate_bps": fee_rate,
-        },
+        fee_details=fee_details,
         token_map_raw=dict(outcome.get("token_map_raw") or {"YES": yes_token, "NO": no_token}),
         rfqe=_boolish_market_field(outcome, "rfqe"),
         neg_risk=neg_risk,
@@ -1578,13 +1577,30 @@ def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
     return dict(raw)
 
 
-def _fetch_fee_rate(clob: Any, token_id: str) -> float:
+def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
+    details_getter = getattr(clob, "get_fee_rate_details", None)
+    if callable(details_getter):
+        try:
+            return canonicalize_fee_details(
+                details_getter(token_id),
+                source="clob_fee_rate",
+                token_id=token_id,
+            )
+        except MarketSnapshotMismatchError as exc:
+            raise ExecutableSnapshotCaptureError("CLOB fee-rate response has invalid units") from exc
+        except Exception as exc:
+            raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
     getter = getattr(clob, "get_fee_rate", None)
     if not callable(getter):
         raise ExecutableSnapshotCaptureError("CLOB client lacks fee-rate fetch")
     try:
-        return float(getter(token_id))
-    except (TypeError, ValueError) as exc:
+        return canonicalize_legacy_fee_rate_value(
+            getter(token_id),
+            source="clob_fee_rate",
+            token_id=token_id,
+        )
+    except MarketSnapshotMismatchError as exc:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
     except Exception as exc:
         raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc

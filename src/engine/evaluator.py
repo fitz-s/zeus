@@ -76,6 +76,12 @@ from src.state.db import log_selection_family_fact, log_selection_hypothesis_fac
 from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
+from src.contracts.executable_market_snapshot_v2 import (
+    MarketSnapshotMismatchError,
+    canonicalize_legacy_fee_rate_value,
+    canonicalize_fee_details,
+    fee_rate_fraction_from_details,
+)
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.data.forecast_source_registry import SourceNotEnabled
@@ -545,10 +551,30 @@ def _default_weather_fee_rate() -> float:
 
 
 def _fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
+    details_getter = getattr(clob, "get_fee_rate_details", None)
+    if callable(details_getter):
+        try:
+            return fee_rate_fraction_from_details(
+                canonicalize_fee_details(
+                    details_getter(token_id),
+                    source="clob_fee_rate",
+                    token_id=token_id,
+                )
+            )
+        except Exception as exc:
+            raise FeeRateUnavailableError(f"fee-rate lookup failed for {token_id}: {exc}") from exc
+
     getter = getattr(clob, "get_fee_rate", None)
     if callable(getter):
         try:
-            return float(getter(token_id))
+            details = canonicalize_legacy_fee_rate_value(
+                getter(token_id),
+                source="legacy_get_fee_rate",
+                token_id=token_id,
+            )
+            return fee_rate_fraction_from_details(details)
+        except MarketSnapshotMismatchError as exc:
+            raise FeeRateUnavailableError(f"fee-rate lookup failed for {token_id}: {exc}") from exc
         except Exception as exc:
             raise FeeRateUnavailableError(f"fee-rate lookup failed for {token_id}: {exc}") from exc
     return _default_weather_fee_rate()
