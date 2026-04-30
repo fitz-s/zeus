@@ -125,6 +125,24 @@ It does not choose the canonical live snapshot table, activate TIGGE/direct
 ECMWF, promote Open-Meteo, or implement the full cross-path
 `CausalTimestampSet`.
 
+Phase 1K review follow-up status for DSA-05/DSA-13/DSA-18 (2026-04-30):
+executable entry metadata checks now read `ensemble_snapshots_v2` only by the
+exact `decision_snapshot_id` returned by the current candidate's snapshot
+persistence. The former city/date/metric latest-row fallback is removed because
+a later correction row is not evidence for the decision being made. Day0
+executable entries now reject WU-settlement cities unless the live observation
+source is settlement-role `wu_api`; IEM ASOS and Open-Meteo hourly remain
+monitor/diagnostic fallbacks and cannot support executable entry. HKO, NOAA,
+and CWA settlement types also fail closed for Day0 executable entry until an
+explicit settlement-type-specific executable observation policy exists. Oracle error
+evidence now fail-closes executable selection when the city/metric row is
+missing, stale, invalid, or future-dated relative to `decision_time`. LOW
+entries therefore remain intentionally blocked until LOW-specific oracle
+evidence exists; this is a live-readiness blocker, not a reason to inherit HIGH
+oracle evidence or default missing LOW rows to OK. This follow-up closes the
+review BLOCK that historical tests were reading future-dated current oracle
+JSON by giving those tests point-in-time evidence fixtures.
+
 Phase 1H status for DSA-07 (2026-04-29): production monitor refresh no longer
 contains a `paper_mode` / Gamma price branch. Held-position market refresh now
 uses the live venue protocol shape only: select YES `token_id` or NO

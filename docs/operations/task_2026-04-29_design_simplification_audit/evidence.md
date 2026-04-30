@@ -65,6 +65,58 @@
   TIGGE/ECMWF primary activation, source timing/payload hash completeness, and
   downstream evidence/capability propagation.
 
+### Phase 1K Review Follow-up Evidence
+
+- `src/engine/evaluator.py` now requires an exact `decision_snapshot_id` when
+  reading `ensemble_snapshots_v2` metadata for executable gates. A missing id
+  returns no v2 metadata instead of selecting the latest city/date/metric row.
+  This avoids using later-filed correction rows as if they were evidence for
+  the current decision.
+- The boundary-ambiguous v2 metadata gate now runs only after `_store_ens_snapshot()`
+  returns the current decision snapshot id. Pre-persistence city/date/metric
+  lookup is no longer part of executable entry authority.
+- `src/engine/evaluator.py` rejects Day0 executable entries for WU-settlement
+  cities unless the Day0 observation source is `wu_api`. IEM ASOS and
+  Open-Meteo hourly observations remain useful fallback/diagnostic evidence but
+  cannot support executable entry.
+- HKO, NOAA, and CWA settlement-source types also fail closed for Day0
+  executable entry until a dedicated executable observation-source policy is
+  implemented for those settlement types. This is intentional: the current
+  real-time observation client's fallback chain does not prove HKO/NOAA/CWA
+  settlement-role Day0 authority.
+- `src/engine/evaluator.py` checks `data/oracle_error_rates.json` for
+  city/metric evidence before executable selection. Missing rows, missing
+  `last_date`, invalid `last_date`, stale rows, and rows future-dated relative
+  to `decision_time` all fail closed with
+  `ORACLE_EVIDENCE_UNAVAILABLE`.
+- The future-dated check was added after critic review observed that historical
+  tests with `decision_time=2026-04-02` were reading current
+  `data/oracle_error_rates.json` rows whose `last_date=2026-04-14`. The repair
+  was to give non-oracle historical tests point-in-time oracle fixtures, not to
+  weaken the production gate.
+- LOW oracle evidence is intentionally fail-closed until LOW-specific
+  city/metric evidence exists. The legacy flat JSON shape is accepted only for
+  HIGH, matching the older `oracle_penalty` compatibility semantics and
+  preventing LOW from inheriting HIGH oracle history.
+- Local verification on 2026-04-30:
+  `pytest -q -p no:cacheprovider tests/test_center_buy_repair.py tests/test_runtime_guards.py tests/test_fdr.py tests/test_decision_evidence_runtime_invocation.py tests/test_digest_profile_matching.py::test_phase1k_live_decision_snapshot_causality_routes_to_snapshot_causality_profile`
+  returned `178 passed`; after adding the non-WU settlement-type Day0 policy
+  regression, the same gate returned `181 passed`.
+- Local static checks on 2026-04-30:
+  `python3 -m py_compile src/engine/evaluator.py tests/test_fdr.py tests/test_runtime_guards.py tests/test_decision_evidence_runtime_invocation.py tests/test_center_buy_repair.py`
+  passed, and
+  `python3 scripts/semantic_linter.py --check src/engine/evaluator.py tests/test_fdr.py tests/test_runtime_guards.py tests/test_decision_evidence_runtime_invocation.py tests/test_center_buy_repair.py`
+  passed.
+- Additional affected-test probe on 2026-04-30:
+  `pytest -q -p no:cacheprovider tests/test_execution_price.py tests/test_evaluate_candidate_metric_integration.py`
+  returned `30 passed, 1 xfailed`. A broader exploratory
+  `tests/test_pnl_flow_and_audit.py --maxfail=5` probe stopped with existing
+  control-plane failures plus evaluator fixture rows that lack the Phase 1K
+  forecast-evidence fields. Topology refused editing that file under this
+  Phase 1K packet (`scope_expansion_required`), so those fixture updates remain
+  a separate scoped package if the broader P&L audit suite is selected as a
+  closeout gate.
+
 ### Official Provider Evidence
 
 - Open-Meteo's Ensemble API documentation says the API provides individual ensemble member forecasts for multiple weather models, includes ECMWF IFS 0.25 ensemble and GFS ensemble model options, and returns API data through `/v1/ensemble`. Source: https://open-meteo.com/en/docs/ensemble-api.

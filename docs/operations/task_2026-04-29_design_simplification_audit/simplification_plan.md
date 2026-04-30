@@ -763,6 +763,19 @@ Current status (2026-04-29):
   files through the broader source-policy route. This does not choose the
   canonical live snapshot table, activate TIGGE/direct ECMWF, promote
   Open-Meteo, or implement the full cross-path timestamp contract.
+- Phase 1K review follow-up is repaired for executable metadata/source/oracle
+  causality: v2 metadata gates now require the exact `decision_snapshot_id`
+  returned by the current candidate's snapshot persistence; Day0 WU-settlement
+  executable entries reject non-`wu_api` fallback observations before the signal
+  path; HKO/NOAA/CWA Day0 executable entries fail closed until a
+  settlement-type-specific executable observation policy exists; and oracle
+  evidence rejects missing, stale, invalid, or future-dated city/metric rows
+  before sizing. Historical tests that exercise unrelated gates now provide
+  point-in-time oracle evidence fixtures instead of reading current JSON as
+  future knowledge. LOW executable entries remain intentionally blocked until
+  LOW-specific oracle evidence exists. This does not mutate production DB rows,
+  change source routing, activate TIGGE/direct ECMWF, promote Open-Meteo, or
+  authorize live entries.
 - Phase 1L canonical snapshot authority is repaired for the live evaluator
   writer: `ensemble_snapshots_v2` is the canonical write target when present
   and attached `world` v2 is preferred over trade/main shadow tables. Legacy

@@ -53,7 +53,7 @@ def _make_edge(p_value: float, *, low: float = 40, high: float = 41) -> BinEdge:
 def _seed_ensemble_snapshots_v2_row(
     conn, *, city: str, target_date: str, metric: str = "high",
     boundary_ambiguous: int = 0, causality_status: str = "OK",
-) -> None:
+) -> str:
     """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots_v2 row.
 
     Closes the "natural-empty-v2 bypass" in T2.d/e/f tests — when v2 is
@@ -89,6 +89,18 @@ def _seed_ensemble_snapshots_v2_row(
         (city, target_date, metric, boundary_ambiguous, causality_status),
     )
     conn.commit()
+    row = conn.execute(
+        """
+        SELECT snapshot_id
+        FROM ensemble_snapshots_v2
+        WHERE city = ? AND target_date = ? AND temperature_metric = ?
+        ORDER BY snapshot_id DESC
+        LIMIT 1
+        """,
+        (city, target_date, metric),
+    ).fetchone()
+    assert row is not None
+    return str(row["snapshot_id"])
 
 
 def _patch_mature_calibration(monkeypatch) -> None:
@@ -167,11 +179,13 @@ class TestDT7ScemaPathActuallyRuns:
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_zero.db")
         init_schema(conn)
-        _seed_ensemble_snapshots_v2_row(
+        snapshot_id = _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=0,
         )
-        meta = _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high")
+        meta = _read_v2_snapshot_metadata(
+            conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
+        )
         assert meta, "meta must be non-empty — schema path must read the real row"
         assert meta.get("boundary_ambiguous") == 0
         assert meta.get("causality_status") == "OK"
@@ -188,17 +202,34 @@ class TestDT7ScemaPathActuallyRuns:
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_one.db")
         init_schema(conn)
-        _seed_ensemble_snapshots_v2_row(
+        snapshot_id = _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
-        meta = _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high")
+        meta = _read_v2_snapshot_metadata(
+            conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
+        )
         assert meta.get("boundary_ambiguous") == 1
         from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
         assert boundary_ambiguous_refuses_signal(meta) is True, (
             "boundary_ambiguous=1 MUST refuse signal — DT7 gate is the core "
             "of the boundary-day-leakage invariant"
         )
+
+    def test_T2g_read_metadata_requires_exact_decision_snapshot_id(self, tmp_path):
+        """No snapshot_id means no decision snapshot authority.
+
+        The evaluator must not use the latest city/date/metric row as a proxy
+        for the candidate's executable decision snapshot.
+        """
+        from src.engine.evaluator import _read_v2_snapshot_metadata
+        conn = get_connection(tmp_path / "t2g_exact_only.db")
+        init_schema(conn)
+        _seed_ensemble_snapshots_v2_row(
+            conn, city="Dallas", target_date="2026-04-12", metric="high",
+            boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
+        )
+        assert _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high") == {}
 
 
 class TestSelectionFamilySubstrate:
@@ -660,12 +691,10 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
-        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
-        # table naturally returns {} → boundary_ambiguous_refuses_signal
-        # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
-        # WILL replace this natural bypass with a real v2 fixture row
-        # (boundary_ambiguous=0) to exercise DT7 on fixture DB.
+        # DT7 gate: metadata lookup now happens after snapshot persistence
+        # and requires the exact decision_snapshot_id. This fixture stubs
+        # snapshot persistence to a known id and seeds a v2 row with that id,
+        # so the boundary check exercises the production-shaped exact-id path.
         #
         # ENS snapshot persistence is stubbed so FakeEns does not need
         # the full production attribute surface at the PERSISTENCE seam;
@@ -733,7 +762,7 @@ class TestSelectionFamilySubstrate:
                 high_so_far=70,
                 low_so_far=None,
                 current_temp=69,
-                source="test",
+                source="wu_api",
                 observation_time=now.isoformat(),
             ),
         )
@@ -958,7 +987,7 @@ class TestSelectionFamilySubstrate:
                 high_so_far=70,
                 low_so_far=None,
                 current_temp=69,
-                source="test",
+                source="wu_api",
                 observation_time=now.isoformat(),
             ),
         )
@@ -1185,7 +1214,7 @@ class TestSelectionFamilySubstrate:
                 high_so_far=70,
                 low_so_far=None,
                 current_temp=69,
-                source="test",
+                source="wu_api",
                 observation_time=now.isoformat(),
             ),
         )
@@ -1402,7 +1431,7 @@ class TestSelectionFamilySubstrate:
                 high_so_far=70,
                 low_so_far=None,
                 current_temp=69,
-                source="test",
+                source="wu_api",
                 observation_time=now.isoformat(),
             ),
         )

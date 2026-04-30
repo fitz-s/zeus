@@ -166,10 +166,10 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
         "src.signal.day0_router.Day0Router.route",
         staticmethod(lambda inputs: _FakeDay0Result()),
     )
-    # DT#7 boundary gate: the evaluator queries
-    # ensemble_snapshots_v2 via _read_v2_snapshot_metadata BEFORE the
-    # day0 branch. Explicit empty-dict stub keeps the gate open and the
-    # test independent of v2-table fixture state.
+    # DT#7 boundary gate: evaluator metadata reads now happen after
+    # snapshot persistence and require the exact decision_snapshot_id. This
+    # test focuses on DecisionEvidence construction, so keep v2 metadata
+    # neutral and independent of fixture DB state.
     monkeypatch.setattr(
         evaluator_module,
         "_read_v2_snapshot_metadata",
@@ -242,7 +242,7 @@ def _make_candidate(now: datetime):
             high_so_far=70,
             low_so_far=None,
             current_temp=69,
-            source="test",
+            source="wu_api",
             observation_time=now.isoformat(),
         ),
     )

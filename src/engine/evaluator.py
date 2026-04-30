@@ -26,6 +26,7 @@ from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
 from src.config import (
     CONFIG_DIR,
+    PROJECT_ROOT,
     City,
     edge_n_bootstrap,
     ensemble_crosscheck_member_count,
@@ -86,6 +87,11 @@ from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
+DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
+    "wu_icao": frozenset({"wu_api"}),
+}
+ORACLE_EVIDENCE_PATH = PROJECT_ROOT / "data" / "oracle_error_rates.json"
+ORACLE_EVIDENCE_MAX_STALENESS_DAYS = 30
 
 
 class FeeRateUnavailableError(RuntimeError):
@@ -166,66 +172,37 @@ def _read_v2_snapshot_metadata(
     extract_tigge_mn2t6_localday_min.py per §DT#7 boundary-leakage law →
     gate fires on boundary_ambiguous=1 rows.
 
-    M3 ordering: if snapshot_id is provided (candidate edge origin), lookup
-    by snapshot_id first for exact match; fallback to fetch_time DESC LIMIT 1
-    (most-recent row) when snapshot_id is absent or unmatched. The fallback
-    may read a later-filed correction row; this is acceptable pre-data-lift
-    but noted as a caveat for post-lift audits.
+    Decision-time ordering: executable gates may only read the exact
+    decision_snapshot_id written for this candidate. A city/date/metric
+    "latest" fallback can be a different fetch cycle and is not evidence
+    for the current decision.
 
     Returns:
         dict with `boundary_ambiguous`, `causality_status`, and `snapshot_id`
         keys when row exists; empty dict when row is absent OR v2 table is
-        not present (backward compat for legacy-only databases).
+        not present OR no snapshot_id is supplied (backward compat for
+        legacy-only databases and pre-persistence callers).
     """
+    if not snapshot_id:
+        return {}
+
     # Resolve schema prefix (world.ensemble_snapshots_v2 when world DB
     # attached; bare ensemble_snapshots_v2 in monolithic test DBs).
     import sqlite3
     for sp in ("world.", ""):
         try:
-            if snapshot_id:
-                # M3: prefer exact snapshot_id match to avoid reading
-                # later-filed correction rows for a different fetch cycle.
-                row = conn.execute(
-                    f"""
-                    SELECT boundary_ambiguous, causality_status, snapshot_id
-                    FROM {sp}ensemble_snapshots_v2
-                    WHERE city = ?
-                      AND target_date = ?
-                      AND temperature_metric = ?
-                      AND snapshot_id = ?
-                    LIMIT 1
-                    """,
-                    (city_name, target_date, temperature_metric, snapshot_id),
-                ).fetchone()
-                if row is None:
-                    # snapshot_id present but unmatched — fall through to
-                    # fetch_time-ordered fallback below.
-                    row = conn.execute(
-                        f"""
-                        SELECT boundary_ambiguous, causality_status, snapshot_id
-                        FROM {sp}ensemble_snapshots_v2
-                        WHERE city = ?
-                          AND target_date = ?
-                          AND temperature_metric = ?
-                        ORDER BY fetch_time DESC
-                        LIMIT 1
-                        """,
-                        (city_name, target_date, temperature_metric),
-                    ).fetchone()
-            else:
-                # M3 fallback: no snapshot_id — use most-recent fetch.
-                row = conn.execute(
-                    f"""
-                    SELECT boundary_ambiguous, causality_status, snapshot_id
-                    FROM {sp}ensemble_snapshots_v2
-                    WHERE city = ?
-                      AND target_date = ?
-                      AND temperature_metric = ?
-                    ORDER BY fetch_time DESC
-                    LIMIT 1
-                    """,
-                    (city_name, target_date, temperature_metric),
-                ).fetchone()
+            row = conn.execute(
+                f"""
+                SELECT boundary_ambiguous, causality_status, snapshot_id
+                FROM {sp}ensemble_snapshots_v2
+                WHERE city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                  AND snapshot_id = ?
+                LIMIT 1
+                """,
+                (city_name, target_date, temperature_metric, snapshot_id),
+            ).fetchone()
         except sqlite3.OperationalError:
             continue
         except Exception:
@@ -238,6 +215,106 @@ def _read_v2_snapshot_metadata(
             "snapshot_id": row["snapshot_id"],
         }
     return {}
+
+
+def _day0_observation_source_rejection_reason(
+    city: City,
+    observation: "Day0ObservationContext",
+) -> str | None:
+    settlement_source_type = str(
+        getattr(city, "settlement_source_type", "") or ""
+    ).strip()
+    if isinstance(observation, dict):
+        source_raw = observation.get("source")
+    else:
+        source_raw = getattr(observation, "source", "")
+    source = str(source_raw or "").strip()
+    allowed_sources = DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE.get(
+        settlement_source_type
+    )
+    if allowed_sources is None:
+        return (
+            "Day0 observation source role is not authorized for executable entry: "
+            f"city={city.name} settlement_source_type={settlement_source_type!r} "
+            f"observation_source={source!r}"
+        )
+    if source not in allowed_sources:
+        return (
+            "Day0 observation source is not authorized for executable entry: "
+            f"city={city.name} settlement_source_type={settlement_source_type!r} "
+            f"observation_source={source!r} allowed={sorted(allowed_sources)}"
+        )
+    return None
+
+
+def _oracle_evidence_row(data: object, city_name: str, temperature_metric: str) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    city_row = data.get(city_name)
+    if not isinstance(city_row, dict):
+        return None
+    metric_row = city_row.get(temperature_metric)
+    if isinstance(metric_row, dict):
+        return metric_row
+    if temperature_metric == "high" and "oracle_error_rate" in city_row:
+        return city_row
+    return None
+
+
+def _oracle_evidence_rejection_reason(
+    city_name: str,
+    temperature_metric: str,
+    *,
+    decision_time: datetime | None,
+) -> str | None:
+    try:
+        payload = json.loads(ORACLE_EVIDENCE_PATH.read_text())
+    except FileNotFoundError:
+        return f"oracle evidence unavailable: {ORACLE_EVIDENCE_PATH} is missing"
+    except Exception as exc:
+        return f"oracle evidence unavailable: {ORACLE_EVIDENCE_PATH} is unreadable ({exc})"
+
+    row = _oracle_evidence_row(payload, city_name, temperature_metric)
+    if row is None:
+        return (
+            "oracle evidence unavailable: missing city/metric row for "
+            f"{city_name}/{temperature_metric}"
+        )
+
+    last_date_raw = row.get("last_date")
+    if not last_date_raw:
+        return (
+            "oracle evidence unavailable: missing last_date for "
+            f"{city_name}/{temperature_metric}"
+        )
+    try:
+        last_date = date.fromisoformat(str(last_date_raw))
+    except ValueError:
+        return (
+            "oracle evidence unavailable: invalid last_date for "
+            f"{city_name}/{temperature_metric}: {last_date_raw!r}"
+        )
+
+    as_of = (
+        decision_time.date()
+        if isinstance(decision_time, datetime)
+        else datetime.now(timezone.utc).date()
+    )
+    if last_date > as_of:
+        return (
+            "oracle evidence unavailable: future-dated relative to decision: "
+            f"{city_name}/{temperature_metric} last_date={last_date.isoformat()} "
+            f"as_of={as_of.isoformat()}"
+        )
+    age_days = (as_of - last_date).days
+    if age_days > ORACLE_EVIDENCE_MAX_STALENESS_DAYS:
+        return (
+            "oracle evidence stale: "
+            f"{city_name}/{temperature_metric} last_date={last_date.isoformat()} "
+            f"as_of={as_of.isoformat()} age_days={age_days} "
+            f"max_days={ORACLE_EVIDENCE_MAX_STALENESS_DAYS}"
+        )
+    return None
 
 
 def _decision_id() -> str:
@@ -1020,30 +1097,20 @@ def evaluate_candidate(
             applied_validations=["day0_observation"],
         )]
 
-    # DT#7 Phase 9C A4 (clause 3): refuse boundary-ambiguous candidates.
-    # When ensemble_snapshots_v2 carries boundary_ambiguous=1 for this
-    # (city, target_date, metric) row — as written at ingest time by
-    # scripts/extract_tigge_mn2t6_localday_min.py per the boundary-leakage
-    # law — the candidate must not be treated as confirmatory signal.
-    # Pre-Golden-Window: v2 is empty; helper returns {} → gate returns
-    # False → no refusal. Post-data-lift: v2 populated + low-track ingest
-    # sets boundary_ambiguous per §DT#7 law → gate fires when appropriate.
-    # Law: docs/authority/zeus_current_architecture.md §22 +
-    #      docs/authority/zeus_dual_track_architecture.md §DT#7.
-    v2_snapshot_meta = _read_v2_snapshot_metadata(
-        conn, city.name, target_date,
-        temperature_metric.temperature_metric,
-    )
-    if boundary_ambiguous_refuses_signal(v2_snapshot_meta):
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="MARKET_FILTER",
-            rejection_reasons=["DT7_boundary_day_ambiguous"],
-            availability_status="DATA_AVAILABLE",
-            selected_method=selected_method,
-            applied_validations=["dt7_boundary_day_gate"],
-        )]
+    if is_day0_mode:
+        source_rejection_reason = _day0_observation_source_rejection_reason(
+            city, candidate.observation
+        )
+        if source_rejection_reason is not None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="OBSERVATION_SOURCE_UNAUTHORIZED",
+                rejection_reasons=[source_rejection_reason],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "observation_source_policy"],
+            )]
 
     # Build bins — skip unparseable (both boundaries None)
     bins = []
@@ -1306,13 +1373,20 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "ens_fetch"],
             )]
 
-        # P10D S1 / INV-16: thread causality_status from v2 snapshot metadata
-        # into Day0SignalInputs so the Day0Router causality gate is live.
-        # Pre-Golden-Window: v2_snapshot_meta is empty → fallback to "OK" (dormant gate).
-        # Post-data-lift: v2 carries causality_status per ETL ingest law.
+        # P10D S1 / INV-16: thread causality_status from the current Day0
+        # observation context into Day0SignalInputs. Snapshot metadata is
+        # only authority after the exact decision_snapshot_id exists; do not
+        # consult a latest city/date/metric snapshot before routing.
         # N/A_CAUSAL_DAY_ALREADY_STARTED signals the day has partially elapsed;
         # Day0Router routes LOW slots accordingly per _LOW_ALLOWED_CAUSALITY.
-        causality_status = v2_snapshot_meta.get("causality_status", "OK")
+        if isinstance(candidate.observation, dict):
+            causality_status = str(
+                candidate.observation.get("causality_status") or "OK"
+            )
+        else:
+            causality_status = str(
+                getattr(candidate.observation, "causality_status", "OK") or "OK"
+            )
 
         # INV-16 enforcement: reject LOW slots with causality_status outside the
         # allowed set before reaching any Platt lookup.  This is a SEPARATE
@@ -1402,6 +1476,27 @@ def evaluate_candidate(
             applied_validations=[*entry_validations, "ens_snapshot_persistence"],
             p_raw=p_raw,
         )]
+
+    v2_snapshot_meta = _read_v2_snapshot_metadata(
+        conn,
+        city.name,
+        target_date,
+        temperature_metric.temperature_metric,
+        snapshot_id=snapshot_id,
+    )
+    if boundary_ambiguous_refuses_signal(v2_snapshot_meta):
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="MARKET_FILTER",
+            rejection_reasons=["DT7_boundary_day_ambiguous"],
+            availability_status="DATA_AVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "dt7_boundary_day_gate"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+        )]
+
     p_raw_persisted = _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
     if p_raw_persisted is False:
         return [EdgeDecision(
@@ -1947,6 +2042,11 @@ def evaluate_candidate(
     projected_total_exposure_usd = current_heat * sizing_bankroll
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)
     projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
+    oracle_evidence_rejection_reason = _oracle_evidence_rejection_reason(
+        city.name,
+        temperature_metric.temperature_metric,
+        decision_time=decision_time,
+    )
 
     decisions = []
     for edge in filtered:
@@ -2052,8 +2152,24 @@ def evaluate_candidate(
             ))
             continue
 
-        # Oracle penalty gate — blacklisted cities skip trading entirely
-        # S2 R4 P10B: pass temperature_metric so LOW candidates use separate oracle info
+        if oracle_evidence_rejection_reason is not None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="ORACLE_EVIDENCE_UNAVAILABLE",
+                rejection_reasons=[oracle_evidence_rejection_reason],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "oracle_evidence"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+            ))
+            continue
+
+        # Oracle penalty gate — blacklisted cities skip trading entirely.
+        # S2 R4 P10B: pass temperature_metric so LOW candidates use separate oracle info.
         oracle = get_oracle_info(city.name, temperature_metric.temperature_metric)
         if oracle.status == OracleStatus.BLACKLIST:
             decisions.append(EdgeDecision(
