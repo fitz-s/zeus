@@ -56,7 +56,7 @@ promotion, or external data-fetch side effects.
 | Source truth | PARTIAL | current source validity must be refreshed before live claims; DB observations lag current markets; Day0 WU geocode path can select wrong station; Day0 observation coverage/freshness is soft, not a trade gate |
 | Forecast signal | BLOCKED | Open-Meteo live ENS lacks persisted issue/valid time; live snapshot id can be empty; local-day ENS NaNs can pass validation and collapse p_raw to an invalid zero vector; WU epoch observation timestamps are treated as stale while still producing tradeable Day0 p_raw |
 | Calibration | BLOCKED | current calibration model/pair tables are empty, so live path falls back to raw probabilities; maturity edge-threshold multiplier is not wired into evaluator selection |
-| Edge construction | PARTIAL | Day0 discovery mode can produce an empty candidate set due contradictory resolution-hour filters; current CLOB fee-rate response shape is not parsed, causing live sizing to reject candidates; closed/non-accepting child markets can enter outcome vector; authority degradation not fail-closed before entry; weather multi-bin `buy_no`/shoulder-sell hypotheses can be selected but never become executable edges |
+| Edge construction | PARTIAL | Day0 discovery mode can produce an empty candidate set due contradictory resolution-hour filters; current CLOB fee-rate response shape is not parsed, causing live sizing to reject candidates; closed/non-accepting child markets can enter outcome vector; authority degradation not fail-closed before entry |
 | Execution intent | BLOCKED | entry intent does not carry executable snapshot facts; no production executable-snapshot producer/refresher was found; VWMP-derived limit prices are clamped but not tick-quantized before snapshot gate; `max_slippage` budget is typed but not enforced; executable snapshot table is empty |
 | Venue submission | BLOCKED | V2 compatibility envelope is not U1-certified market identity; command row is bound to a pre-submit envelope while the signed/raw-response SDK envelope is not persisted back into canonical provenance |
 | Risk/control | BLOCKED | RED force-exit sweep records proxy intent but does not actually cancel/sell; fail-closed RED causes do not necessarily trigger sweep; ORANGE favorable-exit behavior is not explicit |
@@ -706,12 +706,12 @@ stay trade-qualified. The fix must be table-role aware, not blanket
 **Acceptance evidence:** Status reports `world.ensemble_snapshots_v2=684624`
 on the current DB and does not emit the wrong closure-claim flag for that table.
 
-### [OPEN P1] Weather multi-bin `buy_no`/shoulder-sell hypotheses are not executable
+### [CLOSED 2026-04-30] Weather multi-bin `buy_no`/shoulder-sell hypotheses are not executable
 
 **Location:** `src/strategy/market_analysis.py::find_edges`,
 `src/strategy/market_analysis_family_scan.py::scan_full_hypothesis_family`,
 `src/engine/evaluator.py` FDR filtering and token routing.
-**Problem:** `scan_full_hypothesis_family()` tests every bin in both
+**Original problem:** `scan_full_hypothesis_family()` tests every bin in both
 `buy_yes` and `buy_no` directions, but `MarketAnalysis.find_edges()` only
 creates `buy_no` edges when `len(self.bins) <= 2`. Normal Polymarket weather
 families are multi-bin events, while the durable strategy catalog explicitly
@@ -733,22 +733,37 @@ introduced to avoid synthetic `1-p` math on multi-bin families. If so, the
 restriction is a valid safety choice, but then shoulder-bin sell must be marked
 unsupported until a native NO-token VWMP and family-consistent probability
 contract is implemented.
-**Proposed remediation:**
-1. Decide the product contract: either explicitly disable weather multi-bin
-   `buy_no` and mark Shoulder Bin Sell as not live-supported, or implement a
-   native NO-token path for each child market.
-2. If enabled, compute `buy_no` edges from native NO-token VWMP and
-   direction-native posterior `P(NO for this child market)`, not from an
-   undocumented synthetic market-price complement.
-3. Make FDR selection and executable edge construction operate over the same
-   hypothesis universe so selected hypotheses cannot disappear at execution
-   time.
-4. Add tests for a multi-bin shoulder-sell opportunity, a rejected synthetic
-   complement case, and exact NO-token routing into `ExecutionIntent`.
-**Acceptance evidence:** A real weather multi-bin fixture with an overpriced
-shoulder YES market either yields a validated `buy_no` edge routed to the
-native NO token, or produces an explicit `strategy_unsupported_buy_no_multibin`
-no-trade reason.
+**Closure:** Branch `impl/native-multibin-buy-no-2026-04-30` implements the
+native-NO path without authorizing live deployment:
+1. `MarketAnalysis` accepts per-bin native NO VWMP and quote-availability
+   evidence; multi-bin `buy_no` is executable only for bins with native NO
+   quote evidence.
+2. `scan_full_hypothesis_family()` and `find_edges()` now use the same native
+   NO price surface for executable multi-bin `buy_no`; bootstrap CI also uses
+   native NO price rather than `1 - YES_VWMP`.
+3. Evaluator quote acquisition probes `no_token_id` books for multi-bin
+   markets, passes side-aware evidence into analysis, and fail-closes if FDR
+   selects a hypothesis that does not materialize as a `BinEdge`.
+4. Live runtime stays default-off for multi-bin `buy_no`; when enabled it
+   captures/loads the executable snapshot, verifies selected token and YES/NO
+   outcome label, reprices from the selected orderbook, recomputes Kelly size
+   at the final executable price, and rejects unsafe best-ask/depth jumps before
+   `create_execution_intent`.
+5. Snapshot capture and Polymarket top-book reads normalize unsorted books and
+   reject crossed/invalid books before any executable price is used.
+6. Executor routing remains `buy_no -> no_token_id`, and exit snapshot lookup is
+   now selected-token exact so NO exits do not borrow YES-selected sibling
+   snapshots.
+**Closure evidence:** `tests/test_fdr.py`, `tests/test_runtime_guards.py`,
+`tests/test_executable_market_snapshot_v2.py`, `tests/test_bootstrap_symmetry.py`,
+`tests/test_executor.py`, and
+`tests/test_exit_safety.py` cover native NO edge materialization, no silent FDR
+edge disappearance, NO-token fee lookup/routing, NO executable snapshot
+selection/hash, default-off live gating, final-price/depth repricing, monitor
+bootstrap native-NO context, and exit selected-token lookup.
+**Residual boundary:** This closeout is source/test closure only. It does not
+promote Shoulder Bin Sell to live alpha, mutate production DBs, enable the
+default-off runtime flags, or prove calibration/P&L profitability.
 
 ### [MITIGATED 2026-04-30; RESIDUAL P2] M5 exchange reconciliation no longer promotes non-final trades to filled commands
 
@@ -1209,10 +1224,9 @@ Do not fix these as isolated one-line patches. The safe sequence is:
 12. **Calibration maturity semantics:** Before calibration promotion, decide and
    implement the Level 4 contract: hard no-trade or documented stricter edge
    threshold wired into evaluator selection.
-13. **Strategy direction reachability:** Resolve the multi-bin `buy_no`
-   contract before claiming Shoulder Bin Sell alpha. Either implement native
-   NO-token edge construction or remove/disable the unsupported live strategy
-   surface.
+13. **Strategy direction reachability:** CLOSED 2026-04-30 for native
+   multi-bin `buy_no` source/test reachability. Residual live-alpha claims still
+   require calibration/P&L evidence and operator promotion gates.
 14. **Calibration readiness:** Populate and validate metric-aware calibration
    pairs/models only after source/snapshot lineage is clean. Until then,
    `p_cal=p_raw` must remain an explicit no-go or degraded strategy state, not
@@ -1266,8 +1280,9 @@ Do not fix these as isolated one-line patches. The safe sequence is:
   p_cal, and non-normalized model-agreement inputs fail closed before posterior
   or bootstrap edge construction.
 - Strategy reachability tests proving every advertised live strategy family has
-  at least one executable decision path, including weather multi-bin
-  shoulder-sell / `buy_no`.
+  at least one executable decision path. Weather multi-bin shoulder-sell /
+  `buy_no` source reachability is covered by the 2026-04-30 native-NO tests;
+  live-alpha promotion still requires calibration/P&L evidence.
 - Partial-fill lifecycle tests proving `PARTIAL -> CANCELLED remainder` leaves
   an active position for the filled shares and does not create a chain-unknown
   quarantine for the same token.

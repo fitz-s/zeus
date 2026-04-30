@@ -92,10 +92,37 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
 }
 ORACLE_EVIDENCE_PATH = PROJECT_ROOT / "data" / "oracle_error_rates.json"
 ORACLE_EVIDENCE_MAX_STALENESS_DAYS = 30
+NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
+NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
 
 
 class FeeRateUnavailableError(RuntimeError):
     """Raised when token-specific execution fee cannot be established."""
+
+
+def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean feature flag, failing closed on malformed values."""
+
+    flags = settings["feature_flags"]
+    value = flags.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"feature flag {name} must be boolean, got {type(value).__name__}")
+    return bool(value)
+
+
+def native_multibin_buy_no_shadow_enabled() -> bool:
+    return _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG)
+
+
+def native_multibin_buy_no_live_enabled() -> bool:
+    shadow_enabled = native_multibin_buy_no_shadow_enabled()
+    live_enabled = _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG)
+    if live_enabled and not shadow_enabled:
+        raise ValueError(
+            f"{NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG}=true requires "
+            f"{NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG}=true"
+        )
+    return live_enabled
 
 
 @dataclass
@@ -142,6 +169,10 @@ class EdgeDecision:
     n_edges_after_fdr: int = 0
     fdr_fallback_fired: bool = False
     fdr_family_size: int = 0
+    sizing_bankroll: float = 0.0
+    kelly_multiplier_used: float = 0.0
+    execution_fee_rate: float = 0.0
+    safety_cap_usd: float | None = None
 
     # Heavy Bound Domain Objects (Phase 2 encapsulation)
     edge_context: Optional[EdgeContext] = None
@@ -1019,6 +1050,21 @@ def _selected_edge_keys_from_full_family(
     }
 
 
+def _filter_executable_selected_edges(
+    edges: list[BinEdge],
+    selected_edge_keys: set[tuple[str, str]],
+) -> list[BinEdge]:
+    edge_keys = {(edge.bin.label, edge.direction) for edge in edges}
+    missing = selected_edge_keys - edge_keys
+    if missing:
+        missing_s = ", ".join(f"{label}/{direction}" for label, direction in sorted(missing))
+        raise ValueError(f"FDR_SELECTED_EDGE_UNEXECUTABLE:{missing_s}")
+    return [
+        edge for edge in edges
+        if (edge.bin.label, edge.direction) in selected_edge_keys
+    ]
+
+
 def _availability_status_for_error(exc: Exception) -> str:
     text = str(exc).lower()
     name = exc.__class__.__name__
@@ -1641,8 +1687,26 @@ def evaluate_candidate(
 
     # Market prices via VWMP
     p_market = np.zeros(len(bins))
+    p_market_no = np.zeros(len(bins))
+    buy_no_quote_available = np.zeros(len(bins), dtype=bool)
     market_is_complete = True
     mapped_outcomes = 0
+    try:
+        probe_native_no_quotes = len(bins) > 2 and native_multibin_buy_no_shadow_enabled()
+    except ValueError as exc:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="RISK_REJECTED",
+            rejection_reasons=[str(exc)],
+            availability_status="CONFIG_INVALID",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "native_multibin_buy_no_flag_invalid"],
+            decision_snapshot_id=snapshot_id,
+            p_raw=p_raw,
+            p_cal=p_cal,
+        )]
+    native_no_quote_unavailable_labels: list[str] = []
     for i, o in enumerate(outcomes):
         if o["range_low"] is None and o["range_high"] is None:
             continue
@@ -1673,6 +1737,24 @@ def evaluate_candidate(
                 )
             except Exception as micro_exc:
                 logger.warning("Microstructure log DB insert failed for %s: %s", o["token_id"], micro_exc)
+            if probe_native_no_quotes:
+                no_token_id = str(o.get("no_token_id") or "")
+                if not no_token_id:
+                    logger.warning("Native NO quote unavailable for %s: missing no_token_id", o["title"])
+                    native_no_quote_unavailable_labels.append(str(o["title"]))
+                else:
+                    try:
+                        no_bid, no_ask, no_bid_sz, no_ask_sz = clob.get_best_bid_ask(no_token_id)
+                        p_market_no[idx] = vwmp(no_bid, no_ask, no_bid_sz, no_ask_sz)
+                        buy_no_quote_available[idx] = True
+                    except Exception as no_exc:
+                        logger.warning(
+                            "Native NO quote unavailable for %s/%s; buy_no disabled for this bin: %s",
+                            o["title"],
+                            no_token_id,
+                            no_exc,
+                        )
+                        native_no_quote_unavailable_labels.append(str(o["title"]))
         except Exception as e:
             try:
                 from src.contracts.exceptions import EmptyOrderbookError
@@ -1872,6 +1954,11 @@ def evaluate_candidate(
     if not is_day0_mode:
         entry_validations.append("model_agreement")
     entry_validations.append("alpha_posterior")
+    if probe_native_no_quotes:
+        if native_no_quote_unavailable_labels:
+            entry_validations.append("buy_no_native_quote_unavailable")
+        else:
+            entry_validations.append("buy_no_native_quote_available")
 
     forecast_source = _forecast_source_key(
         source_id=ens_result.get("source_id"),
@@ -1895,6 +1982,8 @@ def evaluate_candidate(
         p_raw=p_raw,
         p_cal=p_cal,
         p_market=p_market,
+        p_market_no=p_market_no if probe_native_no_quotes else None,
+        buy_no_quote_available=buy_no_quote_available if probe_native_no_quotes else None,
         alpha=alpha,
         bins=bins,
         member_maxes=analysis_member_extrema,
@@ -1939,6 +2028,7 @@ def evaluate_candidate(
     n_bootstrap = edge_n_bootstrap()
     edges = analysis.find_edges(n_bootstrap=n_bootstrap)
     _fdr_fallback = False
+    _fdr_selection_unexecutable = ""
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
@@ -1959,10 +2049,17 @@ def evaluate_candidate(
             full_family_hypotheses,
             decision_snapshot_id=snapshot_id,
         )
-        filtered = [
-            edge for edge in edges
-            if (edge.bin.label, edge.direction) in selected_edge_keys
-        ]
+        try:
+            filtered = _filter_executable_selected_edges(edges, selected_edge_keys)
+        except ValueError as exc:
+            logger.warning(
+                "Full-family FDR selected an unmaterialized edge for %s/%s: %s",
+                candidate.city.name,
+                candidate.target_date,
+                exc,
+            )
+            _fdr_selection_unexecutable = str(exc)
+            filtered = []
     else:
         # Full-family scan succeeded but returned zero hypotheses — anomalous
         # (any valid market has ≥1 bin × 2 directions). Fail closed instead of
@@ -2013,9 +2110,17 @@ def evaluate_candidate(
         if _fdr_fallback:
             stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
             rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
+        elif _fdr_selection_unexecutable:
+            stage = "FDR_SELECTION_UNEXECUTABLE"
+            rejection_reasons = [_fdr_selection_unexecutable]
         else:
             stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
             rejection_reasons = [f"{len(edges)} edges found, {len(filtered)} passed FDR"]
+            if native_no_quote_unavailable_labels:
+                labels = ",".join(native_no_quote_unavailable_labels[:3])
+                if len(native_no_quote_unavailable_labels) > 3:
+                    labels = f"{labels},..."
+                rejection_reasons.append(f"BUY_NO_NATIVE_QUOTE_UNAVAILABLE:{labels}")
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
@@ -2406,6 +2511,10 @@ def evaluate_candidate(
             }),
             edge_context_json=_serialize_json(edge_ctx),
             decision_evidence=entry_evidence,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier_used=km * risk_throttle,
+            execution_fee_rate=fee_rate,
+            safety_cap_usd=settings["live_safety_cap_usd"],
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

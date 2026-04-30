@@ -74,6 +74,38 @@ def _finite_market_price_vector(
     return arr
 
 
+def _optional_market_price_vector(
+    name: str,
+    values: np.ndarray | None,
+    expected_len: int,
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite")
+    if np.any(arr < 0.0):
+        raise ValueError(f"{name} must be non-negative")
+    if np.any(arr > 1.0):
+        raise ValueError(f"{name} components must be <= 1")
+    return arr
+
+
+def _optional_bool_vector(
+    name: str,
+    values: np.ndarray | None,
+    expected_len: int,
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=bool)
+    if arr.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {arr.shape}")
+    return arr
+
+
 def _finite_member_extrema(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     if arr.ndim != 1 or arr.size == 0:
@@ -106,6 +138,8 @@ class MarketAnalysis:
         bias_reference: dict | None = None,
         rng_seed: int | None = None,
         market_complete: bool = True,
+        p_market_no: np.ndarray | None = None,
+        buy_no_quote_available: np.ndarray | None = None,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -114,6 +148,12 @@ class MarketAnalysis:
         self.p_raw = _finite_probability_distribution("p_raw", p_raw, expected_bins)
         self.p_cal = _finite_probability_distribution("p_cal", p_cal, expected_bins)
         self.p_market = _finite_market_price_vector("p_market", p_market, expected_bins)
+        self.p_market_no = _optional_market_price_vector("p_market_no", p_market_no, expected_bins)
+        self.buy_no_quote_available = _optional_bool_vector(
+            "buy_no_quote_available",
+            buy_no_quote_available,
+            expected_bins,
+        )
         self.market_complete = market_complete
         self.p_posterior = compute_posterior(self.p_cal, self.p_market, alpha, bins=bins)
         self.vig = float(self.p_market.sum())
@@ -173,14 +213,34 @@ class MarketAnalysis:
             "market_complete": self.market_complete,
         }
 
-    def supports_buy_no_edges(self) -> bool:
+    def supports_buy_no_edges(self, bin_idx: int | None = None) -> bool:
         """Return whether local NO-side economics are executable for this market.
 
-        Multi-bin weather families have native NO tokens, but this analysis
-        object only receives YES-side VWMP. Until native NO-side book facts are
-        present, `1 - YES` is not an executable NO entry price.
+        Binary markets may use complement semantics. Multi-bin weather families
+        require native NO-token market prices per selected child; `1 - YES` is
+        not an executable multi-bin NO entry price.
         """
-        return len(self.bins) <= 2
+        if len(self.bins) <= 2:
+            return True
+        if self.p_market_no is None:
+            return False
+        if self.buy_no_quote_available is None:
+            return False
+        if bin_idx is None:
+            return bool(np.any(self.buy_no_quote_available))
+        if bin_idx < 0 or bin_idx >= len(self.bins):
+            raise IndexError(f"bin_idx out of range: {bin_idx}")
+        return bool(self.buy_no_quote_available[bin_idx])
+
+    def buy_no_market_price(self, bin_idx: int) -> float:
+        """Return executable NO-side entry/VWMP price for one bin."""
+        if not self.supports_buy_no_edges(bin_idx):
+            raise ValueError(f"buy_no is not executable for bin index {bin_idx}")
+        if len(self.bins) <= 2 and self.p_market_no is None:
+            return 1.0 - float(self.p_market[bin_idx])
+        if self.p_market_no is None:
+            raise ValueError("native NO market prices are unavailable")
+        return float(self.p_market_no[bin_idx])
 
     def find_edges(
         self, n_bootstrap: int | None = None
@@ -219,12 +279,11 @@ class MarketAnalysis:
                         forward_edge=edge_yes,
                     ))
 
-            # Buy NO direction: edge on the NO side
-            # Restricted to binary markets since local `1-p` math on multi-bin
-            # families generates synthetic edges decoupled from native NO-token VWMP
-            if self.supports_buy_no_edges():
+            # Buy NO direction: payoff probability is complement; executable
+            # entry price must come from the native NO side when available.
+            if self.supports_buy_no_edges(i):
                 p_model_no = 1.0 - float(self.p_cal[i])
-                p_market_no = 1.0 - float(self.p_market[i])
+                p_market_no = self.buy_no_market_price(i)
                 p_post_no = 1.0 - float(self.p_posterior[i])
                 edge_no = p_post_no - p_market_no
 
@@ -385,7 +444,7 @@ class MarketAnalysis:
                 p_cal_boot_all = p_raw_all
 
             p_post_yes = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)[bin_idx]
-            p_market_no = 1.0 - self.p_market[bin_idx]
+            p_market_no = self.buy_no_market_price(bin_idx)
             bootstrap_edges[i] = (1.0 - p_post_yes) - p_market_no
 
         p_value = float(np.mean(bootstrap_edges <= 0))

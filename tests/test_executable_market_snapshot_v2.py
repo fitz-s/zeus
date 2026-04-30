@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: U1 antibodies for ExecutableMarketSnapshotV2 persistence and freshness gate.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
@@ -16,8 +16,10 @@ import pytest
 
 from src.data.market_scanner import (
     ExecutableSnapshotCaptureError,
+    _top_book_level_decimal,
     capture_executable_market_snapshot,
 )
+from src.data.polymarket_client import PolymarketClient
 from src.contracts.executable_market_snapshot_v2 import (
     ExecutableMarketSnapshotV2,
     MarketNotTradableError,
@@ -331,6 +333,64 @@ def test_capture_executable_snapshot_selects_no_orderbook_for_buy_no(conn):
     assert loaded.outcome_label == "NO"
     assert loaded.orderbook_top_bid == Decimal("0.48")
     assert loaded.orderbook_top_ask == Decimal("0.52")
+    assert loaded.raw_orderbook_hash
+
+
+def test_capture_executable_snapshot_normalizes_unsorted_orderbook(conn):
+    clob = FakeClobFacts(orderbook={
+        "asset_id": "yes-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [
+            {"price": "0.01", "size": "100"},
+            {"price": "0.47", "size": "25"},
+            {"price": "0.47", "size": "75"},
+        ],
+        "asks": [
+            {"price": "0.99", "size": "50"},
+            {"price": "0.53", "size": "10"},
+            {"price": "0.53", "size": "15"},
+        ],
+    })
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(direction="buy_yes"),
+        clob=clob,
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded.orderbook_top_bid == Decimal("0.47")
+    assert loaded.orderbook_top_ask == Decimal("0.53")
+    assert _top_book_level_decimal(clob.orderbook, "bids") == (Decimal("0.47"), Decimal("100"))
+    assert _top_book_level_decimal(clob.orderbook, "asks") == (Decimal("0.53"), Decimal("25"))
+
+
+def test_polymarket_client_best_bid_ask_normalizes_unsorted_orderbook(monkeypatch):
+    client = object.__new__(PolymarketClient)
+
+    def fake_orderbook(token_id):
+        assert token_id == "yes-token"
+        return {
+            "bids": [
+                {"price": 0.01, "size": 100.0},
+                {"price": 0.47, "size": 25.0},
+                {"price": 0.47, "size": 75.0},
+            ],
+            "asks": [
+                {"price": 0.99, "size": 50.0},
+                {"price": 0.53, "size": 10.0},
+                {"price": 0.53, "size": 15.0},
+            ],
+        }
+
+    monkeypatch.setattr(client, "get_orderbook", fake_orderbook)
+
+    assert client.get_best_bid_ask("yes-token") == (0.47, 0.53, 100.0, 25.0)
 
 
 @pytest.mark.parametrize(

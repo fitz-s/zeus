@@ -198,21 +198,18 @@ class PolymarketClient:
         Returns: (best_bid, best_ask, bid_size, ask_size)
         """
         from src.contracts.exceptions import EmptyOrderbookError
+        from src.data.market_scanner import _top_book_level_decimal
+
         book = self.get_orderbook(token_id)
-        if "bids" not in book or not book["bids"]:
-            raise EmptyOrderbookError(f"No bids available for {token_id}")
-        if "asks" not in book or not book["asks"]:
-            raise EmptyOrderbookError(f"No asks available for {token_id}")
+        try:
+            best_bid, bid_size = _top_book_level_decimal(book, "bids")
+            best_ask, ask_size = _top_book_level_decimal(book, "asks")
+        except Exception as exc:
+            raise EmptyOrderbookError(f"No executable top book for {token_id}: {exc}") from exc
+        if best_bid >= best_ask:
+            raise EmptyOrderbookError(f"Crossed orderbook for {token_id}")
 
-        best_bid = book["bids"][0]["price"]
-        best_ask = book["asks"][0]["price"]
-        bid_size = book["bids"][0]["size"]
-        ask_size = book["asks"][0]["size"]
-        
-        if bid_size <= 0.0 or ask_size <= 0.0:
-            raise EmptyOrderbookError(f"Liquidity sizes are 0.0 for token {token_id}")
-
-        return best_bid, best_ask, bid_size, ask_size
+        return float(best_bid), float(best_ask), float(bid_size), float(ask_size)
 
     def get_fee_rate(self, token_id: str) -> float:
         """Fetch the token-specific Polymarket taker fee rate."""
