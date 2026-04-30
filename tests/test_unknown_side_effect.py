@@ -219,6 +219,42 @@ def _events(conn, command_id: str) -> list[str]:
     ]
 
 
+def _capture_bound_submission_envelope(mock_client):
+    bound = {}
+    mock_client.bind_submission_envelope.side_effect = lambda envelope: bound.__setitem__("envelope", envelope)
+    return bound
+
+
+def _final_submit_result(
+    bound: dict,
+    *,
+    success: bool,
+    status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict:
+    envelope = bound.get("envelope")
+    if envelope is None:
+        raise AssertionError("test client did not receive a bound submission envelope")
+    raw_payload = {"success": success, "status": status}
+    changes = {
+        "raw_response_json": json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
+    }
+    if error_code is not None:
+        changes["error_code"] = error_code
+        changes["error_message"] = error_message or ""
+    final = envelope.with_updates(**changes)
+    result = {
+        "success": success,
+        "status": status,
+        "_venue_submission_envelope": final.to_dict(),
+    }
+    if error_code is not None:
+        result["errorCode"] = error_code
+        result["errorMessage"] = error_message or ""
+    return result
+
+
 def test_network_timeout_after_POST_creates_unknown_not_rejected(conn):
     from src.execution.executor import _live_order
 
@@ -245,11 +281,14 @@ def test_typed_venue_rejection_creates_SUBMIT_REJECTED(conn):
     intent = _make_entry_intent(conn)
     mock_client = MagicMock()
     mock_client.v2_preflight.return_value = None
-    mock_client.place_limit_order.return_value = {
-        "success": False,
-        "errorCode": "INVALID_ORDER",
-        "errorMessage": "bad tick",
-    }
+    bound = _capture_bound_submission_envelope(mock_client)
+    mock_client.place_limit_order.side_effect = lambda **kwargs: _final_submit_result(
+        bound,
+        success=False,
+        status="rejected",
+        error_code="INVALID_ORDER",
+        error_message="bad tick",
+    )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
         result = _live_order("trade-m2-reject", intent, shares=18.19, conn=conn, decision_id="dec-m2-reject")
@@ -368,6 +407,21 @@ def test_exit_lazy_adapter_preflight_exception_safe_to_retry(conn, monkeypatch):
     assert cmd["state"] == "REJECTED"
     assert "SUBMIT_REJECTED" in _events(conn, cmd["command_id"])
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in _events(conn, cmd["command_id"])
+    rejected_event = conn.execute(
+        """
+        SELECT payload_json
+        FROM venue_command_events
+        WHERE command_id = ? AND event_type = 'SUBMIT_REJECTED'
+        """,
+        (cmd["command_id"],),
+    ).fetchone()
+    rejected_payload = json.loads(rejected_event["payload_json"])
+    final_envelope_id = rejected_payload["final_submission_envelope_id"]
+    final_envelope = conn.execute(
+        "SELECT error_code FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (final_envelope_id,),
+    ).fetchone()
+    assert final_envelope["error_code"] == "V2_PREFLIGHT_EXCEPTION"
 
 
 def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
@@ -399,10 +453,7 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
     client = PolymarketClient()
     client._v2_adapter = adapter
 
-    with patch("src.data.polymarket_client.PolymarketClient", return_value=client), pytest.warns(
-        DeprecationWarning,
-        match="compatibility wrapper",
-    ):
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=client):
         result = execute_exit_order(
             create_exit_order_intent(
                 trade_id="trade-m2-exit-submit-pre",
@@ -420,11 +471,11 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
 
     cmd = _command(conn)
     assert result.status == "rejected"
-    assert result.reason == "V2_PRE_SUBMIT_EXCEPTION"
+    assert result.reason == "V2_SUBMIT_UNSUPPORTED"
     assert cmd["state"] == "REJECTED"
     assert "SUBMIT_REJECTED" in _events(conn, cmd["command_id"])
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in _events(conn, cmd["command_id"])
-    assert fake_sdk.calls == [("get_ok",), ("get_ok",)]
+    assert fake_sdk.calls == [("get_ok",)]
 
 
 def test_duplicate_retry_blocked_during_unknown(conn):

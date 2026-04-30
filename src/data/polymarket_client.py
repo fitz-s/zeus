@@ -281,7 +281,21 @@ class PolymarketClient:
                     "errorMessage": mismatch,
                     "_venue_submission_envelope": pending_envelope.to_dict(),
                 }
-            submit = self._ensure_v2_adapter().submit(pending_envelope)
+            try:
+                adapter = self._ensure_v2_adapter()
+            except Exception as exc:
+                rejected_envelope = pending_envelope.with_updates(
+                    error_code="V2_PREFLIGHT_EXCEPTION",
+                    error_message=str(exc),
+                )
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "errorCode": rejected_envelope.error_code,
+                    "errorMessage": rejected_envelope.error_message,
+                    "_venue_submission_envelope": rejected_envelope.to_dict(),
+                }
+            submit = adapter.submit(pending_envelope)
             result = _legacy_order_result_from_submit(submit)
             logger.info(
                 "V2 bound-envelope submit result: %s %s @ %.3f x %.1f → %s",
