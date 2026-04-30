@@ -51,7 +51,8 @@ Topology has five interacting layers:
   repo health, packet closeout, semantic boot, or live authorization.
 - Use typed issue `owner_manifest` and `repair_kind` metadata to select the owning registry.
 - Stop and plan when planning-lock or unknown ownership appears.
-- Close with changed-file `closeout`, targeted tests, and explicit work/receipt evidence.
+- Close with targeted tests. Add changed-file `closeout` and work/receipt
+  evidence only when a packet, closeout claim, or high-risk gate consumes them.
 
 ## Agent runtime posture
 
@@ -59,7 +60,9 @@ Topology is most useful when it behaves like a runtime contract:
 
 - T0 read-only work gets a route card and stops before edits.
 - T1/T2 work gets focused gates, not full-governance ritual.
-- T3 work gets packet evidence, planning lock, and closeout receipts.
+- T3 work gets planning-lock when governed files are touched and focused gates
+  for the changed surface. Packet evidence, receipts, and critics are
+  conditional on packet closeout, explicit claims, or semantic ambiguity.
 - T4 live/prod work remains blocked without explicit operator authorization.
 - Impact/context output should use the owner manifest for the file class:
   `source_rationale` for `src/**`, script manifest for `scripts/**`, docs
