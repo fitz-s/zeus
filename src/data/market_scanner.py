@@ -1471,6 +1471,8 @@ def capture_executable_market_snapshot(
     top_ask = _top_book_decimal(raw_orderbook, "asks")
     if top_bid <= 0 or top_ask <= 0:
         raise ExecutableSnapshotCaptureError("CLOB top-of-book prices must be positive")
+    if top_bid >= top_ask:
+        raise ExecutableSnapshotCaptureError("CLOB orderbook is crossed")
 
     captured = _utc_datetime(captured_at, field_name="captured_at")
     snapshot = ExecutableMarketSnapshotV2(
@@ -1696,23 +1698,51 @@ def _required_bool_fact(surfaces: tuple[dict, ...], names: tuple[str, ...]) -> b
     raise ExecutableSnapshotCaptureError(f"required boolean fact missing: {'/'.join(names)}")
 
 
-def _top_book_decimal(orderbook: dict, side: str) -> Decimal:
+def _book_row_price_size(row: Any, side: str) -> tuple[Decimal, Decimal]:
+    if isinstance(row, dict):
+        price_value = row.get("price")
+        size_value = row.get("size")
+    elif isinstance(row, (list, tuple)) and len(row) >= 2:
+        price_value = row[0]
+        size_value = row[1]
+    else:
+        price_value = None
+        size_value = None
+    if price_value in (None, ""):
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} price missing")
+    if size_value in (None, ""):
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} size missing")
+    try:
+        price = Decimal(str(price_value))
+        size = Decimal(str(size_value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not decimal") from exc
+    if not price.is_finite() or not size.is_finite():
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not finite")
+    if price <= 0 or price >= 1:
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} price is out of bounds")
+    if size <= 0:
+        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} size must be positive")
+    return price, size
+
+
+def _top_book_level_decimal(orderbook: dict, side: str) -> tuple[Decimal, Decimal]:
     rows = orderbook.get(side)
     if not isinstance(rows, list) or not rows:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook missing {side}")
-    first = rows[0]
-    if isinstance(first, dict):
-        value = first.get("price")
-    elif isinstance(first, (list, tuple)) and first:
-        value = first[0]
+    parsed = [_book_row_price_size(row, side) for row in rows]
+    if side == "bids":
+        best_price = max(price for price, _ in parsed)
+    elif side == "asks":
+        best_price = min(price for price, _ in parsed)
     else:
-        value = None
-    if value in (None, ""):
-        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} top price missing")
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} top price is not decimal") from exc
+        raise ExecutableSnapshotCaptureError(f"unsupported CLOB orderbook side {side!r}")
+    best_size = sum((size for price, size in parsed if price == best_price), Decimal("0"))
+    return best_price, best_size
+
+
+def _top_book_decimal(orderbook: dict, side: str) -> Decimal:
+    return _top_book_level_decimal(orderbook, side)[0]
 
 
 def _datetime_fact(surface: dict, name: str) -> datetime | None:

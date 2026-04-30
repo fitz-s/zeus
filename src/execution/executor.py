@@ -604,6 +604,7 @@ def create_execution_intent(
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    repriced_limit_price: Optional[float] = None,
     event_id: str = "",
     resolution_window: str = "",
     correlation_key: str = "",
@@ -631,11 +632,19 @@ def create_execution_intent(
         elif gap > best_ask * 0.05:
             logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
                            limit_price, best_ask, gap / best_ask * 100)
+    if repriced_limit_price is not None:
+        limit_price = float(repriced_limit_price)
 
     if executable_snapshot_min_tick_size is not None:
         limit_price = _align_buy_limit_price_to_tick(
             limit_price,
             executable_snapshot_min_tick_size,
+        )
+    if float(edge_context.p_posterior) - float(limit_price) <= 0.0:
+        raise ValueError(
+            "REPRICED_LIMIT_REJECTED: "
+            f"p_posterior={float(edge_context.p_posterior):.6f} "
+            f"limit_price={float(limit_price):.6f}"
         )
 
     if edge_direction.value == "buy_yes":

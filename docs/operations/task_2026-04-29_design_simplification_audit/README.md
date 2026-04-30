@@ -32,6 +32,8 @@ packet still does not authorize live entries.
 - `findings.md`: detailed findings, including prior thread-visible findings and new design-simplification findings.
 - `evidence.md`: code, config, local DB, and official external evidence.
 - `simplification_plan.md`: proposed first-principles repair sequence and coverage gates.
+- `native_multibin_buy_no_implementation_spec.md`: implementation handoff for
+  native executable multi-bin `buy_no`; evidence only, not live authorization.
 
 ## Audit Method
 

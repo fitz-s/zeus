@@ -125,6 +125,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-29_design_simplification_audit/findings.md` | packet evidence | Ranked first-principles findings, repair flows, and phase status notes |
 | `task_2026-04-29_design_simplification_audit/simplification_plan.md` | packet evidence | Phased live-flow simplification and repair plan |
 | `task_2026-04-29_design_simplification_audit/evidence.md` | packet evidence | Command outputs, probes, reviews, and verification receipts for the packet |
+| `task_2026-04-29_design_simplification_audit/native_multibin_buy_no_implementation_spec.md` | packet evidence | Native executable multi-bin buy_no implementation handoff; no live authorization or production mutation by presence alone |
 | `task_2026-04-27_harness_debate/` | packet evidence | Harness debate packet evidence and implementation errata preserved from worktree merge |
 | `task_2026-04-27_backtest_first_principles_review/` | packet evidence | Backtest first-principles review packet preserved from worktree merge; planning/evidence only, not live authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |

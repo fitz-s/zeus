@@ -187,6 +187,103 @@ class TestPortfolio:
 
 
 class TestExecutor:
+    def test_create_execution_intent_routes_buy_no_to_no_token_id(self):
+        edge = BinEdge(
+            bin=Bin(low=None, high=67, label="67°F or lower", unit="F"),
+            direction="buy_no",
+            edge=0.22,
+            ci_lower=0.03,
+            ci_upper=0.31,
+            p_model=0.70,
+            p_market=0.40,
+            p_posterior=0.62,
+            entry_price=0.40,
+            p_value=0.01,
+            vwmp=0.40,
+            forward_edge=0.22,
+        )
+        edge_context = EdgeContext(
+            p_raw=np.array([0.30, 0.70]),
+            p_cal=np.array([0.30, 0.70]),
+            p_market=np.array([0.60, 0.40]),
+            p_posterior=0.62,
+            forward_edge=0.22,
+            alpha=1.0,
+            confidence_band_upper=0.31,
+            confidence_band_lower=0.03,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+        intent = create_execution_intent(
+            edge_context=edge_context,
+            edge=edge,
+            size_usd=5.0,
+            mode="opening_hunt",
+            market_id="m1",
+            token_id="yes-token",
+            no_token_id="no-token",
+            best_ask=0.42,
+            executable_snapshot_id="snap-no-token",
+            executable_snapshot_min_tick_size=Decimal("0.01"),
+            executable_snapshot_min_order_size=Decimal("0.01"),
+            executable_snapshot_neg_risk=False,
+        )
+
+        assert intent.direction.value == "buy_no"
+        assert intent.token_id == "no-token"
+        assert intent.executable_snapshot_id == "snap-no-token"
+
+    def test_create_execution_intent_honors_repriced_limit_contract(self):
+        edge = BinEdge(
+            bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+            direction="buy_yes",
+            edge=0.22,
+            ci_lower=0.03,
+            ci_upper=0.31,
+            p_model=0.70,
+            p_market=0.25,
+            p_posterior=0.47,
+            entry_price=0.25,
+            p_value=0.01,
+            vwmp=0.25,
+            forward_edge=0.22,
+        )
+        edge_context = EdgeContext(
+            p_raw=np.array([0.50]),
+            p_cal=np.array([0.50]),
+            p_market=np.array([0.25]),
+            p_posterior=0.47,
+            forward_edge=0.22,
+            alpha=1.0,
+            confidence_band_upper=0.31,
+            confidence_band_lower=0.03,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+        intent = create_execution_intent(
+            edge_context=edge_context,
+            edge=edge,
+            size_usd=5.0,
+            mode="opening_hunt",
+            market_id="m1",
+            token_id="yes-token",
+            no_token_id="no-token",
+            best_ask=0.30,
+            repriced_limit_price=0.30,
+            executable_snapshot_id="snap-limit",
+            executable_snapshot_min_tick_size=Decimal("0.01"),
+            executable_snapshot_min_order_size=Decimal("0.01"),
+            executable_snapshot_neg_risk=False,
+        )
+
+        assert intent.limit_price == pytest.approx(0.30)
+
     @pytest.mark.skip(reason="Phase2: paper mode removed")
     def test_paper_fill(self):
         edge = BinEdge(

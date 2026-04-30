@@ -1,6 +1,6 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-29
-# Authority basis: DSA-07 paper/live residue cleanup; bootstrap exit symmetry reuse.
+# Last reused/audited: 2026-04-30
+# Authority basis: DSA-07 paper/live residue cleanup; native multi-bin buy_no monitor bootstrap reuse.
 """Tests for A1: bootstrap symmetry at exit.
 
 Verifies that monitor refresh produces fresh bootstrap CI bounds
@@ -278,6 +278,10 @@ class TestBootstrapCIInRefreshPosition:
         # p_market for buy_no = 1 - 0.40 = 0.60
         expected_forward_edge = 0.55 - 0.60
         assert result.forward_edge == pytest.approx(expected_forward_edge, abs=1e-6)
+        assert (
+            result.confidence_band_upper != pytest.approx(expected_forward_edge + 0.03, abs=1e-6) or
+            result.confidence_band_lower != pytest.approx(expected_forward_edge - 0.03, abs=1e-6)
+        ), "multi-bin buy_no monitor bootstrap must use native NO quote context, not stale CI fallback"
 
     def test_bootstrap_failure_falls_back_to_stale_ci(self):
         """If bootstrap computation raises, falls back to stale CI width."""
