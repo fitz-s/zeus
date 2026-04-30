@@ -4850,6 +4850,58 @@ def test_role_context_packs_encode_work_ethic_and_skill_policy_without_authority
         assert packet["skill_policy"]["avoid_skills_when"]
 
 
+def test_runtime_context_packs_include_lightweight_operation_feedback_loop():
+    for role in ("explorer", "executor", "critic", "verifier"):
+        packet = topology_doctor.build_context_pack(
+            role,
+            task="agent runtime operation feedback",
+            files=["scripts/topology_doctor_context_pack.py"],
+            task_class="agent_runtime",
+        )
+
+        feedback = packet["runtime_guidance"]["operation_feedback_loop"]
+        assert "Zeus improvement insights" in feedback
+        assert "topology helped/blocked note" in feedback
+        assert "final response or an already-required packet work log/receipt" in feedback
+        assert "standalone artifact" in feedback
+
+
+def test_runtime_packet_artifact_hints_include_feedback_without_new_artifact_stack():
+    packet = topology_doctor.build_runtime_packet(
+        task="agent runtime operation feedback",
+        files=["scripts/topology_doctor_context_pack.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+        role="executor",
+    )
+
+    hints = " ".join(packet["artifact_treatment_hints"])
+    assert "compact feedback capsule" in hints
+    assert "already-required packet surface" in hints
+
+
+def test_runtime_reference_docs_keep_feedback_capsule_non_bureaucratic():
+    root = topology_doctor.ROOT
+    combined = "\n".join(
+        (root / path).read_text()
+        for path in [
+            "AGENTS.md",
+            ".agents/skills/zeus-ai-handoff/SKILL.md",
+            "docs/operations/AGENTS.md",
+            "docs/reference/modules/topology_system.md",
+            "docs/reference/modules/topology_doctor_system.md",
+            "docs/reference/modules/closeout_and_receipts_system.md",
+        ]
+    )
+
+    assert "operation-end feedback capsule" in combined
+    assert "Zeus improvement insights" in combined
+    assert "topology helped/blocked" in combined
+    assert "standalone `evidence.md`/`findings.md`" in combined
+    assert "widening the active packet" in combined or "widen the diff" in combined
+
+
 def test_runtime_route_card_keeps_t0_read_only_lightweight():
     digest = topology_doctor.build_digest(
         "read only agent runtime orientation",

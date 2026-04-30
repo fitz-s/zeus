@@ -51,6 +51,10 @@ bounded impact summary without pretending every file is source.
   blocks `graph_impact_validated`, not ordinary navigation or closeout.
 - Workflow, skill-use, and work-ethic guidance belongs in generated context
   packs, not new authority documents.
+- Generated runtime packets should remind agents to close an operation with a
+  compact feedback capsule: context recovery, Zeus improvement insights, and
+  topology helped/blocked notes. This is a final-response or consumed-packet
+  habit, not an extra closeout gate.
 
 ## Failure modes
 
@@ -60,6 +64,8 @@ bounded impact summary without pretending every file is source.
 - A graph or context-pack appendix is treated as authority rather than derived context.
 - Process controls become bureaucratic when every stale warning blocks every
   task instead of only the claim that depends on it.
+- Feedback loops become bureaucratic when they require a new file per task or
+  turn every observation into immediate scope expansion.
 
 ## Repair routes
 
@@ -83,6 +89,10 @@ bounded impact summary without pretending every file is source.
   hints.
 - Use role context packs (`explorer`, `executor`, `critic`, `verifier`) when the
   next agent needs a bounded runtime contract rather than the full packet.
+- Use operation feedback to improve topology only after separating a one-off
+  annoyance from repeatable routing friction. Repeatable friction should become
+  a focused test, manifest repair, or reference-doc adjustment; one-off notes
+  stay in the closeout capsule.
 
 ## Cross-links
 

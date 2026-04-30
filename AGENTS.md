@@ -223,6 +223,16 @@ until explicit operator-go, dry-run evidence, and rollback path exist.
 are conditional artifacts. Create/update them only when an active packet,
 closeout gate, handoff, or completion claim consumes them.
 
+At the end of a complete operation, recycle context into a compact feedback
+capsule instead of leaving lessons in chat memory. For direct work, include it
+in the final response; for packet closeout, append it to the already-required
+work log or receipt. Cover three points: what scratch/runtime context was
+promoted, summarized, discarded, or left local; one to three actionable Zeus
+improvement insights observed during the operation; and a topology usage note
+that names what helped and what blocked or slowed the work. The capsule must
+not create standalone `evidence.md`/`findings.md` files, widen the diff, or
+turn a suggestion into implementation scope without an explicit route.
+
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
 that package.
