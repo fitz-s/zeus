@@ -1,5 +1,5 @@
 """Replay point-in-time provenance antibodies."""
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Lock replay snapshot/decision reference selection to point-in-time evidence.
 # Reuse: Run with replay fidelity gates when changing ReplayContext reference lookup.
 # Authority basis: P3 usage-path residual guards packet; replay point-in-time provenance gate.
@@ -173,7 +173,9 @@ def test_replay_context_can_fallback_to_shadow_signal_reference(tmp_path):
     conn.close()
 
     assert ref is not None
-    assert ref["source"] == "shadow_signals"
+    assert ref["source"] == "legacy_shadow_signal_diagnostic"
+    assert ref["storage_source"] == "shadow_signals"
+    assert ref["authority_scope"] == "diagnostic_non_promotion"
     assert ref["snapshot_id"] == 41
     assert ref["bin_labels"] == ["39-40°F", "41-42°F"]
     assert ref["p_cal_vector"] == [0.15, 0.85]

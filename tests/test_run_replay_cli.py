@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-26; last_reused=2026-04-26
+# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Lock replay CLI and market-events preflight behavior against unsafe diagnostic fallback.
 # Reuse: Run when replay preflight, WU settlement sweep, or replay CLI error handling changes.
 # Authority basis: POST_AUDIT_HANDOFF 4.2.C market-events preflight packet
@@ -61,7 +61,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Europe-Continental', '2026-04-02T08:00:00Z', 12.0)
+        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris', '2026-04-02T08:00:00Z', 12.0)
         """
     )
     _seed_market_events(conn, "London", "2026-04-03", ("12°C",))
@@ -88,6 +88,57 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     assert relaxed.n_replayed >= 1
 
 
+def test_counterfactual_replay_does_not_auto_enable_snapshot_only_reference(tmp_path, monkeypatch):
+    db_path = tmp_path / "counterfactual-strict.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES (32, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
+        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris', '2026-04-02T08:00:00Z', 12.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    original_get_connection = replay_module.get_trade_connection_with_world
+    try:
+        replay_module.get_trade_connection_with_world = lambda: db_module.get_connection(db_path)
+        with pytest.raises(ReplayPreflightError, match="no_market_events"):
+            run_replay("2026-04-03", "2026-04-03", mode="counterfactual")
+        relaxed = run_replay(
+            "2026-04-03",
+            "2026-04-03",
+            mode="counterfactual",
+            allow_snapshot_only_reference=True,
+        )
+    finally:
+        replay_module.get_trade_connection_with_world = original_get_connection
+
+    assert relaxed.n_replayed >= 1
+    assert relaxed.limitations["forecast_rows_fallback"] is True
+    assert relaxed.limitations["promotion_authority"] is False
+
+
 def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "forecast-fallback.db"
     conn = get_connection(db_path)
@@ -103,8 +154,8 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
         VALUES
-        ('Ankara', '2026-04-03', '20°C', 0.5, 1, 1.0, 'MAM', 'Europe-Continental', '2026-04-02T08:00:00Z', 20.0),
-        ('Ankara', '2026-04-03', '21°C', 0.5, 0, 1.0, 'MAM', 'Europe-Continental', '2026-04-02T08:00:00Z', 20.0)
+        ('Ankara', '2026-04-03', '20°C', 0.5, 1, 1.0, 'MAM', 'Ankara', '2026-04-02T08:00:00Z', 20.0),
+        ('Ankara', '2026-04-03', '21°C', 0.5, 0, 1.0, 'MAM', 'Ankara', '2026-04-02T08:00:00Z', 20.0)
         """
     )
     conn.execute(
@@ -146,6 +197,81 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
         for outcome in relaxed.outcomes
         for decision in outcome.replay_decisions
     )
+
+
+def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_path, monkeypatch):
+    db_path = tmp_path / "shadow-signal-fallback.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
+        VALUES ('Dallas', '2026-04-05', '41-42°F', 42.0, 'high')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+        VALUES (51, 'Dallas', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
+                '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0,
+                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_pairs
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value)
+        VALUES
+        ('Dallas', '2026-04-05', '39-40°F', 0.1, 0, 1.0, 'MAM', 'Dallas',
+         '2026-04-04T08:00:00Z', 42.0),
+        ('Dallas', '2026-04-05', '41-42°F', 0.9, 1, 1.0, 'MAM', 'Dallas',
+         '2026-04-04T08:00:00Z', 42.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO shadow_signals
+        (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
+        VALUES ('Dallas', '2026-04-05', '2026-04-04T10:00:00+00:00', '51',
+                '[0.1, 0.9]', '[0.15, 0.85]',
+                '[{\"bin_label\":\"39-40°F\"},{\"bin_label\":\"41-42°F\"}]',
+                14.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    import src.engine.replay as replay_module
+    import src.state.db as db_module
+
+    monkeypatch.setattr(replay_module, "get_trade_connection_with_world", lambda: db_module.get_connection(db_path))
+
+    summary = run_replay(
+        "2026-04-05",
+        "2026-04-05",
+        mode="audit",
+        allow_snapshot_only_reference=True,
+    )
+
+    assert summary.n_replayed == 1
+    assert summary.limitations["authority_scope"] == "diagnostic_non_promotion"
+    assert summary.limitations["decision_reference_source_counts"] == {
+        "legacy_shadow_signal_diagnostic": 1,
+    }
+    assert summary.limitations["diagnostic_replay_subjects"] == 1
+    assert summary.outcomes[0].decision_reference_source == "legacy_shadow_signal_diagnostic"
+    validations = [
+        validation
+        for outcome in summary.outcomes
+        for decision in outcome.replay_decisions
+        for validation in decision.applied_validations
+    ]
+    assert "diagnostic_reference" in validations
+    assert "authority_scope:diagnostic_non_promotion" in validations
+    assert "decision_reference_storage_source:shadow_signals" in validations
 
 
 def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path, monkeypatch):
@@ -260,9 +386,9 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, settlement_value)
         VALUES
-        ('Paris', '2026-04-04', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-04', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-03T08:00:00Z', 12.0),
-        ('Paris', '2026-04-04', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-04', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-03T08:00:00Z', 12.0)
         """
     )
@@ -344,9 +470,9 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, settlement_value)
         VALUES
-        ('Paris', '2026-04-05', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-05', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-04T08:00:00Z', 12.0),
-        ('Paris', '2026-04-05', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-05', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-04T08:00:00Z', 12.0)
         """
     )
@@ -413,9 +539,9 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, settlement_value)
         VALUES
-        ('Paris', '2026-04-06', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-06', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-05T08:00:00Z', 12.0),
-        ('Paris', '2026-04-06', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-06', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-05T08:00:00Z', 12.0)
         """
     )
@@ -504,9 +630,9 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, settlement_value)
         VALUES
-        ('Paris', '2026-04-07', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-07', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-06T08:00:00Z', 12.0),
-        ('Paris', '2026-04-07', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-07', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-06T08:00:00Z', 12.0)
         """
     )
@@ -600,13 +726,13 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, settlement_value)
         VALUES
-        ('Paris', '2026-04-08', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-08', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-07T08:00:00Z', 12.0),
-        ('Paris', '2026-04-08', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-08', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-07T08:00:00Z', 12.0),
-        ('Paris', '2026-04-09', '12°C', 0.9, 1, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-09', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
          '2026-04-08T08:00:00Z', 12.0),
-        ('Paris', '2026-04-09', '13°C', 0.1, 0, 1.0, 'MAM', 'Europe-Continental',
+        ('Paris', '2026-04-09', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
          '2026-04-08T08:00:00Z', 12.0)
         """
     )
