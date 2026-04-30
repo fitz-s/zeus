@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Purpose: Venus daemon-independent sensing report, including source-contract drift watch and quarantine.
+# Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
 """Venus sensing report generator.
 
 Collects ALL truth surface data Venus needs into one JSON file.
@@ -30,6 +33,8 @@ ZEUS_DB = STATE_DIR / "zeus.db"
 RISK_DB = state_path("risk_state.db")
 POSITIONS_JSON = state_path("positions.json")
 REPORT_PATH = STATE_DIR / "venus_sensing_report.json"
+SOURCE_WATCH_CITY_ENV = "ZEUS_VENUS_SOURCE_WATCH_CITY"
+SOURCE_WATCH_REPORT_ONLY_ENV = "ZEUS_VENUS_SOURCE_WATCH_REPORT_ONLY"
 
 
 def _utcnow() -> datetime:
@@ -202,6 +207,63 @@ def _collect_reality_contracts() -> dict:
     }
 
 
+def _env_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _source_watch_unavailable(authority: str, *, city: str | None = None) -> dict:
+    return {
+        "status": "DATA_UNAVAILABLE",
+        "checked_at_utc": _utcnow().isoformat(),
+        "authority": authority,
+        "event_count": 0,
+        "checked_event_count": 0,
+        "skipped_non_temperature": 0,
+        "skipped_unconfigured": 0,
+        "city_filter": city,
+        "summary": {"OK": 0, "WARN": 0, "ALERT": 0, "DATA_UNAVAILABLE": 1},
+        "events": [],
+        "next_actions": [
+            "Do not rely on source monitor output until Gamma fetch recovers."
+        ],
+        "quarantine_actions": [],
+    }
+
+
+def _collect_source_contract_watch() -> dict:
+    """Run source-contract watch from Venus sensing even if the live daemon is down."""
+    city = os.environ.get(SOURCE_WATCH_CITY_ENV) or None
+    try:
+        from scripts import watch_source_contract
+
+        events, authority = watch_source_contract.fetch_active_events()
+        if authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+            return _source_watch_unavailable(authority, city=city)
+
+        report = watch_source_contract.analyze_events(
+            events,
+            city=city,
+            authority=authority,
+        )
+        if _env_truthy(os.environ.get(SOURCE_WATCH_REPORT_ONLY_ENV)):
+            report["quarantine_actions"] = []
+        else:
+            try:
+                report["quarantine_actions"] = (
+                    watch_source_contract.apply_source_quarantines(report)
+                )
+            except Exception as exc:
+                report["quarantine_actions"] = [
+                    {"action": "quarantine_city_source", "status": "error"}
+                ]
+                report["quarantine_error"] = str(exc)
+        return report
+    except Exception as exc:
+        report = _source_watch_unavailable("ERROR", city=city)
+        report["_error"] = str(exc)
+        return report
+
+
 def _collect_fact_tables(conn: sqlite3.Connection) -> dict:
     outcome = 0
     execution = 0
@@ -220,6 +282,7 @@ def _collect_truth_surfaces(conn: sqlite3.Connection) -> dict:
         "settlements": _collect_settlements(conn),
         "risk_state": _collect_risk_state(),
         "reality_contracts": _collect_reality_contracts(),
+        "source_contract_watch": _collect_source_contract_watch(),
         "fact_tables": _collect_fact_tables(conn),
     }
 
