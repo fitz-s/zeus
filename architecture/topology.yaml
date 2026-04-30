@@ -657,6 +657,9 @@ digest_profile_selection:
     - "architecture/test_topology.yaml"
     - "architecture/module_manifest.yaml"
     - "architecture/source_rationale.yaml"
+    - "tests/test_digest_profile_matching.py"
+    - "tests/test_digest_profiles_equivalence.py"
+    - "tests/test_topology_doctor.py"
 
 digest_profiles:
   - id: "change settlement rounding"
@@ -1160,6 +1163,9 @@ digest_profiles:
         - "StrategyBenchmarkSuite"
       single_terms_can_select: false
       min_confidence: 0.5
+    semantic_file_patterns:
+      - "scripts/live_readiness_check.py"
+      - "tests/test_live_readiness_gates.py"
     file_patterns:
       - "docs/AGENTS.md"
       - "docs/README.md"

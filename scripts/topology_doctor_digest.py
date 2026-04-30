@@ -143,6 +143,9 @@ _DEFAULT_SHARED_COMPANION_FILE_PATTERNS = (
     "architecture/test_topology.yaml",
     "architecture/module_manifest.yaml",
     "architecture/source_rationale.yaml",
+    "tests/test_digest_profile_matching.py",
+    "tests/test_digest_profiles_equivalence.py",
+    "tests/test_topology_doctor.py",
 )
 
 
