@@ -93,6 +93,14 @@ bounded impact summary without pretending every file is source.
   annoyance from repeatable routing friction. Repeatable friction should become
   a focused test, manifest repair, or reference-doc adjustment; one-off notes
   stay in the closeout capsule.
+- For direct feedback tasks, prefer
+  `--intent "direct operation feedback capsule"` with no files for final
+  response only, or with an already-required packet `work_log.md`/`receipt.json`
+  for packet closeout. `.omx/context/*handoff*` remains forbidden for repo
+  persistence unless a separate route admits it.
+- When script/docs/test health emits unrelated global drift, preserve both
+  facts: the changed-surface verdict and the repo-wide drift summary. Do not
+  let the global summary become a claim blocker unless the claim depends on it.
 
 ## Cross-links
 

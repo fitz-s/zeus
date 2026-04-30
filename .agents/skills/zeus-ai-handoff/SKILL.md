@@ -183,6 +183,16 @@ append it to an already-selected work log or receipt. Do not create
 `evidence.md`, `findings.md`, a packet folder, or follow-on implementation just
 to record feedback.
 
+Routing examples:
+
+- Final-response capsule only:
+  `python3 scripts/topology_doctor.py --navigation --task "direct operation feedback capsule: context recovery, Zeus improvement insights, topology helped/blocked" --intent "direct operation feedback capsule" --write-intent read_only`
+- Existing packet surface only:
+  `python3 scripts/topology_doctor.py --navigation --task "operation feedback capsule for packet closeout" --intent "direct operation feedback capsule" --write-intent edit --files docs/operations/task_YYYY-MM-DD_slug/work_log.md`
+
+Do not persist this through `.omx/context/*handoff*`; in Zeus those files are
+local runtime scratch unless a separate inventory/mirroring route admits them.
+
 ### §6.A Direct
 1. Edit / commit / verify
 2. `git add` specific files (NEVER `-A` with co-tenant active per memory `feedback_no_git_add_all_with_cotenant`)

@@ -13,7 +13,9 @@ metadata:
       local; one to three Zeus improvement insights with evidence/inference
       boundaries when relevant; and one topology helped/blocked note. Put it in
       the final response or an already-required packet work log/receipt, never
-      in a standalone artifact or scope-expanding follow-on task.
+      in a standalone artifact or scope-expanding follow-on task. If routing is
+      needed, use digest intent "direct operation feedback capsule"; do not
+      persist through .omx/context handoff files.
 
 required_profile_fields:
   - id

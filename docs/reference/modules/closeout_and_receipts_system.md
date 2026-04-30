@@ -63,6 +63,9 @@ A closeout payload has three distinct concepts:
 - Feedback capsules should improve future work without widening the completed
   operation. Promote a note into code/docs/topology changes only through a new
   admitted route or when the current route already owns that surface.
+- Closeout reports should distinguish changed-surface status from repo-wide
+  drift. A broad script-health warning can remain visible without invalidating
+  a packet whose changed files and requested claims are clean.
 
 ## Failure modes
 
@@ -89,6 +92,9 @@ A closeout payload has three distinct concepts:
 - Keep operation feedback short and actionable. If a topology friction repeats,
   add a focused regression or route-card/doc repair; if it is a one-off, keep it
   as a closeout note.
+- Route direct feedback through `direct operation feedback capsule` when a
+  route card is needed. Persist only to an already-required packet work log or
+  receipt; do not create `.omx/context` handoff files as repo evidence.
 
 ## Cross-links
 

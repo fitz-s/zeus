@@ -1992,6 +1992,7 @@ def build_runtime_packet(
             "promote stable lessons through manifests, module books, tests, or source",
             "record durable packet evidence only when an active gate or handoff consumes it",
             "close complete operations with a compact feedback capsule in the final response or an already-required packet surface",
+            "route direct feedback with intent 'direct operation feedback capsule'; do not persist it under .omx/context",
         ],
     }
 

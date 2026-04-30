@@ -61,6 +61,10 @@ Topology has five interacting layers:
   docs only when the current route owns that surface. If topology blocked or
   misrouted, record the friction as feedback first; promote it to a topology
   fix only when it is repeatable or already in scope.
+- Use the `direct operation feedback capsule` profile for "context recycling",
+  "回收 context", and topology-experience closeout tasks. No-file invocations
+  are final-response only; packet `work_log.md`/`receipt.json` writes are
+  admitted only when that packet already consumes them.
 
 ## Agent runtime posture
 
@@ -79,6 +83,9 @@ Topology is most useful when it behaves like a runtime contract:
   capsule is not authority and not a standalone artifact requirement; it is the
   runtime's mechanism for harvesting useful lessons without forcing unrelated
   repairs into the current diff.
+- Scoped closeout should say whether the changed surface is clean separately
+  from repo-wide drift. Global drift remains visible, but unrelated weekly
+  diagnostics should not be presented as a changed-surface failure.
 
 Route cards and context packs are generated guidance. They never replace
 `AGENTS.md`, manifests, tests, or executable source.

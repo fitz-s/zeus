@@ -233,6 +233,12 @@ that names what helped and what blocked or slowed the work. The capsule must
 not create standalone `evidence.md`/`findings.md` files, widen the diff, or
 turn a suggestion into implementation scope without an explicit route.
 
+Use the first-class route when an agent needs to classify this closeout habit:
+`python3 scripts/topology_doctor.py --navigation --task "direct operation feedback capsule: context recovery, Zeus improvement insights, topology helped/blocked" --intent "direct operation feedback capsule" --write-intent read_only`.
+Pass an existing packet `work_log.md` or `receipt.json` only when that packet
+already consumes it; `.omx/context/*handoff*` remains local runtime scratch, not
+a repo persistence target.
+
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
 that package.
