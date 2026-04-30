@@ -23,6 +23,9 @@ Additional completed slice:
 - corrected pricing shadow now marks marketable sweep evidence with
   `depth_proof_source="CLOB_SWEEP"` and only opens PASS-depth construction on
   that sweep path
+- corrected pricing shadow now materializes `FinalExecutionIntent` evidence
+  when the candidate is submit-ready; passive/nonmarketable candidates remain
+  `not_submit_ready` and keep `live_submit_authority=false`
 
 ## Slice Completed
 
@@ -55,6 +58,7 @@ Passing checks:
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py tests/test_digest_profile_matching.py tests/test_evaluator_explicit_n_mc.py tests/test_load_platt_v2_data_version_filter.py --json`
 - `/Users/leofitz/miniconda3/bin/python3 -m compileall -q src/contracts/execution_intent.py src/execution/executor.py src/engine/cycle_runtime.py`
 - `/Users/leofitz/miniconda3/bin/python3 -m pytest tests/test_executor.py tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_runtime_guards.py -q` -> 263 passed, 1 skipped
+- `/Users/leofitz/miniconda3/bin/python3 -m pytest tests/test_runtime_guards.py tests/test_executor.py tests/test_executable_market_snapshot_v2.py -q` -> 255 passed, 1 skipped
 
 Review gates:
 

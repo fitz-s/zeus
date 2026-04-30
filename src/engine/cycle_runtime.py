@@ -122,6 +122,7 @@ def _attach_corrected_pricing_shadow(
     from src.contracts.execution_intent import (
         ExecutableCostBasis,
         ExecutableTradeHypothesis,
+        FinalExecutionIntent,
         simulate_clob_sweep,
     )
 
@@ -205,6 +206,47 @@ def _attach_corrected_pricing_shadow(
         fdr_family_id=f"legacy_selection_family:{decision_snapshot_id}",
         cost_basis=cost_basis,
     )
+    final_intent_shadow = {
+        "final_intent_shadow_built": False,
+        "final_intent_shadow_status": "not_submit_ready",
+        "final_intent_live_submit_authority": False,
+        "final_intent_shadow_error": None,
+    }
+    try:
+        final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+            order_type="GTC",
+            post_only=False,
+        )
+        final_intent.assert_no_recompute_inputs()
+        final_intent_shadow.update(
+            {
+                "final_intent_shadow_built": True,
+                "final_intent_shadow_status": "submit_ready_shadow",
+                "final_intent_hypothesis_id": final_intent.hypothesis_id,
+                "final_intent_selected_token_id": final_intent.selected_token_id,
+                "final_intent_direction": final_intent.direction,
+                "final_intent_order_type": final_intent.order_type,
+                "final_intent_post_only": final_intent.post_only,
+                "final_intent_size_kind": final_intent.size_kind,
+                "final_intent_size_value": _decimal_payload(final_intent.size_value),
+                "final_intent_final_limit_price": _decimal_payload(
+                    final_intent.final_limit_price
+                ),
+                "final_intent_fee_adjusted_execution_price": _decimal_payload(
+                    final_intent.fee_adjusted_execution_price
+                ),
+                "final_intent_snapshot_hash": final_intent.snapshot_hash,
+                "final_intent_cost_basis_hash": final_intent.cost_basis_hash,
+                "final_intent_pricing_semantics_version": (
+                    final_intent.pricing_semantics_version
+                ),
+                "final_intent_no_recompute_inputs": True,
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        final_intent_shadow["final_intent_shadow_error"] = str(exc)
     payload = {
         "pricing_semantics_version": cost_basis.pricing_semantics_version,
         "shadow_only": True,
@@ -234,6 +276,7 @@ def _attach_corrected_pricing_shadow(
         "legacy_submitted_limit_price": None,
     }
     payload.update(sweep_payload)
+    payload.update(final_intent_shadow)
     tokens["corrected_pricing_shadow"] = payload
     decision.tokens = tokens
     if "corrected_pricing_shadow_built" not in decision.applied_validations:
