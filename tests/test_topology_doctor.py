@@ -4628,6 +4628,23 @@ def test_runtime_reference_docs_keep_artifacts_claim_scoped():
     assert "packet closeout, explicit claims, or semantic ambiguity" in topology_text
 
 
+def test_zeus_handoff_skill_keeps_reads_and_artifacts_mode_scoped():
+    text = (
+        topology_doctor.ROOT / ".agents/skills/zeus-ai-handoff/SKILL.md"
+    ).read_text()
+    registry_text = (
+        topology_doctor.ROOT / ".agents/skills/AGENTS.md"
+    ).read_text()
+
+    assert "## §1 Required Reads (always)" not in text
+    assert "## §1 Scope Reads (mode-scoped)" in text
+    assert "C if >4 files or multi-week" not in text
+    assert "candidate set, not a mandatory bundle" in text
+    assert "do not create placeholder files" in text
+    assert "Mode A (Direct)**: no handoff docs" in text
+    assert "v2.2 (2026-04-30)" in registry_text
+
+
 def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 

@@ -19,17 +19,24 @@ This SKILL selects which **execution mode** fits the task, then applies mode-spe
 
 ---
 
-## §1 Required Reads (always)
+## §1 Scope Reads (mode-scoped)
+
+Start with the smallest read set that can route the task safely:
 
 1. `AGENTS.md` (root)
-2. `workspace_map.md`
-3. `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md` (handoff context)
-4. `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
+2. `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 
-When pipeline/architecture/governance work:
-5. `docs/operations/current_state.md`
-6. `docs/methodology/adversarial_debate_for_project_evaluation.md` (REQUIRED for mode D; RECOMMENDED for mode C with critic-gate; auto-loaded via `.claude/skills/zeus-methodology-bootstrap/SKILL.md` on session boot for any architecture/governance/contamination work)
-7. `.claude/skills/zeus-phase-discipline/SKILL.md` (if mode C / multi-batch)
+Add reads only when the route, mode, or completion claim consumes them:
+
+- `workspace_map.md` when visibility or default route is unclear.
+- `docs/runbooks/task_2026-04-19_ai_workflow_bridge.md` when preparing a
+  handoff bundle, not for direct implementation.
+- `docs/operations/current_state.md` when the task touches an active packet,
+  pipeline/governance state, or a packet-closeout claim.
+- `docs/methodology/adversarial_debate_for_project_evaluation.md` for Mode D,
+  or for Mode C only when a critic-gated multi-batch boundary is active.
+- `.claude/skills/zeus-phase-discipline/SKILL.md` for Mode C / R3 phase work
+  when that runtime exists and the task is actually multi-batch.
 
 If navigation is blocked by pre-existing registry issues, record that as workspace state and keep the handoff change narrow.
 
@@ -53,10 +60,12 @@ Before choosing artifacts or dispatching, pick ONE mode based on task profile:
 |---|---|---|
 | Single file edit, ≤30 min, reversible | **A. Direct** | No handoff overhead needed |
 | 1-3 files, clear spec, ≤2h, low stakes | **B. Subagent** | One-shot Agent dispatch with explicit task |
-| Multi-batch (4+ items), implementation pipeline, K0/K1 zone touched | **C. Runtime multi-batch executor + critic-gate** | Tier 1 pattern; per-batch critic verdict before next |
+| Multi-batch implementation with shared dependencies, K0/K1 zone touched, or durable runtime coordination needed | **C. Runtime multi-batch executor + critic-gate** | Tier 1 pattern; per-batch critic verdict before next |
 | High-stakes architecture/strategy decision; multiple valid approaches; team disagreement | **D. Adversarial debate** | 3-round methodology in `docs/methodology/adversarial_debate_for_project_evaluation.md` |
 
-**Default if uncertain**: B (subagent) for mid-size; C if >4 files or multi-week.
+**Default if uncertain**: A for reversible direct work; B when bounded
+delegation materially helps; C only for real multi-batch/K0/K1 coordination,
+not merely because the diff crosses an arbitrary file count.
 
 **Anti-pattern**: using D (full debate) for what should be A or B is the most common mistake — wastes 70+ min on a 30-min decision. Use methodology §11 ROI signals to check.
 
@@ -131,7 +140,10 @@ End this phase only when the next artifact can state: objective, non-goals, inva
 
 **Mode B (Subagent)**: `task_packet.md` in active packet folder; include the 7-item Execution Prompt Shape (§7). Do not add a separate evidence/findings stack unless the task is an audit/review or the packet explicitly needs durable evidence.
 
-**Mode C (Longlast multi-batch)**: full set:
+**Mode C (Longlast multi-batch)**: candidate set, not a mandatory bundle. Start
+with objective, non-goals, batch plan, verification/rollback, and ownership.
+Add the following files only when the batch runtime or future handoff consumes
+them:
 - `project_brief.md` — context + goal
 - `prd.md` — requirements
 - `architecture_note.md` — design choices
@@ -206,10 +218,19 @@ When handing a task to a coding surface:
 These are PROVEN patterns from Tier 1 + 3-round debate cycle 2026-04-27. Bake into every handoff:
 
 ### §8.1 Disk-first
-Every artifact lands on disk BEFORE runtime notification. Team/message delivery can be asymmetric and can drop silently (memory `feedback_converged_results_to_disk`); disk is canonical record. Recovery: if a teammate goes idle without notification, **disk-poll** the expected output file path; if found, treat as delivered.
+For Mode C/D or any handoff file that other agents must consume, write the
+artifact to disk BEFORE runtime notification. Team/message delivery can be
+asymmetric and can drop silently (memory `feedback_converged_results_to_disk`);
+disk is canonical record for delegated artifacts. Recovery: if a teammate goes
+idle without notification, **disk-poll** the expected output file path; if
+found, treat as delivered.
 
 ### §8.2 file:line citations grep-verified within 10 min
-Before any "lock" event (concession, contract, dispatch, commit), every file:line reference must be grep-re-verified. Citations rot fast (~20-30% premise mismatch in 1 week per memory `feedback_zeus_plan_citations_rot_fast`). Use symbol-anchored citations (function name + sentinel comment) where possible — surveys line-number drift.
+Before any "lock" event (concession, contract, dispatch, commit), grep-verify
+the file:line references that support the locked claim. Citations rot fast
+(~20-30% premise mismatch in 1 week per memory
+`feedback_zeus_plan_citations_rot_fast`). Use symbol-anchored citations
+(function name + sentinel comment) where possible.
 
 ### §8.3 Bidirectional grep before "X% of Y lack Z" claims
 Forward grep (manifest cites field?) AND reverse grep (target system back-cites identity?). Schema-citation gap (forward only) ≠ enforcement gap (both). Apply to ANY % claim. See `.claude/skills/zeus-phase-discipline/SKILL.md` "During implementation" + methodology §5.X case study.
@@ -300,14 +321,21 @@ evidence.
 
 Before calling the handoff ready (any mode):
 
+Apply this checklist only to artifacts selected by the mode. Omit non-applicable
+items; do not create placeholder files to satisfy the checklist shape.
+
 - [ ] Open questions resolved or explicitly blocking
 - [ ] Not-now items explicit
 - [ ] Verification commands concrete
 - [ ] Rollback / blast radius stated
 - [ ] Any new file registered in scoped mesh (`architecture/script_manifest.yaml` for scripts, `architecture/source_rationale.yaml` for src/, `architecture/test_topology.yaml` for tests/, scoped AGENTS.md for routers)
 - [ ] Handoff bundle contains only current, non-conflicting truth surfaces
-- [ ] **Mode C/D additions**: critic-gate dispatched per batch; verdict (if D) committed; per-phase boot evidence on disk
-- [ ] **Discipline checks**: §8.1 disk-first verified; §8.2 cites grep-fresh; §8.3 bidirectional grep run on any % claim; §8.4 git staging clean
+- [ ] **Mode C/D additions**: critic-gate dispatched per batch when that mode is
+  active; verdict committed only for Mode D; per-phase boot evidence on disk
+  only when a long-running runtime consumes it
+- [ ] **Discipline checks**: §8.1 disk-first verified for delegated artifacts;
+  §8.2 cites grep-fresh for locked file:line claims; §8.3 bidirectional grep
+  run on any % claim; §8.4 git staging clean
 - [ ] If implementation discovered prior-stage error: §8.7 erratum applied
 
 ---
@@ -339,3 +367,4 @@ When promoting to OMC/global skill: copy to `~/.claude/skills/zeus-ai-handoff/SK
 v1 (2026-04-19): single-mode workflow adapted from external starter kit.
 v2 (2026-04-28): 4-mode playbook + discipline patterns + failure recovery + erratum pattern. Distilled from Tier 1 batch execution + 3-round adversarial debate cycle 2026-04-27. Validates pattern reusability beyond debate-specific use.
 v2.1 (2026-04-30): runtime-neutral dispatch language plus scoped critic-gate boundaries after conflict-first merge protocol correction.
+v2.2 (2026-04-30): mode-scoped reads/artifacts so handoff discipline does not become default ceremony.

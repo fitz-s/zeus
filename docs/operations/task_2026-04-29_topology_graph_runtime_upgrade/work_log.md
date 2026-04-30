@@ -171,3 +171,30 @@ Verification:
 - `git diff --check` -> clean
 Next: Ready for scoped review/merge; no standalone `evidence.md` or
 `findings.md` artifact was created for this follow-up.
+
+## 2026-04-30 Mode-Scoped Handoff Follow-Up
+
+Date: 2026-04-30
+Branch: `agent-runtime-flow-pruning-2026-04-30`
+Task: Continue pruning agent-runtime ceremony while preserving high-risk gates.
+Changed files: `.agents/skills/AGENTS.md`, `.agents/skills/zeus-ai-handoff/SKILL.md`, `architecture/topology.yaml`, `architecture/digest_profiles.py`, `docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json`, `docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/work_log.md`, `tests/test_digest_profile_matching.py`, `tests/test_topology_doctor.py`
+Summary: `zeus-ai-handoff` now uses mode-scoped reads instead of always-on
+reads, treats Mode C artifact lists as candidates rather than mandatory bundles,
+and keeps critic/boot evidence only for active multi-batch or high-risk
+boundaries. The agent-runtime digest profile now admits
+`.agents/skills/AGENTS.md`, allowing the repo-local skill registry to stay in
+sync with the skill it governs.
+Verification:
+- `python scripts/digest_profiles_export.py --check` -> ok
+- `python scripts/topology_doctor.py --navigation ... --write-intent edit --json` -> ok true
+- `python scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md --json` -> ok true
+- `python scripts/topology_doctor.py --map-maintenance ... --map-maintenance-mode closeout --json` -> ok true
+- `python scripts/topology_doctor.py --schema --json` -> ok true
+- `python -m pytest -q tests/test_topology_doctor.py -k 'zeus_handoff_skill or runtime_reference_docs or runtime_route_card or read_only_runtime'` -> 9 passed, 277 deselected
+- `python -m pytest -q tests/test_digest_profile_matching.py -k 'agent_runtime_profile_admits_runtime_surfaces'` -> 1 passed, 42 deselected
+- `python -m pytest -q tests/test_digest_profiles_equivalence.py` -> 4 passed
+- `python scripts/topology_doctor.py --change-receipts ... --receipt-path docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json --json` -> ok true
+- `python scripts/topology_doctor.py closeout ... --receipt-path docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/receipt.json --json` -> ok true
+- `git diff --check` -> clean
+Next: Ready for scoped review/merge; no standalone `evidence.md` or
+`findings.md` artifact was created for this follow-up.
