@@ -181,6 +181,20 @@ def _patch_evaluator(
     return DummyClob()
 
 
+def _patch_point_in_time_oracle_evidence(monkeypatch, tmp_path):
+    evidence_path = tmp_path / "oracle_error_rates.json"
+    evidence_path.write_text(json.dumps({
+        "NYC": {
+            "high": {
+                "oracle_error_rate": 0.0,
+                "last_date": "2026-04-01",
+                "status": "OK",
+            }
+        }
+    }))
+    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
+
+
 def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:
     return MarketCandidate(
         city=NYC,
@@ -216,7 +230,8 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
     assert "center_buy_ultra_low_price_guard" in decisions[0].applied_validations
 
 
-def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch):
+def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch, tmp_path):
+    _patch_point_in_time_oracle_evidence(monkeypatch, tmp_path)
     clob = _patch_evaluator(monkeypatch, entry_price=0.01)
 
     decisions = evaluator_module.evaluate_candidate(

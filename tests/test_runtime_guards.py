@@ -248,6 +248,136 @@ def _stub_full_family_scan(monkeypatch) -> None:
     monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", _scan)
 
 
+@pytest.mark.parametrize("observation_source", ["iem_asos", "openmeteo_hourly"])
+def test_day0_fallback_observation_source_rejected_before_signal_path(observation_source):
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-12",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=4.0,
+        observation=Day0ObservationContext(
+            high_so_far=70.0,
+            low_so_far=62.0,
+            current_temp=69.0,
+            source=observation_source,
+            observation_time=datetime(2026, 4, 12, 18, 0, tzinfo=timezone.utc).isoformat(),
+            unit="F",
+        ),
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=object(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 12, 18, 5, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "OBSERVATION_SOURCE_UNAUTHORIZED"
+    assert "observation_source_policy" in decisions[0].applied_validations
+
+
+@pytest.mark.parametrize("settlement_source_type", ["hko", "noaa", "cwa_station"])
+def test_day0_entry_rejects_settlement_types_without_executable_source_policy(settlement_source_type):
+    city = City(
+        name=f"Test {settlement_source_type}",
+        lat=40.7772,
+        lon=-73.8726,
+        timezone="America/New_York",
+        cluster="TEST",
+        settlement_unit="F",
+        wu_station="KXXX",
+        settlement_source_type=settlement_source_type,
+    )
+    candidate = MarketCandidate(
+        city=city,
+        target_date="2026-04-12",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=4.0,
+        observation=Day0ObservationContext(
+            high_so_far=70.0,
+            low_so_far=62.0,
+            current_temp=69.0,
+            source="wu_api",
+            observation_time=datetime(2026, 4, 12, 18, 0, tzinfo=timezone.utc).isoformat(),
+            unit="F",
+        ),
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=object(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 12, 18, 5, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "OBSERVATION_SOURCE_UNAUTHORIZED"
+    assert "source role is not authorized" in decisions[0].rejection_reasons[0]
+    assert "observation_source_policy" in decisions[0].applied_validations
+
+
+def test_oracle_evidence_gate_rejects_missing_and_stale_rows(monkeypatch, tmp_path):
+    evidence_path = tmp_path / "oracle_error_rates.json"
+    evidence_path.write_text(json.dumps({
+        "Dallas": {
+            "oracle_error_rate": 0.0,
+            "last_date": "2026-03-01",
+            "status": "OK",
+        }
+    }))
+    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
+
+    missing_metric = evaluator_module._oracle_evidence_rejection_reason(
+        "Dallas",
+        "low",
+        decision_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    stale_high = evaluator_module._oracle_evidence_rejection_reason(
+        "Dallas",
+        "high",
+        decision_time=datetime(2026, 4, 5, tzinfo=timezone.utc),
+    )
+
+    assert missing_metric is not None
+    assert "missing city/metric row" in missing_metric
+    assert stale_high is not None
+    assert "oracle evidence stale" in stale_high
+
+
+def test_oracle_evidence_gate_rejects_future_dated_rows(monkeypatch, tmp_path):
+    evidence_path = tmp_path / "oracle_error_rates.json"
+    evidence_path.write_text(json.dumps({
+        "Dallas": {
+            "high": {
+                "oracle_error_rate": 0.0,
+                "last_date": "2026-04-10",
+                "status": "OK",
+            }
+        }
+    }))
+    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
+
+    reason = evaluator_module._oracle_evidence_rejection_reason(
+        "Dallas",
+        "high",
+        decision_time=datetime(2026, 4, 5, tzinfo=timezone.utc),
+    )
+
+    assert reason is not None
+    assert "future-dated relative to decision" in reason
+
+
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -2279,7 +2409,12 @@ def test_day0_solar_context_failure_is_pre_vector_traceable(tmp_path, monkeypatc
         outcomes=_three_outcomes(),
         hours_since_open=12.0,
         hours_to_resolution=4.0,
-        observation={"high_so_far": 60.0, "current_temp": 59.0, "observation_time": "2026-04-01T16:00:00+00:00"},
+        observation={
+            "high_so_far": 60.0,
+            "current_temp": 59.0,
+            "observation_time": "2026-04-01T16:00:00+00:00",
+            "source": "wu_api",
+        },
         discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
     )
 
@@ -2304,7 +2439,12 @@ def test_day0_no_remaining_forecast_hours_is_pre_vector_traceable(tmp_path, monk
         outcomes=_three_outcomes(),
         hours_since_open=12.0,
         hours_to_resolution=4.0,
-        observation={"high_so_far": 60.0, "current_temp": 59.0, "observation_time": "2026-04-01T16:00:00+00:00"},
+        observation={
+            "high_so_far": 60.0,
+            "current_temp": 59.0,
+            "observation_time": "2026-04-01T16:00:00+00:00",
+            "source": "wu_api",
+        },
         discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
     )
 
@@ -4132,7 +4272,7 @@ def test_lead_days_use_city_local_reference_time():
     assert lead_days == pytest.approx(15.5 / 24.0)
 
 
-def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
+def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path):
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",
@@ -4243,6 +4383,18 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch):
         heats.append(kwargs["current_portfolio_heat"])
         projected = kwargs["current_portfolio_heat"] + (kwargs["size_usd"] / kwargs["bankroll"])
         return (projected <= 0.5, "portfolio_heat")
+
+    evidence_path = tmp_path / "oracle_error_rates.json"
+    evidence_path.write_text(json.dumps({
+        "NYC": {
+            "high": {
+                "oracle_error_rate": 0.0,
+                "last_date": "2026-04-01",
+                "status": "OK",
+            }
+        }
+    }))
+    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
