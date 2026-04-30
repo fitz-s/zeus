@@ -34,6 +34,9 @@ packet still does not authorize live entries.
 - `simplification_plan.md`: proposed first-principles repair sequence and coverage gates.
 - `native_multibin_buy_no_implementation_spec.md`: implementation handoff for
   native executable multi-bin `buy_no`; evidence only, not live authorization.
+- `probability_execution_split_spec.md`: critic-approved sequencing spec for
+  separating market-prior probability, executable token cost, trade hypothesis
+  economics, and reporting cohorts; evidence only, not live authorization.
 
 ## Audit Method
 
@@ -58,6 +61,19 @@ selection, provider-specific bias identity, and the unowned ECMWF Open Data
 scheduled collector surface, but the broader forecast-source authority program
 remains open until a primary direct TIGGE/ECMWF source, source timing/payload
 facts, and downstream source-evidence propagation are complete.
+
+Current 2026-04-30 non-Paris repair overlay: the local code path now closes or
+fails closed the previously active non-Paris design blockers for Day0
+observation authority, local-day ENS/vector validity, entry and exit executable
+snapshot production, V2 bound/final submission-envelope provenance, RED/ORANGE
+risk behavior, entry/exit partial-fill exposure truth, harvester HIGH/LOW
+settlement and learning lineage, calibration maturity, collateral freshness,
+fee-rate units, and day0-capture discovery windows. Paris source mismatch is
+still excluded/open, and live deployment remains blocked by external
+`current_state.md` evidence requirements plus explicit operator authorization.
+Whale-toxicity now has a narrow monitor-side orderbook-adjacent pressure
+detector with tests; Zeus does not claim true market-wide trade-print sweep
+detection until a separate public market-trade event feed is wired and tested.
 
 The broader first-principles closure set now spans eleven repair axes: source policy, canonical data writes, runtime/evidence naming, feature-flag convergence, fallback degradation, market identity, exposure ledger, submit capability, evidence-grade grammar, time causality, and ex-ante economic alpha proof. Several of these are architecture simplifications rather than direct live blockers, but all are necessary before making the stronger claim that only math/physics uncertainty remains.
 

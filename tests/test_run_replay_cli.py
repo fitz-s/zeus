@@ -440,7 +440,7 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
     decision = summary.outcomes[0].replay_decisions[0]
     assert decision.should_trade is False
     assert decision.rejection_stage == "MARKET_PRICE_UNAVAILABLE"
-    assert decision.size_usd > 0.0
+    assert decision.size_usd == 0.0
     assert "market_price_unavailable" in decision.applied_validations
 
 

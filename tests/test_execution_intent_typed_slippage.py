@@ -14,10 +14,9 @@ intended) or 0.02 fraction (= 2% = 200 bps). Repo-wide grep showed
 ZERO readers of `intent.max_slippage`, making the budget unenforced
 dead code in addition to being unit-ambiguous.
 
-P3.3 fix (this packet's narrow scope): promote ExecutionIntent.
-max_slippage from `float` to `SlippageBps` so the unit is explicit at
-construction. Enforcement (rejecting fills above the budget) is a
-separate follow-on packet — P3.3 closes the typing seam first.
+P3.3 fixed the type seam by promoting ExecutionIntent.max_slippage from
+`float` to `SlippageBps`; the 2026-04-30 live-money follow-up enforces the
+budget before command persistence / SDK contact.
 
 Tests:
 1. ExecutionIntent.max_slippage is now SlippageBps-typed.

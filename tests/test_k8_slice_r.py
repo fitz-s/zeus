@@ -9,7 +9,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.strategy.market_fusion import LEGACY_POSTERIOR_MODE
 from src.types.market import Bin
+
+
+def _legacy_kwargs() -> dict[str, object]:
+    return {
+        "posterior_mode": LEGACY_POSTERIOR_MODE,
+        "allow_legacy_quote_prior": True,
+    }
 
 
 def _bins_3() -> list[Bin]:
@@ -44,6 +52,7 @@ class TestMarketAnalysisRngSeed:
             lead_days=2,
             unit="F",
             rng_seed=42,
+            **_legacy_kwargs(),
         )
         assert ma._rng is not None
 
@@ -62,6 +71,7 @@ class TestMarketAnalysisRngSeed:
             calibrator=None,
             lead_days=2,
             unit="F",
+            **_legacy_kwargs(),
         )
 
         ci_a = MarketAnalysis(**kwargs, rng_seed=1)._bootstrap_bin(1, 100)

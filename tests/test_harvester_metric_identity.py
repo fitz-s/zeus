@@ -51,7 +51,7 @@ from src.config import City
 from src.execution import harvester as harvester_mod
 from src.state.db import init_schema, log_market_event_outcome_v2, log_settlement_v2
 from src.state.schema.v2_schema import apply_v2_schema
-from src.types.metric_identity import HIGH_LOCALDAY_MAX
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
 def _make_city(name: str = "testville") -> City:
@@ -151,6 +151,93 @@ def test_harvester_settlement_uses_canonical_high_identity(harvester_conn):
     assert row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
     assert row["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
     assert row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
+
+
+def test_harvester_low_settlement_uses_canonical_low_identity(harvester_conn):
+    """LOW settlement writes must consume low_temp and carry LOW_LOCALDAY_MIN identity."""
+    city = _make_city("low_settlement_city")
+    result = harvester_mod._write_settlement_truth(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        pm_bin_lo=62.0,
+        pm_bin_hi=65.0,
+        event_slug="lowest-temperature-in-low-settlement-city-on-april-24-2026",
+        obs_row={
+            "high_temp": 88.0,
+            "low_temp": 64.0,
+            "source": "wu_icao_history_v1",
+            "id": 199,
+            "fetched_at": "2026-04-24T12:00:00Z",
+        },
+        temperature_metric="low",
+    )
+
+    assert result["authority"] == "VERIFIED"
+    row = harvester_conn.execute(
+        """
+        SELECT temperature_metric, physical_quantity, observation_field,
+               settlement_value
+        FROM settlements
+        WHERE city = ? AND target_date = ? AND temperature_metric = 'low'
+        """,
+        (city.name, "2026-04-24"),
+    ).fetchone()
+    v2_row = harvester_conn.execute(
+        """
+        SELECT temperature_metric, settlement_value
+        FROM settlements_v2
+        WHERE city = ? AND target_date = ? AND temperature_metric = 'low'
+        """,
+        (city.name, "2026-04-24"),
+    ).fetchone()
+
+    assert row is not None
+    assert row["temperature_metric"] == LOW_LOCALDAY_MIN.temperature_metric
+    assert row["physical_quantity"] == LOW_LOCALDAY_MIN.physical_quantity
+    assert row["observation_field"] == LOW_LOCALDAY_MIN.observation_field
+    assert row["settlement_value"] == 64.0
+    assert v2_row is not None
+    assert v2_row["settlement_value"] == 64.0
+
+
+def test_harvester_high_and_low_same_city_date_do_not_overwrite(harvester_conn):
+    city = _make_city("dual_metric_city")
+    harvester_mod._write_settlement_truth(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        pm_bin_lo=85.0,
+        pm_bin_hi=89.0,
+        event_slug="highest-temperature-in-dual-metric-city-on-april-24-2026",
+        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history_v1", "id": 200},
+        temperature_metric="high",
+    )
+    harvester_mod._write_settlement_truth(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        pm_bin_lo=62.0,
+        pm_bin_hi=65.0,
+        event_slug="lowest-temperature-in-dual-metric-city-on-april-24-2026",
+        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history_v1", "id": 201},
+        temperature_metric="low",
+    )
+
+    rows = harvester_conn.execute(
+        """
+        SELECT temperature_metric, settlement_value
+        FROM settlements
+        WHERE city = ? AND target_date = ?
+        ORDER BY temperature_metric
+        """,
+        (city.name, "2026-04-24"),
+    ).fetchall()
+
+    assert [(row["temperature_metric"], row["settlement_value"]) for row in rows] == [
+        ("high", 88.0),
+        ("low", 64.0),
+    ]
 
 
 def test_physical_quantity_is_not_legacy_string(harvester_conn):
@@ -825,6 +912,73 @@ def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(
     assert v2_count == 0
 
 
+def test_lookup_settlement_obs_rejects_unverified_or_wrong_station_rows(harvester_conn):
+    city = _make_city("obs_authority_city")
+    harvester_conn.execute(
+        """
+        INSERT INTO observations (
+            city, target_date, source, high_temp, low_temp, unit, station_id,
+            fetched_at, authority
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            city.name,
+            "2026-04-24",
+            "wu_icao_history",
+            88.0,
+            64.0,
+            "F",
+            "BAD",
+            "2026-04-24T12:00:00Z",
+            "VERIFIED",
+        ),
+    )
+
+    assert harvester_mod._lookup_settlement_obs(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        temperature_metric="low",
+    ) is None
+
+    harvester_conn.execute(
+        """
+        UPDATE observations
+        SET station_id = ?, authority = ?
+        WHERE city = ? AND target_date = ? AND source = ?
+        """,
+        ("KORD", "UNVERIFIED", city.name, "2026-04-24", "wu_icao_history"),
+    )
+    assert harvester_mod._lookup_settlement_obs(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        temperature_metric="low",
+    ) is None
+
+    harvester_conn.execute(
+        """
+        UPDATE observations
+        SET authority = ?
+        WHERE city = ? AND target_date = ? AND source = ?
+        """,
+        ("VERIFIED", city.name, "2026-04-24", "wu_icao_history"),
+    )
+    row = harvester_mod._lookup_settlement_obs(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        temperature_metric="low",
+    )
+
+    assert row is not None
+    assert row["station_id"] == "KORD"
+    assert row["authority"] == "VERIFIED"
+    assert row["observation_field"] == LOW_LOCALDAY_MIN.observation_field
+    assert row["observed_temp"] == 64.0
+
+
 def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_conn):
     """F08: runtime-only snapshots without issue time must not enter training."""
     apply_v2_schema(harvester_conn)
@@ -851,6 +1005,42 @@ def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_co
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
+
+
+def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_conn):
+    apply_v2_schema(harvester_conn)
+    city = _make_city("openmeteo_lineage")
+
+    count = harvester_mod.harvest_settlement(
+        harvester_conn,
+        city,
+        target_date="2026-04-24",
+        winning_bin_label="86-88°F",
+        bin_labels=["85°F or below", "86-88°F", "89°F or higher"],
+        p_raw_vector=[0.2, 0.5, 0.3],
+        lead_days=1.0,
+        forecast_issue_time="2026-04-23T00:00:00Z",
+        forecast_available_at="2026-04-23T00:00:00Z",
+        source_model_version="openmeteo_ecmwf_ifs025_live_v1",
+        settlement_value=87.0,
+        temperature_metric="high",
+        snapshot_id="123",
+    )
+
+    assert count == 3
+    rows = harvester_conn.execute(
+        """
+        SELECT data_version, training_allowed, causality_status, snapshot_id
+        FROM calibration_pairs_v2
+        WHERE city = ?
+        """,
+        (city.name,),
+    ).fetchall()
+    assert len(rows) == 3
+    for row in rows:
+        assert row["data_version"] == "openmeteo_ecmwf_ifs025_live_v1"
+        assert row["training_allowed"] == 0
+        assert row["snapshot_id"] == 123
 
 
 def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):

@@ -61,6 +61,23 @@ def test_negative_constraints_cover_strategy_fallback():
     assert "NC-03" in ids
 
 
+def test_pricing_semantics_guardrail_law_is_registered():
+    invariants = load_yaml("architecture/invariants.yaml")
+    negative = load_yaml("architecture/negative_constraints.yaml")
+
+    invariant_ids = {item["id"] for item in invariants["invariants"]}
+    negative_ids = {item["id"] for item in negative["constraints"]}
+    assert {"INV-33", "INV-34", "INV-35", "INV-36"} <= invariant_ids
+    assert {"NC-20", "NC-21", "NC-22", "NC-23"} <= negative_ids
+
+    linked_invariants = {
+        invariant_id
+        for item in negative["constraints"]
+        for invariant_id in item.get("invariants", [])
+    }
+    assert {"INV-33", "INV-34", "INV-35", "INV-36"} <= linked_invariants
+
+
 def test_strategy_policy_tables_exist_in_schema():
     sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS strategy_health" in sql
@@ -3222,9 +3239,10 @@ def test_harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstr
     conn.close()
 
 
-def test_harvester_settlement_path_skips_pending_exit_positions():
+def test_harvester_settlement_path_settles_pending_exit_residual_exposure():
     from src.execution.harvester import _settle_positions
-    from src.state.db import apply_architecture_kernel_schema
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3233,6 +3251,14 @@ def test_harvester_settlement_path_skips_pending_exit_positions():
 
     pos = _runtime_position(state="pending_exit", chain_state="exit_pending_missing")
     pos.exit_state = "sell_pending"
+    pos.exit_reason = "forward edge failed"
+    pos.token_id = "tok-pending-settled"
+    entry_events, entry_projection = build_entry_canonical_write(
+        _runtime_position(state="entered", chain_state="unknown"),
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
     portfolio = PortfolioState(positions=[pos])
 
     settled = _settle_positions(
@@ -3245,9 +3271,15 @@ def test_harvester_settlement_path_skips_pending_exit_positions():
         strategy_tracker=None,
     )
 
-    assert settled == 0
-    assert portfolio.positions == [pos]
-    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+    assert settled == 1
+    assert portfolio.positions == []
+    event_row = conn.execute(
+        "SELECT phase_before, phase_after FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no DESC LIMIT 1"
+    ).fetchone()
+    assert dict(event_row) == {
+        "phase_before": "pending_exit",
+        "phase_after": "settled",
+    }
     conn.close()
 
 
@@ -3604,7 +3636,15 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
     decision = SimpleNamespace(
         should_trade=True,
         edge=edge,
-        tokens={"market_id": "mkt-1", "token_id": "yes-1", "no_token_id": "no-1"},
+        tokens={
+            "market_id": "mkt-1",
+            "token_id": "yes-1",
+            "no_token_id": "no-1",
+            "executable_snapshot_id": "snap-1",
+            "executable_snapshot_min_tick_size": 0.01,
+            "executable_snapshot_min_order_size": 1.0,
+            "executable_snapshot_neg_risk": False,
+        },
         size_usd=10.0,
         decision_id="dec-1",
         decision_snapshot_id="snap-1",
@@ -3660,6 +3700,7 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         create_execution_intent=lambda **kwargs: SimpleNamespace(),
         execute_intent=lambda *args, **kwargs: result,
         add_position=_add_position,
+        get_last_scan_authority=lambda: "VERIFIED",
         is_strategy_enabled=lambda strategy_name: True,
         _classify_edge_source=lambda mode, edge_obj: "center_buy",
         Position=Position,

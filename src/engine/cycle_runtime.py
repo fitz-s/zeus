@@ -8,9 +8,11 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 from src.config import get_mode
@@ -88,6 +90,151 @@ def _decision_source_context_from_epistemic_json(value: str | None) -> DecisionS
     return DecisionSourceContext.from_forecast_context(forecast_context)
 
 
+def _decimal_payload(value: Decimal) -> str:
+    if value.is_zero():
+        return "0"
+    sign, digits, exponent = value.as_tuple()
+    digits_text = "".join(str(digit) for digit in digits) or "0"
+    while digits_text.endswith("0"):
+        digits_text = digits_text[:-1]
+        exponent += 1
+    if exponent >= 0:
+        text = digits_text + ("0" * exponent)
+    else:
+        decimal_index = len(digits_text) + exponent
+        if decimal_index > 0:
+            text = digits_text[:decimal_index] + "." + digits_text[decimal_index:]
+        else:
+            text = "0." + ("0" * -decimal_index) + digits_text
+    return f"-{text}" if sign else text
+
+
+def _attach_corrected_pricing_shadow(
+    *,
+    decision,
+    snapshot,
+    candidate_limit_price: float,
+    candidate_expected_fill_price_before_fee: float,
+    candidate_size_usd: float,
+) -> dict:
+    """Attach corrected pricing candidate evidence without changing submit flow."""
+
+    from src.contracts.execution_intent import (
+        ExecutableCostBasis,
+        ExecutableTradeHypothesis,
+        simulate_clob_sweep,
+    )
+
+    tokens = dict(getattr(decision, "tokens", {}) or {})
+    edge = getattr(decision, "edge", None)
+    if edge is None:
+        raise ValueError("corrected pricing shadow requires edge")
+    decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip()
+    if not decision_snapshot_id:
+        decision_snapshot_id = str(
+            getattr(getattr(decision, "edge_context", None), "decision_snapshot_id", "")
+            or ""
+        ).strip()
+    if not decision_snapshot_id:
+        raise ValueError("corrected pricing shadow requires decision_snapshot_id")
+
+    candidate_limit = Decimal(str(candidate_limit_price))
+    candidate_expected_fill = Decimal(str(candidate_expected_fill_price_before_fee))
+    candidate_size = Decimal(str(candidate_size_usd))
+    direction = str(edge.direction)
+    if direction.startswith("buy_"):
+        is_marketable = candidate_limit >= snapshot.orderbook_top_ask
+    elif direction.startswith("sell_"):
+        is_marketable = candidate_limit <= snapshot.orderbook_top_bid
+    else:
+        is_marketable = False
+    depth_status = "NOT_MARKETABLE_PASSIVE_LIMIT"
+    sweep_payload = {
+        "sweep_attempted": False,
+        "sweep_depth_status": "NOT_MARKETABLE_PASSIVE_LIMIT",
+    }
+    if is_marketable:
+        sweep = simulate_clob_sweep(
+            snapshot=snapshot,
+            direction=direction,
+            requested_size_kind="notional_usd",
+            requested_size_value=candidate_size,
+            limit_price=candidate_limit,
+        )
+        if sweep.average_price is None:
+            raise ValueError("corrected pricing shadow sweep produced no executable fill")
+        candidate_expected_fill = sweep.average_price
+        depth_status = sweep.depth_status
+        sweep_payload = {
+            "sweep_attempted": True,
+            "sweep_depth_status": sweep.depth_status,
+            "sweep_book_side": sweep.book_side,
+            "sweep_levels_consumed": sweep.levels_consumed,
+            "sweep_filled_shares": _decimal_payload(sweep.filled_shares),
+            "sweep_gross_notional": _decimal_payload(sweep.gross_notional),
+            "sweep_average_price": _decimal_payload(sweep.average_price),
+            "sweep_worst_price": (
+                None if sweep.worst_price is None else _decimal_payload(sweep.worst_price)
+            ),
+            "sweep_unfilled_size_value": _decimal_payload(sweep.unfilled_size_value),
+        }
+
+    cost_basis = ExecutableCostBasis.from_snapshot(
+        snapshot=snapshot,
+        direction=direction,
+        order_policy="limit_may_take_conservative",
+        requested_size_kind="notional_usd",
+        requested_size_value=candidate_size,
+        final_limit_price=candidate_limit,
+        expected_fill_price_before_fee=candidate_expected_fill,
+        fee_adjusted_execution_price=None,
+        depth_status=depth_status,
+    )
+    hypothesis = ExecutableTradeHypothesis.from_cost_basis(
+        event_id=str(snapshot.event_id or tokens.get("event_id") or ""),
+        bin_id=str(getattr(getattr(edge, "bin", None), "label", "") or ""),
+        payoff_probability=Decimal(str(edge.p_posterior)),
+        posterior_distribution_id=f"decision_snapshot:{decision_snapshot_id}",
+        market_prior_id=None,
+        fdr_family_id=f"legacy_selection_family:{decision_snapshot_id}",
+        cost_basis=cost_basis,
+    )
+    payload = {
+        "pricing_semantics_version": cost_basis.pricing_semantics_version,
+        "shadow_only": True,
+        "live_submit_authority": False,
+        "field_semantics": "corrected_candidate_not_submitted",
+        "selected_token_id": cost_basis.selected_token_id,
+        "direction": cost_basis.direction,
+        "snapshot_id": cost_basis.quote_snapshot_id,
+        "snapshot_hash": cost_basis.quote_snapshot_hash,
+        "cost_basis_id": cost_basis.cost_basis_id,
+        "cost_basis_hash": cost_basis.cost_basis_hash,
+        "hypothesis_id": hypothesis.fdr_hypothesis_id,
+        "order_policy": cost_basis.order_policy,
+        "candidate_final_limit_price": _decimal_payload(cost_basis.final_limit_price),
+        "candidate_expected_fill_price_before_fee": _decimal_payload(
+            cost_basis.expected_fill_price_before_fee
+        ),
+        "candidate_fee_adjusted_execution_price": _decimal_payload(
+            cost_basis.fee_adjusted_execution_price
+        ),
+        "candidate_size_usd": _decimal_payload(cost_basis.requested_size_value),
+        "fee_rate": _decimal_payload(cost_basis.worst_case_fee_rate),
+        "neg_risk": cost_basis.neg_risk,
+        "posterior_distribution_id": hypothesis.posterior_distribution_id,
+        "market_prior_id": hypothesis.market_prior_id,
+        "payoff_probability": _decimal_payload(hypothesis.payoff_probability),
+        "legacy_submitted_limit_price": None,
+    }
+    payload.update(sweep_payload)
+    tokens["corrected_pricing_shadow"] = payload
+    decision.tokens = tokens
+    if "corrected_pricing_shadow_built" not in decision.applied_validations:
+        decision.applied_validations.append("corrected_pricing_shadow_built")
+    return payload
+
+
 def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: dict) -> float | None:
     """Reprice a selected entry decision from the executable snapshot book.
 
@@ -108,7 +255,21 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+    from src.config import settings
+    from src.contracts import (
+        Direction,
+        HeldSideProbability,
+        NativeSidePrice,
+        compute_native_limit_price,
+        simulate_clob_sweep,
+    )
+    from src.contracts.slippage_bps import SlippageBps
     tokens = dict(getattr(decision, "tokens", {}) or {})
+    selected_method = str(decision.selected_method or "").strip()
+    edge_context_entry_method = str(
+        getattr(getattr(decision, "edge_context", None), "entry_provenance", "") or ""
+    ).strip()
+    entry_method = selected_method or edge_context_entry_method or "unknown"
     expected_token = tokens.get("no_token_id") if decision.edge.direction == "buy_no" else tokens.get("token_id")
     expected_label = "NO" if decision.edge.direction == "buy_no" else "YES"
     if str(snapshot.selected_outcome_token_id or "") != str(expected_token or ""):
@@ -132,6 +293,19 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
     repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
     if repriced_edge <= 0.0:
         raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
+    direction = Direction(decision.edge.direction)
+    snapshot_limit_price = compute_native_limit_price(
+        HeldSideProbability(float(decision.edge.p_posterior), direction),
+        NativeSidePrice(float(snapshot_vwmp), direction),
+        limit_offset=float(settings["execution"]["limit_offset_pct"]),
+    )
+    slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
+    max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
+    best_ask_slippage_bps = 0.0
+    if slippage_reference_price > 0.0 and best_ask_float > slippage_reference_price:
+        best_ask_slippage_bps = (
+            (best_ask_float - slippage_reference_price) / slippage_reference_price * 10_000.0
+        )
 
     sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
     kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
@@ -139,7 +313,7 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
     safety_cap = getattr(decision, "safety_cap_usd", None)
     if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
-    repriced_size = _size_at_execution_price_boundary(
+    repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
         p_posterior=float(decision.edge.p_posterior),
         entry_price=float(snapshot_vwmp),
         fee_rate=fee_rate,
@@ -147,12 +321,20 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         kelly_multiplier=kelly_multiplier,
         safety_cap_usd=safety_cap,
     )
-    if repriced_size <= 0.0:
+    if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
     final_best_ask: float | None = None
-    final_price = float(snapshot_vwmp)
+    final_price = float(snapshot_limit_price)
+    repriced_size = repriced_size_at_snapshot_vwmp
+    corrected_candidate_price = float(snapshot_limit_price)
+    corrected_candidate_expected_fill = float(snapshot_limit_price)
+    corrected_candidate_size = repriced_size_at_snapshot_vwmp
     best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
-    if best_ask_edge > 0.0:
+    best_ask_inside_slippage_budget = (
+        slippage_reference_price > 0.0
+        and best_ask_float <= slippage_reference_price * (1.0 + max_slippage.fraction)
+    )
+    if best_ask_edge > 0.0 and best_ask_inside_slippage_budget:
         size_at_best_ask = _size_at_execution_price_boundary(
             p_posterior=float(decision.edge.p_posterior),
             entry_price=best_ask_float,
@@ -164,16 +346,40 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         if size_at_best_ask <= 0.0:
             final_best_ask = None
         else:
-            visible_best_ask_usd = best_ask_float * ask_size_float
-            if visible_best_ask_usd + 1e-9 < size_at_best_ask:
+            best_ask_sweep = simulate_clob_sweep(
+                snapshot=snapshot,
+                direction=str(decision.edge.direction),
+                requested_size_kind="notional_usd",
+                requested_size_value=Decimal(str(size_at_best_ask)),
+                limit_price=Decimal(str(best_ask_float)),
+            )
+            if best_ask_sweep.depth_status != "PASS":
                 raise ValueError(
                     "BUY_NO_TAKER_DEPTH_CONSTRAINED: "
-                    f"visible_best_ask_usd={visible_best_ask_usd:.6f} "
+                    f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
                     f"required_usd={size_at_best_ask:.6f}"
                 )
             final_best_ask = best_ask_float
             final_price = best_ask_float
             repriced_size = size_at_best_ask
+            corrected_candidate_price = best_ask_float
+            corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+            corrected_candidate_size = size_at_best_ask
+
+    corrected_pricing_shadow = None
+    try:
+        corrected_pricing_shadow = _attach_corrected_pricing_shadow(
+            decision=decision,
+            snapshot=snapshot,
+            candidate_limit_price=float(corrected_candidate_price),
+            candidate_expected_fill_price_before_fee=float(corrected_candidate_expected_fill),
+            candidate_size_usd=float(corrected_candidate_size),
+        )
+        tokens = dict(getattr(decision, "tokens", {}) or {})
+    except Exception as exc:
+        tokens = dict(getattr(decision, "tokens", {}) or {})
+        tokens["corrected_pricing_shadow_error"] = str(exc)
+        decision.tokens = tokens
 
     decision.edge = replace(
         decision.edge,
@@ -200,7 +406,10 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         decision.applied_validations.append("executable_snapshot_repriced")
     tokens["executable_snapshot_reprice"] = {
         "snapshot_id": snapshot_id,
+        "entry_method": entry_method,
+        "selected_method": selected_method,
         "raw_orderbook_hash": str(snapshot.raw_orderbook_hash or ""),
+        "executable_snapshot_hash": str(snapshot.executable_snapshot_hash or ""),
         "selected_outcome_token_id": str(snapshot.selected_outcome_token_id or ""),
         "outcome_label": str(snapshot.outcome_label or ""),
         "old_entry_price": float(getattr(original_edge, "entry_price", 0.0) or 0.0),
@@ -211,11 +420,29 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         "snapshot_best_bid_size": bid_size_float,
         "snapshot_best_ask": best_ask_float,
         "snapshot_best_ask_size": ask_size_float,
+        "snapshot_limit_price": float(snapshot_limit_price),
+        "slippage_reference_price": float(slippage_reference_price),
+        "max_slippage_bps": float(max_slippage.value_bps),
+        "best_ask_slippage_bps": float(best_ask_slippage_bps),
+        "best_ask_blocked_by_slippage": bool(
+            best_ask_edge > 0.0
+            and not best_ask_inside_slippage_budget
+            and best_ask_slippage_bps > max_slippage.value_bps
+        ),
         "final_limit_price": final_price,
         "final_best_ask": final_best_ask,
+        "corrected_candidate_limit_price": float(corrected_candidate_price),
+        "corrected_candidate_expected_fill_price": float(corrected_candidate_expected_fill),
+        "corrected_candidate_size_usd": float(corrected_candidate_size),
         "repriced_edge": repriced_edge,
         "repriced_size_usd": float(repriced_size),
     }
+    if corrected_pricing_shadow is not None:
+        tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"] = corrected_pricing_shadow
+    if "corrected_pricing_shadow_error" in tokens:
+        tokens["executable_snapshot_reprice"]["corrected_pricing_shadow_error"] = tokens[
+            "corrected_pricing_shadow_error"
+        ]
     decision.tokens = tokens
     return final_best_ask
 
@@ -290,10 +517,10 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
 def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
     """Cancel exchange orders that are not tracked locally.
 
-    Triple-confirmation guard (#63):
+    Durable-command guard (#63 + R3):
       1. Order is NOT in local portfolio tracking (order_id / last_exit_order_id)
       2. Order is NOT in execution_fact (recent command log) within 2 hours
-      3. Only then cancel — otherwise log warning and skip (quarantine)
+      3. Order has durable venue_commands truth; cancel through request_cancel_for_command
     """
     if not hasattr(clob, "get_open_orders"):
         return 0
@@ -332,13 +559,138 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                 order_id,
             )
             continue
+        if conn is None:
+            deps.logger.warning(
+                "Orphan open-order cleanup blocked for %s: missing durable venue command connection",
+                order_id,
+            )
+            continue
         try:
-            result = clob.cancel_order(order_id)
-            if result is not None:
+            row = conn.execute(
+                """
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+        except Exception as exc:
+            if "no such table" in str(exc).lower() and "venue_commands" in str(exc):
+                deps.logger.warning(
+                    "Orphan open-order cleanup blocked for %s: venue command journal unavailable",
+                    order_id,
+                )
+                continue
+            deps.logger.warning(
+                "Orphan open-order cleanup blocked for %s: venue command lookup failed: %s",
+                order_id,
+                exc,
+            )
+            continue
+        if row is None:
+            deps.logger.warning(
+                "Orphan open-order cleanup blocked for %s: missing durable venue command truth",
+                order_id,
+            )
+            continue
+        try:
+            from src.execution.exit_safety import request_cancel_for_command
+
+            command_id = row["command_id"] if hasattr(row, "keys") else row[0]
+            outcome = request_cancel_for_command(
+                conn,
+                str(command_id),
+                lambda venue_order_id: clob.cancel_order(venue_order_id),
+            )
+            if outcome.status == "CANCELED":
                 cancelled += 1
         except Exception as exc:
-            deps.logger.warning("Orphan open-order cleanup failed for %s: %s", order_id, exc)
+            deps.logger.warning("Orphan open-order durable cancel failed for %s: %s", order_id, exc)
     return cancelled
+
+
+def _summary_risk_level(summary: dict) -> str:
+    return str(summary.get("risk_level") or "").strip().upper()
+
+
+def _dedupe_steps(steps: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for step in steps:
+        if step and step not in seen:
+            seen.add(step)
+            ordered.append(step)
+    return ordered
+
+
+def _orange_favorable_exit_decision(pos, exit_context, exit_decision):
+    """Return an ORANGE exit only when authority and net execution are favorable."""
+
+    if exit_decision.should_exit:
+        return exit_decision
+    if str(getattr(exit_decision, "reason", "") or "").startswith("INCOMPLETE_EXIT_CONTEXT"):
+        return exit_decision
+    missing_authority = getattr(exit_context, "missing_authority_fields", None)
+    if callable(missing_authority) and missing_authority():
+        return exit_decision
+    try:
+        best_bid = float(exit_context.best_bid)
+        current_market_price = float(exit_context.current_market_price)
+        shares = float(getattr(pos, "effective_shares", 0.0) or 0.0)
+        cost_basis = float(getattr(pos, "effective_cost_basis_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return exit_decision
+    if not (
+        math.isfinite(best_bid)
+        and math.isfinite(current_market_price)
+        and math.isfinite(shares)
+        and math.isfinite(cost_basis)
+        and shares > 0.0
+        and cost_basis > 0.0
+    ):
+        return exit_decision
+
+    from src.config import exit_fee_rate
+    from src.contracts.execution_price import polymarket_fee
+    from src.contracts.tick_size import TickSize
+    from src.contracts.slippage_bps import SlippageBps
+
+    token_id = getattr(pos, "token_id", "") if getattr(pos, "direction", "") == "buy_yes" else getattr(pos, "no_token_id", "")
+    tick = TickSize.for_market(token_id=token_id).value
+    base_exit_limit = current_market_price - tick
+    planned_exit_price = base_exit_limit
+    if best_bid < base_exit_limit:
+        if current_market_price <= 0.0:
+            return exit_decision
+        slippage = SlippageBps(
+            value_bps=abs(current_market_price - best_bid) / current_market_price * 10_000.0,
+            direction="adverse",
+        )
+        if slippage.fraction > 0.03:
+            return exit_decision
+        planned_exit_price = best_bid
+
+    if not (math.isfinite(planned_exit_price) and 0.0 < planned_exit_price < 1.0):
+        return exit_decision
+    clamped_fee_price = min(max(planned_exit_price, 1e-6), 1.0 - 1e-6)
+    fee_per_share = polymarket_fee(clamped_fee_price, exit_fee_rate())
+    net_exit_value = shares * (planned_exit_price - fee_per_share)
+    if net_exit_value <= cost_basis:
+        return exit_decision
+
+    applied = list(getattr(exit_decision, "applied_validations", None) or getattr(pos, "applied_validations", []) or [])
+    applied.extend(["risk_orange", "orange_favorable_bid_gate", "orange_favorable_net_exit_gate"])
+    applied = _dedupe_steps(applied)
+    return replace(
+        exit_decision,
+        should_exit=True,
+        reason="ORANGE_FAVORABLE_EXIT",
+        urgency="normal",
+        trigger="ORANGE_FAVORABLE_EXIT",
+        applied_validations=applied,
+    )
 
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
@@ -893,6 +1245,20 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             exit_decision = pos.evaluate_exit(exit_context)
+            if _summary_risk_level(summary) == "ORANGE":
+                orange_decision = _orange_favorable_exit_decision(
+                    pos,
+                    exit_context,
+                    exit_decision,
+                )
+                if orange_decision.should_exit and not exit_decision.should_exit:
+                    pos.applied_validations = list(orange_decision.applied_validations)
+                    summary["risk_orange_favorable_exits"] = (
+                        summary.get("risk_orange_favorable_exits", 0) + 1
+                    )
+                elif not exit_decision.should_exit:
+                    summary["risk_orange_holds"] = summary.get("risk_orange_holds", 0) + 1
+                exit_decision = orange_decision
             should_exit = exit_decision.should_exit
             exit_reason = exit_decision.reason
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
@@ -1887,6 +2253,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 reprice_payload["submitted_limit_price"] = submitted_limit
                                 reprice_payload["final_limit_price"] = submitted_limit
                                 reprice_payload["repriced_limit_forced"] = snapshot_best_ask is not None
+                                shadow_payload = reprice_payload.get("corrected_pricing_shadow")
+                                if isinstance(shadow_payload, dict):
+                                    shadow_payload["legacy_submitted_limit_price"] = _decimal_payload(
+                                        Decimal(str(submitted_limit))
+                                    )
+                                    shadow_payload["legacy_submit_path"] = "legacy_execution_intent"
+                                    try:
+                                        candidate_limit = float(
+                                            shadow_payload.get("candidate_final_limit_price")
+                                        )
+                                    except (TypeError, ValueError):
+                                        candidate_limit = float("nan")
+                                    shadow_payload["legacy_submitted_matches_corrected_candidate"] = (
+                                        abs(candidate_limit - submitted_limit) <= 1e-9
+                                        if math.isfinite(candidate_limit)
+                                        else False
+                                    )
                     except Exception as exc:
                         summary["no_trades"] += 1
                         rejection_stage = "EXECUTION_FAILED"

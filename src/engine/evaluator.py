@@ -29,10 +29,12 @@ from src.config import (
     CONFIG_DIR,
     PROJECT_ROOT,
     City,
+    day0_n_mc,
     edge_n_bootstrap,
     ensemble_crosscheck_member_count,
     ensemble_crosscheck_model,
     ensemble_member_count,
+    ensemble_n_mc,
     ensemble_primary_model,
     settings,
 )
@@ -86,7 +88,12 @@ from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.data.forecast_source_registry import SourceNotEnabled
 from src.strategy.market_analysis import MarketAnalysis
-from src.strategy.market_fusion import AuthorityViolation, compute_alpha, vwmp
+from src.strategy.market_fusion import (
+    AuthorityViolation,
+    MODEL_ONLY_POSTERIOR_MODE,
+    compute_alpha,
+    vwmp,
+)
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
 from src.types import Bin, BinEdge
 from src.types.market import BinTopologyError, validate_bin_topology
@@ -1646,7 +1653,12 @@ def evaluate_candidate(
             round_fn=settlement_semantics.round_values,
             causality_status=causality_status,
         ))
-        p_raw = day0.p_vector(bins)
+        # 2026-04-30 BLOCKER #2 fix: pass n_mc explicitly to mirror the pattern
+        # at monitor_refresh.py:502 and surface any future config drift in
+        # code review. Pre-fix, p_vector() omitted n_mc and relied on the
+        # callee re-resolving day0_n_mc() at call time — correct today (10000)
+        # but contract-implicit.
+        p_raw = day0.p_vector(bins, n_mc=day0_n_mc())
         day0_forecast_context = day0.forecast_context()
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
         required_member_floor = ensemble_member_count() if required_hour_indices is not None else 1
@@ -1667,7 +1679,9 @@ def evaluate_candidate(
         entry_validations = ["day0_observation", "ens_fetch", "mc_instrument_noise", "diurnal_peak"]
         lead_days_for_calibration = 0.0
     else:
-        p_raw = ens.p_raw_vector(bins)
+        # 2026-04-30 BLOCKER #2 fix: pass n_mc explicitly (mirrors
+        # monitor_refresh.py:205). Same rationale as the day0 branch above.
+        p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
         day0_forecast_context = None
         ensemble_spread = ens.spread()
         analysis_member_extrema = ens.member_extrema
@@ -2129,6 +2143,7 @@ def evaluate_candidate(
         )]
     if not is_day0_mode:
         entry_validations.append("model_agreement")
+    entry_validations.append("model_only_posterior")
     entry_validations.append("alpha_posterior")
     if probe_native_no_quotes:
         if native_no_quote_unavailable_labels:
@@ -2173,6 +2188,7 @@ def evaluate_candidate(
         bias_corrected=bool(getattr(ens, "bias_corrected", False)),
         market_complete=market_is_complete,
         bias_reference=bias_reference,
+        posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()

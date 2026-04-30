@@ -5,6 +5,9 @@ Covers:
 2. Edge case: shifted by 4 bins → CONFLICT
 3. Failure mode: mismatched vector lengths
 """
+# Created: 2026-03-31
+# Last reused/audited: 2026-04-30
+# Authority basis: Non-Paris live-alpha blocker repair; invalid probability vectors must fail closed.
 
 import numpy as np
 import pytest
@@ -64,6 +67,24 @@ class TestModelAgreement:
         with pytest.raises(ValueError, match="length mismatch"):
             model_agreement(p1, p2)
 
+    def test_nan_vector_raises(self):
+        p1 = np.array([0.5, np.nan, 0.5])
+        p2 = np.array([0.2, 0.3, 0.5])
+        with pytest.raises(ValueError, match="finite"):
+            model_agreement(p1, p2)
+
+    def test_zero_mass_vector_raises(self):
+        p1 = np.array([0.0, 0.0, 0.0])
+        p2 = np.array([0.2, 0.3, 0.5])
+        with pytest.raises(ValueError, match="positive probability mass"):
+            model_agreement(p1, p2)
+
+    def test_unnormalized_vector_raises(self):
+        p1 = np.array([0.2, 0.3, 0.6])
+        p2 = np.array([0.2, 0.3, 0.5])
+        with pytest.raises(ValueError, match="sum to 1.0"):
+            model_agreement(p1, p2)
+
 
 class TestComputeJSD:
     def test_identical_is_zero(self):
@@ -81,3 +102,7 @@ class TestComputeJSD:
         q = np.array([0.0, 0.0, 1.0])
         jsd = compute_jsd(p, q)
         assert 0 <= jsd <= np.log(2) + 0.001
+
+    def test_invalid_vector_raises_before_scipy(self):
+        with pytest.raises(ValueError, match="negative"):
+            compute_jsd(np.array([1.1, -0.1]), np.array([0.5, 0.5]))

@@ -1418,7 +1418,7 @@ def _replay_one_settlement(
     from src.strategy.kelly import dynamic_kelly_mult
     from src.engine.evaluator import _size_at_execution_price_boundary, _default_weather_fee_rate
     from src.strategy.market_analysis import MarketAnalysis
-    from src.strategy.market_fusion import compute_alpha
+    from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE, compute_alpha
     from src.calibration.manager import season_from_month
     from src.data.market_scanner import _parse_temp_range
     from src.types import Bin
@@ -1546,25 +1546,25 @@ def _replay_one_settlement(
         if np.all(np.isfinite(candidate_market_prices)):
             market_prices = candidate_market_prices
             market_price_linked = True
-        else:
-            market_prices = np.full(len(bin_probs_cal), 1.0 / len(bin_probs_cal), dtype=float)
+    if market_price_linked:
+        analysis = MarketAnalysis(
+            p_raw=bin_probs_raw,
+            p_cal=bin_probs_cal,
+            p_market=market_prices,
+            alpha=alpha,
+            bins=bins,
+            member_maxes=member_maxes,
+            calibrator=cal,
+            lead_days=lead_days,
+            unit=city.settlement_unit,
+            round_fn=_round_fn,
+            posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        )
+        edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
+        filtered = fdr_filter(edges)
     else:
-        market_prices = np.full(len(bin_probs_cal), 1.0 / len(bin_probs_cal), dtype=float)
-
-    analysis = MarketAnalysis(
-        p_raw=bin_probs_raw,
-        p_cal=bin_probs_cal,
-        p_market=market_prices,
-        alpha=alpha,
-        bins=bins,
-        member_maxes=member_maxes,
-        calibrator=cal,
-        lead_days=lead_days,
-        unit=city.settlement_unit,
-        round_fn=_round_fn,
-    )
-    edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
-    filtered = fdr_filter(edges)
+        edges = []
+        filtered = []
 
     winning_bin = settlement.get("winning_bin", "")
     settlement_value = settlement.get("settlement_value")
@@ -1679,7 +1679,11 @@ def _replay_one_settlement(
                 range_label="",
                 direction="",
                 should_trade=False,
-                rejection_stage=decision_ref.get("rejection_stage", "FDR_FILTERED"),
+                rejection_stage=(
+                    "MARKET_PRICE_UNAVAILABLE"
+                    if not market_price_linked
+                    else decision_ref.get("rejection_stage", "FDR_FILTERED")
+                ),
                 edge=0.0,
                 p_posterior=0.0,
                 p_raw=0.0,

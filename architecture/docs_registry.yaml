@@ -546,6 +546,25 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: n/a
+- path: docs/operations/active_unfinished_backlog.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active index of unfinished work extracted from archived or closed operations packets; points to archive bodies without making them active workflow defaults
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: packet_bound
+  supersedes:
+    - docs/archives/packets/task_2026-04-13_remaining_repair_backlog.md
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: operations_consolidation
 - path: docs/operations/task_*/
   doc_class: operations
   default_read: false
@@ -604,6 +623,25 @@ entries:
   current_tense_allowed: true
   refresh_source: packet_audit
 
+- path: docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/
+  doc_class: artifact
+  default_read: false
+  direct_reference_allowed: false
+  current_role: packet-local CLOB V2 / G1 readiness evidence root; evidence only, not live deploy or production mutation authority
+  canonical_replaced_by: []
+  next_action: archive_after_closeout
+  lifecycle_state: transitional
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
+
 - path: docs/operations/task_*.md
   doc_class: operations
   default_read: false
@@ -640,6 +678,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
+- path: docs/operations/task_2026-04-30_reality_semantics_refactor_package/**
+  doc_class: package_input
+  default_read: false
+  direct_reference_allowed: false
+  current_role: compaction-safe full reality-semantics refactor package preserving the original review and mirrored pricing-semantics cutover package; package input only, not live deploy or production mutation authority
+  canonical_replaced_by: []
+  next_action: archive_after_closeout
+  lifecycle_state: transitional
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/reference/zeus_domain_model.md
   doc_class: reference
   default_read: true

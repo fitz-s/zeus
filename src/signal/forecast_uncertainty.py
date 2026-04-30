@@ -9,6 +9,8 @@ signal consumers.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
+
 import numpy as np
 
 from src.signal.ensemble_signal import sigma_instrument
@@ -526,8 +528,6 @@ def day0_nowcast_context(
     observation_time: str | None,
     current_utc_timestamp: str | None,
 ) -> dict:
-    from datetime import datetime, timezone
-
     source = str(observation_source or "")
     source_lower = source.lower()
     trusted = any(tag in source_lower for tag in ("wu", "asos", "obs"))
@@ -539,15 +539,13 @@ def day0_nowcast_context(
 
     if observation_time and current_utc_timestamp:
         try:
-            observed_at = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
-            current_at = datetime.fromisoformat(str(current_utc_timestamp).replace("Z", "+00:00"))
-            if observed_at.tzinfo is None:
-                observed_at = observed_at.replace(tzinfo=timezone.utc)
-            if current_at.tzinfo is None:
-                current_at = current_at.replace(tzinfo=timezone.utc)
+            observed_at = _parse_day0_timestamp_utc(observation_time)
+            current_at = _parse_day0_timestamp_utc(current_utc_timestamp)
+            if observed_at is None or current_at is None:
+                raise ValueError("unparseable day0 timestamp")
             age_hours = max(0.0, (current_at - observed_at).total_seconds() / 3600.0)
             freshness_factor = max(0.0, 1.0 - min(1.0, age_hours / FRESHNESS_DECAY_HOURS))
-        except ValueError:
+        except (OSError, OverflowError, TypeError, ValueError):
             age_hours = None
             freshness_factor = 0.0
     trusted_source = source_factor >= 1.0
@@ -566,6 +564,29 @@ def day0_nowcast_context(
         "fresh_observation": fresh_observation,
         "blend_weight": 0.25 * short_lead_progress * source_factor * freshness_factor,
     }
+
+
+def _parse_day0_timestamp_utc(value) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return None
+            if raw.isdigit():
+                parsed = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
 
 
 def analysis_bootstrap_sigma(

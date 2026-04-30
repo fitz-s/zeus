@@ -168,12 +168,28 @@ def get_calibrator(
     season = season_from_date(target_date, lat=city.lat)
     cluster = city.cluster
 
+    # 2026-04-30 BLOCKER #1 fix: resolve canonical data_version for the metric
+    # so load_platt_model_v2 filters by it. Pre-fix the SELECT picked newest
+    # by fitted_at regardless of data_version — invariant-by-coincidence under
+    # today's single-version-per-metric world; future metric upgrades would
+    # silently shift runtime to the new fit. The data_version constants live
+    # in MetricIdentity (metric_identity.py:78-90) and are imported lazily to
+    # avoid pulling the typed-atom module into every test that touches the
+    # calibration manager.
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+    expected_data_version = (
+        HIGH_LOCALDAY_MAX.data_version
+        if temperature_metric == "high"
+        else LOW_LOCALDAY_MIN.data_version
+    )
+
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC)
     model_data = load_platt_model_v2(
         conn,
         temperature_metric=temperature_metric,
         cluster=cluster,
         season=season,
+        data_version=expected_data_version,
     )
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
@@ -243,6 +259,7 @@ def get_calibrator(
             temperature_metric=temperature_metric,
             cluster=fallback_cluster,
             season=season,
+            data_version=expected_data_version,
         )
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)

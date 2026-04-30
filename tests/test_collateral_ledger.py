@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -21,7 +22,7 @@ from src.contracts.fx_classification import (
     require_fx_classification,
 )
 from src.contracts.slippage_bps import SlippageBps
-from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent
 from src.execution.wrap_unwrap_commands import (
     WrapUnwrapState,
     confirm_command,
@@ -48,6 +49,59 @@ def _ctf_units(shares: float) -> int:
     return int(round(shares * _CTF_SCALE))
 
 
+def _decision_source_context() -> DecisionSourceContext:
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-04-26T00:00:00+00:00",
+        forecast_valid_time="2026-04-26T06:00:00+00:00",
+        forecast_fetch_time="2026-04-26T01:00:00+00:00",
+        forecast_available_at="2026-04-26T00:30:00+00:00",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-04-26T02:00:00+00:00",
+        decision_time_status="OK",
+    )
+
+
+def _fake_submit_result(
+    bound_envelope,
+    *,
+    order_id: str | None = None,
+    status: str = "LIVE",
+    success: bool | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict:
+    raw_payload = {"status": status}
+    if order_id is not None:
+        raw_payload["orderID"] = order_id
+    if success is not None:
+        raw_payload["success"] = success
+    changes = {
+        "raw_response_json": json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
+        "order_id": order_id,
+    }
+    if error_code is not None:
+        changes["error_code"] = error_code
+        changes["error_message"] = error_message or ""
+    final = bound_envelope.with_updates(**changes)
+    result = {
+        "status": status,
+        "_venue_submission_envelope": final.to_dict(),
+    }
+    if order_id is not None:
+        result["orderID"] = order_id
+    if success is not None:
+        result["success"] = success
+    if error_code is not None:
+        result["errorCode"] = error_code
+        result["errorMessage"] = error_message or ""
+    return result
+
+
 class FakeCollateralAdapter:
     def __init__(self, payload=None, exc: Exception | None = None):
         self.payload = payload or {}
@@ -67,6 +121,25 @@ def conn():
     init_wrap_unwrap_schema(db)
     yield db
     db.close()
+
+
+@pytest.fixture(autouse=True)
+def _allow_non_collateral_execution_guards(monkeypatch):
+    """This file isolates collateral behavior; other live gates are tested elsewhere."""
+
+    monkeypatch.setattr(
+        "src.execution.executor._assert_risk_allocator_allows_submit",
+        lambda *args, **kwargs: {"component": "risk_allocator", "allowed": True, "reason": "unit_test"},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._assert_risk_allocator_allows_exit_submit",
+        lambda *args, **kwargs: {"component": "risk_allocator", "allowed": True, "reason": "unit_test"},
+    )
+    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+    monkeypatch.setattr(
+        "src.execution.executor._assert_ws_gap_allows_submit",
+        lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "unit_test"},
+    )
 
 
 def _buy_intent(
@@ -93,6 +166,7 @@ def _buy_intent(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        decision_source_context=_decision_source_context(),
     )
 
 
@@ -132,7 +206,14 @@ def _exec_snapshot_kwargs(
                 sports_start_at=None,
                 min_tick_size=Decimal(min_tick_size),
                 min_order_size=Decimal(min_order_size),
-                fee_details={},
+                fee_details={
+                    "source": "test",
+                    "token_id": token_id,
+                    "fee_rate_fraction": 0.0,
+                    "fee_rate_bps": 0.0,
+                    "fee_rate_source_field": "fee_rate_fraction",
+                    "fee_rate_raw_unit": "fraction",
+                },
                 token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
                 rfqe=None,
                 neg_risk=False,
@@ -165,6 +246,7 @@ def _snapshot(
     reserved_pusd: int = 0,
     reserved_tokens: dict[str, int | float] | None = None,
     authority: str = "CHAIN",
+    captured_at: datetime | None = None,
 ) -> CollateralSnapshot:
     ctf_units = {token: _ctf_units(float(shares)) for token, shares in (ctf or {}).items()}
     allowance_source = ctf if ctf_allowances is None else ctf_allowances
@@ -178,7 +260,7 @@ def _snapshot(
         ctf_token_allowances=allowance_units,
         reserved_pusd_for_buys_micro=reserved_pusd,
         reserved_tokens_for_sells=reserved_token_units,
-        captured_at=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        captured_at=captured_at or datetime.now(timezone.utc),
         authority_tier=authority,  # type: ignore[arg-type]
     )
 
@@ -198,6 +280,58 @@ def test_buy_preflight_blocks_when_pusd_allowance_insufficient(conn):
 
     with pytest.raises(CollateralInsufficient, match="pusd_allowance_insufficient"):
         ledger.buy_preflight(_buy_intent(size_usd=10.0))
+
+
+def test_buy_preflight_blocks_when_snapshot_stale(conn):
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(captured_at=datetime.now(timezone.utc) - timedelta(seconds=61)))
+
+    with pytest.raises(CollateralInsufficient, match="collateral_snapshot_stale"):
+        ledger.buy_preflight(_buy_intent(size_usd=1.0))
+
+
+def test_buy_preflight_blocks_when_snapshot_timestamp_is_future(conn):
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(captured_at=datetime.now(timezone.utc) + timedelta(seconds=61)))
+
+    with pytest.raises(CollateralInsufficient, match="collateral_snapshot_future"):
+        ledger.buy_preflight(_buy_intent(size_usd=1.0))
+
+
+def test_buy_preflight_blocks_when_persisted_snapshot_timestamp_is_malformed(conn):
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+          pusd_balance_micro,
+          pusd_allowance_micro,
+          usdc_e_legacy_balance_micro,
+          ctf_token_balances_json,
+          ctf_token_allowances_json,
+          reserved_pusd_for_buys_micro,
+          reserved_tokens_for_sells_json,
+          captured_at,
+          authority_tier,
+          raw_balance_payload_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            100_000_000,
+            100_000_000,
+            0,
+            "{}",
+            "{}",
+            0,
+            "{}",
+            "not-a-timestamp",
+            "CHAIN",
+            None,
+        ),
+    )
+    conn.commit()
+    ledger = CollateralLedger(conn)
+
+    with pytest.raises(CollateralInsufficient, match="collateral_snapshot_stale"):
+        ledger.buy_preflight(_buy_intent(size_usd=1.0))
 
 
 def test_buy_preflight_nets_existing_reservations_from_pusd_allowance(conn):
@@ -223,6 +357,20 @@ def test_sell_preflight_blocks_when_ctf_allowance_insufficient(conn):
 
     with pytest.raises(CollateralInsufficient, match="ctf_allowance_insufficient"):
         ledger.sell_preflight(token_id=YES_TOKEN, size=10)
+
+
+def test_sell_preflight_blocks_when_snapshot_stale(conn):
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        _snapshot(
+            ctf={YES_TOKEN: 10},
+            ctf_allowances={YES_TOKEN: 10},
+            captured_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+        )
+    )
+
+    with pytest.raises(CollateralInsufficient, match="collateral_snapshot_stale"):
+        ledger.sell_preflight(token_id=YES_TOKEN, size=1)
 
 
 def test_sell_preflight_nets_existing_reservations_from_ctf_allowance(conn):
@@ -475,8 +623,11 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
         def v2_preflight(self):
             return None
 
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
-            return {"success": True, "orderID": "entry-order-1", "status": "LIVE"}
+            return _fake_submit_result(self.bound_envelope, order_id="entry-order-1", success=True)
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     try:
@@ -515,10 +666,13 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
         def v2_preflight(self):
             return None
 
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
             assert kwargs["size"] == 30.04
             assert kwargs["price"] == 0.333
-            return {"success": True, "orderID": "entry-order-quantized", "status": "LIVE"}
+            return _fake_submit_result(self.bound_envelope, order_id="entry-order-quantized", success=True)
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     try:
@@ -568,8 +722,17 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
         def v2_preflight(self):
             return None
 
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
-            return None
+            return _fake_submit_result(
+                self.bound_envelope,
+                status="REJECTED",
+                success=False,
+                error_code="unit_rejected",
+                error_message="unit rejection",
+            )
 
     monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_fails_for_terminal)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
@@ -605,8 +768,11 @@ def test_executor_ack_reserves_ctf_tokens_until_terminal_release(conn, monkeypat
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
 
     class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
-            return {"success": True, "orderID": "exit-order-1", "status": "LIVE"}
+            return _fake_submit_result(self.bound_envelope, order_id="exit-order-1", success=True)
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     intent = create_exit_order_intent(
@@ -657,8 +823,17 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
         )
 
     class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
-            return None
+            return _fake_submit_result(
+                self.bound_envelope,
+                status="REJECTED",
+                success=False,
+                error_code="unit_rejected",
+                error_message="unit rejection",
+            )
 
     monkeypatch.setattr("src.state.venue_command_repo.append_event", append_event_fails_for_terminal)
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)

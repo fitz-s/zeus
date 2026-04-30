@@ -486,9 +486,9 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
     monkeypatch.setattr(hv, "get_world_connection", lambda: dummy_conn)
     # Return a valid obs_row so _write_settlement_truth is reached
     monkeypatch.setattr(hv, "_lookup_settlement_obs",
-        lambda conn, city, td: {"id": 1, "source": "wu_icao_history",
-                                "high_temp": 17.3, "unit": "C",
-                                "fetched_at": "2026-04-15T12:00:00Z"})
+        lambda conn, city, td, **kw: {"id": 1, "source": "wu_icao_history",
+                                      "high_temp": 17.3, "unit": "C",
+                                      "fetched_at": "2026-04-15T12:00:00Z"})
     monkeypatch.setattr(hv, "_preflight_harvester_stage2_db_shape",
                         lambda trade, shared: {"stage2_status": "not_run_no_settled_events"})
     monkeypatch.setattr(hv, "load_portfolio", lambda: None)

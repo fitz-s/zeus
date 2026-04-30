@@ -1567,6 +1567,8 @@ class TestIdempotencyCollisionRetry:
         assert result.status == "pending", (
             f"Expected pending for ACKED collision, got {result.status!r}"
         )
+        assert result.order_id == "acked-ord-001"
+        assert result.external_order_id == "acked-ord-001"
         assert result.reason is not None and "prior attempt acked" in result.reason, (
             f"Expected reason to contain 'prior attempt acked', got {result.reason!r}"
         )
@@ -1646,6 +1648,8 @@ class TestIdempotencyCollisionRetry:
         assert result.status == "pending", (
             f"Expected pending for FILLED collision, got {result.status!r}"
         )
+        assert result.order_id == "fill-ord-001"
+        assert result.external_order_id == "fill-ord-001"
         assert result.reason is not None and "prior attempt filled" in result.reason
         mock_inst.place_limit_order.assert_not_called()
 
@@ -1719,6 +1723,62 @@ class TestIdempotencyCollisionRetry:
         )
         assert result.reason is not None and "prior attempt" in result.reason
         mock_inst.place_limit_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Max slippage budget enforcement
+# ---------------------------------------------------------------------------
+
+def test_create_execution_intent_rejects_reprice_above_max_slippage():
+    from src.contracts import EdgeContext, EntryMethod
+    from src.execution.executor import create_execution_intent
+    from src.types.market import Bin, BinEdge
+    import numpy as np
+
+    edge = BinEdge(
+        bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+        direction="buy_yes",
+        edge=0.20,
+        ci_lower=0.03,
+        ci_upper=0.31,
+        p_model=0.70,
+        p_market=0.50,
+        p_posterior=0.70,
+        entry_price=0.50,
+        p_value=0.01,
+        vwmp=0.50,
+        forward_edge=0.20,
+    )
+    edge_context = EdgeContext(
+        p_raw=np.array([0.70]),
+        p_cal=np.array([0.70]),
+        p_market=np.array([0.50]),
+        p_posterior=0.70,
+        forward_edge=0.20,
+        alpha=1.0,
+        confidence_band_upper=0.31,
+        confidence_band_lower=0.03,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="test-snap",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
+    )
+
+    with pytest.raises(ValueError, match="MAX_SLIPPAGE_EXCEEDED"):
+        create_execution_intent(
+            edge_context=edge_context,
+            edge=edge,
+            size_usd=5.0,
+            mode="opening_hunt",
+            market_id="m1",
+            token_id="yes-token",
+            no_token_id="no-token",
+            repriced_limit_price=0.511,
+            executable_snapshot_id="snap-limit",
+            executable_snapshot_min_tick_size=Decimal("0.01"),
+            executable_snapshot_min_order_size=Decimal("0.01"),
+            executable_snapshot_neg_risk=False,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -574,6 +574,7 @@ def _orderresult_from_existing(
             reason="idempotency_collision: prior attempt acked",
             submitted_price=limit_price,
             shares=shares,
+            order_id=existing.venue_order_id,
             order_role=order_role,
             external_order_id=existing.venue_order_id,
             idempotency_key=idem_value,
@@ -587,6 +588,7 @@ def _orderresult_from_existing(
             reason="idempotency_collision: prior attempt filled",
             submitted_price=limit_price,
             shares=shares,
+            order_id=existing.venue_order_id,
             order_role=order_role,
             external_order_id=existing.venue_order_id,
             idempotency_key=idem_value,
@@ -600,6 +602,7 @@ def _orderresult_from_existing(
             reason="idempotency_collision: prior attempt unknown side effect; recovery required",
             submitted_price=limit_price,
             shares=shares,
+            order_id=existing.venue_order_id,
             order_role=order_role,
             external_order_id=existing.venue_order_id,
             idempotency_key=idem_value,
@@ -704,18 +707,51 @@ def create_execution_intent(
         NativeSidePrice(edge.vwmp, edge_direction),
         limit_offset=limit_offset,
     )
+    expected_limit_price = float(limit_price)
+    slippage_reference_price = min(float(edge_context.p_posterior), float(edge.vwmp))
+    if slippage_reference_price <= 0.0:
+        slippage_reference_price = expected_limit_price
+    max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
 
     # Dynamic limit price
     if best_ask is not None:
-        gap = best_ask - limit_price
-        if 0 < gap <= best_ask * 0.05:
-            logger.info("Dynamic limit: jumping to best_ask %.3f (gap %.3f)", best_ask, gap)
+        adverse_gap = best_ask - slippage_reference_price
+        adverse_slippage_bps = (
+            max(0.0, adverse_gap) / slippage_reference_price * 10_000.0
+            if slippage_reference_price > 0.0
+            else float("inf")
+        )
+        if best_ask > limit_price and adverse_slippage_bps <= max_slippage.value_bps:
+            logger.info(
+                "Dynamic limit: jumping to best_ask %.3f (adverse_slippage %.1f bps)",
+                best_ask,
+                adverse_slippage_bps,
+            )
             limit_price = best_ask
-        elif gap > best_ask * 0.05:
-            logger.warning("Limit %.3f far below best_ask %.3f (gap %.1f%%) — may not fill",
-                           limit_price, best_ask, gap / best_ask * 100)
+        elif best_ask > limit_price:
+            logger.warning(
+                "Limit %.3f below best_ask %.3f by %.1f bps vs reference %.3f; "
+                "max_slippage %.1f bps blocks jump",
+                limit_price,
+                best_ask,
+                adverse_slippage_bps,
+                slippage_reference_price,
+                max_slippage.value_bps,
+            )
     if repriced_limit_price is not None:
         limit_price = float(repriced_limit_price)
+    if limit_price > slippage_reference_price:
+        adverse_slippage_bps = (
+            (limit_price - slippage_reference_price) / slippage_reference_price * 10_000
+        )
+        if adverse_slippage_bps > max_slippage.value_bps:
+            raise ValueError(
+                "MAX_SLIPPAGE_EXCEEDED: "
+                f"slippage_reference_price={slippage_reference_price:.6f} "
+                f"limit_price={float(limit_price):.6f} "
+                f"adverse_slippage_bps={adverse_slippage_bps:.2f} "
+                f"max_slippage_bps={max_slippage.value_bps:.2f}"
+            )
 
     if executable_snapshot_min_tick_size is not None:
         limit_price = _align_buy_limit_price_to_tick(
@@ -752,7 +788,7 @@ def create_execution_intent(
         target_size_usd=size_usd,
         limit_price=limit_price,
         toxicity_budget=0.05,
-        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
+        max_slippage=max_slippage,
         is_sandbox=False,
         market_id=market_id,
         token_id=order_token,

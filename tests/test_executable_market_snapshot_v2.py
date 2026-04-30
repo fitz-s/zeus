@@ -1,15 +1,17 @@
 # Created: 2026-04-27
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
-# Purpose: U1 antibodies for ExecutableMarketSnapshotV2 persistence and freshness gate.
+# Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
-"""U1 executable market snapshot and command freshness gate tests."""
+#                  docs/operations/task_2026-04-30_reality_semantics_refactor_package/evidence/source_package/zeus_pricing_semantics_cutover_package/04_multiphase_execution_plan.md
+"""Executable snapshot, command freshness, and corrected pricing contract tests."""
 
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +29,12 @@ from src.contracts.executable_market_snapshot_v2 import (
     StaleMarketSnapshotError,
     canonicalize_fee_details,
     is_fresh,
+)
+from src.contracts.execution_intent import (
+    ExecutableCostBasis,
+    ExecutableTradeHypothesis,
+    FinalExecutionIntent,
+    simulate_clob_sweep,
 )
 from src.state.db import init_schema
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -840,3 +848,553 @@ def test_init_schema_migrates_legacy_venue_commands_snapshot_column():
     indexes = {row["name"] for row in conn.execute("PRAGMA index_list(venue_commands)")}
     assert "snapshot_id" in columns
     assert "idx_venue_commands_snapshot" in indexes
+
+
+def _no_snapshot(**overrides) -> ExecutableMarketSnapshotV2:
+    payload = dict(
+        snapshot_id="snap-no",
+        selected_outcome_token_id="no-token",
+        outcome_label="NO",
+        orderbook_top_bid=Decimal("0.48"),
+        orderbook_top_ask=Decimal("0.50"),
+        orderbook_depth_jsonb='{"asks":[["0.50","100"]],"bids":[["0.48","100"]]}',
+        fee_details={"feeRate": "0.03", "source": "test"},
+    )
+    payload.update(overrides)
+    return _snapshot(**payload)
+
+
+def _buy_no_cost_basis(**overrides) -> ExecutableCostBasis:
+    use_sweep = overrides.pop("use_sweep", True)
+    payload = dict(
+        snapshot=_no_snapshot(),
+        direction="buy_no",
+        order_policy="limit_may_take_conservative",
+        requested_size_kind="notional_usd",
+        requested_size_value=Decimal("5"),
+        final_limit_price=Decimal("0.50"),
+        fee_adjusted_execution_price=Decimal("0.5075"),
+    )
+    payload.update(overrides)
+    if use_sweep:
+        payload.pop("expected_fill_price_before_fee", None)
+        return ExecutableCostBasis.from_snapshot_sweep(**payload)
+    payload.setdefault("expected_fill_price_before_fee", Decimal("0.50"))
+    return ExecutableCostBasis.from_snapshot(**payload)
+
+
+def _hypothesis(cost_basis: ExecutableCostBasis | None = None) -> ExecutableTradeHypothesis:
+    return ExecutableTradeHypothesis.from_cost_basis(
+        event_id="event-1",
+        bin_id="75F+",
+        payoff_probability=Decimal("0.64"),
+        posterior_distribution_id="posterior:model-only:1",
+        market_prior_id=None,
+        fdr_family_id="family:event-1:2026-04-30",
+        cost_basis=cost_basis or _buy_no_cost_basis(),
+    )
+
+
+def test_corrected_cost_basis_selects_native_no_token_from_no_snapshot():
+    snapshot = _no_snapshot()
+    cost_basis = _buy_no_cost_basis()
+
+    assert cost_basis.selected_token_id == "no-token"
+    assert cost_basis.selected_outcome_label == "NO"
+    assert cost_basis.quote_snapshot_id == "snap-no"
+    assert cost_basis.quote_snapshot_hash == snapshot.executable_snapshot_hash
+    assert cost_basis.quote_snapshot_hash != HASH_C
+    assert len(cost_basis.cost_basis_hash) == 64
+    assert cost_basis.cost_basis_id.startswith("cost_basis:")
+    cost_basis.assert_live_safe()
+
+
+def test_executable_snapshot_hash_includes_microstructure_metadata():
+    base = _no_snapshot()
+    changed_fee = _no_snapshot(fee_details={"feeRate": "0.04", "source": "test"})
+    changed_neg_risk = _no_snapshot(neg_risk=True)
+
+    assert base.executable_snapshot_hash != HASH_C
+    assert base.executable_snapshot_hash != changed_fee.executable_snapshot_hash
+    assert base.executable_snapshot_hash != changed_neg_risk.executable_snapshot_hash
+
+
+def test_executable_snapshot_hash_canonicalizes_decimal_scale_and_context():
+    base = _no_snapshot(
+        min_tick_size=Decimal("0.0100"),
+        min_order_size=Decimal("5.000"),
+        orderbook_top_bid=Decimal("0.4800"),
+        orderbook_top_ask=Decimal("0.5200"),
+        fee_details={
+            "feeRate": "0.0300",
+            "source": "test",
+            "nested": {"baseFee": "300.00"},
+        },
+        orderbook_depth_jsonb='{"asks":[["0.52","100"]],"bids":[["0.48","100"]]}',
+    )
+    equivalent = _no_snapshot(
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        orderbook_top_bid=Decimal("0.48"),
+        orderbook_top_ask=Decimal("0.52"),
+        fee_details={
+            "feeRate": "0.03",
+            "source": "test",
+            "nested": {"baseFee": "300"},
+        },
+        orderbook_depth_jsonb='{"asks":[["0.52","100"]],"bids":[["0.48","100"]]}',
+    )
+
+    with localcontext() as context:
+        context.prec = 3
+        low_precision_hash = base.executable_snapshot_hash
+    with localcontext() as context:
+        context.prec = 50
+        high_precision_hash = base.executable_snapshot_hash
+
+    assert base.executable_snapshot_hash == equivalent.executable_snapshot_hash
+    assert low_precision_hash == high_precision_hash == base.executable_snapshot_hash
+
+
+def test_corrected_cost_basis_rejects_snapshot_direction_mismatch():
+    with pytest.raises(ValueError, match="selected_outcome_token_id"):
+        ExecutableCostBasis.from_snapshot(
+            snapshot=_snapshot(),
+            direction="buy_no",
+            order_policy="limit_may_take_conservative",
+            requested_size_kind="notional_usd",
+            requested_size_value=Decimal("5"),
+            final_limit_price=Decimal("0.50"),
+            expected_fill_price_before_fee=Decimal("0.50"),
+            fee_adjusted_execution_price=Decimal("0.5075"),
+        )
+
+
+def test_corrected_cost_basis_recomputes_fee_adjusted_price_from_snapshot_fee():
+    cost_basis = _buy_no_cost_basis(fee_adjusted_execution_price=None)
+
+    assert cost_basis.expected_fill_price_before_fee == Decimal("0.50")
+    assert cost_basis.worst_case_fee_rate == Decimal("0.03")
+    assert cost_basis.fee_adjusted_execution_price == Decimal("0.5075")
+
+    with pytest.raises(ValueError, match="snapshot fee metadata"):
+        _buy_no_cost_basis(fee_adjusted_execution_price=Decimal("0.50"))
+
+
+def test_corrected_cost_basis_direct_constructor_rejects_false_fee_math():
+    cost_basis = _buy_no_cost_basis()
+
+    with pytest.raises(ValueError, match="fee_adjusted_execution_price"):
+        replace(cost_basis, fee_adjusted_execution_price=Decimal("0.50"))
+
+
+def test_corrected_cost_basis_rejects_fill_outside_limit():
+    with pytest.raises(ValueError, match="buy expected_fill_price_before_fee"):
+        _buy_no_cost_basis(
+            use_sweep=False,
+            final_limit_price=Decimal("0.50"),
+            expected_fill_price_before_fee=Decimal("0.51"),
+            fee_adjusted_execution_price=None,
+        )
+
+    with pytest.raises(ValueError, match="sell expected_fill_price_before_fee"):
+        ExecutableCostBasis.from_snapshot(
+            snapshot=_snapshot(),
+            direction="sell_yes",
+            order_policy="limit_may_take_conservative",
+            requested_size_kind="shares",
+            requested_size_value=Decimal("10"),
+            final_limit_price=Decimal("0.50"),
+            expected_fill_price_before_fee=Decimal("0.49"),
+            fee_adjusted_execution_price=None,
+        )
+
+
+def test_corrected_cost_basis_rejects_unknown_order_policy():
+    with pytest.raises(ValueError, match="unsupported order_policy"):
+        _buy_no_cost_basis(order_policy="unknown_policy")
+
+
+def test_corrected_cost_basis_blocks_final_intent_when_depth_not_passed():
+    cost_basis = _buy_no_cost_basis(use_sweep=False, depth_status="EMPTY_BOOK")
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="depth validation failed"):
+        cost_basis.assert_live_safe()
+    with pytest.raises(ValueError, match="depth validation failed"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+        )
+
+
+def test_plain_snapshot_cost_basis_requires_sweep_proof_for_live_intent():
+    cost_basis = _buy_no_cost_basis(use_sweep=False, fee_adjusted_execution_price=None)
+    hypothesis = _hypothesis(cost_basis)
+
+    assert cost_basis.depth_status == "UNVERIFIED_DEPTH"
+    assert cost_basis.depth_proof_source == "UNVERIFIED"
+    with pytest.raises(ValueError, match="UNVERIFIED_DEPTH"):
+        cost_basis.assert_live_safe()
+    with pytest.raises(ValueError, match="UNVERIFIED_DEPTH"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+        )
+    with pytest.raises(ValueError, match="CLOB_SWEEP proof"):
+        _buy_no_cost_basis(use_sweep=False, depth_status="PASS")
+
+
+def test_clob_sweep_buy_uses_ascending_asks_for_expected_fill():
+    snapshot = _no_snapshot(
+        orderbook_top_bid=Decimal("0.48"),
+        orderbook_top_ask=Decimal("0.50"),
+        orderbook_depth_jsonb='{"asks":[["0.50","4"],["0.52","6"]],"bids":[["0.48","10"]]}',
+    )
+
+    sweep = simulate_clob_sweep(
+        snapshot=snapshot,
+        direction="buy_no",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("10"),
+        limit_price=Decimal("0.52"),
+    )
+    cost_basis = ExecutableCostBasis.from_snapshot_sweep(
+        snapshot=snapshot,
+        direction="buy_no",
+        order_policy="limit_may_take_conservative",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("10"),
+        final_limit_price=Decimal("0.52"),
+    )
+
+    assert sweep.book_side == "asks"
+    assert sweep.depth_status == "PASS"
+    assert sweep.levels_consumed == 2
+    assert sweep.average_price == Decimal("0.512")
+    assert cost_basis.expected_fill_price_before_fee == Decimal("0.512")
+    assert cost_basis.fee_adjusted_execution_price == Decimal("0.51949568")
+    cost_basis.assert_live_safe()
+
+
+def test_clob_sweep_rejects_direction_snapshot_side_mismatch():
+    with pytest.raises(ValueError, match="selected_outcome_token_id"):
+        simulate_clob_sweep(
+            snapshot=_snapshot(),
+            direction="buy_no",
+            requested_size_kind="shares",
+            requested_size_value=Decimal("1"),
+            limit_price=Decimal("0.52"),
+        )
+
+
+def test_clob_sweep_sell_uses_descending_bids_for_expected_fill():
+    snapshot = _snapshot(
+        orderbook_top_bid=Decimal("0.55"),
+        orderbook_top_ask=Decimal("0.56"),
+        orderbook_depth_jsonb='{"bids":[["0.55","2"],["0.54","3"]],"asks":[["0.56","10"]]}',
+        fee_details={"feeRate": "0.03", "source": "test"},
+    )
+
+    sweep = simulate_clob_sweep(
+        snapshot=snapshot,
+        direction="sell_yes",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("5"),
+        limit_price=Decimal("0.54"),
+    )
+    cost_basis = ExecutableCostBasis.from_snapshot_sweep(
+        snapshot=snapshot,
+        direction="sell_yes",
+        order_policy="limit_may_take_conservative",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("5"),
+        final_limit_price=Decimal("0.54"),
+    )
+
+    assert sweep.book_side == "bids"
+    assert sweep.depth_status == "PASS"
+    assert sweep.average_price == Decimal("0.544")
+    assert cost_basis.expected_fill_price_before_fee == Decimal("0.544")
+    assert cost_basis.fee_adjusted_execution_price == Decimal("0.53655808")
+    cost_basis.assert_live_safe()
+
+
+def test_clob_sweep_marks_insufficient_depth_without_live_safe_promotion():
+    snapshot = _no_snapshot(
+        orderbook_top_bid=Decimal("0.48"),
+        orderbook_top_ask=Decimal("0.50"),
+        orderbook_depth_jsonb='{"asks":[["0.50","2"],["0.52","10"]],"bids":[["0.48","10"]]}',
+    )
+
+    sweep = simulate_clob_sweep(
+        snapshot=snapshot,
+        direction="buy_no",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("5"),
+        limit_price=Decimal("0.51"),
+    )
+    cost_basis = ExecutableCostBasis.from_snapshot_sweep(
+        snapshot=snapshot,
+        direction="buy_no",
+        order_policy="limit_may_take_conservative",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("5"),
+        final_limit_price=Decimal("0.51"),
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    assert sweep.depth_status == "DEPTH_INSUFFICIENT"
+    assert sweep.filled_shares == Decimal("2")
+    assert sweep.unfilled_size_value == Decimal("3")
+    assert cost_basis.depth_status == "DEPTH_INSUFFICIENT"
+    with pytest.raises(ValueError, match="depth validation failed"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+        )
+
+
+def test_clob_sweep_non_crossing_limit_is_depth_insufficient_not_empty_book():
+    snapshot = _no_snapshot(
+        orderbook_top_bid=Decimal("0.48"),
+        orderbook_top_ask=Decimal("0.50"),
+        orderbook_depth_jsonb='{"asks":[["0.50","2"]],"bids":[["0.48","10"]]}',
+    )
+
+    sweep = simulate_clob_sweep(
+        snapshot=snapshot,
+        direction="buy_no",
+        requested_size_kind="shares",
+        requested_size_value=Decimal("1"),
+        limit_price=Decimal("0.49"),
+    )
+
+    assert sweep.depth_status == "DEPTH_INSUFFICIENT"
+    assert sweep.filled_shares == Decimal("0")
+    assert sweep.average_price is None
+
+
+def test_passive_limit_candidate_cost_basis_is_not_live_safe():
+    cost_basis = _buy_no_cost_basis(
+        use_sweep=False,
+        depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
+        cost_basis.assert_live_safe()
+    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+        )
+
+
+def test_executable_hypothesis_identity_includes_snapshot_and_cost_hash():
+    first = _buy_no_cost_basis()
+    second = _buy_no_cost_basis(final_limit_price=Decimal("0.51"))
+
+    first_hypothesis = _hypothesis(first)
+    second_hypothesis = _hypothesis(second)
+
+    assert first_hypothesis.fdr_hypothesis_id != second_hypothesis.fdr_hypothesis_id
+    assert first_hypothesis.executable_snapshot_hash == first.quote_snapshot_hash
+    assert first_hypothesis.executable_cost_basis_hash == first.cost_basis_hash
+    first_hypothesis.assert_identity_complete()
+
+
+def test_executable_hypothesis_identity_changes_with_posterior_evidence():
+    cost_basis = _buy_no_cost_basis()
+    first = _hypothesis(cost_basis)
+    second = ExecutableTradeHypothesis.from_cost_basis(
+        event_id="event-1",
+        bin_id="75F+",
+        payoff_probability=Decimal("0.65"),
+        posterior_distribution_id="posterior:model-only:2",
+        market_prior_id=None,
+        fdr_family_id="family:event-1:2026-04-30",
+        cost_basis=cost_basis,
+    )
+
+    assert first.fdr_hypothesis_id != second.fdr_hypothesis_id
+
+    with pytest.raises(ValueError, match="posterior_distribution_id"):
+        ExecutableTradeHypothesis.from_cost_basis(
+            event_id="event-1",
+            bin_id="75F+",
+            payoff_probability=Decimal("0.64"),
+            posterior_distribution_id="",
+            market_prior_id=None,
+            fdr_family_id="family:event-1:2026-04-30",
+            cost_basis=cost_basis,
+        )
+
+
+def test_executable_hypothesis_direct_constructor_rejects_stale_identity():
+    hypothesis = _hypothesis()
+
+    with pytest.raises(ValueError, match="fdr_hypothesis_id"):
+        replace(hypothesis, payoff_probability=Decimal("0.65"))
+
+
+def test_final_execution_intent_carries_cost_basis_fields_without_recompute_inputs():
+    cost_basis = _buy_no_cost_basis(snapshot=_no_snapshot(neg_risk=True))
+    hypothesis = _hypothesis(cost_basis)
+
+    intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+        hypothesis=hypothesis,
+        cost_basis=cost_basis,
+    )
+
+    assert intent.hypothesis_id == hypothesis.fdr_hypothesis_id
+    assert intent.selected_token_id == "no-token"
+    assert intent.snapshot_id == cost_basis.quote_snapshot_id
+    assert intent.snapshot_hash == cost_basis.quote_snapshot_hash
+    assert intent.cost_basis_id == cost_basis.cost_basis_id
+    assert intent.cost_basis_hash == cost_basis.cost_basis_hash
+    assert intent.final_limit_price == Decimal("0.50")
+    assert intent.expected_fill_price_before_fee == Decimal("0.50")
+    assert intent.fee_adjusted_execution_price == Decimal("0.5075")
+    assert intent.neg_risk is True
+    intent.assert_no_recompute_inputs()
+    intent.assert_submit_ready()
+
+
+def test_final_execution_intent_enforces_adverse_slippage_budget_for_buys_and_sells():
+    buy_cost_basis = _buy_no_cost_basis(
+        final_limit_price=Decimal("0.52"),
+        expected_fill_price_before_fee=Decimal("0.50"),
+        fee_adjusted_execution_price=None,
+    )
+    buy_hypothesis = _hypothesis(buy_cost_basis)
+
+    with pytest.raises(ValueError, match="MAX_SLIPPAGE_EXCEEDED"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=buy_hypothesis,
+            cost_basis=buy_cost_basis,
+            max_slippage_bps=Decimal("200"),
+        )
+
+    with pytest.raises(ValueError, match="MAX_SLIPPAGE_EXCEEDED"):
+        FinalExecutionIntent(
+            hypothesis_id="hypothesis:sell",
+            selected_token_id="yes-token",
+            direction="sell_yes",
+            size_kind="shares",
+            size_value=Decimal("10"),
+            final_limit_price=Decimal("0.48"),
+            expected_fill_price_before_fee=Decimal("0.50"),
+            fee_adjusted_execution_price=Decimal("0.4925"),
+            order_policy="limit_may_take_conservative",
+            order_type="GTC",
+            post_only=False,
+            cancel_after=None,
+            snapshot_id="snap-sell",
+            snapshot_hash=_snapshot().executable_snapshot_hash,
+            cost_basis_id="cost_basis:" + ("d" * 16),
+            cost_basis_hash="d" * 64,
+            max_slippage_bps=Decimal("200"),
+            tick_size=Decimal("0.01"),
+            min_order_size=Decimal("0.01"),
+            fee_rate=Decimal("0.03"),
+            neg_risk=False,
+        )
+
+
+def test_final_execution_intent_recomputes_fee_adjusted_price_at_boundary():
+    cost_basis = _buy_no_cost_basis()
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="fee_adjusted_execution_price"):
+        FinalExecutionIntent(
+            hypothesis_id=hypothesis.fdr_hypothesis_id,
+            selected_token_id=cost_basis.selected_token_id,
+            direction=cost_basis.direction,
+            size_kind=cost_basis.requested_size_kind,
+            size_value=cost_basis.requested_size_value,
+            final_limit_price=cost_basis.final_limit_price,
+            expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
+            fee_adjusted_execution_price=Decimal("0.50"),
+            order_policy=cost_basis.order_policy,
+            order_type="GTC",
+            post_only=False,
+            cancel_after=None,
+            snapshot_id=cost_basis.quote_snapshot_id,
+            snapshot_hash=cost_basis.quote_snapshot_hash,
+            cost_basis_id=cost_basis.cost_basis_id,
+            cost_basis_hash=cost_basis.cost_basis_hash,
+            max_slippage_bps=Decimal("200"),
+            tick_size=cost_basis.tick_size,
+            min_order_size=cost_basis.min_order_size,
+            fee_rate=cost_basis.worst_case_fee_rate,
+            neg_risk=cost_basis.neg_risk,
+        )
+
+
+def test_final_execution_intent_rejects_incoherent_order_policy_combination():
+    cost_basis = _buy_no_cost_basis()
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="post_only cannot be combined"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+            order_type="FOK",
+            post_only=True,
+        )
+
+
+def test_final_execution_intent_requires_cost_basis_hash():
+    cost_basis = _buy_no_cost_basis()
+    hypothesis = _hypothesis(cost_basis)
+
+    with pytest.raises(ValueError, match="missing fields"):
+        FinalExecutionIntent(
+            hypothesis_id=hypothesis.fdr_hypothesis_id,
+            selected_token_id=cost_basis.selected_token_id,
+            direction=cost_basis.direction,
+            size_kind=cost_basis.requested_size_kind,
+            size_value=cost_basis.requested_size_value,
+            final_limit_price=cost_basis.final_limit_price,
+            expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
+            fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,
+            order_policy=cost_basis.order_policy,
+            order_type="GTC",
+            post_only=False,
+            cancel_after=None,
+            snapshot_id=cost_basis.quote_snapshot_id,
+            snapshot_hash=cost_basis.quote_snapshot_hash,
+            cost_basis_id=cost_basis.cost_basis_id,
+            cost_basis_hash="",
+            max_slippage_bps=Decimal("200"),
+            tick_size=cost_basis.tick_size,
+            min_order_size=cost_basis.min_order_size,
+            fee_rate=cost_basis.worst_case_fee_rate,
+            neg_risk=False,
+        )
+
+    with pytest.raises(ValueError, match="cost_basis_id"):
+        FinalExecutionIntent(
+            hypothesis_id=hypothesis.fdr_hypothesis_id,
+            selected_token_id=cost_basis.selected_token_id,
+            direction=cost_basis.direction,
+            size_kind=cost_basis.requested_size_kind,
+            size_value=cost_basis.requested_size_value,
+            final_limit_price=cost_basis.final_limit_price,
+            expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
+            fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,
+            order_policy=cost_basis.order_policy,
+            order_type="GTC",
+            post_only=False,
+            cancel_after=None,
+            snapshot_id=cost_basis.quote_snapshot_id,
+            snapshot_hash=cost_basis.quote_snapshot_hash,
+            cost_basis_id="cost_basis:wrong",
+            cost_basis_hash=cost_basis.cost_basis_hash,
+            max_slippage_bps=Decimal("200"),
+            tick_size=cost_basis.tick_size,
+            min_order_size=cost_basis.min_order_size,
+            fee_rate=cost_basis.worst_case_fee_rate,
+            neg_risk=False,
+        )

@@ -518,6 +518,7 @@ def load_platt_model_v2(
     temperature_metric: str,
     cluster: str,
     season: str,
+    data_version: Optional[str] = None,
     input_space: str = "width_normalized_density",
 ) -> Optional[dict]:
     """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
@@ -527,9 +528,23 @@ def load_platt_model_v2(
     discrimination — a LOW candidate would silently receive a HIGH Platt
     model. This function closes that gap at the read seam.
 
-    Filters by (temperature_metric, cluster, season, input_space) + is_active=1
-    + authority='VERIFIED'. Returns None if no matching row exists — caller
-    (get_calibrator) falls back to legacy or on-the-fly fit.
+    2026-04-30 (post-architect-audit BLOCKER #1 fix): added explicit
+    ``data_version`` filter. The UNIQUE constraint on platt_models_v2 includes
+    data_version (v2_schema.py:302) and save_platt_model_v2 keys on it
+    (store.py:445-452), so multiple data_versions per (metric, cluster, season)
+    can coexist. Pre-fix, the SELECT picked ``ORDER BY fitted_at DESC LIMIT 1``
+    — newest wins regardless of data_version. That made model selection
+    invariant-by-coincidence: today only ``tigge_mx2t6_local_calendar_day_max_v1``
+    (HIGH) and ``tigge_mn2t6_local_calendar_day_min_v1`` (LOW) are present, so
+    the lookup was correct, but a future training surface that introduces a
+    new data_version (e.g., a v2 metric upgrade) would silently shift runtime
+    to the new fit without any explicit migration. The metric's expected
+    data_version lives in MetricIdentity (metric_identity.py:78-90); callers
+    pass ``MetricIdentity.data_version`` here.
+
+    Filters by (temperature_metric, cluster, season[, data_version], input_space) +
+    is_active=1 + authority='VERIFIED'. Returns None if no matching row exists —
+    caller (get_calibrator) falls back to legacy or on-the-fly fit.
 
     Args:
         conn: SQLite connection (must have platt_models_v2 table applied).
@@ -537,28 +552,53 @@ def load_platt_model_v2(
             v2_schema.py:229-230.
         cluster: per K3, equals the city name (one-cluster-per-city).
         season: e.g. "DJF", "MAM", "JJA", "SON" (hemisphere-flipped already).
+        data_version: optional. When provided, restricts the lookup to rows
+            matching this exact data_version — the canonical contract per
+            INV-15 / Phase 9C metric scoping. Pass MetricIdentity.data_version
+            (or its constant from metric_identity.py) to avoid coincidental
+            cross-version selection. ``None`` preserves legacy behavior for
+            tests and tooling that have not yet threaded the metric.
         input_space: defaults to "width_normalized_density" (canonical post-P9
             space); legacy input_space="raw_probability" is legal but stale.
 
     Returns:
         Same dict shape as load_platt_model, or None.
     """
-    row = conn.execute(
-        """
-        SELECT param_A, param_B, param_C, bootstrap_params_json,
-               n_samples, brier_insample, fitted_at, input_space
-        FROM platt_models_v2
-        WHERE temperature_metric = ?
-          AND cluster = ?
-          AND season = ?
-          AND input_space = ?
-          AND is_active = 1
-          AND authority = 'VERIFIED'
-        ORDER BY fitted_at DESC
-        LIMIT 1
-        """,
-        (temperature_metric, cluster, season, input_space),
-    ).fetchone()
+    if data_version is not None:
+        row = conn.execute(
+            """
+            SELECT param_A, param_B, param_C, bootstrap_params_json,
+                   n_samples, brier_insample, fitted_at, input_space
+            FROM platt_models_v2
+            WHERE temperature_metric = ?
+              AND cluster = ?
+              AND season = ?
+              AND data_version = ?
+              AND input_space = ?
+              AND is_active = 1
+              AND authority = 'VERIFIED'
+            ORDER BY fitted_at DESC
+            LIMIT 1
+            """,
+            (temperature_metric, cluster, season, data_version, input_space),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT param_A, param_B, param_C, bootstrap_params_json,
+                   n_samples, brier_insample, fitted_at, input_space
+            FROM platt_models_v2
+            WHERE temperature_metric = ?
+              AND cluster = ?
+              AND season = ?
+              AND input_space = ?
+              AND is_active = 1
+              AND authority = 'VERIFIED'
+            ORDER BY fitted_at DESC
+            LIMIT 1
+            """,
+            (temperature_metric, cluster, season, input_space),
+        ).fetchone()
 
     if row is None:
         return None
