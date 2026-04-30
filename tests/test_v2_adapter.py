@@ -247,6 +247,57 @@ def test_submit_limit_order_snapshot_failure_is_typed_pre_submit_rejection(tmp_p
     assert fake.calls == [("get_ok",)]
 
 
+def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_path):
+    class MissingFeeClient:
+        def __init__(self):
+            self.calls = []
+
+        def get_ok(self):
+            self.calls.append(("get_ok",))
+            return {"ok": True}
+
+        def get_neg_risk(self, token_id):
+            self.calls.append(("get_neg_risk", token_id))
+            return True
+
+        def get_tick_size(self, token_id):
+            self.calls.append(("get_tick_size", token_id))
+            return "0.01"
+
+        def create_order(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("create_order must not run without fee-rate proof")
+
+        def post_order(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("post_order must not run without fee-rate proof")
+
+    fake = MissingFeeClient()
+    adapter, _ = _adapter(tmp_path, fake)
+
+    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY")
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "get_fee_rate_bps" in (result.error_message or "")
+    assert not any(call[0] in {"create_order", "post_order", "create_and_post_order"} for call in fake.calls)
+
+
+def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_none(tmp_path):
+    class NoneFeeClient(FakeTwoStepClient):
+        def get_fee_rate_bps(self, token_id):
+            self.calls.append(("get_fee_rate_bps", token_id))
+            return None
+
+    fake = NoneFeeClient()
+    adapter, _ = _adapter(tmp_path, fake)
+
+    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY")
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "fee_rate_bps" in (result.error_message or "")
+    assert not any(call[0] in {"create_order", "post_order", "create_and_post_order"} for call in fake.calls)
+
+
 def test_two_step_signing_failure_is_typed_pre_submit_rejection(tmp_path):
     fake = FakeCreateOrderFailureClient()
     adapter, _ = _adapter(tmp_path, fake)
@@ -299,7 +350,14 @@ def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
     assert envelope.tick_size == Decimal("0.01")
     assert envelope.min_order_size == Decimal("5")
     assert envelope.neg_risk is True
-    assert envelope.fee_details == {"bps": 0, "builder_fee_bps": 0}
+    assert envelope.fee_details == {
+        "bps": 0,
+        "builder_fee_bps": 0,
+        "fee_rate_fraction": 0.0,
+        "fee_rate_bps": 0.0,
+        "fee_rate_source_field": "bps",
+        "fee_rate_raw_unit": "bps",
+    }
     assert len(envelope.canonical_pre_sign_payload_hash) == 64
     assert len(envelope.raw_request_hash) == 64
     assert envelope.raw_response_json is None
@@ -576,7 +634,9 @@ def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
 
     monkeypatch.setattr(pm.httpx, "get", lambda *args, **kwargs: Response())
 
-    assert pm.PolymarketClient().get_fee_rate("token-1") == 30.0
+    client = pm.PolymarketClient()
+    assert client.get_fee_rate("token-1") == pytest.approx(0.003)
+    assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
 
 
 def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):

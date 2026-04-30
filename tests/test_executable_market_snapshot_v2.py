@@ -25,6 +25,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     MarketNotTradableError,
     MarketSnapshotMismatchError,
     StaleMarketSnapshotError,
+    canonicalize_fee_details,
     is_fresh,
 )
 from src.state.db import init_schema
@@ -301,12 +302,57 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
     assert loaded.fee_details == {
         "source": "clob_fee_rate",
         "token_id": "yes-token",
+        "fee_rate_fraction": 0.003,
         "fee_rate_bps": 30.0,
+        "fee_rate_source_field": "fee_rate_bps",
+        "fee_rate_raw_unit": "bps",
+        "fee_rate_unit_inferred": "legacy_get_fee_rate_gt_1_bps",
     }
     assert loaded.authority_tier == "CLOB"
     assert fields["executable_snapshot_min_tick_size"] == "0.01"
     assert fields["executable_snapshot_min_order_size"] == "5"
     assert fields["executable_snapshot_neg_risk"] is False
+
+
+def test_fee_details_canonicalize_base_fee_bps_to_fraction():
+    details = canonicalize_fee_details(
+        {"base_fee": "30", "source": "clob_fee_rate"},
+        token_id="token-1",
+    )
+
+    assert details["fee_rate_fraction"] == pytest.approx(0.003)
+    assert details["fee_rate_bps"] == pytest.approx(30.0)
+    assert details["fee_rate_source_field"] == "base_fee"
+    assert details["fee_rate_raw_unit"] == "bps"
+    assert details["token_id"] == "token-1"
+
+
+def test_fee_details_canonicalize_fraction_fee_rate_to_bps():
+    details = canonicalize_fee_details({"feeRate": "0.072"})
+
+    assert details["fee_rate_fraction"] == pytest.approx(0.072)
+    assert details["fee_rate_bps"] == pytest.approx(720.0)
+    assert details["fee_rate_source_field"] == "feeRate"
+    assert details["fee_rate_raw_unit"] == "fraction"
+
+
+def test_fee_details_reject_inconsistent_fraction_and_bps():
+    with pytest.raises(MarketSnapshotMismatchError, match="inconsistent"):
+        canonicalize_fee_details({"feeRate": "0.072", "base_fee": "30"})
+
+
+def test_fee_details_reject_conflicting_expected_token_or_source():
+    with pytest.raises(MarketSnapshotMismatchError, match="token_id"):
+        canonicalize_fee_details(
+            {"base_fee": 30, "token_id": "wrong-token"},
+            token_id="expected-token",
+        )
+
+    with pytest.raises(MarketSnapshotMismatchError, match="source"):
+        canonicalize_fee_details(
+            {"base_fee": 30, "source": "stale_source"},
+            source="clob_fee_rate",
+        )
 
 
 def test_capture_executable_snapshot_selects_no_orderbook_for_buy_no(conn):

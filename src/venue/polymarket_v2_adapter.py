@@ -21,6 +21,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.executable_market_snapshot_v2 import (
+    MarketSnapshotMismatchError,
+    canonicalize_fee_details,
+)
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
 DEFAULT_V2_HOST = "https://clob-v2.polymarket.com"
@@ -275,7 +279,7 @@ class PolymarketV2Adapter:
             tick_size=Decimal(str(_snapshot_attr(snapshot, "tick_size"))),
             min_order_size=Decimal(str(_snapshot_attr(snapshot, "min_order_size"))),
             neg_risk=bool(_snapshot_attr(snapshot, "neg_risk")),
-            fee_details=dict(_snapshot_attr(snapshot, "fee_details") or {}),
+            fee_details=_canonical_fee_details_for_envelope(_snapshot_attr(snapshot, "fee_details")),
             canonical_pre_sign_payload_hash=payload_hash,
             signed_order=None,
             signed_order_hash=None,
@@ -571,6 +575,7 @@ class PolymarketV2Adapter:
             size=Decimal(str(size)),
             side=side,
             order_type=order_type,
+            allow_unavailable_fee_details=True,
             sdk_snapshot=SimpleNamespace(
                 tick_size=Decimal("0.01"),
                 min_order_size=Decimal("0.01"),
@@ -601,6 +606,7 @@ class PolymarketV2Adapter:
         side: str,
         order_type: str,
         sdk_snapshot: SimpleNamespace,
+        allow_unavailable_fee_details: bool = False,
     ) -> VenueSubmissionEnvelope:
         if side not in {"BUY", "SELL"}:
             raise ValueError(f"side must be BUY or SELL, got {side!r}")
@@ -635,7 +641,10 @@ class PolymarketV2Adapter:
             tick_size=sdk_snapshot.tick_size,
             min_order_size=sdk_snapshot.min_order_size,
             neg_risk=sdk_snapshot.neg_risk,
-            fee_details=sdk_snapshot.fee_details,
+            fee_details=_canonical_fee_details_for_envelope(
+                sdk_snapshot.fee_details,
+                allow_unavailable=allow_unavailable_fee_details,
+            ),
             canonical_pre_sign_payload_hash=payload_hash,
             signed_order=None,
             signed_order_hash=None,
@@ -658,17 +667,48 @@ class PolymarketV2Adapter:
         if not callable(tick_size_fn):
             raise V2AdapterError("SDK client does not expose get_tick_size for legacy submit compatibility")
         fee_rate_fn = getattr(client, "get_fee_rate_bps", None)
+        if not callable(fee_rate_fn):
+            raise V2AdapterError("SDK client does not expose get_fee_rate_bps for legacy submit compatibility")
         fee_rate_bps = fee_rate_fn(token_id) if callable(fee_rate_fn) else None
+        if fee_rate_bps is None:
+            raise V2AdapterError("SDK client returned no fee_rate_bps for legacy submit compatibility")
+        fee_details = {
+            "bps": int(fee_rate_bps),
+            "builder_fee_bps": 0,
+            "source": "py-clob-client-v2",
+            "token_id": token_id,
+        }
+        fee_details = canonicalize_fee_details(fee_details)
         return SimpleNamespace(
             tick_size=Decimal(str(tick_size_fn(token_id))),
             min_order_size=Decimal("0.01"),
             neg_risk=bool(neg_risk_fn(token_id)),
-            fee_details={
-                "bps": int(fee_rate_bps) if fee_rate_bps is not None else None,
-                "builder_fee_bps": 0,
-                "source": "py-clob-client-v2",
-            },
+            fee_details=fee_details,
         )
+
+
+def _canonical_fee_details_for_envelope(value: Any, *, allow_unavailable: bool = False) -> dict[str, Any]:
+    details = dict(value or {})
+    if not details:
+        if not allow_unavailable:
+            return canonicalize_fee_details(details)
+        return {}
+    try:
+        return canonicalize_fee_details(details)
+    except MarketSnapshotMismatchError:
+        fee_fields = (
+            "fee_rate_fraction",
+            "feeRate",
+            "fee_rate",
+            "fee_rate_bps",
+            "feeRateBps",
+            "base_fee",
+            "baseFee",
+            "bps",
+        )
+        if not allow_unavailable or any(details.get(field) is not None for field in fee_fields):
+            raise
+        return details
 
 
 def _sdk_version() -> str:
