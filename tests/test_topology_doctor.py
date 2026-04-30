@@ -160,6 +160,34 @@ def test_cli_json_parity_for_runtime_route_card_only():
     assert set(payload) == {"ok", "route_card"}
 
 
+def test_navigation_changed_files_aliases_files_instead_of_empty_route():
+    args = [
+        "--navigation",
+        "--task",
+        "agent runtime navigation changed-files alias",
+        "--changed-files",
+        "scripts/topology_doctor_cli.py",
+        "--intent",
+        "topology graph agent runtime upgrade",
+        "--task-class",
+        "agent_runtime",
+        "--write-intent",
+        "edit",
+        "--json",
+    ]
+
+    payload = run_cli_json(args)
+
+    assert payload == topology_doctor.run_navigation(
+        "agent runtime navigation changed-files alias",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    assert payload["route_card"]["admitted_files"] == ["scripts/topology_doctor_cli.py"]
+
+
 def test_cli_json_parity_for_context_pack_command():
     args = [
         "context-pack",
@@ -2102,6 +2130,76 @@ def test_issue_schema_drift_guard():
     assert set(schema["enums"]["lifecycle_state"]) == topology_doctor.ISSUE_LIFECYCLE_STATES
     assert set(schema["enums"]["authority_status"]) == topology_doctor.ISSUE_AUTHORITY_STATUSES
     assert tuple(schema["enums"]["blocking_modes"]) == topology_doctor.ISSUE_BLOCKING_MODES
+
+
+def test_digest_profile_selection_schema_contract_passes():
+    result = topology_doctor.run_schema()
+    selection = topology_doctor.load_topology()["digest_profile_selection"]
+
+    assert_topology_ok(result)
+    assert "architecture/topology.yaml" in selection["shared_companion_patterns"]
+    assert "architecture/digest_profiles.py" in selection["shared_companion_patterns"]
+
+
+def test_digest_profile_selection_rejects_shared_only_selector(monkeypatch):
+    topology = json.loads(json.dumps(topology_doctor.load_topology()))
+    topology["digest_profile_selection"] = {
+        "shared_companion_patterns": ["architecture/topology.yaml"],
+    }
+    topology["digest_profiles"] = [
+        {
+            "id": "bad shared-only profile",
+            "file_patterns": ["architecture/topology.yaml"],
+            "strong_phrases": [],
+        }
+    ]
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    result = topology_doctor.run_schema()
+
+    assert not result.ok
+    assert any(issue.code == "digest_profile_selector_shared_only" for issue in result.issues)
+
+
+def test_digest_profile_selection_uses_match_policy_strong_phrases(monkeypatch):
+    topology = json.loads(json.dumps(topology_doctor.load_topology()))
+    topology["digest_profile_selection"] = {
+        "shared_companion_patterns": ["architecture/topology.yaml"],
+    }
+    topology["digest_profiles"] = [
+        {
+            "id": "phrase selectable shared-file profile",
+            "match_policy": {
+                "strong_phrases": ["phrase selectable"],
+            },
+            "file_patterns": ["architecture/topology.yaml"],
+        }
+    ]
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    result = topology_doctor.run_schema()
+
+    assert_topology_ok(result)
+
+
+def test_digest_profile_selection_rejects_conflicting_file_evidence(monkeypatch):
+    topology = json.loads(json.dumps(topology_doctor.load_topology()))
+    topology["digest_profiles"] = [
+        {
+            "id": "bad conflicting profile",
+            "semantic_file_patterns": ["scripts/example.py"],
+            "companion_file_patterns": ["scripts/example.py"],
+        }
+    ]
+
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    result = topology_doctor.run_schema()
+
+    assert not result.ok
+    assert any(issue.code == "digest_profile_selection_conflicting_pattern" for issue in result.issues)
 
 
 def test_system_books_have_required_headings():
@@ -4413,6 +4511,11 @@ def test_navigation_route_card_summarizes_admission_and_risk(monkeypatch):
     assert payload["route_card"]["risk_tier"] == "T3"
     assert payload["route_context"]["gate_budget"]["label"] == "architecture_governance_or_runtime_tooling"
     assert payload["direct_blockers"] == []
+    assert payload["task_blockers"] == []
+    assert payload["admission_blockers"] == []
+    assert payload["issues_contract"] == "legacy_aggregate_not_task_blockers"
+    assert payload["route_card"]["selection_evidence_class"] in {"typed_intent", "semantic_phrase", "semantic_file"}
+    assert payload["route_card"]["needs_typed_intent"] is False
 
 
 def test_runtime_route_card_contract_matches_schema():
@@ -4477,6 +4580,7 @@ def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeyp
     assert payload["ok"] is False
     assert payload["digest"]["profile"] == "generic"
     assert payload["route_card"]["admission_status"] == "ambiguous"
+    assert payload["route_card"]["needs_typed_intent"] is True
     assert payload["route_card"]["next_action"] == "stop; pass typed --intent or narrow the task wording"
     assert payload["direct_blockers"][0]["code"] == "navigation_route_ambiguous"
 

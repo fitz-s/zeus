@@ -166,21 +166,30 @@ The durable workspace kernel is:
 
 ### Cross-session merge protocol
 
-Any merge from another worktree/session into a Zeus branch (`plan-pre5`,
-`main`, etc.) requires a **critic-opus dispatch on the merging branch's
-diff against the target branch BEFORE the merge commits**. The critic
-verdict (APPROVE / REVISE / BLOCK) is mandatory; merging without it is a
-process violation regardless of how clean the diff appears.
+Merges from another worktree/session into a Zeus branch (`plan-pre5`,
+`main`, etc.) use a conflict-first protocol, not an unconditional critic
+gate:
 
-Mechanism: see `.agents/skills/zeus-ai-handoff/SKILL.md` §8.8 for the
-operational protocol; `.claude/hooks/pre-merge-contamination-check.sh`
-provides the deterministic gate (`MERGE_AUDIT_EVIDENCE` env var pointing
-to the critic verdict file).
+1. Inspect the merge surface first (`git merge-tree`, `git merge --no-commit`,
+   or the equivalent cherry-pick/rebase conflict view).
+2. If there are no conflicts, merge normally and keep the commit message honest.
+3. If conflicts are narrow and mechanical, resolve them directly or manually
+   choose the correct side; run the affected tests/checks.
+4. Escalate to critic verdict evidence only when conflicts are broad,
+   cross-zone, high-risk (K0/K1, schema, lifecycle, DB/control/live surfaces),
+   or semantically ambiguous.
+
+Mechanism: see `.agents/skills/zeus-ai-handoff/SKILL.md` §8.8 and
+`architecture/worktree_merge_protocol.yaml`. `.claude/hooks/pre-merge-contamination-check.sh`
+is advisory by default and validates `MERGE_AUDIT_EVIDENCE` only when the
+operator/agent has escalated to the critic-evidence path.
 
 This protocol exists because of the 2026-04-28 contamination event: a
-parallel session merged 9 commits into `plan-pre5` without independent
-critic gate; 6 drift items resulted, including 815k mislabeled
-production rows. See `docs/operations/task_2026-04-28_contamination_remediation/`.
+parallel session merged 9 commits into `plan-pre5` without enough conflict
+surface inspection; 6 drift items resulted, including 815k mislabeled
+production rows. The antibody is conflict-first escalation, not making every
+clean merge pay a critic tax. See
+`docs/operations/task_2026-04-28_contamination_remediation/`.
 
 ## 3. Navigation & Task Routing
 

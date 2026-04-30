@@ -13,6 +13,7 @@ required_top_level_keys:
   - required_active_pointers
   - registry_directories
   - reference_fact_specs
+  - digest_profile_selection
   - digest_profiles
 
 node_required_fields:
@@ -126,6 +127,11 @@ admission_envelope:
       - data
       - signal
       - state
+  profile_selection_evidence:
+    semantic_file_patterns: files that can select a profile by file evidence
+    companion_file_patterns: files admitted or maintained with a profile but not sufficient to select it
+    shared_companion_patterns: global registry/control-plane files that never select domain semantics alone
+    legacy_file_patterns: existing file_patterns remain supported; non-shared entries behave as semantic until migrated
   ok_semantics:
     description: >
       Top-level `ok` denotes command success (no exception raised by the digest
@@ -152,6 +158,9 @@ agent_runtime_contract:
     - intent
     - task_class
     - write_intent
+    - selection_evidence_class
+    - needs_typed_intent
+    - companion_files
     - admission_status
     - risk_tier
     - gate_budget
@@ -420,6 +429,11 @@ strict_issue_codes:
   - context_pack_source_rationale_missing
   - agents_zone_mismatch
   - agents_planning_lock_downgrade
+  - digest_profile_selection_missing
+  - digest_profile_selection_shared_pattern_missing
+  - digest_profile_selection_shared_pattern_invalid
+  - digest_profile_selection_conflicting_pattern
+  - digest_profile_selector_shared_only
   - planning_lock_required
   - planning_lock_evidence_invalid
   - code_idiom_manifest_missing

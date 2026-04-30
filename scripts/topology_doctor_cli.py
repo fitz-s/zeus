@@ -76,7 +76,10 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         "--changed-files",
         nargs="*",
         default=[],
-        help="Files for --planning-lock; optional map-maintenance override (omitted there reads git status: staged, unstaged, untracked, deleted)",
+        help=(
+            "Files for --planning-lock/closeout-style gates; with --navigation, "
+            "acts as a --files alias when --files is omitted"
+        ),
     )
     parser.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path for --planning-lock")
     parser.add_argument("--work-record-path", default=None, help="Work record path for --work-record")
@@ -341,7 +344,18 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
                 navigation_kwargs["claims" if field == "claim" else field] = value
         if args.issue_schema_version != "1":
             navigation_kwargs["issue_schema_version"] = args.issue_schema_version
-        payload = api.run_navigation(args.task or "general navigation", args.files, **navigation_kwargs)
+        navigation_files = list(args.files or [])
+        changed_files = list(args.changed_files or [])
+        if navigation_files and changed_files and navigation_files != changed_files:
+            print(
+                "--navigation received both --files and --changed-files with different values; "
+                "use one file list",
+                file=sys.stderr,
+            )
+            return 2
+        if not navigation_files and changed_files:
+            navigation_files = changed_files
+        payload = api.run_navigation(args.task or "general navigation", navigation_files, **navigation_kwargs)
         if args.route_card_only:
             route_payload = {"ok": payload["ok"], "route_card": payload.get("route_card") or {}}
             if args.json:

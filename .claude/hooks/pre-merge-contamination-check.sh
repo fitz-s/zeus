@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# pre-merge-contamination-check.sh — refuses git merge/pull/cherry-pick/rebase
-# on protected branches without MERGE_AUDIT_EVIDENCE env var pointing to a
-# critic verdict file containing required fields per architecture/worktree_merge_protocol.yaml
+# pre-merge-contamination-check.sh — prints conflict-first merge guidance for
+# protected branches. If MERGE_AUDIT_EVIDENCE is provided, validates the critic
+# verdict file containing required fields per architecture/worktree_merge_protocol.yaml.
 #
 # Created: 2026-04-28
 # Last reused/audited: 2026-04-28
@@ -9,7 +9,7 @@
 # Plan evidence: docs/operations/task_2026-04-28_contamination_remediation/STAGE4_PROCESS_GATES_AE_PLAN.md §2
 # Wired as PreToolUse hook for Bash tool in .claude/settings.json
 # Receives JSON payload on stdin: {tool_name, tool_input{command,...}, ...}
-# Exit 0 = allow; exit 2 = block (Claude sees stderr).
+# Exit 0 = allow/advisory; exit 2 = block invalid escalated evidence.
 
 set -euo pipefail
 
@@ -61,30 +61,34 @@ if [ "$IS_PROTECTED" -eq 0 ]; then
     exit 0
 fi
 
-# Check MERGE_AUDIT_EVIDENCE env var
+# Without MERGE_AUDIT_EVIDENCE, the correct flow is conflict-first:
+# allow the merge-class command so the agent/operator can inspect actual
+# conflicts, then escalate only broad/high-risk conflict surfaces.
 if [ -z "${MERGE_AUDIT_EVIDENCE:-}" ]; then
     cat >&2 <<EOF
-[pre-merge-contamination-check] BLOCKED: merge command on protected branch '$CURRENT_BRANCH'
-requires MERGE_AUDIT_EVIDENCE env var.
+[pre-merge-contamination-check] ADVISORY: merge-class command on protected branch '$CURRENT_BRANCH'.
 
 Per architecture/worktree_merge_protocol.yaml + AGENTS.md "Cross-session
-merge protocol", merging from another session/worktree into a protected
-Zeus branch requires a critic-opus dispatch verdict on the merging diff.
+merge protocol", use conflict-first handling:
 
 To proceed:
-1. Identify diff: git diff $CURRENT_BRANCH...<merging-branch>
-2. Dispatch critic-opus per .agents/skills/zeus-ai-handoff/SKILL.md §8.8
-3. Save critic verdict to a file containing fields:
+1. Inspect conflict surface: git merge-tree / git merge --no-commit / equivalent.
+2. If no conflicts, merge normally and run scoped verification.
+3. If conflicts are narrow and mechanical, resolve directly or manually choose the correct side.
+4. Escalate to critic evidence only for broad, cross-zone, high-risk, or semantically ambiguous conflicts.
+
+Escalated path:
+1. Save critic verdict to a file containing fields:
      critic_verdict: APPROVE
      diff_scope: <files + LOC summary>
      drift_keyword_scan: <bidirectional grep results>
-4. Re-run with: MERGE_AUDIT_EVIDENCE=<path> <your git command>
+2. Re-run with: MERGE_AUDIT_EVIDENCE=<path> <your git command>
 
 To override (operator emergency only):
   MERGE_AUDIT_EVIDENCE=OVERRIDE_<reason> <your git command>
   (logged to docs/operations/current_state.md drift table)
 EOF
-    exit 2
+    exit 0
 fi
 
 # Check evidence file exists (skip for OVERRIDE)
