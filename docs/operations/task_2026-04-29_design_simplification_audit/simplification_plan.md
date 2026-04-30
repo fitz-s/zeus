@@ -538,6 +538,27 @@ Phase 2E implemented the DSA-16 cancel/redeem command-side proof slice on
    mutation, CLOB cutover, live side effects, RED-force side-effect-free event
    normalization, or Paris/source routing.
 
+Phase 2F implemented the DSA-16 decision-source integrity slice on 2026-04-30:
+
+1. `ExecutionIntent` now carries a frozen `DecisionSourceContext` distilled
+   from evaluator/cycle-runtime `forecast_context`; executor does not re-query
+   DBs, recompute source policy, or infer missing evidence.
+2. `cycle_runtime` threads accepted decision `forecast_context` into the entry
+   intent before `execute_intent()`.
+3. Entry `_live_order()` now fail-closes before command persistence and SDK
+   contact when source evidence is missing, degraded, non-entry-primary,
+   non-FORECAST, hash-invalid, time-invalid, or not knowable before the
+   decision.
+4. Entry `SUBMIT_REQUESTED.execution_capability` includes a
+   `decision_source_integrity` component on the happy path.
+5. Exit capability proof keeps reduce-only behavior available and records
+   `decision_source_integrity` as `not_applicable_reduce_only`.
+6. This proves source-degradation and evidence-time causality survival across
+   evaluator -> runtime -> executor. It does not define a full age/SLO
+   freshness law, add schema/envelope capability columns, change source
+   routing, mutate production DBs, authorize live side effects, or edit Paris
+   config.
+
 Exit criteria:
 
 - A Gamma fixture can be traced to an SDK request with identical condition id, token ids, outcome labels, tradability, tick/order size, neg-risk, and payload hash.

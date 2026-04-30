@@ -965,6 +965,20 @@ cancel/redeem proof slice only; it does not add schema/envelope capability ids,
 source-degradation/freshness components, RED-force side-effect-free event
 normalization, CLOB cutover, live side effects, or Paris/source routing.
 
+Phase 2F status (2026-04-30): entry submit capability now consumes the accepted
+decision's source/timing evidence instead of relying only on submit-time gates.
+`ExecutionIntent` carries a frozen `DecisionSourceContext` derived from
+`EdgeDecision.epistemic_context_json["forecast_context"]`; `_live_order()`
+rejects before command persistence when the context is missing, degraded,
+non-entry-primary, non-FORECAST, hash-invalid, time-invalid, or not knowable
+before decision. Happy-path entry `SUBMIT_REQUESTED.execution_capability`
+records `decision_source_integrity`; exit records the same component as
+`not_applicable_reduce_only` so source degradation cannot block risk-reducing
+sells. This closes the DSA-16 source-degradation/evidence-time causality
+component for entry submit only. It does not define a full age/SLO freshness
+law, add schema/envelope capability columns, normalize all side-effect-free
+events, authorize live side effects, perform source routing, or edit Paris.
+
 ### DSA-17 [P2] Evidence grade vocabulary was stronger in code than in strategy docs and benchmark names
 
 Classification: promotion-authority complexity.

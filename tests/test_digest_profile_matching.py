@@ -1347,6 +1347,36 @@ def test_phase2c_execution_capability_routes_to_dedicated_profile():
     assert "tests/test_executor_command_split.py" in digest["admission"]["admitted_files"]
 
 
+def test_phase2f_source_degradation_freshness_routes_to_dedicated_profile():
+    digest = build_digest(
+        "Phase 2F DSA-16 source degradation freshness capability with "
+        "execution intent source freshness threading; no live venue side "
+        "effects; no production DB mutation; no schema migration; no source "
+        "routing; no Paris; no CLOB cutover",
+        [
+            "src/contracts/execution_intent.py",
+            "src/engine/cycle_runtime.py",
+            "src/execution/executor.py",
+            "tests/test_executor_command_split.py",
+            "tests/test_live_execution.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_digest_profile_matching.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+    )
+
+    assert digest["profile"] == "phase 2f source degradation freshness capability implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/contracts/execution_intent.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
+    assert "src/execution/executor.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_live_execution.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
     digest = build_digest(
         "Phase 2D DSA-16 execution capability status summary matrix for entry "

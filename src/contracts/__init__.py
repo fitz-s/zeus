@@ -11,7 +11,7 @@ from src.contracts.semantic_types import (
     compute_native_limit_price,
     recompute_native_probability,
 )
-from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent
 from src.contracts.expiring_assumption import ExpiringAssumption
 from src.contracts.edge_context import EdgeContext
 from src.contracts.epistemic_context import EpistemicContext
@@ -25,6 +25,7 @@ from src.contracts.executable_market_snapshot_v2 import (
 
 __all__ = [
     "Direction",
+    "DecisionSourceContext",
     "DecisionSnapshotRef",
     "EntryMethod",
     "HeldSideProbability",

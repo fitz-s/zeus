@@ -157,7 +157,36 @@ def _ensure_envelope(
     return envelope_id
 
 
-def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "tok-" + "0" * 36) -> object:
+_DEFAULT_CONTEXT = object()
+
+
+def _decision_source_context(**overrides):
+    from src.contracts.execution_intent import DecisionSourceContext
+
+    fields = {
+        "source_id": "tigge",
+        "model_family": "ecmwf_ifs025",
+        "forecast_issue_time": "2026-04-26T00:00:00+00:00",
+        "forecast_valid_time": "2026-04-26T06:00:00+00:00",
+        "forecast_fetch_time": "2026-04-26T01:00:00+00:00",
+        "forecast_available_at": "2026-04-26T00:30:00+00:00",
+        "raw_payload_hash": "a" * 64,
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "decision_time": "2026-04-26T02:00:00+00:00",
+        "decision_time_status": "OK",
+    }
+    fields.update(overrides)
+    return DecisionSourceContext(**fields)
+
+
+def _make_entry_intent(
+    conn=None,
+    limit_price: float = 0.55,
+    token_id: str = "tok-" + "0" * 36,
+    decision_source_context=_DEFAULT_CONTEXT,
+) -> object:
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
     from src.contracts import Direction
@@ -166,6 +195,8 @@ def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "to
     snapshot_id = f"snap-{token_id}"
     if conn is not None:
         _ensure_snapshot(conn, token_id=token_id, snapshot_id=snapshot_id)
+    if decision_source_context is _DEFAULT_CONTEXT:
+        decision_source_context = _decision_source_context()
     return ExecutionIntent(
         direction=Direction("buy_yes"),
         target_size_usd=10.0,
@@ -181,6 +212,7 @@ def _make_entry_intent(conn=None, limit_price: float = 0.55, token_id: str = "to
         executable_snapshot_min_tick_size=Decimal("0.01"),
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
+        decision_source_context=decision_source_context,
     )
 
 
@@ -315,6 +347,7 @@ class TestLiveOrderCommandSplit:
         assert len(capability["capability_id"]) == 32
         assert capability["command_id"] == row["command_id"]
         assert capability["executable_snapshot_id"] == intent.executable_snapshot_id
+        components_by_name = {component["component"]: component for component in capability["components"]}
         assert {component["component"] for component in capability["components"]} >= {
             "cutover_guard",
             "risk_allocator",
@@ -322,8 +355,66 @@ class TestLiveOrderCommandSplit:
             "heartbeat_supervisor",
             "ws_gap_guard",
             "collateral_ledger",
+            "decision_source_integrity",
             "executable_snapshot_gate",
         }
+        assert components_by_name["decision_source_integrity"]["allowed"] is True
+        assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
+        assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"
+
+    @pytest.mark.parametrize(
+        ("context", "expected_reason"),
+        [
+            (None, "missing_decision_source_context"),
+            (
+                _decision_source_context(degradation_level="DEGRADED_FORECAST_FALLBACK"),
+                "invalid_decision_source_context:forecast_degraded:DEGRADED_FORECAST_FALLBACK",
+            ),
+            (
+                _decision_source_context(forecast_source_role="monitor_fallback"),
+                "invalid_decision_source_context:forecast_role_not_entry_primary:monitor_fallback",
+            ),
+            (
+                _decision_source_context(forecast_fetch_time="2026-04-26T03:00:00+00:00"),
+                "invalid_decision_source_context:forecast_fetch_after_decision",
+            ),
+            (
+                _decision_source_context(raw_payload_hash="not-a-valid-hash"),
+                "invalid_decision_source_context:invalid_raw_payload_hash",
+            ),
+        ],
+    )
+    def test_entry_rejects_missing_decision_source_context_before_command_persistence(
+        self,
+        mem_conn,
+        context,
+        expected_reason,
+    ):
+        """Entry source evidence must fail closed before command persistence."""
+        from src.execution.executor import _live_order
+
+        intent = _make_entry_intent(mem_conn, decision_source_context=context)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+
+            result = _live_order(
+                trade_id="trd-entry-source-missing",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-source-missing",
+            )
+
+        command_count = mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        assert result.status == "rejected"
+        assert result.reason is not None
+        assert result.reason.startswith("decision_source_integrity:")
+        assert expected_reason in result.reason
+        assert command_count == 0
+        mock_inst.place_limit_order.assert_not_called()
 
     def test_own_connection_commits_pre_submit_rows_before_sdk_submit(self, tmp_path, monkeypatch):
         """Own-connection live entry must make command/envelope durable before SDK contact."""
@@ -876,6 +967,7 @@ class TestExitOrderCommandSplit:
         assert len(capability["capability_id"]) == 32
         assert capability["command_id"] == row["command_id"]
         assert capability["executable_snapshot_id"] == intent.executable_snapshot_id
+        components_by_name = {component["component"]: component for component in capability["components"]}
         assert {component["component"] for component in capability["components"]} >= {
             "cutover_guard",
             "risk_allocator",
@@ -884,8 +976,11 @@ class TestExitOrderCommandSplit:
             "ws_gap_guard",
             "collateral_ledger",
             "replacement_sell_guard",
+            "decision_source_integrity",
             "executable_snapshot_gate",
         }
+        assert components_by_name["decision_source_integrity"]["allowed"] is True
+        assert components_by_name["decision_source_integrity"]["reason"] == "not_applicable_reduce_only"
 
     def test_exit_submit_unknown_writes_event_with_side_effect_unknown(self, mem_conn):
         """Crash-injection drill (exit path): place_limit_order raises.

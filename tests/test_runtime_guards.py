@@ -1550,6 +1550,21 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
     captured = {}
+    decision_time = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+    forecast_context = {
+        "forecast_source_id": "tigge",
+        "model_family": "ecmwf_ifs025",
+        "forecast_issue_time": "2026-04-03T00:00:00+00:00",
+        "forecast_valid_time": "2026-04-03T06:00:00+00:00",
+        "forecast_fetch_time": "2026-04-03T01:00:00+00:00",
+        "forecast_available_at": "2026-04-03T00:30:00+00:00",
+        "raw_payload_hash": "a" * 64,
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "decision_time": decision_time.isoformat(),
+        "decision_time_status": "OK",
+    }
     market = {
         "city": NYC,
         "target_date": "2026-04-01",
@@ -1589,6 +1604,7 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         edge_source="center_buy",
         strategy_key="center_buy",
         edge_context=None,
+        epistemic_context_json=json.dumps({"forecast_context": forecast_context}),
     )
 
     def _capture_intent(**kwargs):
@@ -1627,7 +1643,7 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         mode=DiscoveryMode.OPENING_HUNT,
         summary=summary,
         entry_bankroll=100.0,
-        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        decision_time=decision_time,
         env="live",
         deps=deps,
     )
@@ -1637,6 +1653,10 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
     assert captured["executable_snapshot_min_tick_size"] == "0.01"
     assert captured["executable_snapshot_min_order_size"] == "5"
     assert captured["executable_snapshot_neg_risk"] is False
+    decision_source_context = captured["decision_source_context"]
+    assert decision_source_context.source_id == "tigge"
+    assert decision_source_context.model_family == "ecmwf_ifs025"
+    assert decision_source_context.integrity_errors() == ()
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
