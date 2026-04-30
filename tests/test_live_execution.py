@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import pytest
 from unittest.mock import MagicMock, patch
+from src.contracts.execution_intent import DecisionSourceContext
 from src.execution.executor import _live_order, OrderResult
 
 _TEST_CONN = None
@@ -68,9 +69,27 @@ def _make_intent(**overrides):
         "executable_snapshot_min_tick_size": Decimal("0.01"),
         "executable_snapshot_min_order_size": Decimal("0.01"),
         "executable_snapshot_neg_risk": False,
+        "decision_source_context": _decision_source_context(),
     }
     defaults.update(overrides)
     return MagicMock(**defaults)
+
+
+def _decision_source_context() -> DecisionSourceContext:
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-04-27T00:00:00+00:00",
+        forecast_valid_time="2026-04-27T06:00:00+00:00",
+        forecast_fetch_time="2026-04-27T01:00:00+00:00",
+        forecast_available_at="2026-04-27T00:30:00+00:00",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-04-27T02:00:00+00:00",
+        decision_time_status="OK",
+    )
 
 
 def _ensure_snapshot(conn, *, token_id: str) -> str:

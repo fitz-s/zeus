@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
-from src.contracts import Direction, EdgeContext, EntryMethod, ExecutionIntent
+from src.contracts import Direction, EdgeContext, EntryMethod, ExecutionIntent, DecisionSourceContext
 from src.contracts.slippage_bps import SlippageBps
 from src.execution.executor import create_execution_intent, create_exit_order_intent, execute_exit_order, execute_intent
 from src.risk_allocator import (
@@ -60,6 +60,20 @@ def _intent(market="m1", size=100.0, token="t1", event="e1", resolution="day0", 
         event_id=event,
         resolution_window=resolution,
         correlation_key=correlation,
+        decision_source_context=DecisionSourceContext(
+            source_id="tigge",
+            model_family="ecmwf_ifs025",
+            forecast_issue_time="2026-04-27T00:00:00+00:00",
+            forecast_valid_time="2026-04-27T06:00:00+00:00",
+            forecast_fetch_time="2026-04-27T01:00:00+00:00",
+            forecast_available_at="2026-04-27T00:30:00+00:00",
+            raw_payload_hash="a" * 64,
+            degradation_level="OK",
+            forecast_source_role="entry_primary",
+            authority_tier="FORECAST",
+            decision_time="2026-04-27T02:00:00+00:00",
+            decision_time_status="OK",
+        ),
     )
     return intent
 

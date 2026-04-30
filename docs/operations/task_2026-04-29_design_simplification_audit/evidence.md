@@ -1938,6 +1938,103 @@ Residual blockers:
 - Independent sidecar reviewer flagged these exact boundaries and found no
   need to widen into executor/venue/state/schema/source work.
 
+## Phase 2F DSA-16 Decision-Source Integrity Capability - 2026-04-30
+
+Scope:
+
+- Close the DSA-16 entry-submit source-degradation/evidence-time component by
+  carrying the accepted decision's forecast-source context into the executor
+  capability proof.
+- No venue adapter edit, state schema change, production DB mutation, source
+  routing, Paris config edit, CLOB cutover, live venue side effect, live
+  deployment authorization, or age/SLO freshness policy change.
+
+Implementation:
+
+- Added the dedicated topology profile
+  `phase 2f source degradation freshness capability implementation` plus a
+  digest regression so realistic Phase 2F wording admits the required
+  `contracts` + `engine` + `execution` surfaces instead of falling back to the
+  older Phase 2C command-side proof profile.
+- Added `DecisionSourceContext` to `src/contracts/execution_intent.py`. It is a
+  frozen compact context with source id, model family, issue/valid/fetch/
+  available/decision times, payload hash, degradation, source role, authority
+  tier, and decision-time status.
+- The context validator checks evidence presence, 64-hex payload hash shape,
+  parseable source times, knowability before decision for issue/fetch/available
+  time, entry-primary role, `OK` degradation, `FORECAST` authority, and
+  `decision_time_status="OK"`.
+- `cycle_runtime` parses accepted decision `epistemic_context_json` and passes
+  `forecast_context` into `create_execution_intent()` as a
+  `DecisionSourceContext`. Executor does not read `trade_decisions`, query DB
+  fallback state, or recompute source policy.
+- `_live_order()` computes a `decision_source_integrity` component and rejects
+  missing/invalid context before command persistence, collateral reservation,
+  pre-submit envelope persistence, or SDK contact.
+- Entry `SUBMIT_REQUESTED.execution_capability` carries the allowed
+  `decision_source_integrity` component on the happy path.
+- Exit `SUBMIT_REQUESTED.execution_capability` carries
+  `decision_source_integrity` with `reason="not_applicable_reduce_only"` so
+  missing entry-source evidence cannot block risk-reducing sells.
+- Code-reviewer remediation added `tests/test_live_execution.py` to the
+  Phase 2F topology profile and updated its mock entry intent fixture with a
+  valid `DecisionSourceContext`, preserving the production gate while keeping
+  existing mocked CLOB ACK/error-path tests focused on executor mechanics.
+
+Verification run:
+
+- `python3 scripts/topology_doctor.py --navigation --task "Phase 2F DSA-16 source degradation freshness capability with execution intent source freshness threading no live venue side effects no production DB mutation no schema migration no source routing no Paris no CLOB cutover" --files ...`
+  -> navigation ok; profile
+  `phase 2f source degradation freshness capability implementation`;
+  admission status `admitted`.
+- `pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_phase2f_source_degradation_freshness_routes_to_dedicated_profile tests/test_digest_profile_matching.py::test_phase2c_execution_capability_routes_to_dedicated_profile tests/test_digest_profiles_equivalence.py`
+  -> 6 passed.
+- `pytest -q -p no:cacheprovider tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_entry_submit_requested_persists_execution_capability_proof tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_entry_rejects_missing_decision_source_context_before_command_persistence tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_requested_persists_execution_capability_proof tests/test_runtime_guards.py::test_entry_intent_receives_executable_snapshot_fields tests/test_digest_profile_matching.py::test_phase2f_source_degradation_freshness_routes_to_dedicated_profile tests/test_digest_profiles_equivalence.py`
+  -> 13 passed.
+- `pytest -q -p no:cacheprovider tests/test_executor_command_split.py`
+  -> 28 passed.
+- Reviewer-requested adjacent executor group:
+  `pytest -q -p no:cacheprovider tests/test_executor.py tests/test_live_execution.py`
+  -> 13 passed, 2 skipped.
+- `pytest -q -p no:cacheprovider tests/test_risk_allocator.py`
+  -> 25 passed.
+- `pytest -q -p no:cacheprovider tests/test_executor.py`
+  -> 8 passed, 1 skipped.
+- `python3 -m py_compile src/contracts/execution_intent.py src/contracts/__init__.py src/engine/cycle_runtime.py src/execution/executor.py tests/test_executor_command_split.py tests/test_live_execution.py tests/test_runtime_guards.py tests/test_risk_allocator.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`
+  -> pass.
+- Final combined focused verification:
+  `pytest -q -p no:cacheprovider tests/test_executor_command_split.py tests/test_risk_allocator.py tests/test_executor.py tests/test_live_execution.py tests/test_runtime_guards.py::test_entry_intent_receives_executable_snapshot_fields tests/test_digest_profile_matching.py::test_phase2f_source_degradation_freshness_routes_to_dedicated_profile tests/test_digest_profile_matching.py::test_phase2c_execution_capability_routes_to_dedicated_profile tests/test_digest_profiles_equivalence.py`
+  -> 73 passed, 2 skipped.
+- Final closeout checks:
+  `python3 scripts/digest_profiles_export.py --check` -> OK;
+  `python3 scripts/semantic_linter.py --check ...` over touched source/tests
+  -> pass; planning-lock -> pass; map-maintenance closeout -> pass;
+  `git diff --check -- ...` over the Phase 2F changed-file set -> pass.
+- Known non-Phase-2F residual: broad
+  `pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py
+  tests/test_digest_profiles_equivalence.py` currently exposes an unrelated
+  `test_agent_runtime_profile_admits_runtime_surfaces` route-card text
+  mismatch (`next_action` now reports the current planning-lock wording while
+  the test expects an older packet-plan prefix). The Phase 2F route regressions
+  and digest equivalence pass; this packet does not edit that agent-runtime
+  profile.
+
+Residual blockers:
+
+- Phase 2F deliberately does not define a full age/SLO freshness law; it proves
+  source-degradation state and evidence-time causality/presence survived into
+  executor capability.
+- `_live_order()` still performs idempotency/economic-unknown fast-path lookups
+  before the new decision-source integrity guard. A pre-existing command can
+  therefore be returned on retry without revalidating the new context, but that
+  path does not create a new command or contact the venue; fresh submits are the
+  fail-closed boundary covered by Phase 2F.
+- Capability id remains event-payload evidence only, not a schema/envelope
+  column.
+- Source/market authority is not yet one unified CausalTimestampSet across
+  command, fill, settlement, replay, and learning.
+- No production DB rows were mutated and no live venue side effects were run.
+
 ## Paris Settlement Source Boundary Evidence - 2026-04-29
 
 Scope:

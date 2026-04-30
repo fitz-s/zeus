@@ -190,6 +190,37 @@ def _component_from_result(component: str, result=None, **details) -> dict:
     return payload
 
 
+def _entry_decision_source_component(intent: ExecutionIntent) -> dict:
+    context = getattr(intent, "decision_source_context", None)
+    if context is None:
+        return _capability_component(
+            "decision_source_integrity",
+            allowed=False,
+            reason="missing_decision_source_context",
+        )
+    errors = context.integrity_errors()
+    details = context.capability_details()
+    if errors:
+        return _capability_component(
+            "decision_source_integrity",
+            allowed=False,
+            reason="invalid_decision_source_context",
+            errors=",".join(errors),
+            **details,
+        )
+    return _capability_component(
+        "decision_source_integrity",
+        **details,
+    )
+
+
+def _exit_decision_source_component() -> dict:
+    return _capability_component(
+        "decision_source_integrity",
+        reason="not_applicable_reduce_only",
+    )
+
+
 def _build_execution_capability(
     *,
     action: str,
@@ -576,6 +607,7 @@ def create_execution_intent(
     event_id: str = "",
     resolution_window: str = "",
     correlation_key: str = "",
+    decision_source_context=None,
 ) -> ExecutionIntent:
     """Execution Planner: Generates the intent based on Fair Value Plane output."""
     if False: _ = edge.entry_method
@@ -642,6 +674,7 @@ def create_execution_intent(
         event_id=event_id or market_id,
         resolution_window=resolution_window or "default",
         correlation_key=correlation_key or event_id or market_id,
+        decision_source_context=decision_source_context,
     )
 
 
@@ -1052,6 +1085,7 @@ def execute_exit_order(
                             ws_gap_component,
                             collateral_component,
                             _capability_component("replacement_sell_guard"),
+                            _exit_decision_source_component(),
                             _capability_component("executable_snapshot_gate"),
                         ],
                     ),
@@ -1507,6 +1541,29 @@ def _live_order(
                 order_role="entry",
             )
 
+        decision_source_component = _entry_decision_source_component(intent)
+        if not decision_source_component.get("allowed"):
+            reason = str(decision_source_component.get("reason") or "invalid_decision_source_context")
+            details = decision_source_component.get("details") or {}
+            errors = str(details.get("errors") or "").strip()
+            if errors:
+                reason = f"{reason}:{errors}"
+            logger.warning(
+                "_live_order: decision source integrity blocked entry submit for trade_id=%s: %s",
+                trade_id,
+                reason,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"decision_source_integrity:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+            )
+
         try:
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
@@ -1571,6 +1628,7 @@ def _live_order(
                             heartbeat_component,
                             ws_gap_component,
                             collateral_component,
+                            decision_source_component,
                             _capability_component("executable_snapshot_gate"),
                         ],
                     ),

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from src.config import get_mode
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
+from src.contracts.execution_intent import DecisionSourceContext
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
@@ -67,6 +68,19 @@ def parse_iso(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _decision_source_context_from_epistemic_json(value: str | None) -> DecisionSourceContext | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    forecast_context = payload.get("forecast_context")
+    return DecisionSourceContext.from_forecast_context(forecast_context)
 
 
 def normalize_order_status(payload) -> str:
@@ -1574,6 +1588,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
                         executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
                         executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
+                        decision_source_context=_decision_source_context_from_epistemic_json(
+                            d.epistemic_context_json
+                        ),
                     )
                     # P1.S5: thread decision_id from d.decision_id so the
                     # executor can use a stable upstream ID for idempotency.
