@@ -165,8 +165,13 @@ RUNTIME_RISK_GATE_BUDGETS = {
     },
     "T3": {
         "label": "architecture_governance_or_runtime_tooling",
-        "required": ["packet_plan", "planning_lock", "focused_tests", "closeout_receipt"],
-        "optional": ["critic_review", "graph_appendix_if_fresh"],
+        "required": ["route_card", "planning_lock_if_governed", "focused_tests"],
+        "optional": [
+            "work_record_if_nontrivial_packet",
+            "closeout_receipt_if_packet_or_claim",
+            "critic_review_if_high_risk_or_ambiguous",
+            "graph_appendix_if_fresh",
+        ],
         "stop": "stop if the change would duplicate authority or widen live permissions",
     },
     "T4": {
@@ -1548,12 +1553,13 @@ def build_digest(
 def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | None = None) -> str:
     normalized = [path.strip().removeprefix("./") for path in files if path and path.strip()]
     intent = (write_intent or "").strip().lower()
+    normalized_intent = intent.replace("_", "-").replace(" ", "-")
     task_l = task.lower()
     if intent in {"live", "production", "prod", "apply"} or any(
         token in task_l for token in ("live deploy", "production db", "prod db", "live venue", "apply mutation")
     ):
         return "T4"
-    if intent in {"read_only", "read-only", "none"} or not normalized:
+    if normalized_intent in {"read-only", "readonly", "none"} or not normalized:
         return "T0"
     if any(
         path.startswith(("architecture/", "docs/authority/", "src/state/", "src/control/", "src/supervisor_api/"))
@@ -1569,8 +1575,14 @@ def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | 
 
 def _route_card_next_action(admission_status: str, risk_tier: str) -> str:
     if admission_status == "admitted":
-        if risk_tier in {"T3", "T4"}:
-            return "proceed only with packet plan, planning lock, focused gates, and closeout receipt"
+        if risk_tier == "T3":
+            return (
+                "proceed with planning-lock as needed and focused gates; add "
+                "receipt/critic only for packet closeout, explicit claims, or "
+                "semantic ambiguity"
+            )
+        if risk_tier == "T4":
+            return "stop until explicit operator-go, dry-run evidence, apply guard, and rollback plan exist"
         return "proceed with admitted files and focused verification"
     if admission_status == "advisory_only":
         return "read-only orientation only; pass typed intent or narrower files before editing"
@@ -1595,9 +1607,14 @@ def _route_card_expansion_hints(admission_status: str, risk_tier: str) -> list[s
             "load appendices only for a claim that depends on them",
         ]
     if risk_tier in {"T3", "T4"}:
+        if risk_tier == "T4":
+            return [
+                "load operator-go evidence before any live/prod action",
+                "run dry-run and rollback checks before apply-capable work",
+            ]
         return [
-            "load packet plan and planning-lock evidence before edits",
-            "run role context pack for executor/critic/verifier handoff",
+            "run planning-lock for governed files before edits",
+            "add receipt, work record, or critic only when a packet/claim consumes it",
         ]
     return [
         "use focused context for admitted files",
@@ -1973,7 +1990,7 @@ def build_runtime_packet(
         "artifact_treatment_hints": [
             "keep scratch analysis out of authority surfaces",
             "promote stable lessons through manifests, module books, tests, or source",
-            "record durable packet evidence in receipt and work log",
+            "record durable packet evidence only when an active gate or handoff consumes it",
         ],
     }
 

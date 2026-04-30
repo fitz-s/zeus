@@ -290,6 +290,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                       'Workflow, skill-use, and work-ethic guidance must reduce decisions; do not add ceremony without '
                       'a consuming test or runtime output.'],
     'allowed_files': [ 'AGENTS.md',
+                       '.agents/skills/AGENTS.md',
                        '.agents/skills/zeus-ai-handoff/SKILL.md',
                        '.claude/hooks/pre-merge-contamination-check.sh',
                        '.claude/settings.json',

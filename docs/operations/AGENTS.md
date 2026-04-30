@@ -59,18 +59,24 @@ next implementation slice.
 `current_state.md` names one as the active execution packet. Read them only when
 the active task routes you there.
 
-Tracked packet evidence currently includes the active execution-state truth
-upgrade, graph rendering integration, midstream remediation, packet runtime
-(`zpkt`), and live-readiness completion packets. Closed packet evidence has
-been archived to `docs/archives/packets/` and is indexed in
-`docs/archive_registry.md`.
+Packet-local file names are not global workflow requirements. Files such as
+`evidence.md`, `findings.md`, `work_log.md`, and `receipt.json` are required
+only when the active packet, closeout gate, audit/review task, or future handoff
+consumes them. Direct T0/T1 work should not create packet evidence just to make
+the workflow look complete.
+
+Tracked packet evidence in this live router is limited to the current or
+retained rows below. Closed packet evidence is archived under
+`docs/operations/_archive/` or `docs/archives/packets/` and indexed in
+`docs/archive_registry.md`; do not use archived packet folders as active
+workflow defaults.
 
 ### Attached Package Inputs
 
 Package-input directories are source material for a packet, not universal law.
 For example:
 
-- `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/`
+- `docs/archives/packets/zeus_workspace_authority_reconstruction_package_2026-04-20_v2/`
 - `zeus_topology_system_deep_evaluation_package_2026-04-24/` — topology system
   assessment and P0–P5 reform roadmap; all recommendations remain unimplemented
   and valid as of 2026-04-24
@@ -98,11 +104,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `task_2026-04-13_remaining_repair_backlog.md` | packet evidence | Deferred backlog after non-DB small-package loop |
-| `task_2026-04-19_execution_state_truth_upgrade/` | packet evidence | Execution-state truth upgrade planning packet present on disk |
 | `task_2026-04-23_graph_rendering_integration/` | packet evidence | Graph deep-rendering remaining-value integration packet |
 | `task_2026-04-23_midstream_remediation/` | packet evidence | Midstream remediation package; phase evidence lives under `phases/` and includes POST_AUDIT_HANDOFF_2026-04-24.md for post-compaction resumption |
-| `task_2026-04-25_p2_packet_runtime/` | packet evidence | Packet Runtime (`zpkt`) implementation packet — CLI, soft-warn pre-commit hook, `scope.yaml` schema, and tooling_runtime test category |
-| `task_2026-04-26_live_readiness_completion/` | packet evidence | Live-readiness completion planning packet (K=4 antibodies for 11 open B/G/U/N items); implementation lands in `claude/live-readiness-completion-2026-04-26` worktree |
 | `task_2026-04-26_polymarket_clob_v2_migration/` | packet evidence | Polymarket CLOB V1→V2 migration packet; now supporting R3 Z0 source-of-truth correction and later R3 CLOB V2 phases |
 | `task_2026-04-26_ultimate_plan/` | packet evidence | R3 ultimate implementation packet for Zeus CLOB V2 live-money execution and dominance infrastructure; phase cards, boot notes, work records, reviews, and M3 user-channel ingest evidence live under `r3/` |
 | `task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | packet evidence | R3 Z0 packet-local live-money invariant summary for CLOB V2; not a durable authority doc |
@@ -124,7 +127,6 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-04-29_design_simplification_audit/evidence.md` | packet evidence | Command outputs, probes, reviews, and verification receipts for the packet |
 | `task_2026-04-27_harness_debate/` | packet evidence | Harness debate packet evidence and implementation errata preserved from worktree merge |
 | `task_2026-04-27_backtest_first_principles_review/` | packet evidence | Backtest first-principles review packet preserved from worktree merge; planning/evidence only, not live authority |
-| `zeus_workspace_authority_reconstruction_package_2026-04-20_v2/` | package input | Attached reconstruction package input; not universal authority |
 | `zeus_topology_system_deep_evaluation_package_2026-04-24/` | package input | Topology system deep evaluation and P0–P5 reform roadmap (P0–P5 implementation landed via PR #15 + #13/#14 + commits `c495510`..`0ca6db9`); package preserved as historical evaluation evidence |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
