@@ -33,6 +33,10 @@ Topology has five interacting layers:
 - Global health drift must remain visible even when a scoped route is clear.
 - Agent-runtime output should reduce decisions, not add ceremony: route cards
   summarize admission, risk tier, next action, and gate budget before appendices.
+- Operation-end feedback should create a positive loop without becoming a new
+  gate: agents capture context recovery, Zeus improvement insights, and
+  topology helped/blocked notes in the final response or an already-required
+  packet closeout surface.
 
 ## Failure modes
 
@@ -53,6 +57,10 @@ Topology has five interacting layers:
 - Stop and plan when planning-lock or unknown ownership appears.
 - Close with targeted tests. Add changed-file `closeout` and work/receipt
   evidence only when a packet, closeout claim, or high-risk gate consumes them.
+- If topology helped, preserve the pattern in tests, route-card text, or module
+  docs only when the current route owns that surface. If topology blocked or
+  misrouted, record the friction as feedback first; promote it to a topology
+  fix only when it is repeatable or already in scope.
 
 ## Agent runtime posture
 
@@ -67,6 +75,10 @@ Topology is most useful when it behaves like a runtime contract:
 - Impact/context output should use the owner manifest for the file class:
   `source_rationale` for `src/**`, script manifest for `scripts/**`, docs
   registry or operations router for `docs/**`, and test topology for `tests/**`.
+- Every completed operation should leave one compact feedback capsule. The
+  capsule is not authority and not a standalone artifact requirement; it is the
+  runtime's mechanism for harvesting useful lessons without forcing unrelated
+  repairs into the current diff.
 
 Route cards and context packs are generated guidance. They never replace
 `AGENTS.md`, manifests, tests, or executable source.

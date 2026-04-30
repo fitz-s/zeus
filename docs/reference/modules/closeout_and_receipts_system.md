@@ -44,6 +44,11 @@ A closeout payload has three distinct concepts:
 - Missing work records and missing receipts are real blockers for packet
   closeout or an explicit `packet_closeout_complete` claim. They are not a
   default artifact stack for direct T0/T1 edits.
+- A completed operation should recycle context into a compact feedback capsule:
+  what was promoted/summarized/discarded/left local, one to three Zeus
+  improvement insights, and topology helped/blocked notes. Direct work records
+  this in the final response; packet closeout records it only in an
+  already-required work log or receipt.
 - Planning-lock files need plan evidence before implementation closes.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
 - Warning deferrals must name an owner, an invalidation condition, and a bounded
@@ -55,6 +60,9 @@ A closeout payload has three distinct concepts:
 - Closeout must not mutate runtime truth or produce canonical DB facts.
 - Receipts should prove the completion claim; they should not become long
   diaries for unrelated warnings.
+- Feedback capsules should improve future work without widening the completed
+  operation. Promote a note into code/docs/topology changes only through a new
+  admitted route or when the current route already owns that surface.
 
 ## Failure modes
 
@@ -66,6 +74,8 @@ A closeout payload has three distinct concepts:
   blocker even when no completion claim depends on it.
 - A warning deferral expires but the warning is unrelated to the changed files
   or the requested claim; it should stay visible and not block the packet.
+- A well-intended improvement note becomes mandatory evidence or immediate
+  follow-on work, turning context recovery into scope creep.
 
 ## Repair routes
 
@@ -76,6 +86,9 @@ A closeout payload has three distinct concepts:
   rather than deleting the gate.
 - Record runtime-local artifact treatment: promoted, summarized, discarded, or
   left local.
+- Keep operation feedback short and actionable. If a topology friction repeats,
+  add a focused regression or route-card/doc repair; if it is a one-off, keep it
+  as a closeout note.
 
 ## Cross-links
 

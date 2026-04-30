@@ -6,6 +6,14 @@ metadata:
     Task-shaped context pack contracts for agents. These profiles compose
     existing topology primitives into work packets; they do not create new
     authority and must keep provisional-context warnings visible.
+  common_runtime_guidance:
+    operation_feedback_loop: >
+      At operation close, recycle context into one compact feedback capsule:
+      what scratch/runtime context was promoted, summarized, discarded, or left
+      local; one to three Zeus improvement insights with evidence/inference
+      boundaries when relevant; and one topology helped/blocked note. Put it in
+      the final response or an already-required packet work log/receipt, never
+      in a standalone artifact or scope-expanding follow-on task.
 
 required_profile_fields:
   - id

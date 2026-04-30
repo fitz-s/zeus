@@ -165,6 +165,24 @@ will actually read, not for duplicating every command result.
 
 ## §6 Execution mode mechanics
 
+### §6.0 Operation-end feedback capsule
+
+When a whole operation is complete, recycle context before the final handoff.
+This is a short feedback capsule, not a new artifact stack:
+
+1. Context recovery: state what scratch/runtime context was promoted,
+   summarized, discarded, or left local.
+2. Zeus improvement insight: record one to three actionable observations from
+   the work, such as a code simplification, test gap, doc/routing mismatch, or
+   small next repair. Mark evidence versus inference when it matters.
+3. Topology experience: name what topology helped and what topology blocked,
+   misrouted, or slowed.
+
+For Mode A, include the capsule in the final response. For packet closeout,
+append it to an already-selected work log or receipt. Do not create
+`evidence.md`, `findings.md`, a packet folder, or follow-on implementation just
+to record feedback.
+
 ### §6.A Direct
 1. Edit / commit / verify
 2. `git add` specific files (NEVER `-A` with co-tenant active per memory `feedback_no_git_add_all_with_cotenant`)
@@ -337,6 +355,8 @@ items; do not create placeholder files to satisfy the checklist shape.
   §8.2 cites grep-fresh for locked file:line claims; §8.3 bidirectional grep
   run on any % claim; §8.4 git staging clean
 - [ ] If implementation discovered prior-stage error: §8.7 erratum applied
+- [ ] Operation-end feedback capsule captured in the final response or in an
+  already-required packet closeout surface
 
 ---
 
@@ -368,3 +388,4 @@ v1 (2026-04-19): single-mode workflow adapted from external starter kit.
 v2 (2026-04-28): 4-mode playbook + discipline patterns + failure recovery + erratum pattern. Distilled from Tier 1 batch execution + 3-round adversarial debate cycle 2026-04-27. Validates pattern reusability beyond debate-specific use.
 v2.1 (2026-04-30): runtime-neutral dispatch language plus scoped critic-gate boundaries after conflict-first merge protocol correction.
 v2.2 (2026-04-30): mode-scoped reads/artifacts so handoff discipline does not become default ceremony.
+v2.3 (2026-04-30): operation-end feedback capsule for context recovery, Zeus improvement insights, and topology helped/blocked notes without standalone artifact ceremony.
