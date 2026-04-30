@@ -171,7 +171,7 @@ test_trust_policy:
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-04-29"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-04-27"}

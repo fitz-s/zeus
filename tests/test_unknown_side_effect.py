@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
@@ -86,6 +86,25 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
     return snapshot_id
 
 
+def _decision_source_context():
+    from src.contracts.execution_intent import DecisionSourceContext
+
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-04-27T09:00:00+00:00",
+        forecast_valid_time="2026-04-27T18:00:00+00:00",
+        forecast_fetch_time="2026-04-27T10:00:00+00:00",
+        forecast_available_at="2026-04-27T09:30:00+00:00",
+        raw_payload_hash="f" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time=NOW.isoformat(),
+        decision_time_status="OK",
+    )
+
+
 def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
     from src.contracts import Direction
     from src.contracts.execution_intent import ExecutionIntent
@@ -107,6 +126,7 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
         executable_snapshot_min_tick_size=Decimal("0.01"),
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
+        decision_source_context=_decision_source_context(),
     )
 
 
@@ -474,7 +494,7 @@ def test_economic_intent_duplicate_uses_idempotency_precision(conn):
     second_client.place_limit_order.assert_not_called()
 
 
-def test_reconciliation_finding_order_converts_unknown_to_acked_or_filled(conn):
+def test_reconciliation_finding_order_converts_unknown_to_acked_or_partial_until_confirmed(conn):
     from src.execution.command_recovery import reconcile_unresolved_commands
 
     _insert_unknown_side_effect(conn, idem="2" * 32)
@@ -500,8 +520,27 @@ def test_reconciliation_finding_order_converts_unknown_to_acked_or_filled(conn):
     summary = reconcile_unresolved_commands(conn, client)
     filled = conn.execute("SELECT * FROM venue_commands WHERE command_id = ?", ("cmd-m2-filled",)).fetchone()
     assert summary["advanced"] >= 1
-    assert filled["state"] == "FILLED"
+    assert filled["state"] == "PARTIAL"
     assert filled["venue_order_id"] == "ord-m2-filled"
+    assert "PARTIAL_FILL_OBSERVED" in _events(conn, "cmd-m2-filled")
+    assert "FILL_CONFIRMED" not in _events(conn, "cmd-m2-filled")
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-confirmed",
+        idem="9" * 32,
+        token_id="tok-m2-confirmed",
+    )
+    client.find_order_by_idempotency_key.return_value = {
+        "orderID": "ord-m2-confirmed",
+        "status": "CONFIRMED",
+    }
+    summary = reconcile_unresolved_commands(conn, client)
+    confirmed = conn.execute("SELECT * FROM venue_commands WHERE command_id = ?", ("cmd-m2-confirmed",)).fetchone()
+    assert summary["advanced"] >= 1
+    assert confirmed["state"] == "FILLED"
+    assert confirmed["venue_order_id"] == "ord-m2-confirmed"
+    assert "FILL_CONFIRMED" in _events(conn, "cmd-m2-confirmed")
 
 
 def test_reconciliation_finding_no_order_within_window_permits_safe_replay(conn):
