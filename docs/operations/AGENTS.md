@@ -98,6 +98,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `AGENTS.md` | operations router | Registry for live operations surfaces in this directory |
 | `current_state.md` | live pointer | Single current program, active packet, required evidence, freeze point, next action |
 | `known_gaps.md` | active support | Active operational gap register |
+| `known_gaps_archive.md` | archive interface | Closed gap antibody archive; historical immune-system record, not active gap authority |
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `runtime_artifact_inventory.md` | active support | Inventory for runtime-local planning artifacts mirrored into repo control |

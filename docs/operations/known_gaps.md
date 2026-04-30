@@ -3,8 +3,9 @@
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
 
-**Active surface**: this file lists OPEN, MITIGATED, PARTIALLY FIXED, and
-STALE-UNVERIFIED gaps that still demand attention.
+**Active surface**: this file lists OPEN, PARTIALLY FIXED,
+STALE-UNVERIFIED, and residual-bearing MITIGATED gaps that still demand
+attention.
 
 **Antibody archive** (closed FIXED/CLOSED entries — immune-system record of
 what we made impossible): `docs/operations/known_gaps_archive.md`. Reference
@@ -80,6 +81,15 @@ refresh, and exit decisions.
 **False-positive boundary:** London probe returned `obs_id=EGLC`, matching its
 WU config. The issue is source-routed cities and any city where geocode-nearest
 station differs from the contract station.
+**2026-04-30 recheck:** Entry evaluation now has an
+`OBSERVATION_SOURCE_UNAUTHORIZED` gate for executable Day0 entries and only
+allows `wu_api` for `settlement_source_type="wu_icao"`. That is a partial
+entry-side guard, not a full fix. A local no-network monkeypatch still showed
+`get_current_observation()` calling the WU geocode endpoint for a Hong Kong
+`settlement_source_type="hko"` city and returning `source="wu_api"`, and
+`Day0ObservationContext` still carries no `obs_id`/station field. The Day0
+monitor refresh path consumes `_fetch_day0_observation()` directly and does not
+apply the evaluator's source-policy rejection before building `Day0SignalInputs`.
 **Proposed remediation:**
 1. Route Day0 observation by `settlement_source_type`, not by generic provider
    priority.
@@ -399,27 +409,6 @@ runtime detector and data feed, not the branch's local behavior.
 **Acceptance evidence:** Runtime monitoring can produce both
 `whale_toxicity_available` and `WHALE_TOXICITY` exit decisions from real or
 fixture-backed market data.
-
-### [MITIGATED 2026-04-30] Legacy fill polling no longer treats `MATCHED` as a fill terminal
-
-**Location:** `src/execution/fill_tracker.py`, `src/execution/exit_lifecycle.py`.
-**Original problem:** Legacy polling set `FILL_STATUSES = {"FILLED", "MATCHED"}`.
-Polymarket trade lifecycle treats `MATCHED` as non-terminal; `CONFIRMED` is the
-successful terminal.
-**Antibody deployed:** Entry and exit polling now use `CONFIRMED` as the only
-success terminal. `MATCHED`/`FILLED` entry payloads record venue facts and
-optimistic exposure only; they do not set `entry_fill_verified`, `entered_at`, or
-canonical entry-fill truth. Exit polling leaves `MATCHED`/`FILLED` pending.
-Stale deps cannot remove `CONFIRMED` from the fill-status set.
-**Evidence:** `src/execution/fill_tracker.py::FILL_STATUSES`,
-`_fill_statuses()`, `_record_optimistic_entry_observed()`;
-`src/execution/exit_lifecycle.py::FILL_STATUSES`;
-`tests/test_live_safety_invariants.py::test_confirmed_fill_survives_stale_deps_fill_statuses`,
-`test_legacy_polling_matched_maps_numeric_live_runtime_id_to_optimistic_lot`,
-and `test_pending_exit_filled_status_does_not_economically_close`.
-**Residual:** If a future adapter proves an order-level status is irreversible
-fill finality before trade `CONFIRMED`, it needs a typed order-finality contract
-instead of reusing `MATCHED`/`FILLED` as generic success terminals.
 
 ### [MITIGATED 2026-04-30; RESIDUAL P2] Entry partial fills preserve filled exposure after remainder cancel
 
@@ -784,27 +773,6 @@ finality blocker because non-`CONFIRMED` facts no longer emit `FILL_CONFIRMED`.
 command to `FILLED`; only `CONFIRMED` does. Future drift evidence should name
 whether it compared optimistic or confirmed exposure.
 
-### [MITIGATED 2026-04-30] Exit lifecycle no longer economically closes on non-final `MATCHED`/`FILLED`
-
-**Location:** `src/execution/exit_lifecycle.py::FILL_STATUSES`,
-`src/execution/exit_lifecycle.py::_check_order_fill`,
-`src/execution/exit_lifecycle.py::check_pending_exits`,
-`src/execution/exit_lifecycle.py::_execute_live_exit`.
-**Original problem:** Exit lifecycle defined `FILL_STATUSES = {'MATCHED',
-'FILLED'}` and used that set in both immediate post-submit fill checks and
-later `check_pending_exits()`. A `MATCHED` order/trade status could call
-`compute_economic_close()` before trade `CONFIRMED`.
-**Antibody deployed:** Exit lifecycle now defines `FILL_STATUSES =
-frozenset({"CONFIRMED"})`; `MATCHED` and `FILLED` are explicit non-final
-observations and leave the exit pending.
-**Evidence:** `src/execution/exit_lifecycle.py::FILL_STATUSES`,
-`tests/test_live_safety_invariants.py::test_pending_exit_filled_status_does_not_economically_close`,
-`test_pending_exit_matched_status_does_not_economically_close`, and
-`test_deferred_confirmed_fill_logs_last_monitor_best_bid`.
-**Residual:** If a future adapter proves a non-`CONFIRMED` order string is
-irreversible fill finality, add a typed order-finality source instead of
-widening this raw status set.
-
 ### [OPEN P2] Collateral preflight accepts arbitrarily stale snapshots
 
 **Location:** `src/state/collateral_ledger.py::CollateralLedger.snapshot`,
@@ -981,24 +949,6 @@ cleared, the source rebranding happens deterministically.
 longer writes `data_version='tigge_*'` or `training_allowed=1` unless the source
 is explicitly promoted by policy; every training-allowed pair has a non-null
 snapshot id and an auditable source/provider lineage.
-
-### [MITIGATED 2026-04-30] Command recovery no longer turns non-final `MINED`/`FILLED` into `FILL_CONFIRMED`
-
-**Location:** `src/execution/command_recovery.py::_reconcile_row`,
-`src/state/venue_command_repo.py::append_event`,
-`docs/operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md`.
-**Original problem:** The command recovery loop treated a recovered
-`SUBMIT_UNKNOWN_SIDE_EFFECT` order response with venue status in
-`{"FILLED", "MINED", "CONFIRMED"}` as `FILL_CONFIRMED`, collapsing non-final
-venue observations into confirmed command truth.
-**Antibody deployed:** Recovery now emits `FILL_CONFIRMED` only for
-`CONFIRMED`; `FILLED`, `MATCHED`, `MINED`, `PARTIAL`, `PARTIALLY_MATCHED`, and
-`PARTIALLY_FILLED` emit `PARTIAL_FILL_OBSERVED`.
-**Evidence:** `src/execution/command_recovery.py::_reconcile_row`,
-`tests/test_command_recovery.py::test_unknown_side_effect_nonconfirmed_status_stays_partial_not_fill_finality`,
-and `test_unknown_side_effect_confirmed_reaches_fill_finality`.
-**Residual:** A future adapter may add typed order-finality proof, but raw
-`MINED`/`FILLED` recovery responses no longer advance to `FILLED`.
 
 ### [OPEN P1] Day0 stale/epoch observations can still produce tradeable p_raw
 
@@ -1370,25 +1320,8 @@ finding.
 
 ## ANTI-RABBIT-HOLE: upstream-Polymarket scope limits (READ FIRST)
 
-### [STRUCTURAL — NOT A BUG] Polymarket LOW market series starts 2026-04-15
-**Status:** documented; do not chase.
-**Audit date:** 2026-04-28 (gamma-api.polymarket.com live probe).
-**Fact:** Polymarket did NOT offer LOW (mn2t6 / "lowest temperature") weather markets before 2026-04-15. First closed LOW event resolved 2026-04-15. Coverage is 8 cities only: London, Seoul, NYC, Tokyo, Shanghai, Paris, Miami, Hong Kong.
-**Reality numbers:** 48 closed LOW events / 18 active. Date range 2026-04-15..2026-04-29. HIGH (max temp) market series predates LOW by ~2 years.
-**Implication:**
-- `state/zeus-world.db::settlements` LOW rows will never exceed ~50 historical + ~8/day going forward
-- LOW Platt training MUST use `observations.low_temp` (42,749 rows / 51 cities / 2023-12-27..2026-04-19) as canonical ground truth — NOT `settlements` LOW
-- Absence of LOW settlement rows for (city, date) tuples outside the 8-city × post-2026-04-15 scope is structural, not a backfill miss
-**Do NOT:**
-- Write retro-scrapers for pre-2026-04-15 dates
-- Open quarantine reactivation tickets for cities outside the 8-city set
-- Search archives expecting historical LOW market truth to exist
-- Block on this gap when training LOW calibration; use observations.low_temp
-**Antibody:** `architecture/fatal_misreads.yaml::polymarket_low_market_history_starts_2026_04_15` (severity=critical)
-**Proof artifacts:**
-- `docs/operations/task_2026-04-28_settlements_low_backfill/plan.md`
-- `docs/operations/task_2026-04-28_settlements_low_backfill/evidence/pm_settlement_truth_low.json`
-**Invalidation:** only a fresh gamma-api probe with HTTP-evidence showing LOW events with endDate < 2026-04-15 OR coverage beyond 8 cities may relax this.
+No active remediation items remain in this section. The Polymarket LOW market
+series structural boundary is archived in `known_gaps_archive.md`.
 
 ---
 
@@ -1547,46 +1480,13 @@ cycle_runner._execute_monitoring_phase()
 **Status (2026-04-06):** The latest `opening_hunt` cycles completed without this error appearing in the log. Not confirmed fixed — may have been intermittent or masked by a different cycle mode. Requires a deliberate `day0_capture` run to verify.
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 
-### [MITIGATED 2026-04-30] strategy_tracker no longer reports JSON PnL as independent truth
-**Location:** `src/state/strategy_tracker.py`, legacy `strategy_tracker-*.json` artifacts.
-**Original problem:** `strategy_tracker-paper.json` could report `opening_inertia`
-cumulative PnL that was not reconstructible from durable DB/event truth.
-**Antibody deployed:** `StrategyTracker` is now a no-write canonical projection:
-`record_*` methods are no-op compatibility shims, `save_tracker()` does not
-write disk, `load_tracker()` ignores legacy files, and `summary()` derives from
-`query_authoritative_settlement_rows()` / `position_events`.
-**Evidence:** `src/state/strategy_tracker.py` module contract and no-op
-`record_*` / `save_tracker()` implementations.
-**Residual:** Legacy `strategy_tracker-paper.json` references in tests or
-historical artifacts remain fixture/archive surfaces. They should not be used as
-runtime or wallet truth.
-
-(2 FIXED entries on Healthcheck assumptions + Day0 stale probability waiver
-archived to `known_gaps_archive.md` → "Tooling / Operator Health".)
+(3 closed entries on strategy_tracker JSON authority, Healthcheck assumptions,
+and Day0 stale probability waiver archived to `known_gaps_archive.md` →
+"Tooling / Operator Health".)
 
 ---
 
 ## 2026-04-03 — edge-reversal follow-up triage
-
-### [MITIGATED 2026-04-30] Paper JSON fallback no longer becomes portfolio authority
-**Location:** `src/state/portfolio.py::load_portfolio`,
-`src/engine/cycle_runtime.py`, `src/riskguard/riskguard.py`.
-**Original problem (filed 2026-04-10):** Paper positions with missing token ids
-could make canonical projection non-authoritative, after which
-`load_portfolio()` could fall back to stale JSON and let RiskGuard reason over a
-broken paper portfolio as if it were current truth.
-**Antibody deployed:** `load_portfolio()` is DB-first. If the DB connection or
-projection is not authoritative, it returns a degraded `PortfolioState`
-(`authority="unverified"`, `portfolio_loader_degraded=True`) and suppresses new
-entries; it does not promote deprecated JSON into authority. Chain-only
-quarantine evidence can still be rehydrated explicitly.
-**Evidence:** `src/state/portfolio.py::load_portfolio`,
-`tests/test_runtime_guards.py::test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades`,
-`test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json`,
-and `tests/test_truth_layer.py::test_load_portfolio_rejects_deprecated_state_file`.
-**Residual:** `positions-paper.json` remains in legacy fixtures/history and
-truth-surface stale-status tests. Those references are not live portfolio
-authority and can be cleaned in a separate test/docs hygiene packet.
 
 ### [MITIGATED] Missing monitor-to-exit chain escalates before settlement (2026-04-13)
 **Location:** `src/engine/cycle_runtime.py`, `src/engine/monitor_refresh.py`

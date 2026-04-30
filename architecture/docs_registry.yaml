@@ -456,6 +456,24 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
+- path: docs/operations/known_gaps_archive.md
+  doc_class: archive_interface
+  default_read: false
+  direct_reference_allowed: true
+  current_role: closed gap antibody archive for resolved known_gaps entries
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: historical
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: packet_audit
 - path: docs/operations/current_data_state.md
   doc_class: operations
   default_read: false
