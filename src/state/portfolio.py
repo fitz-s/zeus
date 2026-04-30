@@ -313,7 +313,7 @@ class Position:
 
     # Entry fill verification (live mode)
     entry_order_id: Optional[str] = None  # CLOB order ID from entry
-    entry_fill_verified: bool = False  # True only after CLOB confirms MATCHED/FILLED
+    entry_fill_verified: bool = False  # True only after final fill confirmation.
 
     # Anti-churn
     last_exit_at: str = ""

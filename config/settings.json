@@ -4,7 +4,6 @@
   "_live_safety_cap_usd_note": "Phase 1 maturity rail. Kelly output hard-clipped to this ceiling for canary window. Lifted only after Tier 6 canary passes.",
   "smoke_test_portfolio_cap_usd": 5.0,
   "_smoke_test_portfolio_cap_usd_note": "ONE-TIME smoke test guard: portfolio-wide filled+pending exposure cap. Blocks new entries once total cost-basis across all non-terminal positions exceeds this. Not a permanent feature \u2014 remove after the first full entry\u2192fill\u2192settlement lifecycle has been observed. Added 2026-04-12 after first live cycle placed 12 orders (2 matched) intending $60 exposure when operator expected a single $5 test trade.",
-  "mode": "live",
   "discovery": {
     "opening_hunt_interval_min": 30,
     "update_reaction_times_utc": [

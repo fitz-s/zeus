@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M5.yaml
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -441,6 +441,45 @@ def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn)
     assert conn.execute("SELECT state FROM venue_trade_facts WHERE trade_id = 'trade-retrying'").fetchone()["state"] == "RETRYING"
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "ACKED"
     assert "PARTIAL_FILL_OBSERVED" not in event_types(conn)
+
+
+@pytest.mark.parametrize("status", ["MATCHED", "MINED"])
+def test_nonconfirmed_full_size_trade_is_optimistic_exposure_not_fill_finality(conn, status):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[trade(trade_id=f"trade-{status.lower()}", order_id="ord-m5", size="10", status=status)]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert conn.execute(
+        "SELECT state FROM venue_trade_facts WHERE trade_id = ?",
+        (f"trade-{status.lower()}",),
+    ).fetchone()["state"] == status
+    assert event_types(conn)[-1] == "PARTIAL_FILL_OBSERVED"
+    assert "FILL_CONFIRMED" not in event_types(conn)
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "PARTIAL"
+
+
+def test_confirmed_full_size_trade_is_required_for_fill_finality(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=10)
+
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[trade(trade_id="trade-confirmed", order_id="ord-m5", size="10", status="CONFIRMED")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert conn.execute("SELECT state FROM venue_trade_facts WHERE trade_id = 'trade-confirmed'").fetchone()["state"] == "CONFIRMED"
+    assert event_types(conn)[-1] == "FILL_CONFIRMED"
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
 
 
 def test_stale_or_unsuccessful_venue_reads_are_not_absence_proof(conn):

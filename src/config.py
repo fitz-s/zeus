@@ -5,12 +5,11 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 """
 
 # Created: pre-Phase-0 (K1 Phase 1 strict-contract commits 96b70a8 / f6f612e)
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-04-30
 # Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -28,14 +27,18 @@ def legacy_state_path(filename: str) -> Path:
 
 
 def mode_state_path(filename: str, mode: Optional[str] = None) -> Path:
-    """State path — Zeus is live-only; mode is first-class routing param (B077 / SD-A).
+    """State path for the live runtime.
 
-    The mode parameter is first-class (threaded through read_mode_truth_json)
-    but only "live" (or None) is accepted. Any other value raises ValueError.
+    ``mode`` remains an explicit compatibility parameter for truth-file callers
+    that must prove they are reading live runtime state. Backtest/replay lanes
+    use their own DB paths and must not route through runtime state files.
     """
     resolved = mode or get_mode()
     if resolved not in ACTIVE_MODES:
-        raise ValueError(f"mode_state_path called with invalid mode={resolved!r} — Zeus is live-only.")
+        raise ValueError(
+            f"mode_state_path called with invalid mode={resolved!r}; "
+            f"runtime state is live-only ({ACTIVE_MODES})."
+        )
     return STATE_DIR / filename
 
 
@@ -43,11 +46,15 @@ ACTIVE_MODES = ("live",)
 
 
 def get_mode() -> str:
-    """Mode accessor. Reads from ZEUS_MODE env var (validated at startup)."""
-    mode = os.environ.get("ZEUS_MODE", "live")
-    if mode not in ACTIVE_MODES:
-        raise ValueError(f"ZEUS_MODE={mode!r} is not valid — Zeus is currently restricted to {ACTIVE_MODES}.")
-    return mode
+    """Return the only supported runtime mode.
+
+    Historical builds routed runtime behavior through ``ZEUS_MODE``. That made
+    a single live daemon depend on an environment string while replay/backtest
+    already had separate entry points and stores. The environment variable is
+    no longer authority; callers that need replay/backtest behavior must use
+    the replay/backtest APIs directly.
+    """
+    return "live"
 
 
 def state_path(filename: str) -> Path:
@@ -109,7 +116,6 @@ class Settings:
         self._data = _load_json(path)
         required = [
             "capital_base_usd",
-            "mode",
             "discovery",
             "ensemble",
             "calibration",
@@ -126,10 +132,6 @@ class Settings:
         for key in required:
             if key not in self._data:
                 raise KeyError(f"Missing required config key: {key}")
-        
-        # Enforce single mode authority
-        if self._data.get("mode") and self._data["mode"] != get_mode():
-            raise ValueError(f"Mode conflict: ZEUS_MODE={get_mode()!r} but settings.json mode={self._data['mode']!r}")
 
     def __getitem__(self, key: str):
         return self._data[key]

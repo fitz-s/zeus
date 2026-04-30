@@ -1,8 +1,8 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
 """M3: user-channel WS messages become U2 facts; gaps block new submit."""
 
@@ -239,6 +239,28 @@ def test_matched_event_does_not_final_close_lot(conn):
     assert load_calibration_trade_facts(conn) == []
 
 
+def test_mined_event_is_optimistic_exposure_not_finality(conn):
+    result = _ingestor(conn).handle_message(
+        _trade_message("MINED", transaction_hash="0xmined", confirmation_count=0)
+    )
+
+    assert result["command_event"] == "PARTIAL_FILL_OBSERVED"
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MINED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE"]
+    assert load_calibration_trade_facts(conn) == []
+    assert _command_state(conn) == "PARTIAL"
+
+
+def test_matched_then_mined_does_not_duplicate_optimistic_exposure(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MATCHED"))
+    ingestor.handle_message(_trade_message("MINED", transaction_hash="0xmined", confirmation_count=0))
+
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MATCHED", "MINED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE"]
+    assert load_calibration_trade_facts(conn) == []
+
+
 def test_confirmed_event_finalizes_trade_and_permits_canonical_pnl(conn):
     ingestor = _ingestor(conn)
     ingestor.handle_message(_trade_message("MATCHED"))
@@ -279,6 +301,15 @@ def test_failed_after_matched_quarantines_or_reverses_optimistic_projection(conn
 
     assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MATCHED", "FAILED"]
+
+
+def test_failed_after_mined_quarantines_optimistic_projection(conn):
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(_trade_message("MINED", transaction_hash="0xmined", confirmation_count=0))
+    ingestor.handle_message(_trade_message("FAILED"))
+
+    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MINED", "FAILED"]
 
 
 def test_websocket_disconnect_triggers_reconcile_sweep_marker_and_blocks_submit(conn):
