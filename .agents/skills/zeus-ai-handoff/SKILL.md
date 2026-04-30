@@ -240,14 +240,16 @@ When merging from another worktree/session into the active Zeus branch:
    verification for the changed surface.
 3. If conflicts are narrow and mechanical, resolve directly or manually
    choose the correct side, then run the affected tests/checks.
-4. Escalate to critic-opus evidence only when the conflict surface is broad
-   or semantically dangerous:
+4. Escalate to independent critic evidence only when the conflict surface is
+   broad or semantically dangerous:
    - multi-zone or more than a small handful of conflicted files
    - K0/K1, schema, lifecycle, DB/control/live, or authority surfaces
    - ambiguous ownership or competing truth models
    - drift-keyword greps indicate settlement/source/calibration/data-version risk
-5. For escalated merges, dispatch critic-opus (Agent or longlast critic-* in
-   active team) with:
+5. For escalated merges, dispatch an independent critic using the active
+   runtime's native review surface. Do not call a different vendor CLI just to
+   manufacture independence; the independence boundary is separate
+   role/context inside the current runtime. Provide the critic with:
    - Diff and conflict scope summary (files + LOC)
    - Authoring session identifier (which session/worktree produced it)
    - Boundary check: is the merging session subject to the same
