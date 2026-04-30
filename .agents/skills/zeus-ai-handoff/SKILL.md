@@ -206,30 +206,46 @@ When implementation discovers prior debate / verdict / plan was based on incompl
 
 Methodological transparency compounds across cycles.
 
-### §8.8 Cross-session merge critic-gate
+### §8.8 Cross-session merge conflict-first protocol
 
 When merging from another worktree/session into the active Zeus branch:
 
-1. Identify the diff: `git diff <current-branch>...<merging-branch>`
-2. Dispatch critic-opus (Agent or longlast critic-* in active team) with:
-   - Diff scope summary (files + LOC)
+1. Identify the merge surface:
+   - `git diff <current-branch>...<merging-branch>` for scope
+   - `git merge-tree $(git merge-base <current-branch> <merging-branch>) <current-branch> <merging-branch>` or a no-commit merge/cherry-pick to inspect conflicts
+2. If there are no conflicts, proceed with the merge and run the scoped
+   verification for the changed surface.
+3. If conflicts are narrow and mechanical, resolve directly or manually
+   choose the correct side, then run the affected tests/checks.
+4. Escalate to critic-opus evidence only when the conflict surface is broad
+   or semantically dangerous:
+   - multi-zone or more than a small handful of conflicted files
+   - K0/K1, schema, lifecycle, DB/control/live, or authority surfaces
+   - ambiguous ownership or competing truth models
+   - drift-keyword greps indicate settlement/source/calibration/data-version risk
+5. For escalated merges, dispatch critic-opus (Agent or longlast critic-* in
+   active team) with:
+   - Diff and conflict scope summary (files + LOC)
    - Authoring session identifier (which session/worktree produced it)
    - Boundary check: is the merging session subject to the same
      authority files (root `AGENTS.md`, methodology, planning-lock)?
    - Bidirectional grep: do drift-keyword greps trigger on the diff?
-3. Critic verdict gates the merge — BLOCK = abort; REVISE = address
-   defects per file:line + re-dispatch; APPROVE = proceed with merge
-4. Document: critic verdict path in commit message of the merge commit
+6. Escalated critic verdict gates the merge — BLOCK = abort; REVISE = address
+   defects per file:line + re-dispatch; APPROVE = proceed with merge.
+7. Document critic verdict path in the merge commit only when the critic path
+   was actually used.
 
 This extends §8.5 (per-batch critic-gate within a session) to the
-**cross-session boundary**. Per memory `feedback_executor_commit_boundary_gate`,
-self-review is forbidden; cross-session self-review is the same
-violation at session granularity.
+**cross-session boundary** without turning clean merges into process debt. Per
+memory `feedback_executor_commit_boundary_gate`, self-review is forbidden for
+the escalated critic path; narrow mechanical conflict resolution is ordinary
+merge work and does not require an independent critic.
 
 Hook enforcement: `.claude/hooks/pre-merge-contamination-check.sh`
-requires `MERGE_AUDIT_EVIDENCE` env var pointing to the critic verdict
-file before allowing `git merge` / `git pull` / `git cherry-pick` Bash
-commands; otherwise prints warning + advisory message + exits 2.
+prints the conflict-first protocol for merge-class commands on protected
+branches and allows the command by default. If `MERGE_AUDIT_EVIDENCE` is set,
+the hook validates the critic verdict file and blocks only invalid or BLOCK
+evidence.
 
 ---
 
