@@ -394,6 +394,15 @@ def test_phase5c_forward_substrate_producer_wording_routes_to_producer_profile()
         "Phase 5C.5 remediation",
         "Phase 5C.5 re-review",
         "Phase 5C.5 review remediation",
+        "Phase 5E full market price linkage producer",
+        "Phase 5E full market-price linkage substrate from executable snapshots",
+        "full market price linkage producer",
+        "full market-price linkage substrate",
+        "full market-price linkage substrate from executable snapshots",
+        "executable snapshot market price linkage",
+        "executable snapshot price linkage",
+        "executable snapshots market-price linkage substrate",
+        "log_executable_snapshot_market_price_linkage",
     ],
 )
 def test_phase5c_short_producer_wording_routes_to_producer_profile(task):
@@ -408,6 +417,33 @@ def test_phase5c_short_producer_wording_routes_to_producer_profile(task):
 
     assert digest["profile"] == "phase 5 forward substrate producer implementation"
     assert digest["admission"]["status"] == "admitted"
+
+
+def test_phase5e_full_price_linkage_wording_routes_to_producer_profile():
+    digest = build_digest(
+        "Phase 5E full market-price linkage substrate from executable snapshots "
+        "for DSA-19; explicit connection writer and guarded runtime forward "
+        "substrate call after executable snapshot capture; no production DB "
+        "validation mutation; venue submit cancel redeem untouched; CLOB cutover "
+        "untouched; source routing untouched; Paris untouched",
+        [
+            "src/state/db.py",
+            "src/state/schema/v2_schema.py",
+            "src/engine/cycle_runtime.py",
+            "tests/test_schema_v2_gate_a.py",
+            "tests/test_market_scanner_provenance.py",
+            "tests/test_runtime_guards.py",
+            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
+            "docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md",
+        ],
+    )
+
+    assert digest["profile"] == "phase 5 forward substrate producer implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/schema/v2_schema.py" in digest["admission"]["admitted_files"]
+    assert "src/state/db.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
 
 
 def test_phase5c_writer_seam_review_wording_routes_to_producer_profile():

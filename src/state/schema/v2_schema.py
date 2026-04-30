@@ -118,6 +118,14 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 recorded_at TEXT NOT NULL,
                 hours_since_open REAL,
                 hours_to_resolution REAL,
+                market_price_linkage TEXT NOT NULL DEFAULT 'price_only'
+                    CHECK (market_price_linkage IN ('price_only', 'full')),
+                source TEXT NOT NULL DEFAULT 'GAMMA_SCANNER',
+                best_bid REAL CHECK (best_bid IS NULL OR (best_bid >= 0.0 AND best_bid <= 1.0)),
+                best_ask REAL CHECK (best_ask IS NULL OR (best_ask >= 0.0 AND best_ask <= 1.0)),
+                raw_orderbook_hash TEXT,
+                snapshot_id TEXT,
+                condition_id TEXT,
                 UNIQUE(token_id, recorded_at)
             )
         """)
@@ -128,6 +136,28 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_market_price_history_token_recorded
                 ON market_price_history(token_id, recorded_at)
+        """)
+        for alter_sql in [
+            "ALTER TABLE market_price_history ADD COLUMN market_price_linkage TEXT NOT NULL DEFAULT 'price_only' CHECK (market_price_linkage IN ('price_only', 'full'))",
+            "ALTER TABLE market_price_history ADD COLUMN source TEXT NOT NULL DEFAULT 'GAMMA_SCANNER'",
+            "ALTER TABLE market_price_history ADD COLUMN best_bid REAL CHECK (best_bid IS NULL OR (best_bid >= 0.0 AND best_bid <= 1.0))",
+            "ALTER TABLE market_price_history ADD COLUMN best_ask REAL CHECK (best_ask IS NULL OR (best_ask >= 0.0 AND best_ask <= 1.0))",
+            "ALTER TABLE market_price_history ADD COLUMN raw_orderbook_hash TEXT",
+            "ALTER TABLE market_price_history ADD COLUMN snapshot_id TEXT",
+            "ALTER TABLE market_price_history ADD COLUMN condition_id TEXT",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_snapshot
+                ON market_price_history(snapshot_id, recorded_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_condition_recorded
+                ON market_price_history(condition_id, recorded_at)
         """)
 
         # ----------------------------------------------------------------

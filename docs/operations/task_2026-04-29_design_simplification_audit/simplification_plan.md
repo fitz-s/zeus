@@ -740,6 +740,16 @@ Current status (2026-04-29):
   and raw orderbook hash columns plus at least one valid row. This is a
   read-only tombstone/readiness guard only: it does not change schema, mutate
   DB rows, wire WebSocket capture, compute PnL, or promote strategy evidence.
+- Phase 5E adds the first full-linkage row-shape producer using the executable
+  snapshot facts Zeus already captures for live entry. `market_price_history`
+  now has code-owned full-linkage columns, and an explicit-connection helper
+  writes `market_price_linkage="full"` rows from
+  `ExecutableMarketSnapshotV2` top-of-book/orderbook-hash evidence after
+  snapshot capture. Validation did not touch production DBs and the change does
+  not backfill history, wire WebSocket market capture, compute PnL, or weaken
+  the economics tombstone. When deployed, the runtime call is a live-path DB
+  substrate write and remains under the existing G1 live no-go / operator
+  deploy gates.
 - Paris source-boundary evidence is now precise enough for a source-routing
   packet but not for a blind config flip. Observed HIGH events resolve on
   `LFPG` through 2026-04-18 and on `LFPB` from 2026-04-19 onward; observed LOW

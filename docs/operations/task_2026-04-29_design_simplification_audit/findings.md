@@ -1204,6 +1204,21 @@ promotion-grade economics. The change is read-only readiness logic; it performs
 no schema migration, DB mutation, WebSocket capture, PnL computation, or
 economics tombstone weakening.
 
+Phase 5E full-linkage substrate status (2026-04-30):
+`market_price_history` code-owned DDL now carries the full-linkage fields that
+Phase 5D requires (`market_price_linkage`, CLOB source, best bid/ask,
+raw orderbook hash, snapshot id, and condition id). `src/state/db.py` exposes
+`log_executable_snapshot_market_price_linkage()` as an explicit-connection,
+no-commit helper that writes a full-linkage row from already-captured
+`ExecutableMarketSnapshotV2` orderbook facts. `cycle_runtime` calls this helper
+after executable snapshot capture and before the existing snapshot commit. This
+removes the schema/row-shape blocker for full market-price linkage substrate,
+but it does not close DSA-19: no production DB rows were touched during
+validation, no WebSocket or historical backfill was added, no PnL engine was
+implemented, and `economics_engine_not_implemented` remains the final
+tombstone. When deployed, the runtime call is a live-path DB substrate write
+and remains under the existing G1 live no-go / operator deploy gates.
+
 F4/F10 observability status (2026-04-29): the derived status row-count false
 alarm is fixed for current v2 data-authority tables. `_get_v2_row_counts()`
 now qualifies reads by schema and prefers attached `world` tables over empty

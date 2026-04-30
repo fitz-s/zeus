@@ -1893,6 +1893,30 @@ _FORWARD_PRICE_HISTORY_COLUMNS = (
     "hours_since_open",
     "hours_to_resolution",
 )
+_FULL_LINKAGE_PRICE_HISTORY_COLUMNS = (
+    "market_slug",
+    "token_id",
+    "price",
+    "recorded_at",
+    "hours_since_open",
+    "hours_to_resolution",
+    "market_price_linkage",
+    "source",
+    "best_bid",
+    "best_ask",
+    "raw_orderbook_hash",
+    "snapshot_id",
+    "condition_id",
+)
+_FULL_LINKAGE_PRICE_REQUIRED_COLUMNS = (
+    "market_price_linkage",
+    "source",
+    "best_bid",
+    "best_ask",
+    "raw_orderbook_hash",
+    "snapshot_id",
+    "condition_id",
+)
 _FORWARD_MARKET_REQUIRED_TABLES = (
     "market_events_v2",
     "market_price_history",
@@ -2042,6 +2066,160 @@ def _insert_forward_price_history(conn: sqlite3.Connection, values: dict) -> str
         tuple(values[column] for column in _FORWARD_PRICE_HISTORY_COLUMNS),
     )
     return "inserted"
+
+
+def _insert_full_linkage_price_history(conn: sqlite3.Connection, values: dict) -> str:
+    existing = conn.execute(
+        """
+        SELECT market_slug, token_id, price, recorded_at, hours_since_open,
+               hours_to_resolution, market_price_linkage, source, best_bid,
+               best_ask, raw_orderbook_hash, snapshot_id, condition_id
+        FROM market_price_history
+        WHERE token_id = ? AND recorded_at = ?
+        """,
+        (values["token_id"], values["recorded_at"]),
+    ).fetchone()
+    if existing is not None:
+        existing_values = dict(zip(_FULL_LINKAGE_PRICE_HISTORY_COLUMNS, tuple(existing)))
+        if _forward_existing_matches(existing_values, values):
+            return "unchanged"
+        return "conflict"
+
+    conn.execute(
+        """
+        INSERT INTO market_price_history (
+            market_slug, token_id, price, recorded_at, hours_since_open,
+            hours_to_resolution, market_price_linkage, source, best_bid,
+            best_ask, raw_orderbook_hash, snapshot_id, condition_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(values[column] for column in _FULL_LINKAGE_PRICE_HISTORY_COLUMNS),
+    )
+    return "inserted"
+
+
+def _mid_price(best_bid: float, best_ask: float) -> float | None:
+    if best_bid > best_ask:
+        return None
+    return (best_bid + best_ask) / 2.0
+
+
+def log_executable_snapshot_market_price_linkage(
+    conn: sqlite3.Connection | None,
+    *,
+    snapshot_id: str,
+    source: str = "CLOB_ORDERBOOK",
+    recorded_at: str | None = None,
+) -> dict:
+    """Persist full CLOB top-of-book linkage from an executable snapshot.
+
+    The scanner writer records price-only Gamma substrate. This helper records
+    the CLOB orderbook evidence already captured for an executable entry
+    snapshot. It never opens a default DB and never commits; callers own the
+    transaction boundary.
+    """
+    table = "market_price_history"
+    snapshot_table = "executable_market_snapshots"
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": (table, snapshot_table)}
+
+    snapshot_id_value = _forward_clean_str(snapshot_id)
+    if snapshot_id_value is None:
+        return {"status": "refused_missing_snapshot_id", "tables": (table, snapshot_table)}
+
+    missing_tables = [
+        required
+        for required in (table, snapshot_table)
+        if not _table_exists(conn, required)
+    ]
+    if missing_tables:
+        return {
+            "status": "skipped_missing_tables",
+            "tables": (table, snapshot_table),
+            "missing_tables": tuple(missing_tables),
+        }
+
+    missing_columns = tuple(
+        sorted(set(_FULL_LINKAGE_PRICE_REQUIRED_COLUMNS) - _table_columns(conn, table))
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_columns": missing_columns,
+        }
+
+    saved_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT snapshot_id, event_slug, condition_id, selected_outcome_token_id,
+                   orderbook_top_bid, orderbook_top_ask, raw_orderbook_hash,
+                   captured_at
+            FROM executable_market_snapshots
+            WHERE snapshot_id = ?
+            """,
+            (snapshot_id_value,),
+        ).fetchone()
+    finally:
+        conn.row_factory = saved_factory
+    if row is None:
+        return {"status": "refused_missing_snapshot", "snapshot_id": snapshot_id_value}
+
+    market_slug = _forward_clean_str(row["event_slug"])
+    token_id = _forward_clean_str(row["selected_outcome_token_id"])
+    condition_id = _forward_clean_str(row["condition_id"])
+    best_bid = _forward_price(row["orderbook_top_bid"])
+    best_ask = _forward_price(row["orderbook_top_ask"])
+    raw_orderbook_hash = _forward_clean_str(row["raw_orderbook_hash"])
+    recorded_at_value = _forward_clean_str(recorded_at) or _forward_clean_str(row["captured_at"])
+    source_value = _forward_clean_str(source)
+    if not (
+        market_slug
+        and token_id
+        and condition_id
+        and best_bid is not None
+        and best_ask is not None
+        and raw_orderbook_hash
+        and recorded_at_value
+        and source_value
+    ):
+        return {"status": "refused_missing_snapshot_facts", "snapshot_id": snapshot_id_value}
+
+    price = _mid_price(best_bid, best_ask)
+    if price is None:
+        return {
+            "status": "refused_crossed_orderbook",
+            "snapshot_id": snapshot_id_value,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+        }
+
+    values = {
+        "market_slug": market_slug,
+        "token_id": token_id,
+        "price": price,
+        "recorded_at": recorded_at_value,
+        "hours_since_open": None,
+        "hours_to_resolution": None,
+        "market_price_linkage": "full",
+        "source": source_value,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "raw_orderbook_hash": raw_orderbook_hash,
+        "snapshot_id": snapshot_id_value,
+        "condition_id": condition_id,
+    }
+    result = _insert_full_linkage_price_history(conn, values)
+    return {
+        "status": result,
+        "table": table,
+        "snapshot_id": snapshot_id_value,
+        "token_id": token_id,
+        "recorded_at": recorded_at_value,
+    }
 
 
 def log_forward_market_substrate(

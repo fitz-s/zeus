@@ -1693,6 +1693,83 @@ Residual blockers:
   fills/lots, a WebSocket/orderbook-grade price capture path, and the economics
   engine itself.
 
+## Phase 5E Full Market-Price Linkage Substrate - 2026-04-30
+
+Scope:
+
+- Remove the schema/row-shape blocker introduced by the Phase 5D full-linkage
+  readiness guard by writing full CLOB-linked `market_price_history` rows from
+  executable snapshot orderbook facts.
+- Preserve no-go boundaries: no production DB mutation was performed during
+  validation, no historical backfill, no live venue submit/cancel/redeem, no
+  CLOB cutover, no source routing, no Paris change, no WebSocket activation, no
+  PnL computation, and no economics tombstone weakening. When deployed, the
+  runtime call is a live-path DB substrate write and remains under the existing
+  G1 live no-go / operator deploy gates.
+
+Implementation:
+
+- Added exact Phase 5E / hyphenated operator wording to the existing
+  `phase 5 forward substrate producer implementation` topology profile so
+  full-linkage producer work no longer routes through generic/T4 ambiguity.
+- `market_price_history` DDL now includes nullable/full-linkage fields:
+  `market_price_linkage`, `source`, `best_bid`, `best_ask`,
+  `raw_orderbook_hash`, `snapshot_id`, and `condition_id`, plus lookup indexes
+  for snapshot and condition timestamps. Existing price-only rows default to
+  `market_price_linkage='price_only'` and `source='GAMMA_SCANNER'`.
+- Added `log_executable_snapshot_market_price_linkage(conn, snapshot_id=...)`
+  in `src/state/db.py`. The helper requires an explicit caller-supplied
+  connection, refuses missing tables/schema/snapshot facts/crossed books,
+  writes no commits, and reports idempotent unchanged rows or conflicts without
+  overwriting existing facts.
+- `cycle_runtime` calls the helper immediately after executable snapshot
+  capture and before the existing snapshot commit. This records the same CLOB
+  top-of-book facts already captured for executable identity; it does not add a
+  new venue side-effect surface. Failure/refusal statuses outside `inserted`
+  and `unchanged` now mark the cycle degraded instead of silently hiding a
+  missing linkage row.
+
+Verification:
+
+- Focused first pass:
+  `pytest -q -p no:cacheprovider tests/test_schema_v2_gate_a.py::TestApplyV2SchemaSmoke::test_apply_v2_schema_creates_market_price_history tests/test_schema_v2_gate_a.py::TestApplyV2SchemaSmoke::test_market_price_history_accepts_full_linkage_shape tests/test_market_scanner_provenance.py::TestForwardMarketSubstrateProducer::test_forward_substrate_writes_verified_scanner_rows_without_unblocking_economics tests/test_market_scanner_provenance.py::TestForwardMarketSubstrateProducer::test_executable_snapshot_price_linkage_writes_full_clob_row_without_unblocking_engine tests/test_market_scanner_provenance.py::TestForwardMarketSubstrateProducer::test_executable_snapshot_price_linkage_is_idempotent_and_does_not_overwrite_conflicts tests/test_market_scanner_provenance.py::TestForwardMarketSubstrateProducer::test_executable_snapshot_price_linkage_refuses_bad_or_absent_snapshot_facts tests/test_runtime_guards.py::test_live_entry_captures_and_commits_snapshot_before_executor tests/test_digest_profile_matching.py::test_phase5e_full_price_linkage_wording_routes_to_producer_profile`
+  -> 8 passed, 2 subtests passed.
+- Broader focused group:
+  `pytest -q -p no:cacheprovider tests/test_schema_v2_gate_a.py tests/test_market_scanner_provenance.py tests/test_runtime_guards.py::test_live_entry_captures_and_commits_snapshot_before_executor tests/test_runtime_guards.py::test_entry_intent_receives_executable_snapshot_fields tests/test_runtime_guards.py::test_forward_price_linkage_success_statuses_do_not_degrade_cycle tests/test_runtime_guards.py::test_forward_price_linkage_non_success_statuses_degrade_cycle tests/test_backtest_skill_economics.py tests/test_digest_profile_matching.py::test_phase5c_forward_substrate_producer_wording_routes_to_producer_profile tests/test_digest_profile_matching.py::test_phase5c_short_producer_wording_routes_to_producer_profile tests/test_digest_profile_matching.py::test_phase5e_full_price_linkage_wording_routes_to_producer_profile tests/test_digest_profiles_equivalence.py`
+  -> 104 passed, 9 subtests passed.
+- Reviewer remediation:
+  exact hyphenated/operator Phase 5E topology wording now routes to the forward
+  substrate producer profile; runtime linkage status classification now marks
+  every non-`inserted`/`unchanged` status degraded; packet docs now distinguish
+  "no production DB touched during validation" from the deployed live-path DB
+  substrate write that remains under G1 live no-go / operator gates.
+- Closeout checks:
+  `python3 scripts/digest_profiles_export.py --check` -> OK;
+  `python3 scripts/semantic_linter.py --check ...` over scoped source, tests,
+  docs, and architecture files -> pass; planning-lock -> topology check ok;
+  map-maintenance closeout -> topology check ok; `git diff --check -- ...`
+  over the scoped changed-file set -> pass.
+- Independent verifier -> PASS. Independent code-reviewer initially returned
+  REVISE for degraded-status coverage, exact hyphenated routing, and
+  production-DB wording; after remediation the re-review returned APPROVE with
+  no remaining findings.
+- Broad digest profile suite:
+  `pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py tests/test_digest_profiles_equivalence.py`
+  -> 135 passed, 1 failed. The failure is the pre-existing
+  `test_agent_runtime_profile_admits_runtime_surfaces` route-card wording
+  mismatch where current topology reports `proceed with planning-lock...` while
+  the test expects an older `proceed only with packet plan...` prefix. The
+  Phase 5E route regressions and digest equivalence pass; this package does not
+  expand into the unrelated agent-runtime profile cleanup.
+
+Residual blockers:
+
+- DSA-19 remains open. This row-shape producer only supplies full-linkage
+  market-price substrate from executable entry snapshots. Promotion-grade
+  economics still requires real forward venue/fill/probability/selection/
+  settlement substrate over live/staged-live runs, WebSocket/orderbook-grade
+  broader market capture, confirmed fills/lots, and the economics engine.
+
 ## Phase 2C Execution Capability Proof Slice - 2026-04-29
 
 Scope:
