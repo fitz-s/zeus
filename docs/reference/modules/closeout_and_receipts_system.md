@@ -4,7 +4,10 @@
 
 ## Purpose
 
-The closeout and receipts system ensures a packet ends with scoped validation, companion updates, work evidence, and explicit deferrals. It protects Zeus from both under-closing risky work and over-blocking a packet on unrelated global drift.
+The closeout and receipts system ensures a packet or explicit closeout claim
+ends with scoped validation, companion updates, work evidence, and explicit
+deferrals. It protects Zeus from both under-closing risky work and over-blocking
+a packet on unrelated global drift.
 
 ## Authority anchors
 
@@ -38,7 +41,9 @@ A closeout payload has three distinct concepts:
 
 ## Hidden obligations
 
-- Missing work records and missing receipts are real closeout blockers for repo-changing work.
+- Missing work records and missing receipts are real blockers for packet
+  closeout or an explicit `packet_closeout_complete` claim. They are not a
+  default artifact stack for direct T0/T1 edits.
 - Planning-lock files need plan evidence before implementation closes.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
 - Warning deferrals must name an owner, an invalidation condition, and a bounded
@@ -67,7 +72,8 @@ A closeout payload has three distinct concepts:
 - Use `update_companion` for missing scoped router/registry/map updates.
 - Use `add_registry_row` for newly tracked docs/tests/scripts/source files.
 - Use `propose_owner_manifest` when closeout reveals ambiguous ownership.
-- Record severe blockers in packet work logs and receipts rather than deleting the gate.
+- For packet closeout, record severe blockers in packet work logs and receipts
+  rather than deleting the gate.
 - Record runtime-local artifact treatment: promoted, summarized, discarded, or
   left local.
 

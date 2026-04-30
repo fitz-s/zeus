@@ -4608,6 +4608,26 @@ def test_runtime_route_card_t1_omits_packet_ceremony():
     assert "work_log" not in route_text
 
 
+def test_runtime_reference_docs_keep_artifacts_claim_scoped():
+    topology_text = (
+        topology_doctor.ROOT / "docs/reference/modules/topology_system.md"
+    ).read_text()
+    doctor_text = (
+        topology_doctor.ROOT / "docs/reference/modules/topology_doctor_system.md"
+    ).read_text()
+    closeout_text = (
+        topology_doctor.ROOT / "docs/reference/modules/closeout_and_receipts_system.md"
+    ).read_text()
+
+    combined = "\n".join([topology_text, doctor_text, closeout_text])
+
+    assert "T3 work gets packet evidence, planning lock, and closeout receipts" not in combined
+    assert "Close with changed-file `closeout`, targeted tests" not in combined
+    assert "default artifact stack" in closeout_text
+    assert "direct T0/T1 edits" in doctor_text
+    assert "packet closeout, explicit claims, or semantic ambiguity" in topology_text
+
+
 def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 
