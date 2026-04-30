@@ -22,12 +22,18 @@ import numpy as np
 import pytest
 
 import src.engine.evaluator as evaluator_module
-from src.engine.evaluator import _record_selection_family_facts, _selected_edge_keys_from_full_family
+from src.engine.evaluator import (
+    _filter_executable_selected_edges,
+    _record_selection_family_facts,
+    _selected_edge_keys_from_full_family,
+)
 from src.config import cities_by_name
 from src.state.db import get_connection, init_schema
 from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.fdr_filter import fdr_filter
+import src.strategy.market_analysis as market_analysis_module
+from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.risk_limits import RiskLimits
 from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id, make_edge_family_id
 from src.types import Bin, BinEdge
@@ -111,6 +117,13 @@ def _patch_mature_calibration(monkeypatch) -> None:
         "calibrate_and_normalize",
         lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
     )
+
+
+def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
+    flags = dict(evaluator_module.settings["feature_flags"])
+    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
+    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
 
 class TestFDRFilter:
@@ -416,6 +429,28 @@ class TestSelectionFamilySubstrate:
 
         assert selected == set()
 
+    def test_full_family_selected_key_must_materialize_as_edge(self):
+        edge = BinEdge(
+            bin=Bin(low=40, high=41, unit="F", label="40-41°F"),
+            direction="buy_yes",
+            edge=0.05,
+            ci_lower=0.01,
+            ci_upper=0.10,
+            p_model=0.55,
+            p_market=0.50,
+            p_posterior=0.55,
+            entry_price=0.50,
+            p_value=0.001,
+            vwmp=0.50,
+            forward_edge=0.05,
+        )
+
+        with pytest.raises(ValueError, match="FDR_SELECTED_EDGE_UNEXECUTABLE:40-41°F/buy_no"):
+            _filter_executable_selected_edges(
+                [edge],
+                {("40-41°F", "buy_no")},
+            )
+
     def test_multi_bin_full_family_scan_excludes_unexecutable_buy_no(self):
         class FakeAnalysis:
             bins = [
@@ -445,6 +480,131 @@ class TestSelectionFamilySubstrate:
             "39-40°F",
             "41°F or higher",
         ]
+
+    def test_multi_bin_full_family_scan_uses_native_no_market_price(self):
+        class FakeAnalysis:
+            bins = [
+                Bin(low=None, high=67, unit="F", label="67°F or lower"),
+                Bin(low=68, high=69, unit="F", label="68-69°F"),
+                Bin(low=70, high=None, unit="F", label="70°F or higher"),
+            ]
+            p_cal = np.array([0.20, 0.50, 0.30])
+            p_market = np.array([0.90, 0.05, 0.05])
+            p_market_no = np.array([0.55, 0.99, 0.99])
+            p_posterior = np.array([0.20, 0.50, 0.30])
+
+            def supports_buy_no_edges(self, idx=None):
+                return idx == 0 if idx is not None else True
+
+            def buy_no_market_price(self, idx):
+                return float(self.p_market_no[idx])
+
+            def _bootstrap_bin(self, idx, n):
+                return (-0.10, 0.05, 0.50)
+
+            def _bootstrap_bin_no(self, idx, n):
+                return (0.01, 0.05, 0.001)
+
+        hypotheses = scan_full_hypothesis_family(FakeAnalysis(), n_bootstrap=2)
+        no_hypotheses = [h for h in hypotheses if h.direction == "buy_no"]
+
+        assert len(no_hypotheses) == 1
+        assert no_hypotheses[0].range_label == "67°F or lower"
+        assert no_hypotheses[0].p_market == 0.55
+        assert no_hypotheses[0].entry_price == 0.55
+
+    def test_market_analysis_multi_bin_buy_no_requires_native_no_quote(self):
+        bins = [
+            Bin(low=None, high=67, unit="F", label="67°F or lower"),
+            Bin(low=68, high=69, unit="F", label="68-69°F"),
+            Bin(low=70, high=None, unit="F", label="70°F or higher"),
+        ]
+        analysis = MarketAnalysis(
+            p_raw=np.array([0.20, 0.50, 0.30]),
+            p_cal=np.array([0.20, 0.50, 0.30]),
+            p_market=np.array([0.90, 0.05, 0.05]),
+            p_market_no=np.array([0.55, 0.99, 0.99]),
+            buy_no_quote_available=np.array([True, False, False]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([66.0, 68.0, 72.0]),
+        )
+        analysis._bootstrap_bin = lambda idx, n: (-0.10, 0.05, 0.50)
+        analysis._bootstrap_bin_no = lambda idx, n: (0.01, 0.05, 0.001)
+
+        edges = analysis.find_edges(n_bootstrap=2)
+
+        assert [(edge.bin.label, edge.direction) for edge in edges] == [
+            ("67°F or lower", "buy_no")
+        ]
+        assert edges[0].p_market == 0.55
+        assert edges[0].entry_price == 0.55
+        assert edges[0].vwmp == 0.55
+
+    def test_market_analysis_multi_bin_buy_no_requires_explicit_quote_mask(self):
+        bins = [
+            Bin(low=None, high=67, unit="F", label="67°F or lower"),
+            Bin(low=68, high=69, unit="F", label="68-69°F"),
+            Bin(low=70, high=None, unit="F", label="70°F or higher"),
+        ]
+        analysis = MarketAnalysis(
+            p_raw=np.array([0.20, 0.50, 0.30]),
+            p_cal=np.array([0.20, 0.50, 0.30]),
+            p_market=np.array([0.90, 0.05, 0.05]),
+            p_market_no=np.array([0.55, 0.99, 0.99]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([66.0, 68.0, 72.0]),
+        )
+        analysis._bootstrap_bin = lambda idx, n: (-0.10, 0.05, 0.50)
+        analysis._bootstrap_bin_no = lambda idx, n: (0.01, 0.05, 0.001)
+
+        assert analysis.supports_buy_no_edges() is False
+        assert analysis.supports_buy_no_edges(0) is False
+        assert all(edge.direction != "buy_no" for edge in analysis.find_edges(n_bootstrap=2))
+
+    def test_native_multibin_buy_no_flags_are_strict_boolean(self, monkeypatch):
+        flags = dict(evaluator_module.settings["feature_flags"])
+        flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = "yes"
+        monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
+
+        with pytest.raises(ValueError, match="must be boolean"):
+            evaluator_module.native_multibin_buy_no_shadow_enabled()
+
+    def test_native_multibin_buy_no_live_requires_shadow(self, monkeypatch):
+        _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=True)
+
+        with pytest.raises(ValueError, match="requires"):
+            evaluator_module.native_multibin_buy_no_live_enabled()
+
+    def test_multi_bin_buy_no_bootstrap_uses_native_no_market_price(self, monkeypatch):
+        bins = [
+            Bin(low=None, high=67, unit="F", label="67°F or lower"),
+            Bin(low=68, high=69, unit="F", label="68-69°F"),
+            Bin(low=70, high=None, unit="F", label="70°F or higher"),
+        ]
+        analysis = MarketAnalysis(
+            p_raw=np.array([0.20, 0.50, 0.30]),
+            p_cal=np.array([0.20, 0.50, 0.30]),
+            p_market=np.array([0.90, 0.05, 0.05]),
+            p_market_no=np.array([0.55, 0.99, 0.99]),
+            buy_no_quote_available=np.array([True, False, False]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([66.0, 68.0, 72.0]),
+            rng_seed=123,
+        )
+        monkeypatch.setattr(
+            market_analysis_module,
+            "compute_posterior",
+            lambda *args, **kwargs: np.array([0.20, 0.50, 0.30]),
+        )
+
+        ci_lo, ci_hi, p_value = analysis._bootstrap_bin_no(0, 3)
+
+        assert ci_lo == pytest.approx(0.25)
+        assert ci_hi == pytest.approx(0.25)
+        assert p_value == 0.0
 
     def test_binary_full_family_scan_keeps_executable_buy_no(self):
         class FakeAnalysis:
@@ -567,6 +727,7 @@ class TestSelectionFamilySubstrate:
         )
         now = datetime.now(timezone.utc)
         _patch_mature_calibration(monkeypatch)
+        _set_native_multibin_buy_no_flags(monkeypatch, shadow=True)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):
@@ -608,60 +769,82 @@ class TestSelectionFamilySubstrate:
             def forecast_context(self):
                 return {"day0_test": True}
 
+        analysis_kwargs = {}
+
         class FakeAnalysis:
             def __init__(self, **kwargs):
+                analysis_kwargs.update(kwargs)
                 self.selected_method = kwargs.get("selected_method", "test_fixture")
                 self.bias_correction = kwargs.get("bias_correction", kwargs.get("bias_corrected", False))
                 # NOTE: production kwargs p_raw / p_cal / p_market / alpha /
                 # calibrator / lead_days / etc. are intentionally dropped.
                 # We pin bin topology from the candidate and fabricate a
                 # 1-bin-positive-edge layout so FDR + BH exercise a
-                # deterministic selection (bin 0 YES only).
+                # deterministic selection (bin 0 native-NO only).
                 self.bins = kwargs["bins"]
                 self.p_raw = kwargs["p_raw"]
                 self.p_cal = kwargs["p_cal"]
+                self.p_market_no = kwargs["p_market_no"]
+                self.buy_no_quote_available = kwargs["buy_no_quote_available"]
                 # T2.d.1 2026-04-24: scale p_market/p_posterior to n_bins
-                # (now 4 with left-shoulder). Bin 0 keeps the positive edge
-                # (p_posterior > p_market) so exactly one hypothesis passes
-                # BH + prefilter; bins 1-3 fail at edge<=0 prefilter.
+                # (now 4 with left-shoulder). Bin 0 keeps the positive native
+                # NO edge; YES hypotheses and other NO bins fail prefilter.
                 _n_bins = len(self.bins)
                 self.p_market = np.full(_n_bins, 0.2)
-                self.p_market[0] = 0.1
+                self.p_market[0] = 0.7
                 self.p_posterior = np.full(_n_bins, 0.15)
-                self.p_posterior[0] = 1.0 - float(self.p_posterior[1:].sum())
+                self.p_posterior[0] = 0.20
 
             def forecast_context(self):
                 return {"uncertainty": {}, "location": {}}
 
             def find_edges(self, n_bootstrap=None):
+                p_market_no = float(self.p_market_no[0])
+                p_posterior_no = 1.0 - float(self.p_posterior[0])
                 return [
                     BinEdge(
                         bin=self.bins[0],
-                        direction="buy_yes",
-                        edge=0.1,
+                        direction="buy_no",
+                        edge=p_posterior_no - p_market_no,
                         ci_lower=0.02,
                         ci_upper=0.2,
-                        p_model=0.2,
-                        p_market=0.1,
-                        p_posterior=0.2,
-                        entry_price=0.1,
+                        p_model=0.8,
+                        p_market=p_market_no,
+                        p_posterior=p_posterior_no,
+                        entry_price=p_market_no,
                         p_value=0.001,
-                        vwmp=0.1,
-                        forward_edge=0.1,
+                        vwmp=p_market_no,
+                        forward_edge=p_posterior_no - p_market_no,
                     )
                 ]
 
+            def supports_buy_no_edges(self, idx=None):
+                return idx == 0 if idx is not None else True
+
+            def buy_no_market_price(self, idx):
+                return float(self.p_market_no[idx])
+
             def _bootstrap_bin(self, idx, n):
-                return (0.02, 0.2, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
+                return (-0.2, -0.01, 0.5)
 
             def _bootstrap_bin_no(self, idx, n):
-                return (-0.2, -0.01, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
+                return (0.02, 0.2, 0.001) if idx == 0 else (-0.1, 0.1, 0.5)
+
+        fee_rate_tokens = []
 
         class FakeClob:
             paper_mode = True
+            calls = []
 
             def get_best_bid_ask(self, token_id):
+                self.calls.append(token_id)
+                if token_id.startswith("no"):
+                    return (0.4, 0.6, 10.0, 10.0)
                 return (0.1, 0.2, 10.0, 10.0)
+
+            def get_fee_rate(self, token_id):
+                fee_rate_tokens.append(token_id)
+                return 0.0
 
         monkeypatch.setattr(
             evaluator_module,
@@ -781,15 +964,20 @@ class TestSelectionFamilySubstrate:
         meta = json.loads(conn.execute("SELECT meta_json FROM selection_family_fact").fetchone()["meta_json"])
         conn.close()
 
-        # Phase 4 2026-04-29: multi-bin NO hypotheses are not executable with
-        # YES-only VWMP, so the tested FDR family is the executable YES side.
-        # Bin 0 is the only one with positive edge + CI_lower > 0; others fail
-        # at prefilter. active_fdr_selected remains 1.
+        # Native NO quote evidence makes bin 0 buy_no executable; FDR selected
+        # the same hypothesis that evaluate_candidate materialized as a BinEdge.
         assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
+        assert decisions[0].edge.direction == "buy_no"
+        assert decisions[0].edge.p_market == pytest.approx(0.5)
+        assert decisions[0].edge.entry_price == pytest.approx(0.5)
+        assert decisions[0].edge.vwmp == pytest.approx(0.5)
         assert family_count == 1
-        assert hypothesis_count == 4
-        assert meta["tested_hypotheses"] == 4
+        assert hypothesis_count == 5
+        assert meta["tested_hypotheses"] == 5
         assert meta["active_fdr_selected"] == 1
+        assert analysis_kwargs["buy_no_quote_available"].tolist() == [True, True, True, True]
+        assert analysis_kwargs["p_market_no"].tolist() == [0.5, 0.5, 0.5, 0.5]
+        assert fee_rate_tokens == ["no0"]
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with

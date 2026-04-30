@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -86,6 +86,138 @@ def _decision_source_context_from_epistemic_json(value: str | None) -> DecisionS
         return None
     forecast_context = payload.get("forecast_context")
     return DecisionSourceContext.from_forecast_context(forecast_context)
+
+
+def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: dict) -> float | None:
+    """Reprice a selected entry decision from the executable snapshot book.
+
+    The evaluator quote selects a candidate. The post-decision executable
+    snapshot is the pre-submit pricing authority.
+    """
+
+    snapshot_id = str(snapshot_fields.get("executable_snapshot_id") or "")
+    if not snapshot_id:
+        raise ValueError("EXECUTABLE_SNAPSHOT_UNAVAILABLE: missing snapshot_id")
+    if decision.edge is None:
+        raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing edge")
+    from src.data.market_scanner import _top_book_level_decimal
+    from src.engine.evaluator import _size_at_execution_price_boundary
+    from src.state.snapshot_repo import get_snapshot
+    from src.strategy.market_fusion import vwmp
+
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+    tokens = dict(getattr(decision, "tokens", {}) or {})
+    expected_token = tokens.get("no_token_id") if decision.edge.direction == "buy_no" else tokens.get("token_id")
+    expected_label = "NO" if decision.edge.direction == "buy_no" else "YES"
+    if str(snapshot.selected_outcome_token_id or "") != str(expected_token or ""):
+        raise ValueError("EXECUTABLE_SNAPSHOT_TOKEN_MISMATCH")
+    if str(snapshot.outcome_label or "").upper() != expected_label:
+        raise ValueError("EXECUTABLE_SNAPSHOT_OUTCOME_MISMATCH")
+
+    try:
+        orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: invalid orderbook JSON: {exc}") from exc
+    best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
+    best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+    best_bid_float = float(best_bid)
+    best_ask_float = float(best_ask)
+    bid_size_float = float(bid_size)
+    ask_size_float = float(ask_size)
+    original_edge = decision.edge
+    original_size = float(getattr(decision, "size_usd", 0.0) or 0.0)
+    snapshot_vwmp = vwmp(best_bid_float, best_ask_float, bid_size_float, ask_size_float)
+    repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
+    if repriced_edge <= 0.0:
+        raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
+
+    sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
+    kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
+    fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
+    safety_cap = getattr(decision, "safety_cap_usd", None)
+    if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
+        raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+    repriced_size = _size_at_execution_price_boundary(
+        p_posterior=float(decision.edge.p_posterior),
+        entry_price=float(snapshot_vwmp),
+        fee_rate=fee_rate,
+        sizing_bankroll=sizing_bankroll,
+        kelly_multiplier=kelly_multiplier,
+        safety_cap_usd=safety_cap,
+    )
+    if repriced_size <= 0.0:
+        raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
+    final_best_ask: float | None = None
+    final_price = float(snapshot_vwmp)
+    best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
+    if best_ask_edge > 0.0:
+        size_at_best_ask = _size_at_execution_price_boundary(
+            p_posterior=float(decision.edge.p_posterior),
+            entry_price=best_ask_float,
+            fee_rate=fee_rate,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=kelly_multiplier,
+            safety_cap_usd=safety_cap,
+        )
+        if size_at_best_ask <= 0.0:
+            final_best_ask = None
+        else:
+            visible_best_ask_usd = best_ask_float * ask_size_float
+            if visible_best_ask_usd + 1e-9 < size_at_best_ask:
+                raise ValueError(
+                    "BUY_NO_TAKER_DEPTH_CONSTRAINED: "
+                    f"visible_best_ask_usd={visible_best_ask_usd:.6f} "
+                    f"required_usd={size_at_best_ask:.6f}"
+                )
+            final_best_ask = best_ask_float
+            final_price = best_ask_float
+            repriced_size = size_at_best_ask
+
+    decision.edge = replace(
+        decision.edge,
+        edge=repriced_edge,
+        p_market=float(snapshot_vwmp),
+        entry_price=float(snapshot_vwmp),
+        vwmp=float(snapshot_vwmp),
+        forward_edge=repriced_edge,
+    )
+    if getattr(decision, "edge_context", None) is not None:
+        if is_dataclass(decision.edge_context):
+            decision.edge_context = replace(decision.edge_context, forward_edge=repriced_edge)
+        else:
+            setattr(decision.edge_context, "forward_edge", repriced_edge)
+    try:
+        edge_context_payload = json.loads(getattr(decision, "edge_context_json", "") or "{}")
+        if isinstance(edge_context_payload, dict):
+            edge_context_payload["forward_edge"] = repriced_edge
+            decision.edge_context_json = json.dumps(edge_context_payload, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        pass
+    decision.size_usd = float(repriced_size)
+    if "executable_snapshot_repriced" not in decision.applied_validations:
+        decision.applied_validations.append("executable_snapshot_repriced")
+    tokens["executable_snapshot_reprice"] = {
+        "snapshot_id": snapshot_id,
+        "raw_orderbook_hash": str(snapshot.raw_orderbook_hash or ""),
+        "selected_outcome_token_id": str(snapshot.selected_outcome_token_id or ""),
+        "outcome_label": str(snapshot.outcome_label or ""),
+        "old_entry_price": float(getattr(original_edge, "entry_price", 0.0) or 0.0),
+        "old_vwmp": float(getattr(original_edge, "vwmp", 0.0) or 0.0),
+        "old_size_usd": original_size,
+        "snapshot_vwmp": float(snapshot_vwmp),
+        "snapshot_best_bid": best_bid_float,
+        "snapshot_best_bid_size": bid_size_float,
+        "snapshot_best_ask": best_ask_float,
+        "snapshot_best_ask_size": ask_size_float,
+        "final_limit_price": final_price,
+        "final_best_ask": final_best_ask,
+        "repriced_edge": repriced_edge,
+        "repriced_size_usd": float(repriced_size),
+    }
+    decision.tokens = tokens
+    return final_best_ask
 
 
 def normalize_order_status(payload) -> str:
@@ -1466,6 +1598,67 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
+                    if (
+                        str(env or "").strip().lower() == "live"
+                        and d.edge is not None
+                        and d.edge.direction == "buy_no"
+                        and len(parseable_labels) > 2
+                    ):
+                        from src.engine.evaluator import native_multibin_buy_no_live_enabled
+
+                        try:
+                            native_buy_no_live_enabled = native_multibin_buy_no_live_enabled()
+                            live_flag_error = ""
+                        except ValueError as exc:
+                            native_buy_no_live_enabled = False
+                            live_flag_error = str(exc)
+                        if not native_buy_no_live_enabled:
+                            summary["no_trades"] += 1
+                            rejection_stage = "RISK_REJECTED"
+                            rejection_reasons = [
+                                live_flag_error
+                                or "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+                            ]
+                            _record_opportunity_fact(
+                                candidate,
+                                d,
+                                should_trade=False,
+                                rejection_stage=rejection_stage,
+                                rejection_reasons=rejection_reasons,
+                            )
+                            artifact.add_no_trade(
+                                deps.NoTradeCase(
+                                    decision_id=d.decision_id,
+                                    city=city.name,
+                                    target_date=candidate.target_date,
+                                    range_label=d.edge.bin.label if d.edge else "",
+                                    direction=d.edge.direction if d.edge else "",
+                                    rejection_stage=rejection_stage,
+                                    strategy=strategy_name,
+                                    strategy_key=strategy_name,
+                                    edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                    availability_status=getattr(d, "availability_status", ""),
+                                    rejection_reasons=rejection_reasons,
+                                    best_edge=d.edge.edge if d.edge else 0.0,
+                                    model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                    market_price=d.edge.entry_price if d.edge else 0.0,
+                                    decision_snapshot_id=d.decision_snapshot_id,
+                                    selected_method=d.selected_method,
+                                    settlement_semantics_json=d.settlement_semantics_json,
+                                    epistemic_context_json=d.epistemic_context_json,
+                                    edge_context_json=d.edge_context_json,
+                                    applied_validations=list(d.applied_validations),
+                                    bin_labels=parseable_labels,
+                                    p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                    p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                    p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                    alpha=getattr(d, "alpha", 0.0),
+                                    market_hours_open=candidate.hours_since_open,
+                                    agreement=getattr(d, "agreement", ""),
+                                    timestamp=decision_time.isoformat(),
+                                )
+                            )
+                            continue
                     snapshot_fields = _execution_snapshot_fields(d.tokens)
                     missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
                     snapshot_capture_error = ""
@@ -1591,6 +1784,58 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
+                    snapshot_best_ask = None
+                    if str(env or "").strip().lower() == "live":
+                        try:
+                            snapshot_best_ask = _reprice_decision_from_executable_snapshot(
+                                conn,
+                                d,
+                                snapshot_fields,
+                            )
+                        except Exception as exc:
+                            summary["no_trades"] += 1
+                            rejection_stage = "EXECUTION_FAILED"
+                            rejection_reasons = [f"executable_snapshot_reprice_failed:{exc}"]
+                            _record_opportunity_fact(
+                                candidate,
+                                d,
+                                should_trade=False,
+                                rejection_stage=rejection_stage,
+                                rejection_reasons=rejection_reasons,
+                            )
+                            artifact.add_no_trade(
+                                deps.NoTradeCase(
+                                    decision_id=d.decision_id,
+                                    city=city.name,
+                                    target_date=candidate.target_date,
+                                    range_label=d.edge.bin.label if d.edge else "",
+                                    direction=d.edge.direction if d.edge else "",
+                                    rejection_stage=rejection_stage,
+                                    strategy=strategy_name,
+                                    strategy_key=strategy_name,
+                                    edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                    availability_status=getattr(d, "availability_status", ""),
+                                    rejection_reasons=rejection_reasons,
+                                    best_edge=d.edge.edge if d.edge else 0.0,
+                                    model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                    market_price=d.edge.entry_price if d.edge else 0.0,
+                                    decision_snapshot_id=d.decision_snapshot_id,
+                                    selected_method=d.selected_method,
+                                    settlement_semantics_json=d.settlement_semantics_json,
+                                    epistemic_context_json=d.epistemic_context_json,
+                                    edge_context_json=d.edge_context_json,
+                                    applied_validations=list(d.applied_validations),
+                                    bin_labels=parseable_labels,
+                                    p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                    p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                    p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                    alpha=getattr(d, "alpha", 0.0),
+                                    market_hours_open=candidate.hours_since_open,
+                                    agreement=getattr(d, "agreement", ""),
+                                    timestamp=decision_time.isoformat(),
+                                )
+                            )
+                            continue
                     _record_opportunity_fact(
                         candidate,
                         d,
@@ -1598,31 +1843,91 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_stage="",
                         rejection_reasons=[],
                     )
-                    intent = deps.create_execution_intent(
-                        edge_context=d.edge_context,
-                        edge=d.edge,
-                        size_usd=d.size_usd,
-                        mode=mode.value,
-                        market_id=d.tokens["market_id"],
-                        token_id=d.tokens["token_id"],
-                        no_token_id=d.tokens["no_token_id"],
-                        event_id=(
-                            candidate.event_id
-                            or candidate.slug
-                            or f"{city.name}:{candidate.target_date}"
-                        ),
-                        resolution_window=candidate.target_date,
-                        correlation_key=(
-                            f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
-                        ),
-                        executable_snapshot_id=snapshot_fields["executable_snapshot_id"],
-                        executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
-                        executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
-                        executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
-                        decision_source_context=_decision_source_context_from_epistemic_json(
-                            d.epistemic_context_json
-                        ),
-                    )
+                    try:
+                        intent = deps.create_execution_intent(
+                            edge_context=d.edge_context,
+                            edge=d.edge,
+                            size_usd=d.size_usd,
+                            mode=mode.value,
+                            market_id=d.tokens["market_id"],
+                            token_id=d.tokens["token_id"],
+                            no_token_id=d.tokens["no_token_id"],
+                            best_ask=snapshot_best_ask,
+                            repriced_limit_price=snapshot_best_ask,
+                            event_id=(
+                                candidate.event_id
+                                or candidate.slug
+                                or f"{city.name}:{candidate.target_date}"
+                            ),
+                            resolution_window=candidate.target_date,
+                            correlation_key=(
+                                f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
+                            ),
+                            executable_snapshot_id=snapshot_fields["executable_snapshot_id"],
+                            executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
+                            executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
+                            executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
+                            decision_source_context=_decision_source_context_from_epistemic_json(
+                                d.epistemic_context_json
+                            ),
+                        )
+                        if str(env or "").strip().lower() == "live" and isinstance(getattr(d, "tokens", None), dict):
+                            reprice_payload = d.tokens.get("executable_snapshot_reprice")
+                            if isinstance(reprice_payload, dict):
+                                submitted_limit = float(getattr(intent, "limit_price", 0.0) or 0.0)
+                                if snapshot_best_ask is not None and abs(submitted_limit - float(snapshot_best_ask)) > 1e-9:
+                                    raise ValueError(
+                                        "EXECUTABLE_LIMIT_MISMATCH: "
+                                        f"repriced_final={float(snapshot_best_ask):.6f} "
+                                        f"intent_limit={submitted_limit:.6f}"
+                                    )
+                                reprice_payload["submitted_limit_price"] = submitted_limit
+                                reprice_payload["final_limit_price"] = submitted_limit
+                                reprice_payload["repriced_limit_forced"] = snapshot_best_ask is not None
+                    except Exception as exc:
+                        summary["no_trades"] += 1
+                        rejection_stage = "EXECUTION_FAILED"
+                        rejection_reasons = [f"execution_intent_rejected:{exc}"]
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
+                        artifact.add_no_trade(
+                            deps.NoTradeCase(
+                                decision_id=d.decision_id,
+                                city=city.name,
+                                target_date=candidate.target_date,
+                                range_label=d.edge.bin.label if d.edge else "",
+                                direction=d.edge.direction if d.edge else "",
+                                rejection_stage=rejection_stage,
+                                strategy=strategy_name,
+                                strategy_key=strategy_name,
+                                edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                availability_status=getattr(d, "availability_status", ""),
+                                rejection_reasons=rejection_reasons,
+                                best_edge=d.edge.edge if d.edge else 0.0,
+                                model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                market_price=d.edge.entry_price if d.edge else 0.0,
+                                decision_snapshot_id=d.decision_snapshot_id,
+                                selected_method=d.selected_method,
+                                settlement_semantics_json=d.settlement_semantics_json,
+                                epistemic_context_json=d.epistemic_context_json,
+                                edge_context_json=d.edge_context_json,
+                                applied_validations=list(d.applied_validations),
+                                bin_labels=parseable_labels,
+                                p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
+                                agreement=getattr(d, "agreement", ""),
+                                timestamp=decision_time.isoformat(),
+                            )
+                        )
+                        continue
                     # P1.S5: thread decision_id from d.decision_id so the
                     # executor can use a stable upstream ID for idempotency.
                     # We do NOT pass conn from cycle_runtime (P2 concern: the
@@ -1668,6 +1973,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             "p_market_vector": d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
                             "alpha": getattr(d, "alpha", 0.0),
                             "agreement": getattr(d, "agreement", ""),
+                            "executable_snapshot_reprice": (
+                                d.tokens.get("executable_snapshot_reprice", {})
+                                if isinstance(getattr(d, "tokens", None), dict)
+                                else {}
+                            ),
                         }
                     )
                     # P1.S5 INV-32: materialize_position advances position

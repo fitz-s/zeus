@@ -17,6 +17,7 @@ import pytest
 
 _NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
 YES_TOKEN = "yes-token-001"
+NO_TOKEN = f"{YES_TOKEN}-no"
 _CTF_SCALE = 1_000_000
 
 
@@ -80,13 +81,25 @@ def _allow_risk_allocator_for_exit_tests() -> None:
     )
 
 
-def _ensure_snapshot(c, *, token_id: str = YES_TOKEN, snapshot_id: str | None = None) -> str:
+def _ensure_snapshot(
+    c,
+    *,
+    token_id: str = YES_TOKEN,
+    no_token_id: str | None = None,
+    selected_outcome_token_id: str | None = None,
+    outcome_label: str | None = None,
+    snapshot_id: str | None = None,
+    captured_at: datetime = _NOW,
+) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     snapshot_id = snapshot_id or f"snap-{token_id}"
     if get_snapshot(c, snapshot_id) is not None:
         return snapshot_id
+    no_token = no_token_id or f"{token_id}-no"
+    selected_token = selected_outcome_token_id or token_id
+    selected_label = outcome_label or ("NO" if selected_token == no_token else "YES")
     insert_snapshot(
         c,
         ExecutableMarketSnapshotV2(
@@ -97,9 +110,9 @@ def _ensure_snapshot(c, *, token_id: str = YES_TOKEN, snapshot_id: str | None = 
             condition_id="condition-test",
             question_id="question-test",
             yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
-            selected_outcome_token_id=token_id,
-            outcome_label="YES",
+            no_token_id=no_token,
+            selected_outcome_token_id=selected_token,
+            outcome_label=selected_label,
             enable_orderbook=True,
             active=True,
             closed=False,
@@ -111,7 +124,7 @@ def _ensure_snapshot(c, *, token_id: str = YES_TOKEN, snapshot_id: str | None = 
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             fee_details={},
-            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            token_map_raw={"YES": token_id, "NO": no_token},
             rfqe=None,
             neg_risk=False,
             orderbook_top_bid=Decimal("0.49"),
@@ -121,8 +134,8 @@ def _ensure_snapshot(c, *, token_id: str = YES_TOKEN, snapshot_id: str | None = 
             raw_clob_market_info_hash="b" * 64,
             raw_orderbook_hash="c" * 64,
             authority_tier="CLOB",
-            captured_at=_NOW,
-            freshness_deadline=_NOW + timedelta(days=365),
+            captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(days=365),
         ),
     )
     return snapshot_id
@@ -580,6 +593,37 @@ def test_exit_lifecycle_resolves_latest_fresh_snapshot_for_executor(conn, monkey
         "min_order": "0.01",
         "neg_risk": False,
     }
+
+
+def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
+    from src.execution import exit_lifecycle
+
+    no_snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        outcome_label="NO",
+        snapshot_id="snap-exit-no-selected",
+        captured_at=_NOW,
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-exit-yes-selected-newer",
+        captured_at=_NOW + timedelta(minutes=1),
+    )
+
+    context = exit_lifecycle._latest_exit_snapshot_context(
+        conn,
+        NO_TOKEN,
+        now=_NOW + timedelta(minutes=2),
+    )
+
+    assert context["executable_snapshot_id"] == no_snapshot_id
 
 
 def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):

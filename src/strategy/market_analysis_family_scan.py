@@ -32,6 +32,23 @@ def _label_for_bin(bin_obj: Any) -> str:
     return getattr(bin_obj, "label", None) or getattr(bin_obj, "range_label", None) or str(bin_obj)
 
 
+def _supports_buy_no_for_bin(analysis: Any, idx: int) -> bool:
+    predicate = getattr(analysis, "supports_buy_no_edges", None)
+    if callable(predicate):
+        try:
+            return bool(predicate(idx))
+        except TypeError:
+            return bool(predicate())
+    return len(analysis.bins) <= 2
+
+
+def _buy_no_market_price_for_bin(analysis: Any, idx: int) -> float:
+    getter = getattr(analysis, "buy_no_market_price", None)
+    if callable(getter):
+        return float(getter(idx))
+    return 1.0 - float(analysis.p_market[idx])
+
+
 def scan_full_hypothesis_family(
     analysis: Any,
     *,
@@ -45,11 +62,6 @@ def scan_full_hypothesis_family(
     """
     if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
-    supports_buy_no = (
-        bool(analysis.supports_buy_no_edges())
-        if hasattr(analysis, "supports_buy_no_edges")
-        else len(analysis.bins) <= 2
-    )
     for idx, bin_obj in enumerate(analysis.bins):
         label = _label_for_bin(bin_obj)
 
@@ -73,11 +85,11 @@ def scan_full_hypothesis_family(
             )
         )
 
-        if not supports_buy_no:
+        if not _supports_buy_no_for_bin(analysis, idx):
             continue
 
         p_model_no = 1.0 - float(analysis.p_cal[idx])
-        p_market_no = 1.0 - float(analysis.p_market[idx])
+        p_market_no = _buy_no_market_price_for_bin(analysis, idx)
         p_posterior_no = 1.0 - float(analysis.p_posterior[idx])
         edge_no = p_posterior_no - p_market_no
         ci_lo_no, ci_hi_no, p_value_no = analysis._bootstrap_bin_no(idx, n_bootstrap)

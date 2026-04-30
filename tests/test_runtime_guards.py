@@ -103,6 +103,13 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
 
 
+def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
+    flags = dict(settings["feature_flags"])
+    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
+    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    monkeypatch.setitem(settings._data, "feature_flags", flags)
+
+
 def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
     from src.contracts.alpha_decision import AlphaDecision
 
@@ -216,6 +223,67 @@ def _edge() -> BinEdge:
         entry_price=0.35,
         p_value=0.02,
         vwmp=0.35,
+    )
+
+
+def _insert_executable_snapshot(
+    conn,
+    *,
+    snapshot_id: str,
+    selected_outcome_token_id: str = "yes1",
+    outcome_label: str = "YES",
+    yes_token_id: str = "yes1",
+    no_token_id: str = "no1",
+    condition_id: str = "cond1",
+    top_bid: str = "0.34",
+    top_ask: str = "0.36",
+    bid_size: str = "100",
+    ask_size: str = "100",
+) -> None:
+    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.state.snapshot_repo import insert_snapshot
+
+    captured_at = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+    insert_snapshot(
+        conn,
+        ExecutableMarketSnapshotV2(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-1",
+            event_id="evt-1",
+            event_slug="slug-1",
+            condition_id=condition_id,
+            question_id="question-1",
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_outcome_token_id=selected_outcome_token_id,
+            outcome_label=outcome_label,
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            fee_details={"source": "test", "fee_rate_bps": 0},
+            token_map_raw={"YES": yes_token_id, "NO": no_token_id},
+            rfqe=None,
+            neg_risk=False,
+            orderbook_top_bid=Decimal(top_bid),
+            orderbook_top_ask=Decimal(top_ask),
+            orderbook_depth_jsonb=json.dumps({
+                "bids": [{"price": top_bid, "size": bid_size}],
+                "asks": [{"price": top_ask, "size": ask_size}],
+            }),
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(seconds=30),
+        ),
     )
 
 
@@ -699,6 +767,17 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-runtime-exec",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.34",
+        top_ask="0.36",
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS opportunity_fact (
@@ -822,6 +901,10 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
             self.edge_context_json = '{"forward_edge":0.12}'
+            self.sizing_bankroll = 100.0
+            self.kelly_multiplier_used = 0.25
+            self.execution_fee_rate = 0.0
+            self.safety_cap_usd = None
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -841,7 +924,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         "temperature_metric": "high",
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision(True), DummyDecision(False)])
-    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: object())
+    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: types.SimpleNamespace(limit_price=0.36))
     monkeypatch.setattr(cycle_runner, "execute_intent", lambda *args, **kwargs: OrderResult(status="filled", trade_id="rt1", order_id="o1", fill_price=0.35, shares=10.0, command_state="ACKED"))  # P1.S5 INV-32
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
@@ -1607,6 +1690,17 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
             },
         ],
     }
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry-1",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.34",
+        top_ask="0.36",
+    )
     decision = EdgeDecision(
         should_trade=True,
         edge=_edge(),
@@ -1628,6 +1722,10 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         strategy_key="center_buy",
         edge_context=None,
         epistemic_context_json=json.dumps({"forecast_context": forecast_context}),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
     )
 
     def _capture_intent(**kwargs):
@@ -1680,6 +1778,407 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
     assert decision_source_context.source_id == "tigge"
     assert decision_source_context.model_family == "ecmwf_ifs025"
     assert decision_source_context.integrity_errors() == ()
+
+
+def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-1",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=EdgeContext(
+            p_raw=np.array([0.5, 0.5]),
+            p_cal=np.array([0.5, 0.5]),
+            p_market=np.array([0.35]),
+            p_posterior=edge.p_posterior,
+            forward_edge=edge.forward_edge,
+            alpha=1.0,
+            confidence_band_upper=edge.ci_upper,
+            confidence_band_lower=edge.ci_lower,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="decision-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        ),
+        edge_context_json=json.dumps({"forward_edge": edge.forward_edge, "p_posterior": edge.p_posterior}),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-1"},
+    )
+    conn.close()
+
+    assert best_ask == pytest.approx(0.30)
+    assert decision.edge.vwmp == pytest.approx(0.25)
+    assert decision.edge.entry_price == pytest.approx(0.25)
+    assert decision.edge.edge == pytest.approx(0.22)
+    assert decision.edge_context.forward_edge == pytest.approx(0.22)
+    assert json.loads(decision.edge_context_json)["forward_edge"] == pytest.approx(0.22)
+    assert decision.size_usd == pytest.approx((0.47 - 0.30) / (1 - 0.30) * 0.25 * 100.0)
+    assert "executable_snapshot_repriced" in decision.applied_validations
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["snapshot_id"] == "snap-reprice-1"
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
+    assert reprice["final_limit_price"] == pytest.approx(0.30)
+    assert reprice["repriced_size_usd"] == pytest.approx(decision.size_usd)
+
+
+def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
+    conn = get_connection(tmp_path / "live-buy-no-flag.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-buy-no-flag",
+        "slug": "slug-buy-no-flag",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39°F or lower", "range_low": None, "range_high": 39, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
+            {"title": "40-41°F", "range_low": 40, "range_high": 41, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+            {"title": "42°F or higher", "range_low": 42, "range_high": None, "token_id": "yes2", "no_token_id": "no2", "market_id": "m2"},
+        ],
+    }
+    buy_no_edge = replace(
+        _edge(),
+        bin=Bin(low=None, high=39, label="39°F or lower", unit="F"),
+        direction="buy_no",
+        p_market=0.35,
+        entry_price=0.35,
+        vwmp=0.35,
+        p_posterior=0.62,
+        edge=0.27,
+        forward_edge=0.27,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=buy_no_edge,
+        tokens={"market_id": "m0", "token_id": "yes0", "no_token_id": "no0"},
+        size_usd=5.0,
+        decision_id="d-buy-no-live-disabled",
+        selected_method="ens_member_counting",
+        applied_validations=["native_buy_no_quote_available"],
+        decision_snapshot_id="model-snap-buy-no",
+        edge_source="shoulder_sell",
+        strategy_key="shoulder_sell",
+        settlement_semantics_json='{"measurement_unit":"F"}',
+        epistemic_context_json='{"decision_time_utc":"2026-04-01T00:00:00Z"}',
+        edge_context_json='{"forward_edge":0.27}',
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "shoulder_sell",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not submit")),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not execute")),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    ]
+
+
+def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_path):
+    from dataclasses import replace
+
+    conn = get_connection(tmp_path / "snapshot-reprice-no.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-no-1",
+        selected_outcome_token_id="no1",
+        outcome_label="NO",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.38",
+        top_ask="0.42",
+    )
+    edge = replace(
+        _edge(),
+        direction="buy_no",
+        edge=0.22,
+        p_model=0.62,
+        p_market=0.40,
+        p_posterior=0.62,
+        entry_price=0.40,
+        vwmp=0.40,
+        forward_edge=0.22,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=0.62),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-no-1"},
+    )
+    conn.close()
+
+    assert best_ask == pytest.approx(0.42)
+    assert decision.edge.direction == "buy_no"
+    assert decision.edge.vwmp == pytest.approx(0.40)
+    assert decision.edge.entry_price == pytest.approx(0.40)
+    assert decision.edge.p_market == pytest.approx(0.40)
+    assert decision.edge.edge == pytest.approx(0.22)
+    assert decision.edge_context.forward_edge == pytest.approx(0.22)
+    assert decision.size_usd == pytest.approx((0.62 - 0.42) / (1 - 0.42) * 0.25 * 100.0)
+    assert decision.tokens["executable_snapshot_reprice"]["outcome_label"] == "NO"
+
+
+def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-negative-ask.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-negative-ask",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.48",
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-negative-ask"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    assert decision.edge.vwmp == pytest.approx(0.34)
+    assert decision.edge.edge == pytest.approx(0.13)
+    assert decision.tokens["executable_snapshot_reprice"]["final_limit_price"] == pytest.approx(0.34)
+
+
+def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-thin-depth.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-thin-depth",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        ask_size="1",
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    with pytest.raises(ValueError, match="BUY_NO_TAKER_DEPTH_CONSTRAINED"):
+        cycle_runtime._reprice_decision_from_executable_snapshot(
+            conn,
+            decision,
+            {"executable_snapshot_id": "snap-reprice-thin-depth"},
+        )
+    conn.close()
+
+
+def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_path):
+    db_path = tmp_path / "live-reprice-limit-contract.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-wide-gap",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.20",
+        top_ask="0.30",
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-wide-gap",
+        "slug": "slug-wide-gap",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-wide-gap",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-wide-gap",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-wide-gap",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=types.SimpleNamespace(p_posterior=0.47),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+    captured = {}
+
+    def _execute_capture(intent, edge_vwmp, label, **kwargs):
+        captured["intent"] = intent
+        return OrderResult(
+            status="pending",
+            trade_id="trade-wide-gap",
+            order_id="ord-wide-gap",
+            submitted_price=intent.limit_price,
+            shares=1.0,
+            command_state="INTENT_CREATED",
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=create_execution_intent,
+        execute_intent=_execute_capture,
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert captured["intent"].limit_price == pytest.approx(0.30)
+    reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
+    assert reprice["final_limit_price"] == pytest.approx(0.30)
+    assert reprice["submitted_limit_price"] == pytest.approx(0.30)
+    assert reprice["repriced_limit_forced"] is True
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
@@ -1742,6 +2241,10 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
         edge_source="center_buy",
         strategy_key="center_buy",
         edge_context=types.SimpleNamespace(p_posterior=0.47),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.003,
+        safety_cap_usd=None,
     )
 
     class FakeClob:
@@ -2606,6 +3109,18 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reject-exec",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        condition_id="m1",
+        top_bid="0.34",
+        top_ask="0.36",
+    )
+    conn.commit()
     conn.close()
     portfolio = PortfolioState(bankroll=150.0)
 
@@ -2651,6 +3166,10 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
             self.edge_context_json = '{"forward_edge":0.12}'
+            self.sizing_bankroll = 100.0
+            self.kelly_multiplier_used = 0.25
+            self.execution_fee_rate = 0.0
+            self.safety_cap_usd = None
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -2670,7 +3189,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
         "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
-    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: object())
+    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: types.SimpleNamespace(limit_price=0.36))
     monkeypatch.setattr(
         cycle_runner,
         "execute_intent",
