@@ -956,10 +956,15 @@ class TestSourceContractGate:
             "2026-04-29",
             "2026-05-01",
         ]
-        assert candidate["runtime_gaps_before_apply"] == []
+        assert len(candidate["runtime_gaps_before_apply"]) == 1
+        assert "not fetchable by WU history" in candidate["runtime_gaps_before_apply"][0]
+        assert any(
+            "not fetchable by WU history" in blocker
+            for blocker in auto._candidate_apply_ready(candidate)
+        )
         mini_packet = candidate["mini_llm_execution"]
-        assert mini_packet["mini_model_can_directly_complete"] is True
-        assert mini_packet["current_authority"] == "ready_for_deterministic_apply_packet"
+        assert mini_packet["mini_model_can_directly_complete"] is False
+        assert mini_packet["current_authority"] == "report_and_dry_run_only"
         assert (
             "Do not mutate production DB truth except through the exact scoped commands in this receipt after DB backup succeeds."
         ) in mini_packet[
@@ -985,10 +990,10 @@ class TestSourceContractGate:
         assert any("--apply/--no-dry-run/--force outside" in token for token in safe_contract["forbidden_command_tokens"])
         assert mini_packet["report_template"] == {
             "city": "Paris",
-            "can_complete_remaining_conversion": True,
+            "can_complete_remaining_conversion": False,
             "source_quarantine_should_remain_active": True,
-            "blocking_reasons": [],
-            "next_safe_action": "execute listed deterministic apply steps and collect evidence refs",
+            "blocking_reasons": candidate["runtime_gaps_before_apply"],
+            "next_safe_action": "write report, keep quarantine active, and request missing deterministic capability",
         }
         controller_apply = next(
             item for item in candidate["command_plan"] if item["id"] == "controller_apply"
@@ -1184,7 +1189,8 @@ class TestSourceContractGate:
         assert json.loads(latest_path.read_text())["run_id"] == "cron-run"
         assert report_path.exists()
         report_text = report_path.read_text()
-        assert "can_complete_remaining_conversion: `True`" in report_text
+        assert "can_complete_remaining_conversion: `False`" in report_text
+        assert "not fetchable by WU history" in report_text
         assert "exact scoped commands in this receipt" in report_text
         assert "`scripts/watch_source_contract.py`" in report_text
         assert "allowed: `state/zeus-world.db (only via exact scoped rebuild commands from the receipt)`" in report_text
@@ -1236,7 +1242,7 @@ class TestSourceContractGate:
                 "--run-id",
                 "fixture-prod-block",
                 "--today",
-                "2026-04-30",
+                "2026-05-03",
                 "--execute-apply",
                 "--force",
                 "--json",
@@ -1329,7 +1335,7 @@ class TestSourceContractGate:
                 "--run-id",
                 "apply-run",
                 "--today",
-                "2026-04-30",
+                "2026-05-03",
                 "--execute-apply",
                 "--force",
                 "--no-station-metadata-network",
@@ -1376,6 +1382,97 @@ class TestSourceContractGate:
         assert any("scripts/backfill_wu_daily_all.py" in cmd for command in commands for cmd in command)
         assert any("--apply" in command for command in commands)
         assert any("--no-dry-run" in command for command in commands)
+
+    def test_auto_convert_execute_apply_rolls_back_config_and_source_fact_on_failure(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        from scripts import source_contract_auto_convert as auto
+
+        fixture = tmp_path / "events.json"
+        fixture.write_text(
+            json.dumps(
+                [
+                    _gamma_temperature_event(
+                        event_id="paris-high-20260429",
+                        title="Highest temperature in Paris on April 29?",
+                        slug="highest-temperature-in-paris-on-april-29-2026",
+                        question="Will the high temperature in Paris be 20°C or higher?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                    _gamma_temperature_event(
+                        event_id="paris-low-20260501",
+                        title="Lowest temperature in Paris on May 1?",
+                        slug="lowest-temperature-in-paris-on-may-1-2026",
+                        question="Will the low temperature in Paris be 10°C or lower?",
+                        resolution_source=(
+                            "https://www.wunderground.com/history/daily/fr/"
+                            "bonneuil-en-france/LFPB"
+                        ),
+                    ),
+                ]
+            )
+        )
+        config_path = tmp_path / "cities.json"
+        original_config = auto.DEFAULT_CITY_CONFIG_PATH.read_bytes()
+        config_path.write_bytes(original_config)
+        source_validity_path = tmp_path / "current_source_validity.md"
+        original_source_validity = b"# Current Source Validity\n"
+        source_validity_path.write_bytes(original_source_validity)
+        db_path = tmp_path / "zeus-world.db"
+        db_path.write_bytes(b"sqlite placeholder")
+        quarantine_path = tmp_path / "quarantine.json"
+        evidence_base = tmp_path / "evidence"
+
+        def _fail_run_command(command, *, cwd, artifact_path):
+            raise RuntimeError("synthetic downstream failure")
+
+        monkeypatch.setattr(auto, "_run_command", _fail_run_command)
+
+        exit_code = auto.main(
+            [
+                "--fixture",
+                str(fixture),
+                "--receipt-dir",
+                str(tmp_path / "receipts"),
+                "--lock-path",
+                str(tmp_path / "source_auto.lock"),
+                "--quarantine-path",
+                str(quarantine_path),
+                "--run-id",
+                "rollback-run",
+                "--today",
+                "2026-05-03",
+                "--execute-apply",
+                "--force",
+                "--no-station-metadata-network",
+                "--config-path",
+                str(config_path),
+                "--source-validity-path",
+                str(source_validity_path),
+                "--db",
+                str(db_path),
+                "--evidence-root-base",
+                str(evidence_base),
+                "--json",
+            ]
+        )
+
+        assert exit_code == 2
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "failed"
+        candidate = output["candidates"][0]
+        assert candidate["apply_status"] == "failed"
+        assert "synthetic downstream failure" in candidate["apply_error"]
+        assert config_path.read_bytes() == original_config
+        assert source_validity_path.read_bytes() == original_source_validity
+        rollback_path = evidence_base / "rollback-run" / "paris" / "rollback_manifest.json"
+        assert rollback_path.exists()
+        rollback = json.loads(rollback_path.read_text(encoding="utf-8"))
+        assert rollback["status"] == "complete"
+        assert {item["status"] for item in rollback["restored"]} == {"restored"}
 
     def test_platt_refit_derives_exact_bucket_keys_from_city_date_scope(self):
         from scripts import refit_platt_v2

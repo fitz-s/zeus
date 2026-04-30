@@ -254,13 +254,28 @@ def _threshold_blockers(
     return blockers
 
 
-def _runtime_gaps(metrics: list[str], *, auto_confirmed: bool) -> list[str]:
+def _runtime_gaps(
+    metrics: list[str],
+    date_scope: dict[str, Any],
+    *,
+    auto_confirmed: bool,
+) -> list[str]:
     if not auto_confirmed:
         return []
+    gaps: list[str] = []
     unsupported = sorted(set(metrics) - {"high", "low"})
     if unsupported:
-        return [f"unsupported affected temperature metrics: {unsupported}"]
-    return []
+        gaps.append(f"unsupported affected temperature metrics: {unsupported}")
+    future_or_recent = list(
+        date_scope.get("future_or_recent_dates_not_fetchable_by_wu_history") or []
+    )
+    if future_or_recent:
+        gaps.append(
+            "affected market dates are not fetchable by WU history yet: "
+            f"{future_or_recent}; executable_wu_fetch_end="
+            f"{date_scope.get('executable_wu_fetch_end')}; keep source quarantine active"
+        )
+    return gaps
 
 
 def _evidence_root(run_id: str, city: str) -> str:
@@ -948,7 +963,11 @@ def build_candidates(report: dict[str, Any], policy: RuntimePolicy, *, run_id: s
             policy=policy,
         )
         auto_confirmed = not threshold_blockers
-        runtime_gaps = _runtime_gaps(metrics, auto_confirmed=auto_confirmed)
+        runtime_gaps = _runtime_gaps(
+            metrics,
+            date_scope,
+            auto_confirmed=auto_confirmed,
+        )
         command_plan = _command_plan(city, metrics, date_scope) if auto_confirmed else []
         mini_packet = _mini_execution_packet(
             run_id=run_id,
@@ -1058,7 +1077,18 @@ def _candidate_apply_ready(candidate: dict[str, Any]) -> list[str]:
     if candidate.get("confirmation_status") != "auto_confirmed":
         blockers.append("candidate is not auto_confirmed")
     blockers.extend(candidate.get("threshold_blockers") or [])
-    blockers.extend(candidate.get("runtime_gaps_before_apply") or [])
+    runtime_gaps = list(candidate.get("runtime_gaps_before_apply") or [])
+    blockers.extend(runtime_gaps)
+    date_scope = candidate.get("date_scope") or {}
+    future_or_recent = list(
+        date_scope.get("future_or_recent_dates_not_fetchable_by_wu_history") or []
+    )
+    if future_or_recent and not any("not fetchable by WU history" in str(gap) for gap in runtime_gaps):
+        blockers.append(
+            "affected market dates are not fetchable by WU history yet: "
+            f"{future_or_recent}; executable_wu_fetch_end="
+            f"{date_scope.get('executable_wu_fetch_end')}"
+        )
     branch = candidate.get("transition_branch")
     if branch != "same_provider_station_change":
         blockers.append(f"unsupported apply branch: {branch}")
@@ -1213,6 +1243,33 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(path)
+
+
+def _snapshot_file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_file_bytes(path: Path, payload: bytes | None) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if payload is None:
+        try:
+            path.unlink()
+            status = "removed"
+        except FileNotFoundError:
+            status = "already_absent"
+    else:
+        tmp_path = path.with_name(f".{path.name}.rollback.tmp")
+        tmp_path.write_bytes(payload)
+        tmp_path.replace(path)
+        status = "restored"
+    return {
+        "path": str(path),
+        "status": status,
+        "restored_at_utc": _utcnow().isoformat(),
+    }
 
 
 def apply_config_update(
@@ -1617,6 +1674,8 @@ def execute_apply(
         evidence_root.mkdir(parents=True, exist_ok=True)
         manifest = _evidence_manifest(str(receipt["run_id"]), city)
         candidate["apply_status"] = "running"
+        original_config_bytes = _snapshot_file_bytes(config_path)
+        original_source_validity_bytes = _snapshot_file_bytes(source_validity_path)
 
         try:
             if not ms.is_city_source_quarantined(city, path=quarantine_path):
@@ -1781,11 +1840,34 @@ def execute_apply(
             candidate["apply_status"] = "failed"
             candidate["apply_error"] = f"{type(exc).__name__}: {exc}"
             candidate["evidence_manifest"] = manifest
+            rollback_artifact: dict[str, Any] | None = None
+            try:
+                rollback_artifact = {
+                    "status": "complete",
+                    "reason": candidate["apply_error"],
+                    "restored": [
+                        _restore_file_bytes(config_path, original_config_bytes),
+                        _restore_file_bytes(source_validity_path, original_source_validity_bytes),
+                    ],
+                    "created_at_utc": _utcnow().isoformat(),
+                }
+                rollback_path = evidence_root / "rollback_manifest.json"
+                _write_json_atomic(rollback_path, rollback_artifact)
+                candidate["rollback_manifest"] = str(rollback_path)
+            except Exception as rollback_exc:
+                rollback_artifact = {
+                    "status": "failed",
+                    "reason": candidate["apply_error"],
+                    "rollback_error": f"{type(rollback_exc).__name__}: {rollback_exc}",
+                    "created_at_utc": _utcnow().isoformat(),
+                }
+                candidate["rollback_error"] = rollback_artifact["rollback_error"]
             failures.append(
                 {
                     "city": city,
                     "error": candidate["apply_error"],
                     "evidence_root": str(evidence_root),
+                    "rollback": rollback_artifact,
                 }
             )
 

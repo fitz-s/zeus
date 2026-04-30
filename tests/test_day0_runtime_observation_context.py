@@ -1,4 +1,7 @@
 """Runtime contract tests for Day0 observation context propagation."""
+# Created: 2026-04-30
+# Last reused/audited: 2026-04-30
+# Authority basis: Day0 runtime observation context relationship protection; source authority gate fixture refresh.
 
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_ge
             "outcomes": [],
         }],
         evaluate_candidate=lambda *args, **kwargs: [],
+        get_last_scan_authority=lambda: "VERIFIED",
         logger=SimpleNamespace(warning=lambda *a, **k: None, error=lambda *a, **k: None),
         NoTradeCase=object,
     )
@@ -80,6 +84,7 @@ def test_execute_discovery_phase_falls_back_for_legacy_day0_getter_signature():
             "outcomes": [],
         }],
         evaluate_candidate=lambda *args, **kwargs: [],
+        get_last_scan_authority=lambda: "VERIFIED",
         logger=SimpleNamespace(warning=lambda *a, **k: None, error=lambda *a, **k: None),
         NoTradeCase=object,
     )

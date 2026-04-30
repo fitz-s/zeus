@@ -29,6 +29,12 @@ from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.market_scanner import _parse_temp_range, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
+from src.engine.evaluator import (
+    _day0_observation_field,
+    _day0_observation_quality_rejection_reason,
+    _day0_observation_source_rejection_reason,
+    _finite_day0_observation_float,
+)
 from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
@@ -348,9 +354,53 @@ def _refresh_day0_observation(
     if obs is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation"]
-    if not obs.observation_time:
+    if not _day0_observation_field(obs, "observation_time"):
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "missing_observation_timestamp"]
+
+    # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
+    # so Day0Signal receives the typed object, not a bare str.
+    # Slice P2-fix1 (post-review BLOCKER from code-reviewer + critic M1,
+    # 2026-04-26): split audit (via resolver) from value construction (via
+    # MetricIdentity.from_raw direct). Pre-fix1, routing the value through
+    # resolver coerced garbage strings ("HIGH", " low ", etc.) silently to
+    # HIGH, removing MetricIdentity.from_raw's loud antibody. Now: resolver
+    # emits DEBUG audit log (preserves P2-C2 visibility), but the actual
+    # MetricIdentity comes from the raw position attribute so garbage still
+    # raises ValueError at the typed-atom boundary.
+    # _position_metric_str already bound at function entry (P2-fix5 hoist);
+    # the resolver fired its audit log there. Construct MetricIdentity from
+    # raw position attribute so garbage strings still raise (P2-fix1 antibody).
+    temperature_metric = MetricIdentity.from_raw(
+        getattr(position, "temperature_metric", "high")
+    )
+
+    source_rejection = _day0_observation_source_rejection_reason(
+        city,
+        obs,
+        consumer_label="held-position monitor refresh",
+    )
+    if source_rejection is not None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "observation_source_policy",
+            source_rejection,
+        ]
+
+    quality_rejection = _day0_observation_quality_rejection_reason(
+        city,
+        obs,
+        temperature_metric,
+        decision_time=datetime.now(timezone.utc),
+    )
+    if quality_rejection is not None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "observation_quality_gate",
+            quality_rejection,
+        ]
 
     ens_result = fetch_ensemble(
         city,
@@ -374,8 +424,8 @@ def _refresh_day0_observation(
             city.name,
             target_d,
             city.timezone,
-            observation_time=obs.observation_time,
-            observation_source=obs.source,
+            observation_time=_day0_observation_field(obs, "observation_time"),
+            observation_source=_day0_observation_field(obs, "source", ""),
         )
     except Exception:
         temporal_context = None
@@ -383,23 +433,6 @@ def _refresh_day0_observation(
     if temporal_context is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
-
-    # R4: wrap the str from Position (portfolio boundary) into MetricIdentity
-    # so Day0Signal receives the typed object, not a bare str.
-    # Slice P2-fix1 (post-review BLOCKER from code-reviewer + critic M1,
-    # 2026-04-26): split audit (via resolver) from value construction (via
-    # MetricIdentity.from_raw direct). Pre-fix1, routing the value through
-    # resolver coerced garbage strings ("HIGH", " low ", etc.) silently to
-    # HIGH, removing MetricIdentity.from_raw's loud antibody. Now: resolver
-    # emits DEBUG audit log (preserves P2-C2 visibility), but the actual
-    # MetricIdentity comes from the raw position attribute so garbage still
-    # raises ValueError at the typed-atom boundary.
-    # _position_metric_str already bound at function entry (P2-fix5 hoist);
-    # the resolver fired its audit log there. Construct MetricIdentity from
-    # raw position attribute so garbage strings still raise (P2-fix1 antibody).
-    temperature_metric = MetricIdentity.from_raw(
-        getattr(position, "temperature_metric", "high")
-    )
 
     extrema, hours_remaining = remaining_member_extrema_for_day0(
         ens_result["members_hourly"],
@@ -414,17 +447,27 @@ def _refresh_day0_observation(
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
     semantics = SettlementSemantics.for_city(city)
+    observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
+    observed_low_so_far = _finite_day0_observation_float(obs, "low_so_far")
+    current_temp = _finite_day0_observation_float(obs, "current_temp")
+    if current_temp is None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "fresh_ens_fetch",
+            "observation_quality_gate",
+        ]
     day0 = Day0Router.route(Day0SignalInputs(
         temperature_metric=temperature_metric,
-        observed_high_so_far=float(obs.high_so_far) if obs.high_so_far is not None else None,
-        observed_low_so_far=float(obs.low_so_far) if obs.low_so_far is not None else None,
-        current_temp=float(obs.current_temp),
+        observed_high_so_far=observed_high_so_far,
+        observed_low_so_far=observed_low_so_far,
+        current_temp=current_temp,
         hours_remaining=hours_remaining,
         member_maxes_remaining=extrema.maxes,
         member_mins_remaining=extrema.mins,
         unit=city.settlement_unit,
-        observation_source=str(obs.source),
-        observation_time=obs.observation_time,
+        observation_source=str(_day0_observation_field(obs, "source", "")),
+        observation_time=_day0_observation_field(obs, "observation_time"),
         temporal_context=temporal_context,
         round_fn=semantics.round_values,
         precision=semantics.precision,

@@ -158,9 +158,14 @@ def member_maxes_for_target_date(
         timezone_name,
         times=times,
     )
+    local_day_values = np.asarray(members_hourly[:, tz_hours], dtype=float)
+    if not np.isfinite(local_day_values).all():
+        raise ValueError(
+            f"Non-finite ensemble values in local-day slice for {target_date}."
+        )
     if temperature_metric.is_low():
-        return members_hourly[:, tz_hours].min(axis=1)
-    return members_hourly[:, tz_hours].max(axis=1)
+        return local_day_values.min(axis=1)
+    return local_day_values.max(axis=1)
 
 
 def p_raw_vector_from_maxes(
@@ -206,6 +211,12 @@ def p_raw_vector_from_maxes(
         n_mc = ensemble_n_mc()
     if rng is None:
         rng = np.random.default_rng()
+
+    member_maxes = np.asarray(member_maxes, dtype=float)
+    if member_maxes.ndim != 1 or len(member_maxes) == 0:
+        raise ValueError("member_maxes must be a non-empty one-dimensional array")
+    if not np.isfinite(member_maxes).all():
+        raise ValueError("member_maxes must contain only finite values")
 
     n_bins = len(bins)
     n_members = len(member_maxes)

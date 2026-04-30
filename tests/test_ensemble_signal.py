@@ -20,7 +20,7 @@ import pytest
 
 from src.config import City
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.signal.ensemble_signal import EnsembleSignal, SIGMA_INSTRUMENT
+from src.signal.ensemble_signal import EnsembleSignal, SIGMA_INSTRUMENT, p_raw_vector_from_maxes
 from src.types import Bin
 
 
@@ -93,6 +93,13 @@ class TestEnsembleSignalInit:
         ens = EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
         assert len(ens.member_maxes) == 51
 
+    def test_rejects_nonfinite_local_day_values(self):
+        members = _make_constant_members(40.0)
+        members[0, 3] = np.nan
+        times = _make_local_day_times(TARGET_DATE, NYC.timezone)
+        with pytest.raises(ValueError, match="Non-finite ensemble values"):
+            EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
+
     def test_member_maxes_correct(self):
         """Each member's max across the timezone-selected hours should be extracted."""
         target_date = TARGET_DATE
@@ -103,6 +110,18 @@ class TestEnsembleSignalInit:
         tz_hours = EnsembleSignal._select_hours_for_date(target_date, tz, times=times)
         expected = members[:, tz_hours].max(axis=1)
         np.testing.assert_array_almost_equal(ens.member_maxes, expected)
+
+    def test_p_raw_vector_rejects_nonfinite_member_extrema(self):
+        member_extrema = np.full(51, 40.0)
+        member_extrema[0] = np.inf
+        with pytest.raises(ValueError, match="finite"):
+            p_raw_vector_from_maxes(
+                member_extrema,
+                NYC,
+                NYC_SEMANTICS,
+                NYC_BINS,
+                n_mc=5,
+            )
 
     def test_real_times_override_decision_time_approximation(self):
         target_date = TARGET_DATE

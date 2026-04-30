@@ -1,6 +1,7 @@
 # Source-Contract Auto-Conversion Runtime Plan
 
-Status: active implementation packet
+Status: merged packet evidence on `plan-pre5`; not the active live-control
+pointer while `docs/operations/current_state.md` routes the branch to R3 G1
 Created: 2026-04-30
 Branch: source-auto-conversion-2026-04-30
 
@@ -62,7 +63,10 @@ UTC/local runtime facts:
   older than that window.
 - Target dates newer than `executable_wu_fetch_end` are recorded as
   `future_or_recent_dates_not_fetchable_by_wu_history`; they cannot be
-  backfilled until WU history is available.
+  backfilled until WU history is available. Their presence blocks
+  `--execute-apply` completion and source-quarantine release; the city remains
+  new-entry quarantined until every affected target date is backfillable and
+  release evidence is complete.
 - Default same-provider WU station-change historical window: 1095 days. This
   is intentionally explicit policy, not model judgment.
 
