@@ -149,6 +149,8 @@ def _attach_corrected_pricing_shadow(
     else:
         is_marketable = False
     depth_status = "NOT_MARKETABLE_PASSIVE_LIMIT"
+    depth_proof_source = "PASSIVE_LIMIT"
+    allow_depth_pass = False
     sweep_payload = {
         "sweep_attempted": False,
         "sweep_depth_status": "NOT_MARKETABLE_PASSIVE_LIMIT",
@@ -165,6 +167,8 @@ def _attach_corrected_pricing_shadow(
             raise ValueError("corrected pricing shadow sweep produced no executable fill")
         candidate_expected_fill = sweep.average_price
         depth_status = sweep.depth_status
+        depth_proof_source = "CLOB_SWEEP"
+        allow_depth_pass = True
         sweep_payload = {
             "sweep_attempted": True,
             "sweep_depth_status": sweep.depth_status,
@@ -189,6 +193,8 @@ def _attach_corrected_pricing_shadow(
         expected_fill_price_before_fee=candidate_expected_fill,
         fee_adjusted_execution_price=None,
         depth_status=depth_status,
+        depth_proof_source=depth_proof_source,
+        _allow_depth_pass=allow_depth_pass,
     )
     hypothesis = ExecutableTradeHypothesis.from_cost_basis(
         event_id=str(snapshot.event_id or tokens.get("event_id") or ""),

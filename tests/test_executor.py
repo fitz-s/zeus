@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: R3 Z1 cutover guard audit; pre-existing executor behavior tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tests for executor and portfolio."""
 
+import inspect
 import sqlite3
 import json
 from datetime import datetime, timedelta, timezone
@@ -14,12 +15,20 @@ from decimal import Decimal
 import pytest
 
 from src.execution.executor import (
+    OrderResult,
     create_execution_intent,
     create_exit_order_intent,
+    execute_final_intent,
     execute_exit_order,
     execute_intent,
 )
-from src.contracts import EdgeContext, EntryMethod
+from src.contracts import (
+    DecisionSourceContext,
+    Direction,
+    EdgeContext,
+    EntryMethod,
+    FinalExecutionIntent,
+)
 import numpy as np
 from src.config import settings
 from src.state.portfolio import (
@@ -145,6 +154,51 @@ def _final_submit_result(bound_envelope, *, order_id: str | None, status: str = 
     return result
 
 
+def _decision_source_context() -> DecisionSourceContext:
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-04-27T09:00:00+00:00",
+        forecast_valid_time="2026-04-27T18:00:00+00:00",
+        forecast_fetch_time="2026-04-27T10:00:00+00:00",
+        forecast_available_at="2026-04-27T09:30:00+00:00",
+        raw_payload_hash="f" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-04-27T12:00:00+00:00",
+        decision_time_status="OK",
+    )
+
+
+def _final_execution_intent(**overrides) -> FinalExecutionIntent:
+    payload = dict(
+        hypothesis_id="hypothesis:finaltest01",
+        selected_token_id="no-token-final",
+        direction="buy_no",
+        size_kind="shares",
+        size_value=Decimal("10"),
+        final_limit_price=Decimal("0.49"),
+        expected_fill_price_before_fee=Decimal("0.49"),
+        fee_adjusted_execution_price=Decimal("0.49"),
+        order_policy="limit_may_take_conservative",
+        order_type="GTC",
+        post_only=False,
+        cancel_after=None,
+        snapshot_id="snap-final",
+        snapshot_hash="a" * 64,
+        cost_basis_id="cost_basis:" + ("d" * 16),
+        cost_basis_hash="d" * 64,
+        max_slippage_bps=Decimal("200"),
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        fee_rate=Decimal("0"),
+        neg_risk=False,
+    )
+    payload.update(overrides)
+    return FinalExecutionIntent(**payload)
+
+
 class TestPortfolio:
     def test_empty_portfolio(self):
         state = PortfolioState()
@@ -214,6 +268,133 @@ class TestPortfolio:
 
 
 class TestExecutor:
+    def test_execute_final_intent_bridges_immutable_submit_shape(self, monkeypatch):
+        captured = {}
+
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(
+                trade_id=trade_id,
+                intent=intent,
+                shares=shares,
+                conn=conn,
+                decision_id=decision_id,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="pending",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+        source_context = _decision_source_context()
+        final_intent = _final_execution_intent()
+
+        result = execute_final_intent(
+            final_intent,
+            market_id="condition-final",
+            mode="opening_hunt",
+            decision_source_context=source_context,
+            conn=_TEST_CONN,
+            decision_id="decision-final",
+            trade_id="trade-final",
+            event_id="event-final",
+            resolution_window="2026-04-30",
+            correlation_key="corr-final",
+            decision_edge=0.07,
+        )
+
+        assert result.status == "pending"
+        assert captured["trade_id"] == "trade-final"
+        assert captured["shares"] == pytest.approx(10.0)
+        assert captured["conn"] is _TEST_CONN
+        assert captured["decision_id"] == "decision-final"
+        legacy_intent = captured["intent"]
+        assert legacy_intent.direction == Direction.NO
+        assert legacy_intent.token_id == "no-token-final"
+        assert legacy_intent.limit_price == pytest.approx(0.49)
+        assert legacy_intent.target_size_usd == pytest.approx(4.90)
+        assert legacy_intent.executable_snapshot_id == "snap-final"
+        assert legacy_intent.executable_snapshot_min_tick_size == Decimal("0.01")
+        assert legacy_intent.executable_snapshot_min_order_size == Decimal("0.01")
+        assert legacy_intent.executable_snapshot_neg_risk is False
+        assert legacy_intent.decision_source_context == source_context
+        assert legacy_intent.market_id == "condition-final"
+        assert legacy_intent.event_id == "event-final"
+        assert legacy_intent.resolution_window == "2026-04-30"
+        assert legacy_intent.correlation_key == "corr-final"
+        assert legacy_intent.order_type == "GTC"
+        assert legacy_intent.post_only is False
+
+    def test_execute_final_intent_rejects_missing_source_context_before_live_order(
+        self,
+        monkeypatch,
+    ):
+        called = False
+
+        def fake_live_order(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("_live_order must not run without source context")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        result = execute_final_intent(
+            _final_execution_intent(),
+            market_id="condition-final",
+            mode="opening_hunt",
+            decision_source_context=None,
+            trade_id="trade-final",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "decision_source_integrity:missing_decision_source_context"
+        assert called is False
+
+    def test_execute_final_intent_rejects_post_only_before_live_order(self, monkeypatch):
+        called = False
+
+        def fake_live_order(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("_live_order must not run for unsupported post-only")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        result = execute_final_intent(
+            _final_execution_intent(
+                order_policy="post_only_passive_limit",
+                post_only=True,
+            ),
+            market_id="condition-final",
+            mode="opening_hunt",
+            decision_source_context=_decision_source_context(),
+            trade_id="trade-final",
+        )
+
+        assert result.status == "rejected"
+        assert result.reason == "post_only_entry_submit_not_supported"
+        assert called is False
+
+    def test_execute_final_intent_exposes_no_recompute_inputs(self):
+        from src.execution import executor as executor_module
+
+        signature = inspect.signature(executor_module.execute_final_intent)
+        forbidden_parameters = {
+            "edge",
+            "edge_context",
+            "edge_vwmp",
+            "label",
+            "p_posterior",
+            "vwmp",
+            "bin_edge",
+        }
+        assert forbidden_parameters.isdisjoint(signature.parameters)
+        source = inspect.getsource(executor_module.execute_final_intent)
+        assert "create_execution_intent(" not in source
+        assert "compute_native_limit_price(" not in source
+
     def test_create_execution_intent_routes_buy_no_to_no_token_id(self):
         edge = BinEdge(
             bin=Bin(low=None, high=67, label="67°F or lower", unit="F"),

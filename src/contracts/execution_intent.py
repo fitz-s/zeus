@@ -559,6 +559,10 @@ class ExecutionIntent:
     resolution_window: str = "default"
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
+    # Corrected FinalExecutionIntent bridges set these fields so live submit
+    # can prove venue order shape did not drift after final pricing.
+    order_type: str = ""
+    post_only: bool = False
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
