@@ -44,12 +44,55 @@ LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
     "ensemble_snapshots.available_at",
+    "ensemble_snapshots_v2.available_at",
     "forecasts_table_synthetic",
 })
 
 
 class ReplayPreflightError(RuntimeError):
     """Raised when replay cannot safely produce diagnostic output."""
+
+
+def _table_exists(conn, schema: str, table: str) -> bool:
+    schema_sql = "main" if schema == "" else schema
+    try:
+        return conn.execute(
+            f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone() is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def _first_existing_table(conn, table: str) -> str:
+    if _table_exists(conn, "world", table):
+        return f"world.{table}"
+    if _table_exists(conn, "", table):
+        return table
+    return ""
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    if not table:
+        return set()
+    if "." in table:
+        schema, name = table.split(".", 1)
+    else:
+        schema, name = "main", table
+    try:
+        rows = conn.execute(f"PRAGMA {schema}.table_info({name})").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
+
+
+def _metric_filter_sql(columns: set[str], source: str, temperature_metric: str) -> tuple[str, tuple[str, ...], bool]:
+    """Return metric predicate and whether this table can satisfy v2 identity."""
+    if "temperature_metric" in columns:
+        return " AND temperature_metric = ?", (temperature_metric,), True
+    if source == "ensemble_snapshots_v2":
+        return "", (), False
+    return "", (), True
 
 
 # ---------------------------------------------------------------------------
@@ -233,17 +276,149 @@ class ReplayContext:
         self.conn = conn
         self.overrides = overrides or {}
         self.allow_snapshot_only_reference = allow_snapshot_only_reference
-        self._snapshot_cache: dict[tuple[str, str, str, str], dict] = {}
+        self._snapshot_cache: dict[tuple[str, str, str, str, str], dict] = {}
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
-        try:
-            self.conn.execute("SELECT 1 FROM world.ensemble_snapshots LIMIT 0")
-            self._sp = "world."  # world DB attached
-        except sqlite3.OperationalError as exc:
-            try:
-                self.conn.execute("SELECT 1 FROM ensemble_snapshots LIMIT 0")
-                self._sp = ""  # monolithic DB (tests)
-            except sqlite3.OperationalError:
-                raise RuntimeError("Replay topology error: ensemble_snapshots neither in world attach nor local main schema.") from exc
+        self._snapshot_table_column_cache: dict[str, set[str]] = {}
+        self._snapshot_v2_table = _first_existing_table(self.conn, "ensemble_snapshots_v2")
+        self._snapshot_legacy_table = _first_existing_table(self.conn, "ensemble_snapshots")
+        if not self._snapshot_v2_table and not self._snapshot_legacy_table:
+            raise RuntimeError(
+                "Replay topology error: neither ensemble_snapshots_v2 nor "
+                "ensemble_snapshots exists in world attach or local main schema."
+            )
+        if self._snapshot_legacy_table.startswith("world."):
+            self._sp = "world."  # preserve existing replay co-location behavior
+        elif self._snapshot_legacy_table:
+            self._sp = ""  # monolithic DB (tests) or main legacy snapshot projection
+        elif self._snapshot_v2_table.startswith("world."):
+            self._sp = "world."
+        else:
+            self._sp = ""  # monolithic DB (tests)
+
+    def _columns_for(self, table: str) -> set[str]:
+        if table not in self._snapshot_table_column_cache:
+            self._snapshot_table_column_cache[table] = _table_columns(self.conn, table)
+        return self._snapshot_table_column_cache[table]
+
+    def _snapshot_row(
+        self,
+        city_name: str,
+        target_date: str,
+        *,
+        decision_time: str,
+        snapshot_id: Optional[int] = None,
+        order: str = "latest",
+        temperature_metric: Literal["high", "low"] = "high",
+    ):
+        base_columns = (
+            "snapshot_id", "members_json", "p_raw_json", "lead_hours", "spread",
+            "is_bimodal", "model_version", "issue_time", "valid_time",
+            "available_at", "fetch_time", "data_version",
+        )
+        for table, source in (
+            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_legacy_table, "ensemble_snapshots"),
+        ):
+            if not table:
+                continue
+            columns = self._columns_for(table)
+            if not set(base_columns).issubset(columns):
+                continue
+            metric_sql, metric_params, metric_supported = _metric_filter_sql(
+                columns,
+                source,
+                temperature_metric,
+            )
+            if not metric_supported:
+                continue
+            if snapshot_id is not None:
+                row = self.conn.execute(
+                    f"""
+                    SELECT {", ".join(base_columns)}, ? AS snapshot_source
+                    FROM {table}
+                    WHERE snapshot_id = ?
+                      AND city = ?
+                      AND target_date = ?
+                      AND datetime(available_at) <= datetime(?)
+                      {metric_sql}
+                    LIMIT 1
+                    """,
+                    (
+                        source,
+                        snapshot_id,
+                        city_name,
+                        target_date,
+                        decision_time,
+                        *metric_params,
+                    ),
+                ).fetchone()
+            else:
+                direction = "ASC" if order == "earliest" else "DESC"
+                row = self.conn.execute(
+                    f"""
+                    SELECT {", ".join(base_columns)}, ? AS snapshot_source
+                    FROM {table}
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND datetime(available_at) <= datetime(?)
+                      {metric_sql}
+                    ORDER BY datetime(available_at) {direction}, datetime(fetch_time) {direction}
+                    LIMIT 1
+                    """,
+                    (source, city_name, target_date, decision_time, *metric_params),
+                ).fetchone()
+            if row is not None:
+                return row
+        return None
+
+    def _snapshot_reference_row(
+        self,
+        city_name: str,
+        target_date: str,
+        *,
+        decision_time: str,
+        temperature_metric: Literal["high", "low"] = "high",
+    ):
+        """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
+        for table, source in (
+            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_legacy_table, "ensemble_snapshots"),
+        ):
+            if not table:
+                continue
+            columns = self._columns_for(table)
+            required = {"snapshot_id", "city", "target_date", "available_at", "p_raw_json"}
+            if not required.issubset(columns):
+                continue
+            metric_sql, metric_params, metric_supported = _metric_filter_sql(
+                columns,
+                source,
+                temperature_metric,
+            )
+            if not metric_supported:
+                continue
+            fetch_order = (
+                ", datetime(fetch_time) ASC"
+                if "fetch_time" in columns
+                else ""
+            )
+            row = self.conn.execute(
+                f"""
+                SELECT snapshot_id, available_at, ? AS snapshot_source
+                FROM {table}
+                WHERE city = ?
+                  AND target_date = ?
+                  AND datetime(available_at) <= datetime(?)
+                  AND p_raw_json IS NOT NULL
+                  {metric_sql}
+                ORDER BY datetime(available_at) ASC{fetch_order}
+                LIMIT 1
+                """,
+                (source, city_name, target_date, decision_time, *metric_params),
+            ).fetchone()
+            if row is not None:
+                return row
+        return None
 
     def _forecast_rows_for(
         self, city_name: str, target_date: str,
@@ -439,19 +614,27 @@ class ReplayContext:
         if key in self._decision_ref_cache:
             return self._decision_ref_cache[key]
 
-        row = self.conn.execute(
+        trade_rows = self.conn.execute(
             f"""
             SELECT td.trade_id, td.timestamp AS decision_time,
                    td.forecast_snapshot_id AS snapshot_id, td.market_hours_open
             FROM trade_decisions td
-            JOIN {self._sp}ensemble_snapshots es ON es.snapshot_id = td.forecast_snapshot_id
-            WHERE es.city = ? AND es.target_date = ?
-              AND td.forecast_snapshot_id IS NOT NULL
+            WHERE td.forecast_snapshot_id IS NOT NULL
             ORDER BY datetime(td.timestamp) ASC, td.trade_id ASC
-            LIMIT 1
-            """,
-            (city_name, target_date),
-        ).fetchone()
+            """
+        ).fetchall()
+        row = None
+        for trade_row in trade_rows:
+            snapshot_row = self._snapshot_row(
+                city_name,
+                target_date,
+                decision_time=trade_row["decision_time"],
+                snapshot_id=trade_row["snapshot_id"],
+                temperature_metric=temperature_metric,
+            )
+            if snapshot_row is not None:
+                row = trade_row
+                break
 
         if row is not None:
             result = {
@@ -598,22 +781,19 @@ class ReplayContext:
                 }
 
         if best is None and self.allow_snapshot_only_reference:
-            row = self.conn.execute(
-                f"""
-                SELECT snapshot_id, available_at
-                FROM {self._sp}ensemble_snapshots
-                WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
-                ORDER BY datetime(available_at) ASC
-                LIMIT 1
-                """,
-                (city_name, target_date),
-            ).fetchone()
+            row = self._snapshot_reference_row(
+                city_name,
+                target_date,
+                decision_time="9999-12-31T23:59:59+00:00",
+                temperature_metric=temperature_metric,
+            )
             if row is not None:
                 best = {
                     "trade_id": "",
                     "decision_time": row["available_at"],
                     "snapshot_id": row["snapshot_id"],
-                    "source": "ensemble_snapshots.available_at",
+                    "source": f"{row['snapshot_source']}.available_at",
+                    "authority_scope": BACKTEST_AUTHORITY_SCOPE,
                 }
 
         if best is None and self.allow_snapshot_only_reference:
@@ -630,9 +810,16 @@ class ReplayContext:
         *,
         decision_time: str,
         snapshot_id: Optional[int] = None,
+        temperature_metric: Literal["high", "low"] = "high",
     ) -> Optional[dict]:
         """Get the newest snapshot that was actually available at decision time."""
-        key = (city_name, target_date, str(decision_time or ""), str(snapshot_id or ""))
+        key = (
+            city_name,
+            target_date,
+            temperature_metric,
+            str(decision_time or ""),
+            str(snapshot_id or ""),
+        )
         if key in self._snapshot_cache:
             return self._snapshot_cache[key]
 
@@ -641,34 +828,13 @@ class ReplayContext:
             self._snapshot_cache[key] = result
             return result
 
-        if snapshot_id is not None:
-            row = self.conn.execute(
-                f"""
-                SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
-                       model_version, issue_time, valid_time, available_at, fetch_time, data_version
-                FROM {self._sp}ensemble_snapshots
-                WHERE snapshot_id = ?
-                  AND city = ?
-                  AND target_date = ?
-                  AND datetime(available_at) <= datetime(?)
-                LIMIT 1
-                """,
-                (snapshot_id, city_name, target_date, decision_time),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                f"""
-                SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread, is_bimodal,
-                       model_version, issue_time, valid_time, available_at, fetch_time, data_version
-                FROM {self._sp}ensemble_snapshots
-                WHERE city = ?
-                  AND target_date = ?
-                  AND datetime(available_at) <= datetime(?)
-                ORDER BY datetime(available_at) DESC, datetime(fetch_time) DESC
-                LIMIT 1
-                """,
-                (city_name, target_date, decision_time),
-            ).fetchone()
+        row = self._snapshot_row(
+            city_name,
+            target_date,
+            decision_time=decision_time,
+            snapshot_id=snapshot_id,
+            temperature_metric=temperature_metric,
+        )
 
         if row is None:
             self._snapshot_cache[key] = None
@@ -688,6 +854,12 @@ class ReplayContext:
             "available_at": row["available_at"],
             "fetch_time": row["fetch_time"],
             "data_version": row["data_version"],
+            "snapshot_source": row["snapshot_source"],
+            "authority_scope": (
+                "canonical_snapshot_v2"
+                if row["snapshot_source"] == "ensemble_snapshots_v2"
+                else BACKTEST_AUTHORITY_SCOPE
+            ),
             "n_members": len(members),
         }
         self._snapshot_cache[key] = result
@@ -1270,6 +1442,7 @@ def _replay_one_settlement(
         target_date,
         decision_time=decision_ref["decision_time"],
         snapshot_id=decision_ref["snapshot_id"],
+        temperature_metric=temperature_metric,
     )
     if snapshot is None:
         return None  # No ENS data for this date

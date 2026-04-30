@@ -2650,6 +2650,87 @@ Residual blockers:
 - This phase does not activate direct TIGGE/ECMWF, change Open-Meteo fallback
   policy, change source routing, mutate production DB rows, or decide Paris.
 
+## Phase 1L Reader Follow-Up - 2026-04-30
+
+Scope:
+
+- Close the replay/harvester reader side of DSA-13 after the evaluator writer
+  began producing canonical `ensemble_snapshots_v2` rows.
+- Keep legacy `ensemble_snapshots` readable only as compatibility/diagnostic
+  fallback.
+- No production DB mutation, no schema migration, no live venue side effects,
+  no source routing, no Paris config edit, no economics promotion.
+
+Implementation:
+
+- `src/engine/replay.py` now resolves snapshot rows through a v2-first helper.
+  Explicit `snapshot_id` reads and latest-at-decision-time reads check
+  `ensemble_snapshots_v2` first, then legacy `ensemble_snapshots`.
+- Replay keeps the existing `datetime(available_at) <= datetime(decision_time)`
+  guard on both explicit and latest snapshot reads.
+- Replay snapshot-only fallback remains opt-in and diagnostic. It now can report
+  `source=ensemble_snapshots_v2.available_at`, but still stamps
+  `authority_scope=diagnostic_non_promotion`; it requires non-null
+  `p_raw_json` before using a snapshot as reference evidence.
+- Replay v2 snapshot reads are metric-scoped. `ensemble_snapshots_v2` rows must
+  match the requested `temperature_metric`; legacy rows use the same filter when
+  the compatibility table exposes that column.
+- Replay preserves the original `trade_decisions` read location: historical
+  trade decisions remain main/unqualified even when snapshot authority is in an
+  attached `world.ensemble_snapshots_v2` table. This prevents split topology
+  regressions where snapshot rows live in world while trade decisions remain in
+  the trade DB.
+- `src/execution/harvester.py` now resolves `_get_stored_p_raw()`,
+  `get_snapshot_p_raw()`, and `get_snapshot_context()` through a v2-first
+  helper. When settlement rows or open-position fallback provide expected
+  city/date/metric identity, v2 rows must match that identity before they can
+  outrank legacy fallback; this prevents numeric snapshot-id collisions from
+  binding unrelated v2 rows.
+- Harvester learning context now respects v2 `training_allowed=0`:
+  such snapshots remain auditable but get
+  `learning_snapshot_ready=False` and
+  `learning_blocked_reason=snapshot_training_not_allowed`.
+
+Verification:
+
+- `python3 scripts/topology_doctor.py --navigation --task "DSA-13 canonical snapshot authority: replay snapshot and harvester snapshot readers prefer ensemble_snapshots_v2 canonical live snapshots while legacy ensemble_snapshots projection diagnostic remains compatibility; no production DB mutation no schema migration no live venue side effects no source routing no Paris config edit no economics promotion" ...`
+  -> navigation ok under `phase 1L canonical snapshot authority`.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md`
+  -> topology check ok.
+- `python3 scripts/semantic_linter.py --check src/engine/replay.py src/execution/harvester.py tests/test_replay_time_provenance.py tests/test_harvester_metric_identity.py`
+  -> pass.
+- `python3 -m py_compile src/engine/replay.py src/execution/harvester.py tests/test_replay_time_provenance.py tests/test_harvester_metric_identity.py`
+  -> pass.
+- `pytest -q -p no:cacheprovider tests/test_replay_time_provenance.py tests/test_run_replay_cli.py tests/test_replay_skill_eligibility_filter.py`
+  -> 33 passed.
+- After critic found the split-topology `world.trade_decisions` regression,
+  `tests/test_replay_time_provenance.py::test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapshot`
+  was added. The focused replay group rerun:
+  `pytest -q -p no:cacheprovider tests/test_replay_time_provenance.py::test_replay_context_reads_main_trade_decisions_with_attached_world_v2_snapshot tests/test_replay_time_provenance.py tests/test_run_replay_cli.py tests/test_replay_skill_eligibility_filter.py`
+  -> 31 passed.
+- After critic found the second-round metric/collision regressions,
+  `tests/test_replay_time_provenance.py::test_replay_context_v2_snapshot_lookup_is_metric_scoped`,
+  `tests/test_replay_time_provenance.py::test_replay_context_snapshot_only_fallback_requires_p_raw`,
+  and
+  `tests/test_harvester_metric_identity.py::test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity`
+  were added. The previously failing replay metric gate now passes:
+  `pytest -q -p no:cacheprovider tests/test_phase5c_replay_metric_identity.py`
+  -> 9 passed.
+- `pytest -q -p no:cacheprovider tests/test_harvester_metric_identity.py tests/test_phase10e_closeout.py tests/test_cross_module_invariants.py::test_inv03_harvester_prefers_decision_snapshot_over_latest`
+  -> 38 passed.
+- Critic re-review found no code-level blocker after the metric/collision
+  remediation. It could not issue formal APPROVE only because code-intel
+  `lsp_diagnostics` was unavailable (`Transport closed`) and local
+  `pyright`/`mypy`/`ruff` commands were not installed. This packet treats that
+  as an external diagnostic unavailability, covered by `semantic_linter`,
+  `py_compile`, focused pytest gates, verifier PASS, and `git diff --check`.
+
+Residual blockers:
+
+- This follow-up is still diagnostic/learning-context cleanup. It does not make
+  replay economics promotion-authoritative, does not backfill or mutate DB rows,
+  and does not replace the later DSA-19 economics substrate requirement.
+
 Phase 3 finality follow-up (2026-04-30):
 
 - User constraint clarified that `MATCHED`/`MINED` are not finality and
