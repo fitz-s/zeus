@@ -6,7 +6,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 
 import logging
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
@@ -26,7 +26,7 @@ from src.contracts import (
 )
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
-from src.data.market_scanner import _parse_temp_range, get_sibling_outcomes
+from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
@@ -41,13 +41,35 @@ from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.chain_reconciliation import resolve_position_metric
 from src.state.portfolio import Position
-from src.strategy.market_fusion import compute_alpha, vwmp
+from src.strategy.market_fusion import (
+    MODEL_ONLY_POSTERIOR_MODE,
+    compute_alpha,
+    compute_posterior,
+    vwmp,
+)
 from src.types import Bin
 from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
+_WHALE_TOXICITY_PRICE_MARGIN = 0.05
+_WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
+_WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
+_WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
+
+
+def _model_only_native_posterior(p_native: float) -> float:
+    """Return held-side payoff belief without using executable quote as prior."""
+    p = float(p_native)
+    if not np.isfinite(p) or not 0.0 <= p <= 1.0:
+        raise ValueError(f"native monitor probability must be in [0, 1], got {p!r}")
+    posterior = compute_posterior(
+        np.array([p, 1.0 - p], dtype=float),
+        None,
+        posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+    )
+    return float(posterior[0])
 
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
@@ -205,6 +227,7 @@ def _refresh_ens_member_counting(
             bin_widths=[b.width for b in all_bins],
         )
         p_cal_yes = float(p_cal_vector[held_idx])
+        p_cal_full = p_cal_vector
         applied = [
             "fresh_ens_fetch",
             *forecast_source_validations,
@@ -218,6 +241,7 @@ def _refresh_ens_member_counting(
             float(lead_days),
             bin_width=all_bins[0].width,
         )
+        p_cal_full = np.array([p_cal_yes], dtype=float)
         applied = [
             "fresh_ens_fetch",
             *forecast_source_validations,
@@ -226,6 +250,7 @@ def _refresh_ens_member_counting(
         ]
     else:
         p_cal_yes = float(p_raw_vector[held_idx])
+        p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
         applied = ["fresh_ens_fetch", *forecast_source_validations, "mc_instrument_noise"]
 
     # Compute actual hours since position was entered (not hardcoded 48h)
@@ -300,10 +325,9 @@ def _refresh_ens_member_counting(
     else:
         p_cal_native = p_cal_yes
 
-    current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+    current_p_posterior = _model_only_native_posterior(p_cal_native)
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
-    p_cal_full = p_cal_vector if (cal is not None and len(all_bins) > 1) else np.array([p_cal_yes])
     setattr(position, "_bootstrap_context", {
         "p_raw": p_raw_vector,
         "p_cal": p_cal_full,
@@ -317,7 +341,7 @@ def _refresh_ens_member_counting(
     })
 
     _set_monitor_probability_fresh(position, True)
-    return current_p_posterior, [*applied, "alpha_posterior"]
+    return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
 
 
 def _fetch_day0_observation(city: Position | object, target_d: date):
@@ -492,6 +516,7 @@ def _refresh_day0_observation(
             bin_widths=[b.width for b in all_bins],
         )
         p_cal_yes = float(p_cal_vector[held_idx])
+        p_cal_full = p_cal_vector
         applied = [
             "day0_observation",
             "fresh_ens_fetch",
@@ -506,6 +531,7 @@ def _refresh_day0_observation(
             0.0,
             bin_width=all_bins[0].width,
         )
+        p_cal_full = np.array([p_cal_yes], dtype=float)
         applied = [
             "day0_observation",
             "fresh_ens_fetch",
@@ -515,6 +541,7 @@ def _refresh_day0_observation(
         ]
     else:
         p_cal_yes = float(p_raw_vector[held_idx])
+        p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
         applied = [
             "day0_observation",
             "fresh_ens_fetch",
@@ -573,10 +600,9 @@ def _refresh_day0_observation(
         authority_verified=_authority_verified,
     ).value_for_consumer("ev")
     p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
-    current_p_posterior = alpha * p_cal_native + (1.0 - alpha) * current_p_market
+    current_p_posterior = _model_only_native_posterior(p_cal_native)
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
-    p_cal_full = p_cal_vector if (cal is not None and len(all_bins) > 1) else np.array([p_cal_yes])
     setattr(position, "_bootstrap_context", {
         "p_raw": p_raw_vector,
         "p_cal": p_cal_full,
@@ -590,7 +616,7 @@ def _refresh_day0_observation(
     })
 
     _set_monitor_probability_fresh(position, True)
-    return current_p_posterior, [*applied, "alpha_posterior"]
+    return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
 
 
 def _delta_bucket(delta: float) -> str:
@@ -702,6 +728,177 @@ def _check_persistence_anomaly(
 from src.contracts.edge_context import EdgeContext
 
 
+def _append_monitor_validation(position: Position, validation: str) -> None:
+    validations = list(getattr(position, "applied_validations", []) or [])
+    if validation not in validations:
+        validations.append(validation)
+    position.applied_validations = validations
+
+
+def _bin_sort_key(outcome: dict) -> tuple[int, float]:
+    low = outcome.get("range_low")
+    high = outcome.get("range_high")
+    if low is None and high is None:
+        return (1, float("inf"))
+    if low is None:
+        return (0, float(high))
+    return (0, float(low))
+
+
+def _adjacent_sibling_outcomes(position: Position, siblings: list[dict]) -> list[dict]:
+    """Return tradable weather bins adjacent to the held bin within one event."""
+
+    if not position.market_id:
+        return []
+    ordered = [
+        outcome for outcome in sorted(siblings, key=_bin_sort_key)
+        if outcome.get("range_low") is not None or outcome.get("range_high") is not None
+    ]
+    held_index = next(
+        (idx for idx, outcome in enumerate(ordered) if outcome.get("market_id") == position.market_id),
+        None,
+    )
+    if held_index is None:
+        return []
+    adjacent: list[dict] = []
+    if held_index > 0:
+        adjacent.append(ordered[held_index - 1])
+    if held_index + 1 < len(ordered):
+        adjacent.append(ordered[held_index + 1])
+    return adjacent
+
+
+def _recent_price_delta(
+    conn,
+    *,
+    token_id: str,
+    current_price: float,
+    now: datetime,
+    lookback_hours: float = _WHALE_TOXICITY_LOOKBACK_HOURS,
+) -> float | None:
+    if conn is None or not token_id:
+        return None
+    try:
+        lookback = (now - timedelta(hours=lookback_hours)).isoformat()
+        row = conn.execute(
+            """
+            SELECT price
+            FROM token_price_log
+            WHERE token_id = ? AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (token_id, lookback),
+        ).fetchone()
+        if row is None:
+            return None
+        return float(current_price) - float(row["price"])
+    except Exception as exc:
+        logger.debug("Whale-toxicity price delta unavailable for token=%s: %s", token_id, exc)
+        return None
+
+
+def _detect_whale_toxicity_from_orderbook(
+    conn,
+    clob,
+    position: Position,
+    *,
+    held_best_bid: float | None,
+    held_best_ask: float | None,
+    now: datetime | None = None,
+) -> bool | None:
+    """Detect adjacent-bin orderbook pressure for held YES positions.
+
+    This is deliberately narrower than a true market-wide trade-sweep detector:
+    Zeus currently has no market-level trade stream producer.  A signal is
+    raised only when VERIFIED sibling bins plus fresh CLOB top-book facts show a
+    large adjacent YES bid with enough visible depth.  Missing facts stay
+    unknown (`None`) so the exit evidence does not pretend the detector ran.
+    """
+
+    if position.direction != "buy_yes":
+        _append_monitor_validation(position, "whale_toxicity_not_applicable:buy_no")
+        return False
+    if conn is None:
+        return None
+    if clob is None or not position.market_id or held_best_bid is None:
+        _append_monitor_validation(position, "whale_toxicity_unavailable:missing_market_facts")
+        return None
+
+    try:
+        siblings = get_sibling_outcomes(position.market_id)
+        if str(get_last_scan_authority()).upper() != "VERIFIED":
+            _append_monitor_validation(position, "whale_toxicity_unavailable:market_scan_not_verified")
+            return None
+    except Exception as exc:
+        logger.debug("Whale-toxicity sibling scan failed for %s: %s", position.trade_id, exc)
+        _append_monitor_validation(position, "whale_toxicity_unavailable:sibling_scan_failed")
+        return None
+
+    adjacent = _adjacent_sibling_outcomes(position, siblings)
+    if not adjacent:
+        _append_monitor_validation(position, "whale_toxicity_unavailable:no_adjacent_bins")
+        return None
+
+    observed = False
+    basis_price = float(held_best_ask if held_best_ask is not None else held_best_bid)
+    position_notional = max(
+        _WHALE_TOXICITY_MIN_NOTIONAL_USD,
+        float(getattr(position, "effective_cost_basis_usd", 0.0) or 0.0),
+        float(getattr(position, "size_usd", 0.0) or 0.0),
+    )
+    now_utc = now or datetime.now(timezone.utc)
+
+    for outcome in adjacent:
+        adjacent_token = str(outcome.get("token_id") or "").strip()
+        if not adjacent_token:
+            continue
+        try:
+            adj_bid, adj_ask, adj_bid_size, _adj_ask_size = clob.get_best_bid_ask(adjacent_token)
+        except Exception as exc:
+            logger.debug(
+                "Whale-toxicity adjacent book unavailable for trade=%s token=%s: %s",
+                position.trade_id,
+                adjacent_token,
+                exc,
+            )
+            continue
+
+        observed = True
+        adjacent_notional = float(adj_bid) * float(adj_bid_size)
+        current_mid = (float(adj_bid) + float(adj_ask)) / 2.0
+        prior_delta = _recent_price_delta(
+            conn,
+            token_id=adjacent_token,
+            current_price=current_mid,
+            now=now_utc,
+        )
+        has_sufficient_depth = adjacent_notional >= position_notional
+        has_recent_surge = (
+            prior_delta is not None
+            and prior_delta >= _WHALE_TOXICITY_PRICE_MARGIN
+            and float(adj_bid) >= basis_price + _WHALE_TOXICITY_PRICE_MARGIN
+        )
+        has_severe_static_pressure = (
+            prior_delta is None
+            and float(adj_bid) >= basis_price + _WHALE_TOXICITY_SEVERE_PRICE_MARGIN
+            and adjacent_notional >= position_notional * 2.0
+        )
+        if has_sufficient_depth and (has_recent_surge or has_severe_static_pressure):
+            _append_monitor_validation(
+                position,
+                "whale_toxicity_available:adjacent_orderbook_pressure",
+            )
+            return True
+
+    if observed:
+        _append_monitor_validation(position, "whale_toxicity_available:clear")
+        return False
+
+    _append_monitor_validation(position, "whale_toxicity_unavailable:adjacent_orderbook_missing")
+    return None
+
+
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
     """Fetch fresh market price and recompute P_posterior for a held position.
 
@@ -806,6 +1003,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     except Exception as e:
         logger.debug("ENS refresh failed for %s: %s", pos.trade_id, e)
 
+    pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
+        conn,
+        clob,
+        pos,
+        held_best_bid=pos.last_monitor_best_bid,
+        held_best_ask=pos.last_monitor_best_ask,
+    )
+
     divergence_score = abs(current_p_posterior - current_p_market)
     market_velocity_1h = 0.0
 
@@ -865,11 +1070,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             bins = bootstrap_ctx["bins"]
             if len(bootstrap_ctx["member_extrema"]) == 0:
                 raise ValueError("Bootstrap context has no member_extrema")
-            p_market_arr = np.zeros(len(bins))
-            # A1: MarketAnalysis expects YES-side market prices (entry convention).
-            # For buy_no, current_p_market is native NO-side — convert back to YES.
-            p_market_yes = current_p_market if pos.direction == "buy_yes" else 1.0 - current_p_market
-            p_market_arr[held_idx] = p_market_yes
+            p_market_arr = None
+            if pos.direction == "buy_yes" or len(bins) <= 2:
+                p_market_arr = np.zeros(len(bins))
+                # Binary buy_no may still use complement price semantics. In
+                # multi-bin buy_no, native NO quote below is the only executable
+                # cost and model-only posterior never consumes this vector.
+                p_market_yes = current_p_market if pos.direction == "buy_yes" else 1.0 - current_p_market
+                p_market_arr[held_idx] = p_market_yes
             p_market_no_arr = None
             buy_no_quote_available = None
             if pos.direction == "buy_no" and len(bins) > 2:
@@ -890,6 +1098,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 calibrator=bootstrap_ctx["calibrator"],
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],
+                posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
             )
             # Call _bootstrap_bin directly (not find_edges) so CI is computed
             # regardless of edge sign — monitor needs CI even when edge is negative.

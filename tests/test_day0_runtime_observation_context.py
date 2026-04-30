@@ -8,9 +8,15 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
+import src.data.observation_client as observation_client
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.monitor_refresh as monitor_refresh
+from src.config import City
+from src.contracts.exceptions import ObservationUnavailableError
 from src.engine.discovery_mode import DiscoveryMode
+from src.signal.forecast_uncertainty import day0_nowcast_context
 
 
 def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_getter():
@@ -140,3 +146,109 @@ def test_monitor_refresh_day0_helper_falls_back_for_legacy_getter(monkeypatch):
 
     assert result["current_temp"] == 70.0
     assert captured["legacy_calls"] == 1
+
+
+def _city(**overrides) -> City:
+    base = {
+        "name": "Test City",
+        "lat": 40.0,
+        "lon": -73.0,
+        "timezone": "UTC",
+        "settlement_unit": "F",
+        "cluster": "test",
+        "wu_station": "KNYC",
+        "settlement_source_type": "wu_icao",
+    }
+    base.update(overrides)
+    return City(**base)
+
+
+def test_day0_executable_observation_rejects_non_wu_source_class(monkeypatch):
+    def should_not_fetch_wu(*args, **kwargs):
+        raise AssertionError("non-WU settlement sources must not call WU geocode")
+
+    monkeypatch.setattr(observation_client, "_fetch_wu_observation", should_not_fetch_wu)
+
+    with pytest.raises(ObservationUnavailableError, match="unsupported"):
+        observation_client.get_current_observation(
+            _city(name="Hong Kong", settlement_source_type="hko", wu_station=""),
+            target_date=date(2026, 4, 1),
+            reference_time=datetime(2026, 4, 1, 16, tzinfo=timezone.utc),
+        )
+
+
+def test_day0_wu_observation_rejects_station_mismatch(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "observations": [
+                    {
+                        "temp": 72.0,
+                        "valid_time_gmt": 1775059200,
+                        "obs_id": "KJFK",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(observation_client.httpx, "get", lambda *args, **kwargs: Response())
+
+    with pytest.raises(ObservationUnavailableError, match="All observation providers failed"):
+        observation_client.get_current_observation(
+            _city(wu_station="KNYC"),
+            target_date=date(2026, 4, 1),
+            reference_time=datetime(2026, 4, 1, 16, 30, tzinfo=timezone.utc),
+        )
+
+
+def test_day0_wu_observation_preserves_station_and_iso_time(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "observations": [
+                    {
+                        "temp": 70.0,
+                        "valid_time_gmt": 1775055600,
+                        "obs_id": "KNYC",
+                    },
+                    {
+                        "temp": 74.0,
+                        "valid_time_gmt": 1775059200,
+                        "obs_id": "KNYC",
+                    },
+                ]
+            }
+
+    monkeypatch.setattr(observation_client.httpx, "get", lambda *args, **kwargs: Response())
+
+    obs = observation_client.get_current_observation(
+        _city(wu_station="KNYC"),
+        target_date=date(2026, 4, 1),
+        reference_time=datetime(2026, 4, 1, 16, 30, tzinfo=timezone.utc),
+    )
+
+    assert obs.source == "wu_api"
+    assert obs.station_id == "KNYC"
+    assert obs.sample_count == 2
+    assert obs.high_so_far == 74.0
+    assert obs.low_so_far == 70.0
+    assert obs.observation_time.endswith("+00:00")
+
+
+def test_day0_nowcast_context_parses_epoch_timestamps():
+    observed_at = datetime(2026, 4, 1, 15, tzinfo=timezone.utc)
+    current_at = datetime(2026, 4, 1, 15, 30, tzinfo=timezone.utc)
+
+    context = day0_nowcast_context(
+        hours_remaining=2.0,
+        observation_source="wu_api",
+        observation_time=int(observed_at.timestamp()),
+        current_utc_timestamp=str(int(current_at.timestamp())),
+    )
+
+    assert context["age_hours"] == pytest.approx(0.5)
+    assert context["fresh_observation"] is True
+    assert context["blend_weight"] > 0.0

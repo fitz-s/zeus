@@ -31,6 +31,8 @@ _CTF_SCALE = 1_000_000
 _TERMINAL_RESERVATION_STATES = frozenset(
     {"CANCELED", "CANCELLED", "FILLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
+COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 60.0
+COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
 
 COLLATERAL_LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
@@ -196,6 +198,7 @@ class CollateralLedger:
         required = spend_micro if spend_micro is not None else _intent_worst_case_spend_micro(intent)
         if snapshot.authority_tier == "DEGRADED":
             raise CollateralInsufficient("collateral_snapshot_degraded")
+        _assert_snapshot_fresh(snapshot)
         if snapshot.available_pusd_micro < required:
             raise CollateralInsufficient(
                 f"pusd_insufficient: required_micro={required} "
@@ -224,6 +227,7 @@ class CollateralLedger:
             raise CollateralInsufficient("ctf_token_id_required")
         if snapshot.authority_tier == "DEGRADED":
             raise CollateralInsufficient("collateral_snapshot_degraded")
+        _assert_snapshot_fresh(snapshot)
         available = snapshot.available_tokens(selected_token)
         if available < required:
             raise CollateralInsufficient(
@@ -401,7 +405,7 @@ class CollateralLedger:
         try:
             captured_at = datetime.fromisoformat(str(raw["captured_at"]).replace("Z", "+00:00"))
         except Exception:
-            captured_at = datetime.now(timezone.utc)
+            captured_at = datetime.fromtimestamp(0, timezone.utc)
         return CollateralSnapshot(
             pusd_balance_micro=int(raw["pusd_balance_micro"] or 0),
             pusd_allowance_micro=int(raw["pusd_allowance_micro"] or 0),
@@ -566,6 +570,27 @@ def _read_adapter_payload(adapter: Any) -> dict[str, Any]:
         payload["ctf_token_balances_units"] = balances
         payload["ctf_token_allowances_units"] = allowances
     return payload
+
+
+def _assert_snapshot_fresh(snapshot: CollateralSnapshot) -> None:
+    captured_at = snapshot.captured_at
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - captured_at.astimezone(timezone.utc)).total_seconds()
+    if age_seconds < -COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS:
+        raise CollateralInsufficient(
+            "collateral_snapshot_future: "
+            f"age_seconds={age_seconds:.1f} "
+            f"clock_skew_seconds={COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS:.1f}"
+        )
+    if age_seconds < 0:
+        return
+    if age_seconds > COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:
+        raise CollateralInsufficient(
+            "collateral_snapshot_stale: "
+            f"age_seconds={age_seconds:.1f} "
+            f"max_age_seconds={COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:.1f}"
+        )
 
 
 def _intent_worst_case_spend_micro(intent: ExecutionIntent) -> int:

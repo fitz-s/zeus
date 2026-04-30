@@ -194,7 +194,7 @@ Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fal
 **Location:** `src/strategy/market_fusion.py` + `src/contracts/vig_treatment.py`
 **Problem (historical):** `p_market` includes vig (~0.95–1.05 total probability across bins). Blending model probability with vig-contaminated market probability, then normalizing, smears the vig bias into the posterior. Separately, sparse monitor vectors (zeros for non-held bins) diluted the held-bin posterior OR (post-B086 2026-04-19) were left as raw zeros which underweighted the held bin in blend.
 **Antibody deployed (2026-04-13):** `compute_posterior()` constructs `VigTreatment.from_raw(p_market)` and blends against `clean_prices` before final posterior normalization when `p_market` looks like a complete market-family vector.
-**Antibody deployed (2026-04-24, T6.3 Option C, commit `6f53ef2`):** `VigTreatment.from_raw(p_market, *, sibling_snapshot=None, imputation_source="none")` gains impute path — when raw market has zero bins and a sibling_snapshot (e.g., p_cal) is supplied, zeros are filled from the sibling and the record carries `imputed_bins: tuple` + `imputation_source: Literal["none","sibling_market","p_cal_fallback"]`. The sparse branch of `compute_posterior` now routes through this with `imputation_source="p_cal_fallback"`. Silent revival of pre-B086 policy is structurally impossible — typed-visible on the VigTreatment record. Archive supersedence recorded at `docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17` (local-only; durable record in `docs/operations/task_2026-04-23_midstream_remediation/T6_receipt.json` + `src/contracts/vig_treatment.py` module docstring).
+**Antibody deployed (2026-04-24, T6.3 Option C, commit `6f53ef2`):** `VigTreatment.from_raw(p_market, *, sibling_snapshot=None, imputation_source="none")` gains impute path — when raw market has zero bins and a sibling_snapshot (e.g., p_cal) is supplied, zeros are filled from the sibling and the record carries `imputed_bins: tuple` + `imputation_source: Literal["none","sibling_market","p_cal_fallback"]`. The sparse branch of `compute_posterior` now routes through this with `imputation_source="p_cal_fallback"`. Silent revival of pre-B086 policy is structurally impossible — typed-visible on the VigTreatment record. Archive supersedence recorded at `docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17` (local-only; durable record in `docs/archives/packets/task_2026-04-23_midstream_remediation/T6_receipt.json` + `src/contracts/vig_treatment.py` module docstring).
 **Category immunity**: 1.0/1.0. Downstream auditors reading the posterior record can distinguish market-derived bins from model-prior fills via `imputation_source`.
 **Remaining operator decision**: once `sibling_market` source wiring lands (T6.4-phase3 style slice threading real cross-market snapshots), flip caller from `p_cal_fallback` to `sibling_market`.
 
@@ -315,8 +315,8 @@ evidence, not an active remediation item.
 - Block on this gap when training LOW calibration; use observations.low_temp
 **Antibody:** `architecture/fatal_misreads.yaml::polymarket_low_market_history_starts_2026_04_15` (severity=critical)
 **Proof artifacts:**
-- `docs/operations/task_2026-04-28_settlements_low_backfill/plan.md`
-- `docs/operations/task_2026-04-28_settlements_low_backfill/evidence/pm_settlement_truth_low.json`
+- `docs/archives/packets/task_2026-04-28_settlements_low_backfill/plan.md`
+- `docs/archives/packets/task_2026-04-28_settlements_low_backfill/evidence/pm_settlement_truth_low.json`
 **Invalidation:** only a fresh gamma-api probe with HTTP-evidence showing LOW events with endDate < 2026-04-15 OR coverage beyond 8 cities may relax this.
 
 ### [CLOSED — 2026-04-30; archived from MITIGATED] strategy_tracker no longer reports JSON PnL as independent truth
@@ -360,3 +360,159 @@ and `tests/test_truth_layer.py::test_load_portfolio_rejects_deprecated_state_fil
 **Residual:** `positions-paper.json` remains in legacy fixtures/history and
 truth-surface stale-status tests. Those references are not live portfolio
 authority and can be cleaned in a separate test/docs hygiene packet.
+
+### [CLOSED — 2026-04-30] LOW non-Day0 monitor uses LOW probability chain
+**Archived from active register:** 2026-04-30.
+**Original problem:** `monitor_refresh._refresh_ens_member_counting()` resolved a
+LOW position's calibrator metric but constructed `EnsembleSignal` with the
+implicit HIGH default, so held LOW positions could compute raw probability from
+daily maxima.
+**Antibody deployed:** `monitor_refresh` now resolves `MetricIdentity` once and
+passes `temperature_metric=temperature_metric` into `EnsembleSignal`, while the
+calibrator receives the same metric string.
+**Evidence:** `src/engine/monitor_refresh.py` metric-resolution and
+`EnsembleSignal(... temperature_metric=...)` callsite; LOW monitor regression
+coverage in `tests/test_phase9c_gate_f_prep.py`.
+**Residual:** None for the original LOW-vs-HIGH monitor-chain break. Exit
+partial-fill exposure and whale detector gaps remain separately active.
+
+### [CLOSED — 2026-04-30] LOW Day0 handles open shoulders and rich observation context
+**Archived from active register:** 2026-04-30.
+**Original problem:** LOW Day0 probability converted `None` shoulder bounds with
+`float(None)` and dropped rich HIGH-path fields such as settlement rounding,
+observation source/time, and temporal context.
+**Antibody deployed:** `Day0LowNowcastSignal` treats open shoulders as
+`-inf/+inf`, applies injected settlement rounding, and preserves observation
+source/time plus temporal context through `Day0SignalInputs` and the router.
+**Evidence:** `src/signal/day0_low_nowcast_signal.py`,
+`src/signal/day0_router.py`, and `tests/test_phase6_day0_split.py` covering
+open shoulders, rounding injection, and rich observation context.
+**Residual:** Day0 source-role/station authorization is still active under the
+separate Day0 observation routing gap.
+
+### [CLOSED — 2026-04-30] Entry intent carries executable snapshot facts
+**Archived from active register:** 2026-04-30.
+**Original problem:** The runtime call to `create_execution_intent()` did not
+pass `executable_snapshot_id`, min tick, min order, or neg-risk facts even though
+the command repository required them.
+**Antibody deployed:** `cycle_runtime` extracts required executable snapshot
+fields, captures a fresh entry snapshot when missing, blocks on missing/capture
+failure, and passes snapshot id/min tick/min order/neg-risk into
+`create_execution_intent()`.
+**Evidence:** `src/engine/cycle_runtime.py` snapshot-field extraction/capture and
+intent callsite; `src/data/market_scanner.py::capture_executable_market_snapshot`;
+`tests/test_runtime_guards.py::test_entry_intent_receives_executable_snapshot_fields`,
+`test_live_entry_snapshot_capture_failure_blocks_before_intent`, and
+`test_live_entry_captures_and_commits_snapshot_before_executor`.
+**Residual:** Exit snapshot refresh is still tracked by the executable snapshot
+producer/refresher residual.
+
+### [CLOSED — 2026-04-30] Market scan authority is gated before entry discovery
+**Archived from active register:** 2026-04-30.
+**Original problem:** `find_weather_markets()` exposed bare market dicts while
+scanner authority (`VERIFIED`, `STALE`, `EMPTY_FALLBACK`, `NEVER_FETCHED`) was
+lost before entry evaluation.
+**Antibody deployed:** Runtime reads `get_last_scan_authority()`, records forward
+substrate/availability facts, and blocks discovery before evaluator on non-
+`VERIFIED` scan authority.
+**Evidence:** `src/engine/cycle_runtime.py::_market_scan_authority()` and the
+pre-evaluator block; `tests/test_runtime_guards.py::test_discovery_phase_blocks_stale_market_scan_before_evaluator`,
+`test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator`, and
+`test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluator`.
+**Residual:** Current-source validity and Day0 observation routing remain
+separate source-truth gaps.
+
+### [CLOSED — 2026-04-30] Open-Meteo ENS snapshot failure no longer produces tradeable empty snapshot id
+**Archived from active register:** 2026-04-30.
+**Original problem:** Open-Meteo-shaped ENS payloads could lack issue/valid times,
+`_store_ens_snapshot()` could return `""`, and evaluation could continue without
+a decision snapshot id.
+**Antibody deployed:** Entry forecast evidence now requires explicit source,
+role, authority, issue/valid/fetch/available facts; Open-Meteo no longer fakes
+issue time from valid time; failed snapshot persistence rejects the candidate
+instead of continuing with an empty id.
+**Evidence:** `src/engine/evaluator.py::_entry_forecast_evidence_errors`,
+`_store_ens_snapshot` failure handling, and probability-vector validation;
+`tests/test_runtime_guards.py::test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector`,
+`test_openmeteo_parse_keeps_first_valid_time_and_does_not_fake_issue_time`,
+`test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time`,
+`test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption`,
+and `test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback`.
+**Residual:** Live Open-Meteo as entry-primary still requires valid issue-time and
+role evidence; missing evidence is a no-trade, not a silent empty-snapshot trade.
+
+### [CLOSED — 2026-04-30] Gamma closed/non-accepting child markets are filtered before outcome extraction
+**Archived from active register:** 2026-04-30.
+**Original problem:** `_extract_outcomes()` included every child market with
+parseable tokens/prices even if Gamma marked the child closed, inactive,
+non-accepting, or orderbook-disabled.
+**Antibody deployed:** `_market_child_is_tradable()` filters explicit
+non-tradable child markets before token/price extraction while preserving
+tradable children with status facts.
+**Evidence:** `src/data/market_scanner.py::_extract_outcomes` and
+`_market_child_is_tradable`; `tests/test_k1_slice_d.py::test_extract_outcomes_filters_untradable_gamma_children`.
+**Residual:** Reduced-family statistical treatment for partially closed market
+families remains a policy question, but closed children no longer enter the
+outcome vector.
+
+### [CLOSED — 2026-04-30] v2 row-count observability prefers world truth over trade shadow
+**Archived from active register:** 2026-04-30.
+**Original problem:** Status summary used unqualified v2 table row-count queries,
+so empty trade shadow tables could hide populated attached world tables.
+**Antibody deployed:** `_get_v2_row_counts()` now has table-specific schema
+preference and bounded row-count probes, preferring attached `world` for world
+v2 tables and respecting present empty world tables as authority.
+**Evidence:** `src/observability/status_summary.py::_V2_ROW_COUNT_SCHEMA_PREFERENCE`
+and `_get_v2_row_counts`; `tests/test_phase10b_dt_seam_cleanup.py::TestRCPV2RowCountSensor`
+world-vs-main and missing-table coverage.
+**Residual:** Status summaries remain observability projections, not authority
+for live deploy.
+
+### [CLOSED — 2026-04-30] VWMP-derived entry limits are quantized to executable snapshot tick
+**Archived from active register:** 2026-04-30.
+**Original problem:** Entry price planning could produce fractional VWMP-derived
+limits such as `0.313333...`, which then failed the executable snapshot tick gate.
+**Antibody deployed:** `create_execution_intent()` aligns BUY limit prices down
+to `executable_snapshot_min_tick_size` before constructing the `ExecutionIntent`;
+live runtime now requires the snapshot min-tick field before intent creation.
+**Evidence:** `src/execution/executor.py::_align_buy_limit_price_to_tick`,
+`create_execution_intent`; `src/engine/cycle_runtime.py` snapshot-field gate;
+executor/runtime tests covering snapshot-threaded intent and repriced limit
+submission.
+**Residual:** Entry `max_slippage` enforcement is closed separately on
+2026-04-30.
+
+### [CLOSED — 2026-04-30] Entry max-slippage budget is enforced before command persistence
+**Archived from active register:** 2026-04-30.
+**Original problem:** `ExecutionIntent.max_slippage` was typed as
+`SlippageBps`, but dynamic entry repricing still used an independent 5% best-ask
+jump window. A best ask outside the 200 bps budget could become the submitted
+limit before command persistence.
+**Antibody deployed:** `create_execution_intent()` now evaluates adverse
+slippage against the executable quote reference and rejects repriced limits above
+the 200 bps budget. Runtime executable-snapshot repricing records the reference
+price, applied bps, and whether the best ask was blocked by the budget before
+threading the intent.
+**Evidence:** `src/execution/executor.py::create_execution_intent`,
+`src/engine/cycle_runtime.py::_reprice_decision_from_executable_snapshot`,
+`tests/test_executor.py::TestExecutor::test_create_execution_intent_rejects_reprice_above_slippage_budget`,
+`tests/test_executor_command_split.py::test_create_execution_intent_rejects_reprice_above_max_slippage`,
+and `tests/test_runtime_guards.py::test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump`.
+**Residual:** This closes configured entry slippage-budget enforcement. It does
+not prove live alpha or solve separate live fee evidence / realized execution
+attribution gaps.
+
+### [CLOSED — 2026-04-30] Weather multi-bin buy_no/shoulder-sell hypotheses have native-NO executable reachability
+**Archived from active register:** 2026-04-30.
+**Original problem:** Full-family FDR could select multi-bin `buy_no` hypotheses
+while `MarketAnalysis.find_edges()` produced no executable `BinEdge` for those
+multi-bin native-NO trades.
+**Antibody deployed:** Native NO quote evidence is threaded through family scan,
+edge materialization, evaluator quote acquisition, snapshot capture, and
+selected-token runtime routing; live enablement remains default-off.
+**Evidence:** `tests/test_fdr.py`, `tests/test_runtime_guards.py`,
+`tests/test_executable_market_snapshot_v2.py`, `tests/test_bootstrap_symmetry.py`,
+`tests/test_executor.py`, and `tests/test_exit_safety.py` coverage named in the
+original closeout.
+**Residual:** This does not promote Shoulder Bin Sell to live alpha or prove P&L;
+it only closes the structural reachability gap.

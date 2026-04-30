@@ -1,9 +1,8 @@
 """Real-time observation client for Day0 signal.
 
-Spec §1.3 priority:
-  Priority 1: WU API (settlement authority)
-  Priority 2: IEM ASOS real-time (US cities)
-  Priority 3: Open-Meteo hourly (all cities, free fallback)
+Executable Day0 observations are settlement-source-bound. Diagnostic fallbacks
+must be requested explicitly so Open-Meteo/IEM cannot silently become ordinary
+settlement evidence in the live entry/monitor path.
 
 Contract:
   high_so_far MUST mean the target city's local target-date maximum observed so far,
@@ -46,6 +45,11 @@ class Day0ObservationContext:
     observation_time: object  # raw timestamp — str | int | float | None
     unit: str
     causality_status: str = "OK"
+    station_id: str = ""
+    sample_count: int = 0
+    first_sample_time: object = None
+    last_sample_time: object = None
+    coverage_status: str = "UNKNOWN"
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:
@@ -65,6 +69,12 @@ class Day0ObservationContext:
             "source": self.source,
             "observation_time": self.observation_time,
             "unit": self.unit,
+            "causality_status": self.causality_status,
+            "station_id": self.station_id,
+            "sample_count": self.sample_count,
+            "first_sample_time": self.first_sample_time,
+            "last_sample_time": self.last_sample_time,
+            "coverage_status": self.coverage_status,
         }
 
     # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh
@@ -159,6 +169,22 @@ def _parse_wu_valid_time(raw_value, tz: ZoneInfo) -> datetime | None:
         return None
 
 
+def _observation_time_utc_iso(dt_local: datetime) -> str:
+    return dt_local.astimezone(timezone.utc).isoformat()
+
+
+def _wu_observation_station_id(obs: dict) -> str:
+    for key in ("obs_id", "stationID", "station_id", "stationId"):
+        value = obs.get(key)
+        if value not in (None, ""):
+            return str(value).strip().upper()
+    return ""
+
+
+def _wu_station_matches(station_id: str, expected_station: str) -> bool:
+    return station_id == expected_station or station_id.startswith(f"{expected_station}:")
+
+
 def _parse_local_timestamp(raw_value, tz: ZoneInfo) -> datetime | None:
     if raw_value in (None, ""):
         return None
@@ -189,25 +215,40 @@ def get_current_observation(
     city: City,
     target_date: date | str | None = None,
     reference_time: datetime | str | None = None,
+    *,
+    allow_non_settlement_fallback: bool = False,
 ) -> Day0ObservationContext:
-    """Get the current target-date observation for Day0 signal."""
+    """Get the current target-date observation for executable Day0 signal.
+
+    Default calls are settlement-source-bound and fail closed when the city's
+    configured source class is unsupported here. Diagnostic callers may opt into
+    non-settlement fallbacks, but those contexts must not be treated as
+    executable source truth downstream.
+    """
 
     target_day, _, reference_local, tz = _resolve_observation_context(
         city, target_date=target_date, reference_time=reference_time
     )
 
-    result = _fetch_wu_observation(city, target_day=target_day, reference_local=reference_local, tz=tz)
-    if result is not None:
-        return result
+    if city.settlement_source_type == "wu_icao":
+        result = _fetch_wu_observation(city, target_day=target_day, reference_local=reference_local, tz=tz)
+        if result is not None:
+            return result
+    elif not allow_non_settlement_fallback:
+        raise ObservationUnavailableError(
+            f"Executable Day0 observation source unsupported for "
+            f"{city.name}/{city.settlement_source_type}"
+        )
 
-    if city.wu_station and city.settlement_unit == "F":
+    if allow_non_settlement_fallback and city.wu_station and city.settlement_unit == "F":
         result = _fetch_iem_asos(city, target_day=target_day, reference_local=reference_local, tz=tz)
         if result is not None:
             return result
 
-    result = _fetch_openmeteo_hourly(city, target_day=target_day, reference_local=reference_local, tz=tz)
-    if result is not None:
-        return result
+    if allow_non_settlement_fallback:
+        result = _fetch_openmeteo_hourly(city, target_day=target_day, reference_local=reference_local, tz=tz)
+        if result is not None:
+            return result
 
     logger.error(
         "No observation source available for %s on local target_date=%s up to %s",
@@ -256,31 +297,50 @@ def _fetch_wu_observation(
         if not observations:
             return None
 
-        samples: list[tuple[float, datetime, object]] = []
+        expected_station = str(city.wu_station or "").strip().upper()
+        if not expected_station:
+            return None
+
+        samples: list[tuple[float, datetime, object, str]] = []
         for obs in observations:
             temp = obs.get("temp")
             raw_time = obs.get("valid_time_gmt")
             if temp is None or raw_time is None:
                 continue
+            station_id = _wu_observation_station_id(obs)
+            if not _wu_station_matches(station_id, expected_station):
+                continue
             dt_local = _parse_wu_valid_time(raw_time, tz)
             if dt_local is None:
                 continue
-            samples.append((float(temp), dt_local, raw_time))
+            samples.append((float(temp), dt_local, raw_time, station_id))
 
-        selected = _select_local_day_samples(samples, target_day, reference_local)
+        selected = [
+            (float(temp), dt_local, raw_time, station_id)
+            for temp, dt_local, raw_time, station_id in samples
+            if dt_local.date() == target_day and dt_local <= reference_local
+        ]
+        selected.sort(key=lambda row: row[1])
         if not selected:
             return None
 
-        current_temp, _, raw_time = selected[-1]
-        high_so_far = max(temp for temp, _, _ in selected)
-        low_so_far = min(temp for temp, _, _ in selected)
+        current_temp, observed_local, _, station_id = selected[-1]
+        high_so_far = max(temp for temp, _, _, _ in selected)
+        low_so_far = min(temp for temp, _, _, _ in selected)
+        first_local = selected[0][1]
+        last_local = selected[-1][1]
         return Day0ObservationContext(
             high_so_far=float(high_so_far),
             low_so_far=float(low_so_far),
             current_temp=float(current_temp),
             source="wu_api",
-            observation_time=raw_time,
+            observation_time=_observation_time_utc_iso(observed_local),
             unit=city.settlement_unit,
+            station_id=station_id,
+            sample_count=len(selected),
+            first_sample_time=_observation_time_utc_iso(first_local),
+            last_sample_time=_observation_time_utc_iso(last_local),
+            coverage_status="OK",
         )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:
@@ -349,6 +409,11 @@ def _fetch_iem_asos(
             source="iem_asos",
             observation_time=local_valid,
             unit="F",
+            station_id=station,
+            sample_count=1,
+            first_sample_time=local_valid,
+            last_sample_time=local_valid,
+            coverage_status="DIAGNOSTIC_FALLBACK",
         )
 
     except MissingCalibrationError:
@@ -419,6 +484,11 @@ def _fetch_openmeteo_hourly(
             source="openmeteo_hourly",
             observation_time=raw_time,
             unit=city.settlement_unit,
+            station_id="",
+            sample_count=len(selected),
+            first_sample_time=selected[0][2],
+            last_sample_time=raw_time,
+            coverage_status="DIAGNOSTIC_FALLBACK",
         )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:

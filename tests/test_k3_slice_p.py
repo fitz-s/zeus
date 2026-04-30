@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.strategy.market_fusion import compute_posterior
+from src.strategy.market_fusion import LEGACY_POSTERIOR_MODE, compute_posterior
 from src.types.market import Bin
 
 
@@ -39,6 +39,29 @@ def _non_tail_bins_3() -> list[Bin]:
         Bin(low=62, high=63, unit="F", label="62-63°F"),
         Bin(low=64, high=65, unit="F", label="64-65°F"),
     ]
+
+
+def _legacy_kwargs() -> dict[str, object]:
+    return {
+        "posterior_mode": LEGACY_POSTERIOR_MODE,
+        "allow_legacy_quote_prior": True,
+    }
+
+
+def _legacy_compute_posterior(
+    p_cal: np.ndarray,
+    p_market: np.ndarray,
+    *,
+    alpha: float,
+    bins: list[Bin],
+) -> np.ndarray:
+    return compute_posterior(
+        p_cal,
+        p_market,
+        alpha=alpha,
+        bins=bins,
+        **_legacy_kwargs(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +89,7 @@ class TestSparseMarketImputation:
         bins = _non_tail_bins_3()  # no tail scaling — alpha_vec == alpha
         alpha = 0.6
 
-        posterior = compute_posterior(p_cal, p_market_sparse, alpha=alpha, bins=bins)
+        posterior = _legacy_compute_posterior(p_cal, p_market_sparse, alpha=alpha, bins=bins)
 
         # Expected under T6.3 impute: zeros → p_cal at same positions
         imputed_market = np.array([p_cal[0], 0.45, p_cal[2]])
@@ -97,8 +120,8 @@ class TestSparseMarketImputation:
         p_market_sparse = np.array([0.0, 0.45, 0.0])
         bins = _bins_3()
 
-        post_complete = compute_posterior(p_cal, p_market_complete, alpha=0.6, bins=bins)
-        post_sparse = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+        post_complete = _legacy_compute_posterior(p_cal, p_market_complete, alpha=0.6, bins=bins)
+        post_sparse = _legacy_compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
 
         # Under T6.3 impute, sparse posterior should be within 15% of complete.
         assert abs(post_sparse[1] - post_complete[1]) / post_complete[1] < 0.15
@@ -110,7 +133,7 @@ class TestSparseMarketImputation:
         p_market = np.array([0.18, 0.48, 0.29])
         bins = _bins_3()
 
-        posterior = compute_posterior(p_cal, p_market, alpha=0.6, bins=bins)
+        posterior = _legacy_compute_posterior(p_cal, p_market, alpha=0.6, bins=bins)
 
         assert posterior.sum() == pytest.approx(1.0, abs=1e-9)
         assert np.all(posterior > 0)
@@ -127,7 +150,7 @@ class TestSparseMarketImputation:
         p_market_sparse = np.array([0.0, 0.45, 0.0])
         bins = _bins_3()  # bins 0 and 2 are tail bins
 
-        posterior = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+        posterior = _legacy_compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
 
         # Tail-alpha: max(0.20, 0.6 * 0.5) = 0.30. Non-tail: 0.60.
         imputed_market = np.array([p_cal[0], 0.45, p_cal[2]])
@@ -158,7 +181,7 @@ class TestSparseMarketImputation:
         p_market_sparse = np.array([0.0, 0.45, 0.0])
         bins = _non_tail_bins_3()
 
-        posterior = compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
+        posterior = _legacy_compute_posterior(p_cal, p_market_sparse, alpha=0.6, bins=bins)
 
         assert posterior[0] == pytest.approx(0.0, abs=1e-9), (
             f"Expected posterior[0] ≈ 0 when p_cal[0]=0 and market[0]=0; got {posterior[0]}"
@@ -193,6 +216,7 @@ class TestSparseMarketImputation:
             lead_days=2,
             unit="F",
             rng_seed=123,
+            **_legacy_kwargs(),
         )
 
         ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=100)
@@ -235,6 +259,7 @@ class TestBootstrapAllBins:
             lead_days=2,
             unit="F",
             rng_seed=123,
+            **_legacy_kwargs(),
         )
 
         ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=200)
@@ -265,6 +290,7 @@ class TestBootstrapAllBins:
                 lead_days=2,
                 unit="F",
                 rng_seed=999,
+                **_legacy_kwargs(),
             )
 
         ci1 = _make()._bootstrap_bin(1, 100)
@@ -277,16 +303,19 @@ class TestBootstrapAllBins:
 # ---------------------------------------------------------------------------
 
 class TestBuyNoMath:
-    """Verify that buy-NO edge computation is algebraically correct:
+    """Verify binary buy-NO complement math only:
     edge_no = (1 - p_posterior[i]) - (1 - p_market[i]) = p_market[i] - p_posterior[i]
+
+    Multi-bin buy_no execution is covered by native NO quote tests, because
+    1 - YES_VWMP is not a live executable NO entry price there.
     """
 
-    def test_buy_no_edge_is_complement_of_yes(self):
-        """NO edge should equal negative of YES edge."""
-        p_posterior = np.array([0.2, 0.5, 0.3])
-        p_market = np.array([0.18, 0.55, 0.27])
+    def test_binary_buy_no_edge_is_complement_of_yes(self):
+        """Binary NO edge should equal negative of YES edge."""
+        p_posterior = np.array([0.45, 0.55])
+        p_market = np.array([0.55, 0.45])
 
-        for i in range(3):
+        for i in range(2):
             edge_yes = p_posterior[i] - p_market[i]
             p_post_no = 1.0 - p_posterior[i]
             p_market_no = 1.0 - p_market[i]
@@ -337,6 +366,7 @@ class TestBootstrapWithPlattCalibrator:
             lead_days=2,
             unit="F",
             rng_seed=123,
+            **_legacy_kwargs(),
         )
 
         ci_lo, ci_hi, p_val = ma._bootstrap_bin(1, n=200)
@@ -366,6 +396,8 @@ class TestBootstrapWithPlattCalibrator:
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=np.array([0.15, 0.55, 0.30]),
             p_market=np.array([0.18, 0.48, 0.34]),
+            p_market_no=np.array([0.82, 0.52, 0.66]),
+            buy_no_quote_available=np.array([True, True, True]),
             alpha=0.6,
             bins=bins,
             member_maxes=members,
@@ -373,6 +405,7 @@ class TestBootstrapWithPlattCalibrator:
             lead_days=2,
             unit="F",
             rng_seed=456,
+            **_legacy_kwargs(),
         )
 
         ci_lo, ci_hi, p_val = ma._bootstrap_bin_no(1, n=200)
@@ -412,6 +445,8 @@ class TestB082HasPlattSingleParamSet:
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=np.array([0.15, 0.55, 0.30]),
             p_market=np.array([0.18, 0.48, 0.34]),
+            p_market_no=np.array([0.82, 0.52, 0.66]),
+            buy_no_quote_available=np.array([True, True, True]),
             alpha=0.6,
             bins=bins,
             member_maxes=members,
@@ -419,6 +454,7 @@ class TestB082HasPlattSingleParamSet:
             lead_days=2,
             unit="F",
             rng_seed=777,
+            **_legacy_kwargs(),
         )
 
     def test_b082_single_fitted_param_set_counts_as_calibrated(self):

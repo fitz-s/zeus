@@ -48,22 +48,110 @@ promotion, or external data-fetch side effects.
   `observations.source='wu_icao_history' AND authority='VERIFIED'` currently
   ends at 2026-04-19, while the audit date is 2026-04-28.
 
+### Current non-Paris repair overlay (2026-04-30)
+
+This overlay is current for non-Paris blocker status in the active worktree.
+Where it conflicts with older `OPEN` headings below, this overlay supersedes
+the older heading until those historical entries are individually archived.
+Paris `LFPG`/`LFPB` source mismatch remains excluded and open under the
+dedicated Paris entry.
+
+**Code-path blockers closed or fail-closed by current source + tests:**
+
+- Day0 non-Paris observation authority: executable Day0 observation is now
+  settlement-source-bound by default, unsupported settlement sources fail
+  closed instead of using WU/IEM/Open-Meteo fallback as executable truth, WU
+  station ids are preserved/checked, WU epoch timestamps parse as fresh when
+  current, and stale/coverage-invalid Day0 observations block entry or degrade
+  monitor refresh to stale evidence.
+- Forecast/vector validity: local-day ENS non-finite values, non-finite member
+  extrema, invalid probability vectors, and invalid model-agreement vectors now
+  fail closed before posterior/edge construction.
+- Executable snapshot identity: entry snapshot capture/threading is present,
+  and held-position exits now reuse a fresh snapshot or capture a new
+  VERIFIED Gamma + CLOB executable snapshot before sell intent creation;
+  stale/unverified/missing capture still fails closed through the executor U1
+  gate.
+- V2 submit provenance: live placement requires a bound U1-derived submission
+  envelope; compatibility `legacy:` envelopes are not accepted on the normal
+  live path, and final SDK submission envelopes are persisted and linked from
+  `SUBMIT_ACKED`.
+- Risk behavior: effective `RiskLevel.RED` now triggers the RED sweep even when
+  `force_exit_review` is false; ORANGE favorable exits require complete exit
+  authority and net-favorable economics rather than acting like YELLOW or
+  gross break-even.
+- Fill/exposure truth: entry partial-fill remainder cancel preserves observed
+  exposure, exit partial fills reduce local remaining shares/cost basis and
+  retries only unsold residual exposure, and existing `FILLED` command
+  idempotency collisions preserve `order_id`/`external_order_id`.
+- Settlement/learning: harvester settlement lookup is metric/source/station
+  aware, LOW settlement writes use LOW identity, pending-exit residual exposure
+  can settle, and calibration-pair learning preserves actual snapshot/source
+  lineage instead of rebranding live/Open-Meteo p_raw as TIGGE training rows.
+- Economics/evidence gates: calibration maturity Level 4 blocks before edge
+  selection, collateral buy/sell preflight rejects stale snapshots, current
+  CLOB `base_fee` shapes are canonicalized into fee fractions with provenance,
+  day0-capture no longer inherits the scanner's non-Day0 min-hour filter, and
+  v2 row-count observability prefers world-qualified tables over empty trade
+  shadows.
+- Monitor microstructure: held YES positions now compute
+  `last_monitor_whale_toxicity` from VERIFIED sibling-bin metadata plus fresh
+  adjacent CLOB top-book pressure. The detector distinguishes available-clear,
+  available-toxic, not-applicable `buy_no`, and unknown market-fact states in
+  monitor provenance.
+
+**Remaining non-Paris conditions before a live-alpha claim:**
+
+- External live authorization is still blocked by `current_state.md`: Q1
+  Zeus-egress evidence, staged live-smoke evidence, G1 close review, and
+  `live_deploy_authorized=true` are absent. This is not a local math/code
+  patch.
+- Promotion-grade alpha evidence is still required: calibration tables/models
+  must be populated or uncalibrated strategies must remain explicitly blocked;
+  staged read-only/simulated evidence must prove P&L after fees/slippage/fill
+  drag before strategy promotion.
+- RED direct venue side-effect SLA is intentionally not implemented inside
+  `cycle_runner`; the current architecture records durable cancel proxy intent
+  and uses the normal command/execution seams. If the operator requires
+  immediate venue `cancel_order()` from RED itself, that is a separate
+  live-side-effect packet with explicit operator-go, not a docs-only repair.
+- True market-wide print-level "whale sweep" remains intentionally not claimed:
+  Zeus's current V2 adapter exposes `get_trades`, and Polymarket documents that
+  surface as authenticated account trade history. Public market-trade event
+  methods are a separate feed and are not wired into this repo path. The live
+  code claim is now narrower: orderbook-adjacent pressure detection from fresh
+  sibling CLOB books. A future print-level detector would require a separate
+  market-stream feed and evidence packet, not a local monitor patch.
+
+**Verification snapshot for this overlay:** focused non-Paris suites passed on
+2026-04-30: `tests/test_exit_safety.py` (20), `tests/test_runtime_guards.py`
+(178), `tests/test_day0_runtime_observation_context.py` +
+`tests/test_model_agreement.py` + `tests/test_ensemble_signal.py` +
+`tests/test_market_analysis.py` (88), collateral/executor command suites (94,
+1 skipped), V2 adapter/snapshot suites (66), harvester suites (60),
+HK/model-agreement alpha boundary (12), RED/structural-linter gates (9),
+monitor whale-toxicity unit coverage plus monitor-to-exit seams
+(`tests/test_lifecycle.py` 14, selected `tests/test_runtime_guards.py` 2,
+selected `tests/test_live_safety_invariants.py` 4), and
+calibration-maturity focused checks (2). No live venue side effects or
+production DB mutation were performed.
+
 ### Money-path coverage verdict
 
 | Money path segment | Current verdict | Primary blockers |
 |---|---|---|
-| Contract semantics | PARTIAL | Paris station mismatch; LOW shoulder/Day0 semantics incomplete |
-| Source truth | PARTIAL | current source validity must be refreshed before live claims; DB observations lag current markets; Day0 WU geocode path can select wrong station; Day0 observation coverage/freshness is soft, not a trade gate |
-| Forecast signal | BLOCKED | Open-Meteo live ENS lacks persisted issue/valid time; live snapshot id can be empty; local-day ENS NaNs can pass validation and collapse p_raw to an invalid zero vector; WU epoch observation timestamps are treated as stale while still producing tradeable Day0 p_raw |
-| Calibration | BLOCKED | current calibration model/pair tables are empty, so live path falls back to raw probabilities; maturity edge-threshold multiplier is not wired into evaluator selection |
-| Edge construction | PARTIAL | Day0 discovery mode can produce an empty candidate set due contradictory resolution-hour filters; current CLOB fee-rate response shape is not parsed, causing live sizing to reject candidates; closed/non-accepting child markets can enter outcome vector; authority degradation not fail-closed before entry |
-| Execution intent | BLOCKED | entry intent does not carry executable snapshot facts; no production executable-snapshot producer/refresher was found; VWMP-derived limit prices are clamped but not tick-quantized before snapshot gate; `max_slippage` budget is typed but not enforced; executable snapshot table is empty |
-| Venue submission | BLOCKED | V2 compatibility envelope is not U1-certified market identity; command row is bound to a pre-submit envelope while the signed/raw-response SDK envelope is not persisted back into canonical provenance |
-| Risk/control | BLOCKED | RED force-exit sweep records proxy intent but does not actually cancel/sell; fail-closed RED causes do not necessarily trigger sweep; ORANGE favorable-exit behavior is not explicit |
-| Fill/holding | PARTIAL | CONFIRMED-only finality is now enforced in legacy polling, M5 exchange reconciliation, and command recovery; residuals are optimistic-vs-confirmed drift journal split, partial-fill ledger completeness, and filled-command idempotency recovery without an order id |
-| Monitoring/exit | PARTIAL | LOW monitor can recompute HIGH raw probability; LOW Day0 open shoulders crash; exit partial fills do not reduce local exposure; whale-toxicity gate has no live detector feeding it |
-| Settlement/learning | BLOCKED | harvester live-write path default-off; LOW settlement writes are HIGH-only; settlement obs lookup ignores authority/station/metric; pending-exit exposure can skip settlement; empty decision snapshot id breaks learning traceability; harvester can rebrand live/Open-Meteo p_raw as TIGGE training rows |
-| Observability | PARTIAL | v2 status row counts can read empty trade shadow tables instead of world truth |
+| Contract semantics | PARTIAL | Paris station/source mismatch remains excluded/open; non-Paris source truth still needs fresh pre-live audit |
+| Source truth | PARTIAL | current source validity must be refreshed before live claims; Paris remains quarantined; no production DB mutation was performed in this repair |
+| Forecast signal | PARTIAL | local code now fails closed on non-finite/invalid vectors; live-alpha claim still needs current source/data evidence and promotion-grade calibration evidence |
+| Calibration | BLOCKED | current calibration model/pair evidence is not promotion-grade; uncalibrated or Level 4 paths must remain blocked or explicitly degraded |
+| Edge construction | PARTIAL | Day0 discovery windows, fee-rate parsing, Level 4 maturity gating, and multi-bin `buy_no` reachability are locally repaired; live economics still require staged P&L after fees/slippage/fill drag |
+| Execution intent | PARTIAL | entry and held-exit executable snapshot paths are locally wired/fail-closed; live evidence still needs staged scan -> snapshot -> command insertion |
+| Venue submission | PARTIAL | normal live path is bound to U1/final SDK submission provenance; legacy compatibility helpers are not deploy evidence |
+| Risk/control | PARTIAL | RED/ORANGE behavior is locally executable/fail-closed; direct venue cancel from `cycle_runner` is intentionally a separate live-side-effect SLA decision |
+| Fill/holding | PARTIAL | CONFIRMED-only finality, entry/exit partial materialization, and filled-command order-id recovery are locally repaired; residual drift-journal split is not a live-entry blocker |
+| Monitoring/exit | PARTIAL | LOW monitor/Day0 and exit partial fills are locally repaired; whale-toxicity is now orderbook-adjacent pressure, not true all-market print-sweep detection |
+| Settlement/learning | PARTIAL | harvester HIGH/LOW metric/source/station lineage and pending-exit settlement are locally repaired; live harvester flag and production writes remain operator-gated |
+| Observability | PARTIAL | v2 row-count shadow-table false alarm is closed; broader live-readiness projections remain non-authority |
 
 ### [OPEN P1] Day0 observation path can bypass settlement-source routing
 
@@ -103,95 +191,26 @@ apply the evaluator's source-policy rejection before building `Day0SignalInputs`
 Paris Day0 only returns LFPB after the Paris source decision; mismatched obs_id
 produces structured no-trade.
 
-### [OPEN P1] LOW non-Day0 monitor can use HIGH probability chain
-
-**Location:** `src/engine/monitor_refresh.py` around `_refresh_ens_member_counting()`;
-`src/signal/ensemble_signal.py::EnsembleSignal.__init__`.
-**Problem:** Monitor refresh resolves `position.temperature_metric` and passes it
-to the LOW calibrator, but constructs `EnsembleSignal` without
-`temperature_metric`. `EnsembleSignal` defaults to `HIGH_LOCALDAY_MAX`. A LOW
-position can therefore recompute `p_raw_vector` from daily maximums and then
-apply LOW bins/calibration logic.
-**Impact:** Holding and exit decisions for LOW positions can be based on the
-wrong physical quantity. This is a semantic chain break from holding -> exit.
-**False-positive boundary:** This does not affect HIGH positions. It requires a
-LOW position on the non-Day0 monitor path; current runtime has zero positions.
-**Proposed remediation:**
-1. Pass the resolved LOW/HIGH `MetricIdentity` into monitor
-   `EnsembleSignal(...)`.
-2. Add a regression where a LOW position's monitor path feeds member minima, not
-   maxima.
-3. Make missing/malformed `temperature_metric` on active LOW-like positions
-   fail closed or emit an operator-visible quarantine, not silently default HIGH.
-**Acceptance evidence:** LOW monitor p_raw fixture differs from HIGH max fixture;
-exit trigger receives LOW-consistent `EdgeContext`; test covers active LOW
-position with sibling bins.
-
-### [OPEN P1] LOW Day0 cannot handle real open-shoulder bins and loses rich semantics
-
-**Location:** `src/signal/day0_low_nowcast_signal.py`,
-`src/signal/day0_router.py`, `src/engine/monitor_refresh.py`.
-**Problem:** LOW Day0 `p_vector()` converts `None` shoulders with `float(None)`.
-Real Polymarket bins and Zeus `Bin` explicitly use `None` for open shoulders.
-The LOW router also does not carry the rich Day0 fields used by HIGH
-(`round_fn`, observation timing, temporal context) into the LOW signal object.
-**Impact:** LOW Day0 can crash on real shoulder markets and does not fully
-encode settlement rounding or observation-latency semantics. This affects
-entry-time Day0 and held-position Day0 refresh.
-**False-positive boundary:** Center bins with finite low/high do not crash.
-This is specifically about open shoulders and rich Day0 semantics.
-**Proposed remediation:**
-1. Implement LOW shoulder probability with unbounded predicates:
-   `(-inf, hi]`, `[lo, +inf)`, and finite `[lo, hi]`.
-2. Thread `round_fn`, observation time/source, and temporal context through
-   LOW Day0 the same way HIGH receives them.
-3. Add HKO/WU-specific rounding tests and observation-staleness tests for LOW
-   Day0.
-4. Add a live Gamma fixture containing LOW shoulder bins.
-**Acceptance evidence:** LOW Day0 p_vector returns normalized probabilities for
-open shoulders, does not raise `TypeError`, and records applied validations for
-rounding/freshness.
-
-### [OPEN P1] Entry intent does not carry executable snapshot facts
-
-**Location:** `src/engine/cycle_runtime.py::deps.create_execution_intent(...)`,
-`src/execution/executor.py::create_execution_intent`,
-`src/state/venue_command_repo.py::_assert_executable_snapshot_gate`.
-**Problem:** `create_execution_intent()` supports `executable_snapshot_id`,
-`min_tick_size`, `min_order_size`, and `neg_risk`, and
-`venue_command_repo` requires a non-empty snapshot id before inserting a venue
-command. The runtime callsite does not pass those fields.
-**Impact:** Even if strategy gates and bankroll gates are cleared, live entry
-cannot form the certified snapshot -> command path. It should fail closed at
-the snapshot gate rather than silently trading, but it is not a complete
-order-entry path.
-**False-positive boundary:** This is not a paper-mode fill issue. It concerns
-the live command insertion path after executable snapshot gating is enforced.
-**Proposed remediation:**
-1. Build executable market snapshots during market discovery or immediately
-   before command insertion from fresh Gamma/CLOB facts.
-2. Carry `snapshot_id`, min tick, min order size, and neg-risk from decision to
-   `ExecutionIntent`.
-3. Make missing snapshot id an evaluator/entry rejection before opportunity is
-   marked tradeable.
-4. Add an integration test from candidate -> decision -> intent -> command repo
-   proving the snapshot gate passes with fresh facts and fails stale facts.
-**Acceptance evidence:** A live-mode dry-run can insert a command only with a
-fresh executable snapshot; stale/missing snapshot produces structured no-trade.
-
 ### [OPEN P1] No production executable snapshot producer/refresher was found
 
 **Location:** `src/state/snapshot_repo.py`, `src/engine/cycle_runtime.py`,
 `src/execution/exit_lifecycle.py::_latest_exit_snapshot_context`.
-**Problem:** The executable snapshot gate is present, but repository search found
+**Original problem:** The executable snapshot gate is present, but repository search found
 `ExecutableMarketSnapshotV2(...)` construction and `insert_snapshot(...)` calls
 only in tests and the snapshot repository module, not in a live runtime producer.
 Exit lifecycle also expects the latest fresh `executable_market_snapshots` row
 by token and returns an empty context when none exists, deliberately letting the
 executor fail closed. Current audit DBs had zero `executable_market_snapshots`.
-**Impact:** Threading `snapshot_id` through `ExecutionIntent` is not sufficient.
-Both entry and exit can remain blocked because no live component proves and
-refreshes the executable CLOB facts required by the U1 gate.
+**Active residual:** Entry-side snapshot production/threading is now present,
+but held-position exit still depends on a previously-created fresh snapshot row.
+Both entry and exit can still remain blocked when the live snapshot table is
+empty; the unresolved owner is the exit-token refresher / producer symmetry.
+**2026-04-30 recheck:** The entry side now has `capture_executable_market_snapshot()`
+in `src/data/market_scanner.py`, `cycle_runtime` calls it when live entry lacks
+snapshot facts, and runtime tests prove capture/commit before executor intent.
+This gap remains open for the exit/held-position side: `_latest_exit_snapshot_context()`
+can consume a fresh row by selected token, but no symmetric exit-token refresher
+was found in the live monitoring/exit path.
 **False-positive boundary:** This is a static/runtime-inventory finding. A
 producer outside `src/` or outside the current branch would invalidate it only if
 it writes the canonical `executable_market_snapshots` table with fresh Gamma/CLOB
@@ -221,6 +240,10 @@ and identical YES/NO token ids.
 **Impact:** The final SDK submit envelope is not closed over U1-certified
 market facts. This is an execution identity gap even after entry snapshot
 threading is fixed.
+**2026-04-30 recheck:** Entry `_live_order()` now binds the persisted
+pre-submit envelope into `PolymarketClient` before submission, but the adapter
+still has a compatibility fallback and the exit submit path persists a
+pre-submit envelope without binding it into the client. The gap remains open.
 **False-positive boundary:** The compatibility helper may be acceptable for
 local smoke or pre-submit rejection surfaces. It is not acceptable evidence for
 certified live-money venue submission.
@@ -233,60 +256,6 @@ certified live-money venue submission.
 4. Add a test that fails if YES/NO token ids collapse to the selected token.
 **Acceptance evidence:** Submit envelope canonical hash includes real snapshot
 identity; live path has no `legacy-compat` marker.
-
-### [OPEN P2] Entry max-slippage budget is typed but not enforced
-
-**Location:** `src/contracts/execution_intent.py`,
-`src/execution/executor.py::create_execution_intent`, and `_live_order`.
-**Problem:** `ExecutionIntent.max_slippage` is a typed `SlippageBps`, but the
-contract comment explicitly says enforcement is a later packet and repository
-search shows no live reader that rejects or clamps entry orders by that budget.
-The dynamic limit branch can jump to `best_ask` when the gap is within 5% of
-ask, independent of the 200 bps adverse-slippage budget. Read-only reproduction
-with base limit `0.48`, `best_ask=0.50`, and `max_slippage=200 bps` produced
-`limit_price=0.50`, an adverse jump of about `416.7 bps`.
-**Impact:** A live order can intentionally improve price for fill probability
-while exceeding the configured slippage budget. Limit orders still cap the venue
-price, but the configured risk budget is advisory rather than executable.
-**False-positive boundary:** This is not a market-order overfill claim. For GTC
-limit orders the submitted limit still bounds execution. The gap is that the
-named `max_slippage` control does not alter the submitted limit or reject the
-intent.
-**Proposed remediation:**
-1. Define the slippage reference price: base computed limit, VWMP, best ask, or
-   all-in fee-adjusted entry price.
-2. Enforce `intent.max_slippage` before command persistence by rejecting or
-   clamping dynamic-limit jumps beyond budget.
-3. Record applied slippage bps and reference price in `ExecutionIntent` and
-   command payload evidence.
-4. Add tests where dynamic best ask is within the 5% jump window but above the
-   max-slippage budget.
-**Acceptance evidence:** An entry fixture with a 416 bps adverse dynamic jump and
-200 bps budget cannot submit at the higher price unless an explicit operator
-override is recorded.
-
-### [OPEN P2] Market scan authority is dropped before entry discovery
-
-**Location:** `src/data/market_scanner.py::MarketSnapshot` and
-`find_weather_markets`; `src/engine/cycle_runtime.py` market discovery loop.
-**Problem:** The scanner has an authority type (`VERIFIED`, `STALE`,
-`EMPTY_FALLBACK`, `NEVER_FETCHED`) but `find_weather_markets()` returns bare
-market dicts. Runtime consumes the bare list and can continue from keyword
-fallback or stale degraded provenance without a live-entry fail-closed branch.
-**Impact:** Entry decisions can be formed from data whose authority was known
-at the scanner boundary but lost before runtime gating.
-**False-positive boundary:** Cycle start clears cache, reducing stale-cache
-risk. This remains a provenance plumbing gap, not proof of an observed stale
-live trade.
-**Proposed remediation:**
-1. Return a provenance-tagged scan result to runtime, not only a list.
-2. Fail closed for new entries on `STALE`, `EMPTY_FALLBACK`, or keyword fallback
-   unless an explicit operator-read-only mode is active.
-3. Preserve authority in no-trade/availability facts.
-4. Add tests for fresh fetch success, network failure with cache, and empty
-   fallback.
-**Acceptance evidence:** Entry lane refuses non-`VERIFIED` market scan authority
-while monitor/exit lanes remain read-only.
 
 ### [OPEN P1] RED force-exit sweep is proxy-only, not venue cancel/sell
 
@@ -381,34 +350,37 @@ appear to lower or override exit thresholds as documented.
 **Acceptance evidence:** ORANGE produces deterministic favorable-exit intents
 for qualifying held positions and no longer has identical behavior to YELLOW.
 
-### [OPEN P2] Whale-toxicity exit gate has no live detector feeding it
+### [MITIGATED 2026-04-30; RESIDUAL P3] Whale-toxicity uses orderbook-adjacent pressure, not all-market prints
 
 **Location:** `src/engine/monitor_refresh.py::refresh_position`,
 `src/state/portfolio.py::Position.evaluate_exit`, and
 `src/execution/exit_triggers.py::evaluate_exit_triggers`.
-**Problem:** Exit logic has a `WHALE_TOXICITY` immediate-exit branch and the
-execution module advertises adjacent-bin sweep detection, but monitor refresh
-initializes `pos.last_monitor_whale_toxicity = None` and no production path was
-identified that computes and sets it to `True`. The portfolio exit path records
-`whale_toxicity_unavailable` when the field is `None`.
-**Impact:** A documented microstructure safety gate cannot trigger in live
-monitoring, so adjacent-bin sweep toxicity is advisory/spec-only unless another
-component supplies the field.
-**False-positive boundary:** Tests can pass `is_whale_sweep=True` directly to
-the lower-level trigger, proving the branch works when supplied. The gap is the
-runtime detector and data feed, not the branch's local behavior.
-**Proposed remediation:**
-1. Define the adjacent-bin sweep signal from orderbook/trade facts, including
-   lookback window, affected sibling bins, size threshold, and confidence.
-2. Compute it during monitor refresh from fresh CLOB/user-channel facts and set
-   `last_monitor_whale_toxicity` to a concrete bool with provenance.
-3. Fail to conservative hold/exit policy explicitly when the detector is
-   unavailable, rather than silently treating it as absent.
-4. Add an integration fixture where sibling-bin sweep facts cause a held
-   position to produce `WHALE_TOXICITY`.
-**Acceptance evidence:** Runtime monitoring can produce both
-`whale_toxicity_available` and `WHALE_TOXICITY` exit decisions from real or
-fixture-backed market data.
+**Original problem:** Exit logic had a `WHALE_TOXICITY` immediate-exit branch
+and the execution module advertised adjacent-bin sweep detection, but monitor
+refresh always initialized `pos.last_monitor_whale_toxicity = None`. The
+portfolio exit path therefore recorded only `whale_toxicity_unavailable`.
+**Current behavior:** Monitor refresh now computes a narrow orderbook-adjacent
+pressure detector for held YES positions. It requires VERIFIED sibling-bin
+metadata and fresh adjacent CLOB top-book facts, compares adjacent YES pressure
+against the held bin with a 5c recent-surge margin or stricter 15c static
+pressure fallback, and requires visible bid notional at least as large as the
+position notional floor. `buy_no` positions are marked not-applicable rather
+than falsely treating adjacent YES buying as toxic.
+**False-positive boundary:** This is not a true all-market trade-print whale
+sweep detector. Zeus's current V2 adapter exposes `get_trades`, and Polymarket
+documents that surface as authenticated account trade history. Public
+market-trade event methods are separate and not wired into this repo path, so
+Zeus does not claim print-level whale detection without a market-stream
+producer. Missing Gamma/CLOB facts leave the field `None`; clear facts set it
+to `False`; strong adjacent pressure sets it to `True`.
+**Evidence:** `tests/test_lifecycle.py::TestMonitorWhaleToxicity` covers toxic,
+clear, unverified-scan unknown, and `buy_no` not-applicable cases. Selected
+monitor-to-exit runtime seams prove `whale_toxicity` still flows through
+`ExitContext` without corrupting Day0 monitor validations.
+**Residual:** If the operator wants a literal "whale swept adjacent bin" claim,
+add a dedicated market-level trade/websocket feed with threshold/lookback
+validation. That is an enhancement beyond the current orderbook-pressure safety
+gate, not a blocker for the current non-Paris local code path.
 
 ### [MITIGATED 2026-04-30; RESIDUAL P2] Entry partial fills preserve filled exposure after remainder cancel
 
@@ -594,31 +566,6 @@ recognized configured cities.
 **Acceptance evidence:** Paris live candidates only proceed when configured
 station id matches event resolutionSource or an explicit dated routing table.
 
-### [OPEN P1] Live Open-Meteo ENS snapshots can fail to persist and return empty snapshot id
-
-**Location:** `src/data/ensemble_client.py`, `src/engine/evaluator.py::_store_ens_snapshot`.
-**Problem:** Open-Meteo parsing returns `issue_time=None` and
-`first_valid_time`, while `_store_ens_snapshot()` reads `issue_time` and
-`valid_time`. The legacy `ensemble_snapshots` table requires non-null
-`issue_time` and `valid_time`. The exception is caught and the function returns
-`""`, allowing decision flow to continue without `decision_snapshot_id` or
-`p_raw_json` persistence.
-**Impact:** Decision audit, settlement learning, harvester joins, and replay
-traceability lose their primary snapshot key. This breaks forecast signal ->
-learning lineage.
-**False-positive boundary:** A registered ingest source such as TIGGE can carry
-`run_init_utc`. The current default live Open-Meteo path is the affected path.
-**Proposed remediation:**
-1. Normalize Open-Meteo payloads to a non-null issue/valid-time contract, using
-   a documented availability semantics rather than silent `None`.
-2. Use `first_valid_time` or explicit derived valid time where appropriate, and
-   persist availability provenance.
-3. Treat failed snapshot persistence as a signal-quality rejection, not as an
-   empty snapshot id continuation.
-4. Add an in-memory DB regression with NOT NULL `ensemble_snapshots` schema and
-   a live Open-Meteo-shaped payload.
-**Acceptance evidence:** Every tradeable decision has non-empty
-`decision_snapshot_id`; `_store_ens_snapshot` failure prevents entry.
 
 ### [OPEN P1] Calibration maturity edge-threshold multiplier is dead on the live path
 
@@ -656,114 +603,6 @@ cleared or if only a specific city/season/metric bucket is immature.
 **Acceptance evidence:** A Level 4 fixture cannot produce the same tradeable
 decision as a Level 1 fixture with the same raw edge unless it clears the
 documented stricter maturity rule, and decision evidence records that rule.
-
-### [OPEN P1] Closed/non-accepting Gamma child markets enter outcome vector
-
-**Location:** `src/data/market_scanner.py::_extract_outcomes`,
-`src/engine/evaluator.py` market price loop.
-**Problem:** Current Gamma responses can contain mixed child markets under an
-open event. For Paris 2026-04-28, some child markets were `closed=true` while
-the event was still returned by active discovery. `_extract_outcomes()` parses
-all child markets with tokens/prices and never checks `closed`, `active`,
-`acceptingOrders`, or `enableOrderBook`.
-**Impact:** Closed bins can skew market probability, add stale token mapping,
-or cause the evaluator to reject the whole candidate when an untradeable bin has
-an empty orderbook.
-**False-positive boundary:** Fully open future events are not affected. The
-observed risk occurs near resolution or during partial child-market closure.
-**Proposed remediation:**
-1. Filter child markets to tradable status before outcome extraction.
-2. Preserve skipped closed/non-accepting labels as availability facts rather
-   than silently ignoring market topology.
-3. Decide whether a partially closed family should be a no-trade for the whole
-   event or a reduced-family evaluation; default should be fail-closed until
-   the statistical treatment is proven.
-4. Add Gamma fixture tests with mixed `closed/acceptingOrders` child markets.
-**Acceptance evidence:** Closed child markets never contribute token ids/prices
-to p_market; partial family closure produces explicit no-trade or verified
-reduced-family logic.
-
-### [OPEN P2] v2 row-count observability reads trade shadow tables before world truth
-
-**Location:** `src/observability/status_summary.py::_get_v2_row_counts`,
-`src/state/db.py::get_trade_connection_with_world`.
-**Problem:** Status summary opens a trade connection with world attached, but
-queries unqualified v2 table names. Current `zeus_trades.db` has empty v2
-shadow tables while `world.ensemble_snapshots_v2` has 684,624 rows, so status
-can report `ensemble_snapshots_v2=0` and emit `v2_empty_despite_closure_claim`.
-**Impact:** Operator readiness dashboards can report false data-readiness
-failure or hide the real source of missing calibration. This is an observability
-false alarm, not proof that world v2 data is absent.
-**False-positive boundary:** Tables that intentionally live in trade DB should
-stay trade-qualified. The fix must be table-role aware, not blanket
-`world.` for everything.
-**Proposed remediation:**
-1. Classify each v2 table as world or trade authority.
-2. Query row counts with explicit schema qualification.
-3. Add status tests with both main/trade and attached world tables populated
-   differently.
-4. Separate "world data empty" from "trade shadow empty" in discrepancy flags.
-**Acceptance evidence:** Status reports `world.ensemble_snapshots_v2=684624`
-on the current DB and does not emit the wrong closure-claim flag for that table.
-
-### [CLOSED 2026-04-30] Weather multi-bin `buy_no`/shoulder-sell hypotheses are not executable
-
-**Location:** `src/strategy/market_analysis.py::find_edges`,
-`src/strategy/market_analysis_family_scan.py::scan_full_hypothesis_family`,
-`src/engine/evaluator.py` FDR filtering and token routing.
-**Original problem:** `scan_full_hypothesis_family()` tests every bin in both
-`buy_yes` and `buy_no` directions, but `MarketAnalysis.find_edges()` only
-creates `buy_no` edges when `len(self.bins) <= 2`. Normal Polymarket weather
-families are multi-bin events, while the durable strategy catalog explicitly
-includes shoulder-bin sell / native NO-token trades. The evaluator later
-intersects FDR-selected hypotheses with the already-created edge list, so a
-selected multi-bin `buy_no` hypothesis has no `BinEdge` object and never reaches
-the NO-token route.
-**Read-only reproduction:** An in-memory three-bin weather family with a
-positive lower-shoulder `buy_no` edge produced a full-family selected
-hypothesis for `67 or lower / buy_no`, while `find_edges()` returned only the
-upper-shoulder `buy_yes` edge. No source files or DB rows were mutated.
-**Impact:** The Shoulder Bin Sell alpha family can be structurally unreachable
-for standard multi-bin weather markets. Zeus may record that the full-family
-hypothesis existed while never producing a tradeable NO-side decision, causing
-strategy attribution, opportunity accounting, and live-alpha expectations to
-diverge from reality.
-**False-positive boundary:** The `len(self.bins) <= 2` guard may have been
-introduced to avoid synthetic `1-p` math on multi-bin families. If so, the
-restriction is a valid safety choice, but then shoulder-bin sell must be marked
-unsupported until a native NO-token VWMP and family-consistent probability
-contract is implemented.
-**Closure:** Branch `impl/native-multibin-buy-no-2026-04-30` implements the
-native-NO path without authorizing live deployment:
-1. `MarketAnalysis` accepts per-bin native NO VWMP and quote-availability
-   evidence; multi-bin `buy_no` is executable only for bins with native NO
-   quote evidence.
-2. `scan_full_hypothesis_family()` and `find_edges()` now use the same native
-   NO price surface for executable multi-bin `buy_no`; bootstrap CI also uses
-   native NO price rather than `1 - YES_VWMP`.
-3. Evaluator quote acquisition probes `no_token_id` books for multi-bin
-   markets, passes side-aware evidence into analysis, and fail-closes if FDR
-   selects a hypothesis that does not materialize as a `BinEdge`.
-4. Live runtime stays default-off for multi-bin `buy_no`; when enabled it
-   captures/loads the executable snapshot, verifies selected token and YES/NO
-   outcome label, reprices from the selected orderbook, recomputes Kelly size
-   at the final executable price, and rejects unsafe best-ask/depth jumps before
-   `create_execution_intent`.
-5. Snapshot capture and Polymarket top-book reads normalize unsorted books and
-   reject crossed/invalid books before any executable price is used.
-6. Executor routing remains `buy_no -> no_token_id`, and exit snapshot lookup is
-   now selected-token exact so NO exits do not borrow YES-selected sibling
-   snapshots.
-**Closure evidence:** `tests/test_fdr.py`, `tests/test_runtime_guards.py`,
-`tests/test_executable_market_snapshot_v2.py`, `tests/test_bootstrap_symmetry.py`,
-`tests/test_executor.py`, and
-`tests/test_exit_safety.py` cover native NO edge materialization, no silent FDR
-edge disappearance, NO-token fee lookup/routing, NO executable snapshot
-selection/hash, default-off live gating, final-price/depth repricing, monitor
-bootstrap native-NO context, and exit selected-token lookup.
-**Residual boundary:** This closeout is source/test closure only. It does not
-promote Shoulder Bin Sell to live alpha, mutate production DBs, enable the
-default-off runtime flags, or prove calibration/P&L profitability.
 
 ### [MITIGATED 2026-04-30; RESIDUAL P2] M5 exchange reconciliation no longer promotes non-final trades to filled commands
 
@@ -1057,12 +896,20 @@ block non-Day0 opening/update modes.
 `MarketCandidate(... discovery_mode='day0_capture')`; a >6h market is rejected
 with a structured discovery-window reason, not silently removed by two filters.
 
-### [OPEN P1] Live fee-rate API shape is not parsed before Kelly sizing
+### [MITIGATED 2026-04-30; RESIDUAL P1] Live fee-rate `base_fee` shape is parsed, but unit/provenance semantics remain unresolved
 
 **Location:** `src/data/polymarket_client.py::get_fee_rate`,
 `src/engine/evaluator.py::_fee_rate_for_token`,
 `src/engine/evaluator.py::_size_at_execution_price_boundary`.
-**Problem:** The live evaluator asks the CLOB client for a token-specific fee
+**2026-04-30 recheck:** `PolymarketClient.get_fee_rate()` now accepts
+`base_fee`, `baseFee`, `fee_rate_bps`, `feeRateBps`, `feeRate`, `fee_rate`,
+`takerFeeRate`, and `taker_fee_rate`, and `tests/test_v2_adapter.py` covers the
+current `base_fee` shape. The original parser-shape blocker is therefore
+mitigated. The entry remains active because the code returns the raw numeric
+`base_fee` as the `polymarket_fee()` coefficient, while the documented formula
+expects a fractional fee-rate coefficient; raw response capture and conversion
+basis are still not persisted into decision evidence.
+**Original problem:** The live evaluator asks the CLOB client for a token-specific fee
 rate before Kelly sizing. `PolymarketClient.get_fee_rate()` calls
 `https://clob.polymarket.com/fee-rate?token_id=...` but only accepts fields such
 as `feeRate`, `fee_rate`, `takerFeeRate`, or `taker_fee_rate`. Current official
@@ -1075,13 +922,15 @@ the client raises `RuntimeError`, `_fee_rate_for_token()` converts that into
 token returned HTTP 200 with `{"base_fee":1000}` from `/fee-rate`. Calling
 `PolymarketClient().get_fee_rate(token)` on the same token produced
 `RuntimeError: Fee-rate response missing feeSchedule.feeRate ...`.
-**Impact:** Even after market discovery, signal, calibration, and executable
-snapshot gates are repaired, live entry can still fail before position sizing
-because the current CLOB fee-rate response does not match the parser. This is an
-API-contract compatibility blocker, not an alpha/model limitation.
+**Residual impact:** Even after market discovery, signal, calibration, and
+executable snapshot gates are repaired, live entry sizing can still be wrong if
+the current CLOB `base_fee` integer is interpreted as the wrong
+`polymarket_fee()` coefficient. This is now a unit/provenance compatibility
+blocker, not a parser-shape blocker or alpha/model limitation.
 **False-positive boundary:** If runtime injects a test/dummy `clob` without
 `get_fee_rate`, evaluator falls back to `FEE_RATE_WEATHER`. The live path uses
-the real client method, so the fallback is not reached when the parser raises.
+the real client method, so unknown fee response units must be converted or fail
+closed with evidence.
 **Proposed remediation:**
 1. Parse `base_fee` from `/fee-rate` and convert it to the exact fee-rate unit
    expected by `polymarket_fee()`, with an explicit test against official docs and
@@ -1098,45 +947,6 @@ without exception, the converted value matches the intended Polymarket fee
 formula units, and evaluator no longer rejects otherwise-valid candidates at
 `EXECUTION_PRICE_UNAVAILABLE` solely because the response field is `base_fee`.
 
-### [OPEN P1] VWMP-derived entry limits are not quantized to tick size
-
-**Location:** `src/contracts/semantic_types.py::compute_native_limit_price`,
-`src/contracts/tick_size.py::TickSize.clamp_to_valid_range`,
-`src/execution/executor.py::create_execution_intent`,
-`src/contracts/executable_market_snapshot_v2.py::assert_snapshot_executable`.
-**Problem:** Entry limit price is derived from `min(p_posterior, edge.vwmp) -
-limit_offset`. `edge.vwmp` is a volume-weighted bid/ask/size price and can be an
-arbitrary decimal even when bid and ask themselves are valid tick prices.
-`compute_native_limit_price()` only clamps to `[0.01,0.99]`; it does not round or
-floor to the market tick. The U1 snapshot gate later requires
-`submitted_price % snapshot.min_tick_size == 0`, so a normal VWMP such as
-`0.333333...` yields a limit like `0.313333...` and fails the executable snapshot
-gate before command persistence.
-**Read-only reproduction:** `compute_native_limit_price(p_posterior=0.60,
-native_price=0.3333333333333333, limit_offset=0.02)` returned
-`0.3133333333333333`; `Decimal(str(price)) % Decimal('0.01')` returned
-`0.0033333333333333`, proving it is not aligned to a one-cent tick.
-**Impact:** Even with a valid edge, fresh executable snapshot, and compatible
-submit envelope, live entry can fail closed because the planner produces a price
-shape the snapshot contract correctly rejects. This is not market alpha
-uncertainty; it is a deterministic execution-shape mismatch.
-**False-positive boundary:** If `edge.vwmp` happens to be tick-aligned after the
-offset, the command can pass this particular gate. The bug is that tick alignment
-is accidental rather than guaranteed by the price-planning contract.
-**Proposed remediation:**
-1. Add a typed tick-quantization operation, distinct from range clamp, with side-
-   aware rounding: buy limits should not round upward past the configured budget
-   unless explicitly intended; sell limits should not round downward past the
-   exit budget unless explicitly intended.
-2. Quantize entry and exit limit prices before idempotency-key generation,
-   provenance-envelope persistence, collateral reservation, and snapshot gate.
-3. Use the snapshot's actual `min_tick_size` when available rather than the
-   default weather tick.
-4. Add tests for VWMP fractional prices, `0.001` tick snapshots, dynamic
-   best-ask jumps, and idempotency-key stability after quantization.
-**Acceptance evidence:** A fractional VWMP fixture produces a snapshot-aligned
-limit price before `insert_command()`, and U1 gate passes/fails only on real
-tradability facts, not on avoidable planner rounding residue.
 
 ### [OPEN P1] Final SDK submission envelope is not persisted after CLOB submit
 
@@ -1197,33 +1007,32 @@ Do not fix these as isolated one-line patches. The safe sequence is:
    station/source identity, max-age, minimum sample coverage, and explicit
    stale-observation no-trade/read-only behavior before any Day0 p_raw can be
    tradeable.
-5. **Forecast signal validity:** Fix Open-Meteo issue/valid-time persistence,
-   make snapshot write failure block tradeable decisions, and add local-day
-   finite-extrema plus probability-simplex gates for p_raw/p_cal. This must
-   land before learning/harvester or live-alpha claims.
-6. **Market discovery authority:** Preserve scan authority and filter
-   closed/non-accepting child markets before evaluator sees outcomes.
-7. **Executable identity closure:** Generate executable snapshots from fresh
-   market facts, thread them through `ExecutionIntent`, and eliminate
+5. **Forecast signal validity:** Keep the Open-Meteo empty-snapshot antibody in
+   place and finish local-day finite-extrema plus probability-simplex gates for
+   p_raw/p_cal. This must land before learning/harvester or live-alpha claims.
+6. **Market discovery authority:** CLOSED 2026-04-30 for scan-authority gating
+   and closed/non-accepting child filtering. Residual source validity belongs to
+   the contract/source audit and Day0 observation authority items.
+7. **Executable identity closure:** Entry-side snapshot capture/threading is
+   present. Add symmetric exit snapshot refresh/production and eliminate
    compatibility placeholders from live V2 submit.
 8. **Execution economics closure:** Repair live CLOB fee-rate parsing, unit
    conversion, and fee evidence before claiming Kelly sizing reflects current
    Polymarket costs.
-9. **Execution price-shape closure:** Quantize all entry/exit limit prices to
-   snapshot tick size before idempotency, envelope, collateral, and command
-   persistence; then enforce `max_slippage` and any dynamic-limit jumps before
-   command persistence. Every configured execution budget must be behavior-
-   changing or explicitly removed.
+9. **Execution price-shape closure:** Entry VWMP tick alignment and entry
+   `max_slippage` enforcement are CLOSED 2026-04-30. Remaining economics work is
+   live fee evidence and realized execution-cost attribution. Every configured
+   execution budget must be behavior-changing or explicitly removed.
 10. **Venue submission provenance closure:** Persist the final SDK submit
    envelope/result as append-only canonical evidence and link it to the command
    ack, so pre-submit intent evidence and post-submit side-effect evidence are
    both durable.
-11. **LOW semantic closure:** Fix LOW Day0 shoulders, LOW monitor metric
-   threading, LOW rounding/freshness context, and add regression fixtures for
-   shoulder markets.
-12. **Calibration maturity semantics:** Before calibration promotion, decide and
-   implement the Level 4 contract: hard no-trade or documented stricter edge
-   threshold wired into evaluator selection.
+11. **LOW semantic closure:** CLOSED 2026-04-30 for LOW monitor metric threading
+   and LOW Day0 shoulder/rich-context handling. Remaining LOW risk is under the
+   source-role/station/freshness Day0 observation authority gap.
+12. **Calibration maturity semantics:** CLOSED 2026-04-30 for local executable
+   selection: Level 4 raw-probability buckets block before edge selection. Live
+   promotion still requires populated calibration evidence.
 13. **Strategy direction reachability:** CLOSED 2026-04-30 for native
    multi-bin `buy_no` source/test reachability. Residual live-alpha claims still
    require calibration/P&L evidence and operator promotion gates.
@@ -1231,31 +1040,26 @@ Do not fix these as isolated one-line patches. The safe sequence is:
    pairs/models only after source/snapshot lineage is clean. Until then,
    `p_cal=p_raw` must remain an explicit no-go or degraded strategy state, not
    a silent "calibrated" surface.
-15. **Risk-action closure:** Make RED and ORANGE risk states executable, not
-   advisory: RED must cancel/sweep or emit `RED_ACTION_BLOCKED`; ORANGE must
-   create favorable-exit intents under an explicit price rule.
-16. **Partial-fill lifecycle and fill finality:** Implement entry and exit
-   partial-fill materialization before hardening finality semantics. The fix
-   must preserve filled shares when entry remainder is cancelled, reduce
-   remaining shares when exit is partially filled, prevent REST/M5 and exit
-   lifecycle/command-recovery from promoting non-final `MATCHED`/`MINED`, and
-   use WS/M5 `CONFIRMED` as the reference for confirmed exposure.
-17. **Collateral freshness closure:** Enforce a collateral snapshot freshness
-   invariant at buy/sell executor preflight and prove stale pUSD/CTF inventory
-   cannot cross command persistence or SDK contact.
-18. **Filled-command recovery closure:** Make idempotency recovery for existing
-   `FILLED` commands reconstruct active positions with order ids, not pending
-   no-order-id projections.
-19. **Monitor microstructure closure:** Either implement the live
-   whale-toxicity detector or remove it from claimed behavior; if implemented,
-   feed it into monitor-to-exit provenance.
-20. **Settlement/learning closure:** Make harvester metric-aware for HIGH/LOW,
-   enforce verified source/station reads, preserve actual forecast-source
-   lineage into calibration pairs, populate pair snapshot ids, and ensure
-   settlement terminalizes all residual exposure even when an exit order is
-   pending or retrying.
-21. **Observability repair:** Qualify v2 row-count queries and make status
-   distinguish data absence from projection/schema ambiguity.
+15. **Risk-action closure:** CLOSED 2026-04-30 for local semantics: RED sweep
+   actuation and ORANGE favorable-exit intent creation are covered by tests.
+   Direct venue cancel inside `cycle_runner` remains a separate operator-go SLA.
+16. **Partial-fill lifecycle and fill finality:** CLOSED 2026-04-30 for local
+   entry/exit materialization and CONFIRMED-only finality. Remaining
+   optimistic-vs-confirmed drift journaling is a reconciliation/audit refinement.
+17. **Collateral freshness closure:** CLOSED 2026-04-30 for buy/sell executor
+   preflight freshness rejection.
+18. **Filled-command recovery closure:** CLOSED 2026-04-30 for `FILLED`
+   command recovery preserving order ids.
+19. **Monitor microstructure closure:** CLOSED 2026-04-30 for the claimed local
+   behavior: orderbook-adjacent pressure is fed into monitor-to-exit provenance.
+   True all-market trade-print whale-sweep detection is not claimed without a
+   future market-stream feed.
+20. **Settlement/learning closure:** CLOSED 2026-04-30 for local HIGH/LOW
+   metric/source/station lineage, pending-exit residual settlement, and
+   decision-snapshot/source lineage in calibration pairs. Live harvester writes
+   remain feature-flag/operator gated.
+21. **Observability repair:** CLOSED 2026-04-30 for v2 row-count world-vs-trade
+   shadow qualification. Status remains a projection, not deploy authority.
 22. **End-to-end proof:** Run a staged live-smoke/dry-run that exercises
     market scan -> snapshot -> decision -> command insert -> V2 envelope ->
     user-channel or polling finality -> position projection -> monitor exit
@@ -1266,8 +1070,9 @@ Do not fix these as isolated one-line patches. The safe sequence is:
 - Unit tests for every patched seam above.
 - Integration test for candidate -> decision -> executable snapshot -> command
   insertion.
-- Fixture-backed Gamma tests for open shoulders, mixed closed child markets,
-  Paris station identity, and HK HKO Day0 station routing.
+- Fixture-backed Gamma/source tests for Paris station identity and HK HKO Day0
+  station routing. Open-shoulder and mixed closed-child coverage is archived as
+  closed 2026-04-30.
 - Discovery-mode window tests proving `day0_capture` reaches <6h markets, rejects
   >6h markets once, and does not inherit the scanner's non-Day0 minimum-hour
   default.
@@ -1294,20 +1099,21 @@ Do not fix these as isolated one-line patches. The safe sequence is:
 - Risk-action tests proving RED causes execute or block with alerting cancel/sweep
   semantics, and ORANGE produces favorable-exit intents under its documented rule.
 - Production executable-snapshot producer tests proving fresh snapshots are
-  created/refreshed before both entry and exit commands.
+  created/refreshed before both entry and exit commands; entry coverage exists,
+  exit refresher coverage remains active.
 - Execution-budget tests proving dynamic limit price improvement cannot exceed
   the configured slippage budget without explicit override evidence.
 - Fee-rate API compatibility tests proving current `base_fee` responses parse
   into the correct fee formula units and malformed fee responses fail closed with
   explicit provenance.
-- Tick-quantization tests proving VWMP-derived fractional prices are aligned to
-  the executable snapshot's `min_tick_size` before command persistence and before
-  idempotency-key hashing.
+- Tick-quantization tests for entry are archived as closed 2026-04-30; keep
+  regression coverage when changing execution price planning.
 - Venue-submission provenance tests proving the final SDK envelope/result is
   durably appended and linked to `SUBMIT_ACKED`, not only returned transiently
   from `PolymarketClient.place_limit_order()`.
-- Monitor microstructure tests proving whale-toxicity is either fed by live data
-  and behavior-changing or explicitly unsupported.
+- Monitor microstructure tests proving orderbook-adjacent whale-toxicity is fed
+  by fresh sibling CLOB facts, behavior-changing when toxic, clear when
+  pressure is absent, and unknown when scan/orderbook authority is insufficient.
 - Harvester settlement tests proving HIGH/LOW metric identity, VERIFIED
   source/station enforcement, and settlement terminalization of pending-exit
   residual exposure.

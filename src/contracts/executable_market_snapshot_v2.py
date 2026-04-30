@@ -11,6 +11,8 @@ single command insertion seam calls before any venue side effect can happen.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -47,6 +49,11 @@ FEE_RATE_FRACTION_FIELDS = (
     "fee_rate",
     "takerFeeRate",
     "taker_fee_rate",
+)
+_FEE_HASH_NUMERIC_FIELDS = frozenset(
+    FEE_RATE_BPS_FIELDS
+    + FEE_RATE_FRACTION_FIELDS
+    + ("fee_rate_fraction", "fee_rate_bps")
 )
 
 
@@ -150,6 +157,49 @@ class ExecutableMarketSnapshotV2:
         """Compatibility alias used by VenueSubmissionEnvelope creation."""
 
         return self.min_tick_size
+
+    @property
+    def executable_snapshot_hash(self) -> str:
+        """Hash the executable snapshot identity, not just the raw orderbook.
+
+        The raw CLOB orderbook hash proves depth payload lineage. Corrected
+        execution identity also needs token map, fee metadata, tick/min-order,
+        neg-risk, tradability flags, selected side, and timing fields.
+        """
+
+        return _sha256_json(
+            {
+                "snapshot_id": self.snapshot_id,
+                "gamma_market_id": self.gamma_market_id,
+                "event_id": self.event_id,
+                "event_slug": self.event_slug,
+                "condition_id": self.condition_id,
+                "question_id": self.question_id,
+                "yes_token_id": self.yes_token_id,
+                "no_token_id": self.no_token_id,
+                "selected_outcome_token_id": self.selected_outcome_token_id,
+                "outcome_label": self.outcome_label,
+                "enable_orderbook": self.enable_orderbook,
+                "active": self.active,
+                "closed": self.closed,
+                "accepting_orders": self.accepting_orders,
+                "min_tick_size": self.min_tick_size,
+                "min_order_size": self.min_order_size,
+                "fee_details": _canonical_fee_details_for_hash(self.fee_details),
+                "token_map_raw": self.token_map_raw,
+                "rfqe": self.rfqe,
+                "neg_risk": self.neg_risk,
+                "orderbook_top_bid": self.orderbook_top_bid,
+                "orderbook_top_ask": self.orderbook_top_ask,
+                "orderbook_depth_jsonb": self.orderbook_depth_jsonb,
+                "raw_gamma_payload_hash": self.raw_gamma_payload_hash,
+                "raw_clob_market_info_hash": self.raw_clob_market_info_hash,
+                "raw_orderbook_hash": self.raw_orderbook_hash,
+                "authority_tier": self.authority_tier,
+                "captured_at": self.captured_at,
+                "freshness_deadline": self.freshness_deadline,
+            }
+        )
 
     def with_selected_outcome(
         self,
@@ -419,9 +469,49 @@ def _as_fee_float(value: Any, field_name: str) -> float:
 
 def _as_decimal(value: Any, field_name: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise MarketSnapshotMismatchError(f"{field_name} must be decimal-compatible") from exc
+    if not decimal_value.is_finite():
+        raise MarketSnapshotMismatchError(f"{field_name} must be finite")
+    return decimal_value
+
+
+def _decimal_text(value: Any) -> str:
+    """Return context-independent decimal text for snapshot identity hashes."""
+
+    value = _as_decimal(value, "decimal")
+    if value.is_zero():
+        return "0"
+    sign, digits, exponent = value.as_tuple()
+    digits_text = "".join(str(digit) for digit in digits) or "0"
+    while digits_text.endswith("0"):
+        digits_text = digits_text[:-1]
+        exponent += 1
+    if exponent >= 0:
+        text = digits_text + ("0" * exponent)
+    else:
+        decimal_index = len(digits_text) + exponent
+        if decimal_index > 0:
+            text = digits_text[:decimal_index] + "." + digits_text[decimal_index:]
+        else:
+            text = "0." + ("0" * -decimal_index) + digits_text
+    return f"-{text}" if sign else text
+
+
+def _canonical_fee_details_for_hash(value: Any, key: str = "") -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): _canonical_fee_details_for_hash(child_value, str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_canonical_fee_details_for_hash(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [_canonical_fee_details_for_hash(item, key) for item in value]
+    if key in _FEE_HASH_NUMERIC_FIELDS:
+        return _decimal_text(value)
+    return value
 
 
 def _as_utc(value: datetime, *, field_name: str) -> datetime:
@@ -430,3 +520,21 @@ def _as_utc(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _decimal_text(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _sha256_json(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        default=_json_default,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

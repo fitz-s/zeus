@@ -314,51 +314,16 @@ class PolymarketClient:
 
         warnings.warn(
             "PolymarketClient.place_limit_order() is a compatibility wrapper; "
-            "live placement routes through PolymarketV2Adapter.",
+            "live placement requires a bound VenueSubmissionEnvelope.",
             DeprecationWarning,
             stacklevel=2,
         )
-
-        try:
-            adapter = self._ensure_v2_adapter()
-            preflight = adapter.preflight()
-        except Exception as exc:
-            # M2: this compatibility wrapper lazily initializes credentials /
-            # adapter and runs a preflight before adapter.submit_limit_order().
-            # Failures here are before the venue submit side-effect boundary,
-            # so executor should receive a typed rejection payload rather than
-            # misclassifying the exception as SUBMIT_UNKNOWN_SIDE_EFFECT.
-            return {
-                "success": False,
-                "status": "rejected",
-                "errorCode": "V2_PREFLIGHT_EXCEPTION",
-                "errorMessage": str(exc),
-            }
-        if not preflight.ok:
-            return {
-                "success": False,
-                "status": "rejected",
-                "errorCode": preflight.error_code or "V2_PREFLIGHT_FAILED",
-                "errorMessage": preflight.message,
-            }
-
-        submit = adapter.submit_limit_order(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
-            order_type=order_type,
-        )
-        result = _legacy_order_result_from_submit(submit)
-        logger.info(
-            "V2 order submit result: %s %s @ %.3f x %.1f → %s",
-            side,
-            token_id[:12],
-            price,
-            size,
-            result.get("status"),
-        )
-        return result
+        return {
+            "success": False,
+            "status": "rejected",
+            "errorCode": "BOUND_ENVELOPE_REQUIRED",
+            "errorMessage": "live placement requires bind_submission_envelope() before place_limit_order()",
+        }
 
     def get_order(self, order_id: str) -> Optional[dict]:
         """Fetch a single order by venue order ID. Returns None if not found.

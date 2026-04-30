@@ -509,20 +509,15 @@ def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):
     assert envelope.canonical_pre_sign_payload_hash != buy_envelope.canonical_pre_sign_payload_hash
 
 
-def test_polymarket_client_live_submit_delegates_to_v2_adapter(tmp_path):
+def test_polymarket_client_unbound_place_limit_order_fails_closed_without_submit():
     from src.data.polymarket_client import PolymarketClient
-
-    adapter, _ = _adapter(tmp_path, FakeOneStepClient(response={"orderID": "ord-v2", "status": "LIVE"}))
-    submit = adapter.submit(adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC"))
 
     class FakeAdapter:
         def __init__(self):
             self.calls = []
 
-        def preflight(self):
-            from src.venue.polymarket_v2_adapter import PreflightResult
-
-            return PreflightResult(ok=True)
+        def preflight(self):  # pragma: no cover - tripwire
+            raise AssertionError("unbound wrapper must fail before v2 preflight")
 
         def submit_limit_order(self, *, token_id, price, size, side, order_type):
             self.calls.append(
@@ -534,7 +529,7 @@ def test_polymarket_client_live_submit_delegates_to_v2_adapter(tmp_path):
                     "order_type": order_type,
                 }
             )
-            return submit
+            raise AssertionError("unbound wrapper must not call compatibility submit")
 
     client = PolymarketClient()
     fake_adapter = FakeAdapter()
@@ -543,18 +538,13 @@ def test_polymarket_client_live_submit_delegates_to_v2_adapter(tmp_path):
     with pytest.warns(DeprecationWarning, match="compatibility wrapper"):
         result = client.place_limit_order(token_id="yes-token", price=0.5, size=20.0, side="BUY")
 
-    assert fake_adapter.calls == [
-        {
-            "token_id": "yes-token",
-            "price": 0.5,
-            "size": 20.0,
-            "side": "BUY",
-            "order_type": "GTC",
-        }
-    ]
-    assert result["orderID"] == "ord-v2"
-    assert result["success"] is True
-    assert result["_venue_submission_envelope"]["sdk_package"] == "py-clob-client-v2"
+    assert fake_adapter.calls == []
+    assert result == {
+        "success": False,
+        "status": "rejected",
+        "errorCode": "BOUND_ENVELOPE_REQUIRED",
+        "errorMessage": "live placement requires bind_submission_envelope() before place_limit_order()",
+    }
 
 
 def test_polymarket_client_bound_envelope_bypasses_legacy_compat_submit(tmp_path):
@@ -674,20 +664,15 @@ def test_polymarket_client_cancel_blocks_before_adapter_when_cutover_disallows(m
         client.cancel_order("ord-cancel")
 
 
-def test_polymarket_client_wrapper_fails_closed_when_v2_preflight_rejects():
+def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():
     from src.data.polymarket_client import PolymarketClient
-    from src.venue.polymarket_v2_adapter import PreflightResult
 
     class FakeAdapter:
         def __init__(self):
             self.submit_called = False
 
-        def preflight(self):
-            return PreflightResult(
-                ok=False,
-                error_code="Q1_EGRESS_EVIDENCE_ABSENT",
-                message="missing Q1 evidence",
-            )
+        def preflight(self):  # pragma: no cover - tripwire
+            raise AssertionError("unbound wrapper must fail before v2 preflight")
 
         def submit_limit_order(self, **_kwargs):
             self.submit_called = True
@@ -703,8 +688,8 @@ def test_polymarket_client_wrapper_fails_closed_when_v2_preflight_rejects():
     assert result == {
         "success": False,
         "status": "rejected",
-        "errorCode": "Q1_EGRESS_EVIDENCE_ABSENT",
-        "errorMessage": "missing Q1 evidence",
+        "errorCode": "BOUND_ENVELOPE_REQUIRED",
+        "errorMessage": "live placement requires bind_submission_envelope() before place_limit_order()",
     }
     assert fake_adapter.submit_called is False
 

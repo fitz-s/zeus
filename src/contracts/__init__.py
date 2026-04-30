@@ -11,7 +11,16 @@ from src.contracts.semantic_types import (
     compute_native_limit_price,
     recompute_native_probability,
 )
-from src.contracts.execution_intent import DecisionSourceContext, ExecutionIntent
+from src.contracts.execution_intent import (
+    CORRECTED_PRICING_SEMANTICS_VERSION,
+    ClobSweepResult,
+    DecisionSourceContext,
+    ExecutableCostBasis,
+    ExecutableTradeHypothesis,
+    ExecutionIntent,
+    FinalExecutionIntent,
+    simulate_clob_sweep,
+)
 from src.contracts.expiring_assumption import ExpiringAssumption
 from src.contracts.edge_context import EdgeContext
 from src.contracts.epistemic_context import EpistemicContext
@@ -34,7 +43,13 @@ __all__ = [
     "compute_forward_edge",
     "compute_native_limit_price",
     "recompute_native_probability",
+    "CORRECTED_PRICING_SEMANTICS_VERSION",
+    "ClobSweepResult",
+    "ExecutableCostBasis",
+    "ExecutableTradeHypothesis",
     "ExecutionIntent",
+    "FinalExecutionIntent",
+    "simulate_clob_sweep",
     "ExpiringAssumption",
     "EdgeContext",
     "EpistemicContext",

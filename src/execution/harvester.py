@@ -23,11 +23,11 @@ from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair_v2
-from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.exceptions import SettlementPrecisionError
-from src.data.market_scanner import _match_city, _parse_temp_range, GAMMA_BASE
+from src.data.market_scanner import _match_city, _parse_temp_range, infer_temperature_metric, GAMMA_BASE
 from src.state.chronicler import log_event
 from src.state.decision_chain import (
     SettlementRecord,
@@ -133,6 +133,38 @@ _HARVESTER_STAGE2_SHARED_TABLES = (
     "calibration_decision_group",
     "platt_models",
 )
+
+_TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
+
+
+def _metric_identity_for(temperature_metric: str | MetricIdentity) -> MetricIdentity:
+    return MetricIdentity.from_raw(temperature_metric)
+
+
+def _forecast_source_from_version(source_model_version: str | None) -> str:
+    version = str(source_model_version or "").strip().lower()
+    if not version:
+        return ""
+    if version.startswith("ecmwf_ens"):
+        return "ecmwf_ens"
+    if version.startswith("tigge"):
+        return "tigge"
+    if version.startswith("openmeteo"):
+        return "openmeteo"
+    return version.split("_", 1)[0]
+
+
+def _is_training_forecast_source(source_model_version: str | None) -> bool:
+    return _forecast_source_from_version(source_model_version) in _TRAINING_FORECAST_SOURCES
+
+
+def _coerce_snapshot_id(snapshot_id: object) -> int | None:
+    if snapshot_id in (None, ""):
+        return None
+    try:
+        return int(str(snapshot_id))
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -285,7 +317,60 @@ def _dual_write_canonical_settlement_if_available(
     return True
 
 
-def _lookup_settlement_obs(conn, city: City, target_date: str) -> Optional[dict]:
+def _table_column_names(conn, table_name: str) -> list[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.Error:
+        return []
+    return [str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows]
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+    return set(_table_column_names(conn, table_name))
+
+
+def _row_value(row, key: str):
+    if isinstance(row, sqlite3.Row):
+        return row[key] if key in row.keys() else None
+    if isinstance(row, dict):
+        return row.get(key)
+    return None
+
+
+def _source_matches_settlement_family(source: str, source_type: str) -> bool:
+    src = str(source or "").strip().lower()
+    if source_type == "wu_icao":
+        return src == "wu_icao_history" or src.startswith("wu_icao_history_")
+    if source_type == "noaa":
+        return src.startswith("ogimet_metar_")
+    if source_type == "hko":
+        return src == "hko_daily_api" or src.startswith("hko_daily_api_")
+    return False
+
+
+def _expected_settlement_station_id(city: City) -> str:
+    if city.settlement_source_type == "hko":
+        return "HKO"
+    return str(city.wu_station or "").strip().upper()
+
+
+def _station_matches_city(row_station: object, city: City) -> bool:
+    expected = _expected_settlement_station_id(city)
+    if not expected:
+        return city.settlement_source_type == "hko"
+    station = str(row_station or "").strip().upper()
+    if not station:
+        return False
+    return station == expected or station.startswith(f"{expected}:")
+
+
+def _lookup_settlement_obs(
+    conn,
+    city: City,
+    target_date: str,
+    *,
+    temperature_metric: str = "high",
+) -> Optional[dict]:
     """Look up source-family-correct observation for the harvester write path.
 
     Routes per city.settlement_source_type (P-C routing rules, DR-33 plan §3.3):
@@ -294,21 +379,48 @@ def _lookup_settlement_obs(conn, city: City, target_date: str) -> Optional[dict]
       - hko       → observations.source='hko_daily_api'
       - cwa_station → no accepted proxy (returns None; row will quarantine)
     """
+    metric_identity = _metric_identity_for(temperature_metric)
     st = city.settlement_source_type
+    if st == "cwa_station":
+        return None
+    column_names = _table_column_names(conn, "observations")
+    columns = set(column_names)
+    if not columns:
+        return None
+    metric_field = metric_identity.observation_field
+    if metric_field not in columns:
+        return None
     rows = conn.execute(
-        """SELECT id, source, high_temp, unit, fetched_at
+        """SELECT *
            FROM observations
-           WHERE city = ? AND target_date = ? AND high_temp IS NOT NULL""",
+           WHERE city = ? AND target_date = ?""",
         (city.name, target_date),
     ).fetchall()
     for r in rows:
-        _id, src, high_temp, unit, fetched_at = r
-        if st == "wu_icao" and src == "wu_icao_history":
-            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
-        if st == "noaa" and isinstance(src, str) and src.startswith("ogimet_metar_"):
-            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
-        if st == "hko" and src == "hko_daily_api":
-            return {"id": _id, "source": src, "high_temp": high_temp, "unit": unit, "fetched_at": fetched_at}
+        if not isinstance(r, (sqlite3.Row, dict)):
+            r = dict(zip(column_names, r))
+        src = str(_row_value(r, "source") or "")
+        if not _source_matches_settlement_family(src, st):
+            continue
+        if "authority" in columns and str(_row_value(r, "authority") or "").upper() != "VERIFIED":
+            continue
+        if "station_id" in columns and not _station_matches_city(_row_value(r, "station_id"), city):
+            continue
+        observed_temp = _row_value(r, metric_field)
+        if observed_temp is None:
+            continue
+        return {
+            "id": _row_value(r, "id"),
+            "source": src,
+            "high_temp": _row_value(r, "high_temp"),
+            "low_temp": _row_value(r, "low_temp"),
+            "unit": _row_value(r, "unit"),
+            "fetched_at": _row_value(r, "fetched_at"),
+            "station_id": _row_value(r, "station_id"),
+            "authority": _row_value(r, "authority"),
+            "observation_field": metric_field,
+            "observed_temp": observed_temp,
+        }
     return None
 
 
@@ -377,6 +489,14 @@ def run_harvester() -> dict:
             target_date = _extract_target_date(event)
             if target_date is None:
                 continue
+            temperature_metric = infer_temperature_metric(
+                event.get("title", ""),
+                event.get("slug", ""),
+                *[
+                    str(market.get("question") or market.get("groupItemTitle") or "")
+                    for market in event.get("markets", []) or []
+                ],
+            )
 
             resolved_market_outcomes = _extract_resolved_market_outcomes(event)
             winning_market_outcomes = [
@@ -416,7 +536,12 @@ def run_harvester() -> dict:
                 continue
 
             # Look up source-family-correct obs for SettlementSemantics gate.
-            obs_row = _lookup_settlement_obs(shared_conn, city, target_date)
+            obs_row = _lookup_settlement_obs(
+                shared_conn,
+                city,
+                target_date,
+                temperature_metric=temperature_metric,
+            )
             if obs_row is None:
                 # No obs yet; don't write a quarantine row — retry next cycle when obs lands.
                 # (Alternative: write QUARANTINED with harvester_live_no_obs; skip for DR-33-A
@@ -433,6 +558,7 @@ def run_harvester() -> dict:
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
                 resolved_market_outcomes=resolved_market_outcomes,
+                temperature_metric=temperature_metric,
             )
 
             # Extract all bin labels and use decision-time snapshots for calibration
@@ -460,8 +586,8 @@ def run_harvester() -> dict:
                 ]
             event_pairs = 0
             for context in learning_contexts:
-                _dv = context.get("source_model_version", "") or ""
-                _temperature_metric = "low" if "mn2t6" in _dv or "min" in _dv else "high"
+                if context.get("temperature_metric") != temperature_metric:
+                    continue
                 event_pairs += harvest_settlement(
                     shared_conn,
                     city,
@@ -473,7 +599,12 @@ def run_harvester() -> dict:
                     forecast_issue_time=context["issue_time"],
                     forecast_available_at=context["available_at"],
                     source_model_version=context["source_model_version"],
-                    temperature_metric=_temperature_metric,
+                    temperature_metric=temperature_metric,
+                    snapshot_id=context.get("decision_snapshot_id"),
+                    snapshot_training_allowed=bool(context.get("snapshot_learning_ready", False)),
+                    forecast_source=context.get("forecast_source", ""),
+                    pair_data_version=context.get("source_model_version"),
+                    causality_status=context.get("snapshot_causality_status") or "OK",
                 )
             total_pairs += event_pairs
             if event_pairs > 0:
@@ -787,6 +918,7 @@ def _write_settlement_truth(
     event_slug: str = "",
     obs_row: Optional[dict] = None,
     resolved_market_outcomes: Optional[list[ResolvedMarketOutcome]] = None,
+    temperature_metric: str | MetricIdentity = "high",
 ) -> dict:
     """Write canonical-authority settlement truth to settlements table.
 
@@ -809,6 +941,7 @@ def _write_settlement_truth(
     data_version = _HARVESTER_LIVE_DATA_VERSION.get(
         city.settlement_source_type, "unknown_v0"
     )
+    metric_identity = _metric_identity_for(temperature_metric)
     settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     authority = "QUARANTINED"
@@ -817,14 +950,19 @@ def _write_settlement_truth(
     reason: Optional[str] = None
     rounding_rule: str = "wmo_half_up"
 
-    if obs_row is None or obs_row.get("high_temp") is None:
+    observation_value = (
+        obs_row.get(metric_identity.observation_field)
+        if obs_row is not None
+        else None
+    )
+    if obs_row is None or observation_value is None:
         reason = "harvester_live_no_obs"
     else:
         try:
             sem = SettlementSemantics.for_city(city)
             rounding_rule = sem.rounding_rule
             rounded = sem.assert_settlement_value(
-                float(obs_row["high_temp"]),
+                float(observation_value),
                 context=f"harvester_live/{city.name}/{target_date}",
             )
         except SettlementPrecisionError:
@@ -864,9 +1002,9 @@ def _write_settlement_truth(
         "pm_bin_hi": pm_bin_hi,
         "unit": city.settlement_unit,
         "settlement_source_type": db_source_type,
-        "temperature_metric": HIGH_LOCALDAY_MAX.temperature_metric,
-        "physical_quantity": HIGH_LOCALDAY_MAX.physical_quantity,
-        "observation_field": HIGH_LOCALDAY_MAX.observation_field,
+        "temperature_metric": metric_identity.temperature_metric,
+        "physical_quantity": metric_identity.physical_quantity,
+        "observation_field": metric_identity.observation_field,
         "data_version": data_version,
         "reconstructed_at": settled_at,
         "audit_ref": "docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md",
@@ -898,9 +1036,9 @@ def _write_settlement_truth(
                 # "mx2t6_local_calendar_day_max"; any future JOIN that filters on
                 # canonical physical_quantity would have silently dropped 100%
                 # of harvester-written rows.
-                HIGH_LOCALDAY_MAX.temperature_metric,
-                HIGH_LOCALDAY_MAX.physical_quantity,
-                HIGH_LOCALDAY_MAX.observation_field,
+                metric_identity.temperature_metric,
+                metric_identity.physical_quantity,
+                metric_identity.observation_field,
                 data_version, json.dumps(provenance, sort_keys=True, default=str),
             ),
         )
@@ -908,7 +1046,7 @@ def _write_settlement_truth(
             conn,
             city=city.name,
             target_date=target_date,
-            temperature_metric=HIGH_LOCALDAY_MAX.temperature_metric,
+            temperature_metric=metric_identity.temperature_metric,
             market_slug=event_slug or None,
             winning_bin=winning_bin,
             settlement_value=settlement_value,
@@ -924,7 +1062,7 @@ def _write_settlement_truth(
                 market_slug=event_slug or None,
                 city=city.name,
                 target_date=target_date,
-                temperature_metric=HIGH_LOCALDAY_MAX.temperature_metric,
+                temperature_metric=metric_identity.temperature_metric,
                 outcomes=[
                     outcome.as_v2_outcome_row()
                     for outcome in resolved_market_outcomes
@@ -1028,6 +1166,10 @@ def _snapshot_identity_predicates(
     return " AND " + " AND ".join(predicates), tuple(params), True
 
 
+def _snapshot_select_expr(columns: set[str], column: str, fallback_sql: str) -> str:
+    return column if column in columns else f"{fallback_sql} AS {column}"
+
+
 def _snapshot_row_by_id(
     conn,
     snapshot_id: str,
@@ -1052,11 +1194,16 @@ def _snapshot_row_by_id(
         )
         if not identity_supported:
             continue
+        training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
+        causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
+        metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
                    model_version, data_version, snapshot_id,
-                   {('training_allowed, causality_status' if source == 'ensemble_snapshots_v2' else 'NULL AS training_allowed, NULL AS causality_status')},
+                   {training_expr},
+                   {causality_expr},
+                   {metric_expr},
                    ? AS snapshot_source
             FROM {table}
             WHERE snapshot_id = ?
@@ -1091,11 +1238,16 @@ def _latest_snapshot_row(
         )
         if not identity_supported:
             continue
+        training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
+        causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
+        metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
                    model_version, data_version, snapshot_id,
-                   {('training_allowed, causality_status' if source == 'ensemble_snapshots_v2' else 'NULL AS training_allowed, NULL AS causality_status')},
+                   {training_expr},
+                   {causality_expr},
+                   {metric_expr},
                    ? AS snapshot_source
             FROM {table}
             WHERE city = ? AND target_date = ? AND p_raw_json IS NOT NULL
@@ -1205,6 +1357,8 @@ def get_snapshot_context(
             "issue_time": issue_time,
             "available_at": row["available_at"],
             "source_model_version": source_model_version,
+            "temperature_metric": str(row["temperature_metric"] or "high"),
+            "forecast_source": _forecast_source_from_version(source_model_version),
             "snapshot_learning_ready": learning_snapshot_ready,
             "learning_blocked_reason": learning_blocked_reason,
             "snapshot_source": row["snapshot_source"],
@@ -1343,6 +1497,7 @@ def _snapshot_contexts_from_rows(trade_conn, shared_conn, rows: list[dict]) -> t
         contexts.append({
             **context,
             "decision_snapshot_id": snapshot_id,
+            "temperature_metric": str(context.get("temperature_metric") or row.get("temperature_metric") or "high"),
             "source": str(row.get("source") or "unknown"),
             "authority_level": str(row.get("authority_level") or "unknown"),
             "is_degraded": bool(row.get("is_degraded", False)) or bool(blocked_reason),
@@ -1401,6 +1556,11 @@ def harvest_settlement(
     settlement_value: Optional[float] = None,
     bias_corrected: Optional[bool] = None,
     temperature_metric: str = "high",
+    snapshot_id: object = None,
+    snapshot_training_allowed: Optional[bool] = None,
+    forecast_source: Optional[str] = None,
+    pair_data_version: Optional[str] = None,
+    causality_status: str = "OK",
 ) -> int:
     """Generate calibration pairs from a settled market.
 
@@ -1427,6 +1587,29 @@ def harvest_settlement(
         raise ValueError(
             "source_model_version is required when harvesting calibration pairs"
         )
+    metric_identity = _metric_identity_for(
+        getattr(city, "temperature_metric", temperature_metric)
+        if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low"
+        else temperature_metric
+    )
+    resolved_forecast_source = forecast_source or _forecast_source_from_version(source_model_version)
+    resolved_pair_data_version = (
+        str(pair_data_version).strip()
+        if pair_data_version not in (None, "")
+        else (
+            metric_identity.data_version
+            if _is_training_forecast_source(source_model_version)
+            else str(source_model_version or "").strip()
+        )
+    )
+    if not resolved_pair_data_version:
+        resolved_pair_data_version = metric_identity.data_version
+    training_requested = (
+        bool(snapshot_training_allowed)
+        if snapshot_training_allowed is not None
+        else _is_training_forecast_source(source_model_version)
+    )
+    resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
     count = 0
     for i, label in enumerate(bin_labels):
@@ -1442,22 +1625,9 @@ def harvest_settlement(
             issue_time,
             source_model_version or "",
         )
-        # C5 (2026-04-24): route both tracks through add_calibration_pair_v2
-        # with canonical MetricIdentity. Legacy add_calibration_pair for the
-        # HIGH branch wrote to calibration_pairs (no INV-14, no metric identity)
-        # — refit_platt_v2 reads only calibration_pairs_v2, so HIGH training
-        # pairs silently never reached the v2 trainer. Mirror the LOW pattern
-        # exactly for HIGH but with HIGH_LOCALDAY_MAX identity. Side effect:
-        # settlement rounding shifts from explicit round_wmo_half_up_value
-        # (HKO-unaware naive half-up) to v2's internal
-        # SettlementSemantics.for_city(city_obj).round_values which applies
-        # HKO oracle_truncate where applicable. Passes no `source=` so INV-15's
-        # two-signal check reduces to the data_version prefix gate (both
-        # tigge_mx2t6_... and tigge_mn2t6_... start with "tigge" → whitelist ok).
-        if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low":
-            metric_identity = LOW_LOCALDAY_MIN
-        else:
-            metric_identity = HIGH_LOCALDAY_MAX
+        # C5 routes both tracks through add_calibration_pair_v2. The row also
+        # preserves forecast-source lineage so runtime/fallback p_raw cannot be
+        # rebranded as canonical TIGGE training data.
         add_calibration_pair_v2(
             conn, city=city.name, target_date=target_date,
             range_label=label, p_raw=p_raw, outcome=outcome,
@@ -1468,8 +1638,11 @@ def harvest_settlement(
             bias_corrected=bool(bias_corrected),
             city_obj=city,
             metric_identity=metric_identity,
-            data_version=metric_identity.data_version,
-            training_allowed=True,
+            data_version=resolved_pair_data_version,
+            source=resolved_forecast_source,
+            training_allowed=training_requested,
+            causality_status=causality_status or "OK",
+            snapshot_id=resolved_snapshot_id,
         )
         count += 1
 
@@ -1554,12 +1727,19 @@ def _settle_positions(
         state_name = getattr(pos.state, "value", getattr(pos, "state", ""))
         exit_state = getattr(pos, "exit_state", "")
         chain_state = getattr(pos, "chain_state", "")
+        pending_exit_at_settlement = state_name == "pending_exit"
         if (
             state_name in {"pending_tracked", "quarantined", "admin_closed", "voided", "settled"}
-            or (state_name == "pending_exit" and exit_state != "backoff_exhausted")
             or chain_state in {"quarantined", "quarantine_expired"}
-            or (chain_state == "exit_pending_missing" and exit_state != "backoff_exhausted")
-            or exit_state in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+            or (
+                chain_state == "exit_pending_missing"
+                and not pending_exit_at_settlement
+                and exit_state != "backoff_exhausted"
+            )
+            or (
+                not pending_exit_at_settlement
+                and exit_state in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+            )
         ):
             logger.info("Skipping settlement for %s: runtime state still non-terminal for settlement", pos.trade_id)
             continue

@@ -1099,6 +1099,88 @@ cards:
       Kelly cost is not a bare probability. Preserve typed execution cost,
       token fee lookup, and explicit failure when fee truth is unavailable.
 
+  - id: BUY_NO_PROBABILITY_EXECUTION_PRICE_SPLIT
+    status: open_gap
+    severity: critical
+    sources:
+      - docs/operations/task_2026-04-29_design_simplification_audit/probability_execution_split_spec.md
+      - docs/operations/task_2026-04-29_design_simplification_audit/native_multibin_buy_no_implementation_spec.md
+      - docs/operations/known_gaps.md
+    failure_mode: >
+      A locally valid payoff complement or token quote is reused as a different
+      economic object: `P_no_i = 1 - P_yes_i` becomes executable NO entry
+      price, token VWMP becomes posterior prior, or legacy `BinEdge.p_market`,
+      `entry_price`, and `vwmp` are treated as interchangeable authority.
+    trigger_context:
+      - buy_no enablement
+      - p_market / entry_price / vwmp changes
+      - FDR hypothesis universe changes
+      - Kelly sizing or edge denominator changes
+      - executable snapshot or token routing changes
+      - Polymarket CLOB orderbook semantics
+    wrong_moves:
+      - remove the multi-bin buy_no guard because executor can route no_token_id
+      - use `1 - YES_VWMP` as a live multi-bin NO entry price
+      - let executable snapshot VWMP rewrite posterior-prior fields silently
+      - size or submit from a scalar whose physical quantity changes by layer
+      - treat API token quote as a calibrated market-prior estimator by default
+    correct_rule: >
+      Keep settlement probability, market-prior estimator, executable
+      token-side cost, and order lifecycle as separate planes. `P_no_i` is a
+      payoff probability complement; executable buy_no cost must come from the
+      selected NO token quote/cost-basis evidence under an explicit order
+      policy. FDR, Kelly, intent, snapshot, fee lookup, and executor submission
+      must all reference the same selected-side economic object.
+    antibodies:
+      docs:
+        - docs/operations/task_2026-04-29_design_simplification_audit/probability_execution_split_spec.md
+      code:
+        - src/engine/evaluator.py
+        - src/strategy/market_analysis.py
+        - src/strategy/market_analysis_family_scan.py
+        - src/execution/executor.py
+        - src/contracts/execution_price.py
+        - src/data/polymarket_client.py
+      tests:
+        - tests/test_fdr.py
+        - tests/test_executable_market_snapshot_v2.py
+        - tests/test_market_analysis.py
+        - tests/test_reality_contracts.py
+        - tests/test_execution_price.py
+        - tests/test_kelly.py
+      gates:
+        - pytest -q tests/test_fdr.py tests/test_executable_market_snapshot_v2.py tests/test_market_analysis.py tests/test_reality_contracts.py tests/test_execution_price.py tests/test_kelly.py
+    residual_risk: >
+      Corrected live semantics are not complete until legacy BinEdge price
+      fields stop carrying cross-plane authority, executor limit derivation is
+      hardened against posterior/vwmp recomputation, exit symmetry is proven,
+      and reporting/backtest cohorts segregate pricing_semantics_version.
+    invalidation_condition: >
+      Close only after the corrected-mode implementation proves side/token/
+      snapshot/cost-basis lineage end to end and rejects legacy complement
+      fallback for live multi-bin buy_no.
+    routing:
+      task_terms: [buy_no, no_token_id, p_market, entry_price, vwmp, executable price, market prior, cost basis, FDR, Kelly, Polymarket CLOB]
+      file_patterns:
+        - src/engine/evaluator.py
+        - src/strategy/market_analysis.py
+        - src/strategy/market_analysis_family_scan.py
+        - src/execution/executor.py
+        - src/contracts/execution_price.py
+        - src/data/polymarket_client.py
+        - tests/test_fdr.py
+        - tests/test_executable_market_snapshot_v2.py
+    downstream_blast_radius:
+      - src/engine/market_scanner.py
+      - src/execution/exit_lifecycle.py
+      - src/strategy/kelly.py
+      - src/engine/replay.py
+      - reporting/backtest economics cohorts
+    zero_context_digest: >
+      buy_no exposes a four-plane semantic split: payoff probability complement
+      is not executable token cost; p_market/entry_price/vwmp must not carry
+      mixed authority across posterior, Kelly, snapshot, and submit paths.
+
   - id: ALPHA_TARGET_AND_TAIL_TREATMENT_NOT_PROFIT_SAFE
     status: mitigated
     severity: high
@@ -1977,7 +2059,7 @@ cards:
     status: active_law
     severity: critical
     sources:
-      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/12_major_findings.md
+      - docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/12_major_findings.md
       - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
     failure_mode: >
       42,749 WU daily observations were stamped VERIFIED but 39,431 had
@@ -2005,7 +2087,7 @@ cards:
         - settlements_authority_monotonic trigger + verified_insert/update_integrity triggers
         - SettlementSemantics.assert_settlement_value() row-level gate
       audits:
-        - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+        - docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23
     residual_risk: >
       39,431 legacy rows remain in the VERIFIED-without-evidence state
       (tracked as forensic C6). They are not retroactively demoted — but
@@ -2133,7 +2215,7 @@ cards:
     sources:
       - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
       - src/state/db.py
-      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+      - docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23
     failure_mode: >
       Without a typed identity spine, rows in canonical authority
       tables cannot be joined safely across time, cannot be audited for
@@ -2290,7 +2372,7 @@ cards:
     status: active_law
     severity: high
     sources:
-      - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23/
+      - docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23/
       - docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md
     failure_mode: >
       Inherited or migrated databases carry unknown authority gaps.
@@ -2320,7 +2402,7 @@ cards:
       audit (who reads what and assumes what).
     antibodies:
       template:
-        - docs/operations/zeus_world_data_forensic_audit_package_2026-04-23
+        - docs/archives/packets/zeus_world_data_forensic_audit_package_2026-04-23
       artifacts:
         - 10 critical findings + 10 structural fixes in 12_major_findings.md
         - safe/unsafe use-case matrix in 11_data_readiness_ruling.md
@@ -2411,7 +2493,7 @@ cards:
       - src/execution/harvester.py
       - src/data/tier_resolver.py
       - state/zeus-world.db (2026-04-24 probe)
-      - docs/operations/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/
+      - docs/archives/packets/task_2026-04-23_midstream_remediation/phases/task_2026-04-24_midstream_tier2_adversarial_followups/
     failure_mode: >
       A future agent reads harvester._HARVESTER_LIVE_DATA_VERSION['cwa_station']
       = 'cwa_no_collector_v0', tier_resolver.py:72 saying 'no city uses this

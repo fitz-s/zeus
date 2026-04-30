@@ -135,3 +135,30 @@ constraints:
       tests:
         - tests/test_discovery_idempotency.py::test_idempotency_key_skips_duplicate_submit
         - tests/test_discovery_idempotency.py::test_retry_after_unknown_does_not_double_place
+  - id: NC-20
+    statement: No raw executable quote, VWMP vector, or sparse held-token quote vector may enter corrected posterior modes; corrected prior modes require MarketPriorDistribution.
+    invariants: [INV-33]
+    enforced_by:
+      tests:
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
+  - id: NC-21
+    statement: No implied_probability ExecutionPrice, fee-adjusted or otherwise, may satisfy corrected Kelly/executable-cost authority.
+    invariants: [INV-34]
+    enforced_by:
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_implied_probability_fails_kelly_safe
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_fee_adjusted_implied_probability_fails_corrected_kelly_authority
+  - id: NC-22
+    statement: No FinalExecutionIntent contract field may carry posterior, p_market, VWMP, BinEdge, edge, market_prior, or entry_price recompute inputs.
+    invariants: [INV-35]
+    enforced_by:
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_final_execution_intent_excludes_probability_and_quote_recompute_inputs
+  - id: NC-23
+    statement: No monitor/exit refresh may use held-token market quote observations as corrected posterior prior evidence; held-token quotes belong to executable mark/exit economics.
+    invariants: [INV-36]
+    enforced_by:
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatInExitTriggerThresholds::test_monitor_bootstrap_refresh_keeps_held_quote_out_of_corrected_posterior

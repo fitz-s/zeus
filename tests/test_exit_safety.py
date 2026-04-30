@@ -47,7 +47,26 @@ def _ctf_units(shares: float) -> int:
     return int(round(float(shares) * _CTF_SCALE))
 
 
-def _snapshot(*, pusd: int = 100_000_000, ctf: dict[str, int | float] | None = None):
+def _fake_submit_result(bound_envelope, *, order_id: str, status: str = "LIVE") -> dict:
+    raw_payload = {"status": status, "orderID": order_id, "success": True}
+    final = bound_envelope.with_updates(
+        raw_response_json=json.dumps(raw_payload, sort_keys=True, separators=(",", ":")),
+        order_id=order_id,
+    )
+    return {
+        "success": True,
+        "status": status,
+        "orderID": order_id,
+        "_venue_submission_envelope": final.to_dict(),
+    }
+
+
+def _snapshot(
+    *,
+    pusd: int = 100_000_000,
+    ctf: dict[str, int | float] | None = None,
+    captured_at: datetime | None = None,
+):
     from src.state.collateral_ledger import CollateralSnapshot
 
     ctf_units = {token: _ctf_units(float(shares)) for token, shares in (ctf or {}).items()}
@@ -59,7 +78,7 @@ def _snapshot(*, pusd: int = 100_000_000, ctf: dict[str, int | float] | None = N
         ctf_token_allowances=dict(ctf_units),
         reserved_pusd_for_buys_micro=0,
         reserved_tokens_for_sells={},
-        captured_at=_NOW,
+        captured_at=captured_at or datetime.now(timezone.utc),
         authority_tier="CHAIN",
     )
 
@@ -123,7 +142,14 @@ def _ensure_snapshot(
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
-            fee_details={},
+            fee_details={
+                "source": "test",
+                "token_id": selected_token,
+                "fee_rate_fraction": 0.0,
+                "fee_rate_bps": 0.0,
+                "fee_rate_source_field": "fee_rate_fraction",
+                "fee_rate_raw_unit": "fraction",
+            },
             token_map_raw={"YES": token_id, "NO": no_token},
             rfqe=None,
             neg_risk=False,
@@ -497,6 +523,106 @@ def test_partial_fill_plus_cancel_remainder_updates_remaining_shares(conn):
     assert remaining_exit_shares(conn, "cmd-exit-1") == Decimal("6.00")
 
 
+def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-partial-exit",
+        market_id="mkt-partial-exit",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-partial-exit",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-partial-exit"
+            return {
+                "status": "PARTIALLY_MATCHED",
+                "remaining_size": "12.00",
+                "matched_size": "8.00",
+                "avgPrice": "0.44",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.shares == pytest.approx(12.0)
+    assert position.size_usd == pytest.approx(6.0)
+    assert position.cost_basis_usd == pytest.approx(6.0)
+    assert position.nested_fills[-1]["type"] == "partial_exit_fill"
+    assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
+    assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
+    assert position.nested_fills[-1]["realized_pnl"] == pytest.approx(-0.48)
+
+
+def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-partial-cancel",
+        market_id="mkt-partial-cancel",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-partial-cancel",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-partial-cancel"
+            return {
+                "status": "CANCELLED",
+                "remaining_size": "12.00",
+                "matched_size": "8.00",
+                "avgPrice": "0.44",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 1
+    assert position.exit_state == "retry_pending"
+    assert position.shares == pytest.approx(12.0)
+    assert position.size_usd == pytest.approx(6.0)
+    assert position.cost_basis_usd == pytest.approx(6.0)
+    assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
+    assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
+
+
 def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(conn, monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
@@ -512,9 +638,12 @@ def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(con
     calls: list[dict] = []
 
     class FakeClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
-            return {"success": True, "orderID": "ord-1", "status": "LIVE"}
+            return _fake_submit_result(self.bound_envelope, order_id="ord-1")
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
     try:
@@ -624,6 +753,220 @@ def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
     )
 
     assert context["executable_snapshot_id"] == no_snapshot_id
+
+
+def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-exit-refresh",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+        cost_basis_usd=10.0,
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.50,
+        best_bid=0.49,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+
+    sibling = {
+        "market_id": "condition-test",
+        "condition_id": "condition-test",
+        "question_id": "question-test",
+        "token_id": YES_TOKEN,
+        "no_token_id": NO_TOKEN,
+        "title": "Will NYC high temp be 50-51°F?",
+        "active": True,
+        "closed": False,
+        "accepting_orders": True,
+        "enable_orderbook": True,
+        "range_low": 50,
+        "range_high": 51,
+        "token_map_raw": {"YES": YES_TOKEN, "NO": NO_TOKEN},
+        "raw_gamma_payload_hash": "a" * 64,
+        "gamma_market_raw": {
+            "id": "gamma-test",
+            "conditionId": "condition-test",
+            "questionID": "question-test",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": [YES_TOKEN, NO_TOKEN],
+        },
+    }
+    monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [sibling])
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def fake_capture_snapshot(conn_arg, *, market, decision, clob, captured_at, scan_authority):
+        assert scan_authority == "VERIFIED"
+        assert market["outcomes"] == [sibling]
+        assert decision.tokens["market_id"] == "condition-test"
+        assert decision.edge.direction == "buy_yes"
+        snapshot_id = _ensure_snapshot(
+            conn_arg,
+            token_id=YES_TOKEN,
+            no_token_id=NO_TOKEN,
+            selected_outcome_token_id=YES_TOKEN,
+            outcome_label="YES",
+            snapshot_id="snap-exit-captured",
+            captured_at=captured_at,
+        )
+        return {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", fake_capture_snapshot)
+
+    def fake_execute_exit_order(intent, decision_id=""):
+        captured.update(
+            decision_id=decision_id,
+            snapshot_id=intent.executable_snapshot_id,
+            min_tick=intent.executable_snapshot_min_tick_size,
+            min_order=intent.executable_snapshot_min_order_size,
+            neg_risk=intent.executable_snapshot_neg_risk,
+        )
+        return exit_lifecycle.OrderResult(
+            trade_id=intent.trade_id,
+            status="pending",
+            order_id="ord-exit-refresh",
+            external_order_id="ord-exit-refresh",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-exit-refresh"
+            return {"status": "OPEN"}
+
+    result = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=FakeClob(),
+        conn=conn,
+    )
+
+    assert result == "sell_pending: order=ord-exit-refresh, status=OPEN"
+    assert captured == {
+        "decision_id": "exit:pos-exit-refresh",
+        "snapshot_id": "snap-exit-captured",
+        "min_tick": "0.01",
+        "min_order": "0.01",
+        "neg_risk": False,
+    }
+
+
+def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-exit-stale-scan",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+    )
+
+    monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [{"market_id": market_id}])
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "STALE")
+    monkeypatch.setattr(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale scan must not capture snapshot")),
+    )
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context == {}
+
+
+def test_exit_snapshot_capture_fails_closed_when_capture_returns_no_id(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-exit-no-snapshot-id",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+    )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "question_id": "question-test",
+                "token_id": YES_TOKEN,
+                "no_token_id": NO_TOKEN,
+            }
+        ],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+    monkeypatch.setattr(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        lambda *args, **kwargs: {
+            "executable_snapshot_id": "",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        },
+    )
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context == {}
 
 
 def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):

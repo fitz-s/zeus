@@ -1,4 +1,7 @@
 """Tests for Slice N — Runtime Irreversible Safeguards (Bugs #63, #67)."""
+# Created: 2026-04-17
+# Last reused/audited: 2026-04-30
+# Authority basis: Slice N runtime irreversible safeguards; 2026-04-30 durable venue-command cancel truth remediation.
 
 import logging
 import sqlite3
@@ -44,15 +47,15 @@ class TestOrphanOrderCleanup:
         assert cancelled == 0
         clob.cancel_order.assert_not_called()
 
-    def test_orphan_without_conn_still_cancels(self):
-        """Without conn (no execution_fact check), orphans still get cancelled (backward compat)."""
+    def test_orphan_without_conn_blocks_cancel(self):
+        """Without durable command truth, cleanup must fail closed."""
         from src.engine.cycle_runtime import cleanup_orphan_open_orders
         portfolio = _make_portfolio(order_ids=["O-001"])
         clob = _make_clob([{"id": "O-001"}, {"id": "O-ORPHAN"}])
         deps = _make_deps()
         cancelled = cleanup_orphan_open_orders(portfolio, clob, deps=deps, conn=None)
-        assert cancelled == 1
-        clob.cancel_order.assert_called_once_with("O-ORPHAN")
+        assert cancelled == 0
+        clob.cancel_order.assert_not_called()
 
     def test_orphan_in_recent_trade_decisions_quarantined(self, caplog):
         """Orphan order found in trade_decisions within 2h should be quarantined, not cancelled."""
@@ -78,15 +81,19 @@ class TestOrphanOrderCleanup:
         with caplog.at_level(logging.WARNING):
             cancelled = cleanup_orphan_open_orders(portfolio, clob, deps=deps, conn=conn)
 
-        # O-RECENT should be quarantined (not cancelled), O-TRUE-ORPHAN should be cancelled
-        assert cancelled == 1
-        clob.cancel_order.assert_called_once_with("O-TRUE-ORPHAN")
+        # O-RECENT is quarantined. O-TRUE-ORPHAN also fails closed because this
+        # legacy fixture has no venue_commands journal to prove durable command truth.
+        assert cancelled == 0
+        clob.cancel_order.assert_not_called()
         quarantine_logs = [r for r in caplog.records if "quarantining" in r.message]
         assert len(quarantine_logs) == 1
         assert "O-RECENT" in quarantine_logs[0].message
+        blocked_logs = [r for r in caplog.records if "venue command journal unavailable" in r.message]
+        assert len(blocked_logs) == 1
+        assert "O-TRUE-ORPHAN" in blocked_logs[0].message
 
-    def test_orphan_old_trade_decisions_still_cancels(self):
-        """Orphan order in trade_decisions but older than 2h should still be cancelled."""
+    def test_orphan_old_trade_decisions_blocks_without_command_journal(self):
+        """Old trade_decisions rows are not command truth; no journal means no cancel."""
         from src.engine.cycle_runtime import cleanup_orphan_open_orders
 
         conn = sqlite3.connect(":memory:")
@@ -107,8 +114,8 @@ class TestOrphanOrderCleanup:
         deps = _make_deps()
 
         cancelled = cleanup_orphan_open_orders(portfolio, clob, deps=deps, conn=conn)
-        assert cancelled == 1
-        clob.cancel_order.assert_called_once_with("O-OLD")
+        assert cancelled == 0
+        clob.cancel_order.assert_not_called()
 
 
 # ── Bug #67: ENS snapshot after Day0 gate ────────────────────────────

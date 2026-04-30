@@ -16,7 +16,10 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.engine import cycle_runner
 from src.engine.cycle_runner import _execute_force_exit_sweep
+from src.engine.discovery_mode import DiscoveryMode
+from src.riskguard.risk_level import RiskLevel
 from src.state.db import init_schema
 from src.state.portfolio import PortfolioState, Position
 from src.state.snapshot_repo import insert_snapshot
@@ -34,7 +37,14 @@ def _conn():
     return conn
 
 
-def _snapshot() -> ExecutableMarketSnapshotV2:
+def _file_conn(path):
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _snapshot(captured_at: datetime | None = None) -> ExecutableMarketSnapshotV2:
+    captured = captured_at or NOW
     return ExecutableMarketSnapshotV2(
         snapshot_id="snap-red",
         gamma_market_id="gamma-red",
@@ -67,8 +77,8 @@ def _snapshot() -> ExecutableMarketSnapshotV2:
         raw_clob_market_info_hash="b" * 64,
         raw_orderbook_hash="c" * 64,
         authority_tier="CLOB",
-        captured_at=NOW,
-        freshness_deadline=NOW + timedelta(seconds=30),
+        captured_at=captured,
+        freshness_deadline=captured + timedelta(seconds=30),
     )
 
 
@@ -167,6 +177,107 @@ def test_red_emit_passes_through_command_recovery():
 
     assert result["advanced"] == 1
     assert get_command(conn, row["command_id"])["state"] == "CANCELLED"
+
+
+def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus-red.db"
+    conn = _file_conn(db_path)
+    init_schema(conn)
+    insert_snapshot(conn, _snapshot(datetime.now(timezone.utc)))
+    conn.commit()
+    conn.close()
+    portfolio = PortfolioState(positions=[_position()])
+
+    class DummyClob:
+        def get_balance(self):
+            return 100.0
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: _file_conn(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", lambda: DummyClob())
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cycle_runner, "is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_reconcile_pending_positions",
+        lambda *args, **kwargs: {
+            "entered": 0,
+            "voided": 0,
+            "dirty": False,
+            "tracker_dirty": False,
+        },
+    )
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda *args, **kwargs: ({}, True))
+    monkeypatch.setattr(cycle_runner, "_cleanup_orphan_open_orders", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_entry_bankroll_for_cycle",
+        lambda *args, **kwargs: (100.0, {"portfolio_initial_bankroll_usd": 100.0}),
+    )
+    monitor_seen = {}
+
+    def _monitor_after_red_sweep(_conn, _clob, monitored_portfolio, *_args, **_kwargs):
+        monitor_seen["exit_reason"] = monitored_portfolio.positions[0].exit_reason
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", _monitor_after_red_sweep)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_discovery_phase",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("RED risk must block entries")
+        ),
+    )
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.execution.command_recovery.reconcile_unresolved_commands", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        "src.control.heartbeat_supervisor.summary",
+        lambda: {"health": "OK", "entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr(
+        "src.control.ws_gap_guard.summary",
+        lambda: {
+            "subscription_state": "CONNECTED",
+            "gap_reason": "",
+            "m5_reconcile_required": False,
+            "entry": {"allow_submit": True},
+        },
+    )
+    monkeypatch.setattr(
+        "src.risk_allocator.refresh_global_allocator",
+        lambda *args, **kwargs: {"entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr(
+        cycle_runner.cutover_guard,
+        "summary",
+        lambda: {"state": "NORMAL", "entry": {"allow_submit": True}},
+    )
+    monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda *args, **kwargs: None)
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+
+    assert summary["risk_level"] == RiskLevel.RED.value
+    assert summary["force_exit_review_scope"] == "sweep_active_positions"
+    assert summary["force_exit_sweep_trigger"] == "risk_level_red"
+    assert summary["force_exit_sweep"]["attempted"] == 1
+    assert summary["force_exit_sweep"]["cancel_commands_inserted"] == 1
+    assert summary["entries_blocked_reason"] == "risk_level=RED"
+    assert portfolio.positions[0].exit_reason == "red_force_exit"
+    assert monitor_seen["exit_reason"] == "red_force_exit"
+
+    conn = _file_conn(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind='CANCEL' "
+            "AND decision_id LIKE 'red_force_exit_proxy:%'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_red_emit_sole_caller_is_cycle_runner_force_exit_block():

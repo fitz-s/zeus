@@ -257,6 +257,7 @@ def _insert_executable_snapshot(
     top_ask: str = "0.36",
     bid_size: str = "100",
     ask_size: str = "100",
+    orderbook_depth: dict | None = None,
 ) -> None:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import insert_snapshot
@@ -291,10 +292,14 @@ def _insert_executable_snapshot(
             neg_risk=False,
             orderbook_top_bid=Decimal(top_bid),
             orderbook_top_ask=Decimal(top_ask),
-            orderbook_depth_jsonb=json.dumps({
-                "bids": [{"price": top_bid, "size": bid_size}],
-                "asks": [{"price": top_ask, "size": ask_size}],
-            }),
+            orderbook_depth_jsonb=json.dumps(
+                orderbook_depth
+                if orderbook_depth is not None
+                else {
+                    "bids": [{"price": top_bid, "size": bid_size}],
+                    "asks": [{"price": top_ask, "size": ask_size}],
+                }
+            ),
             raw_gamma_payload_hash="a" * 64,
             raw_clob_market_info_hash="b" * 64,
             raw_orderbook_hash="c" * 64,
@@ -667,6 +672,78 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
     portfolio_path = tmp_path / "positions.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-orphan",
+        selected_outcome_token_id="yes-orphan",
+        yes_token_id="yes-orphan",
+        no_token_id="no-orphan",
+        condition_id="cond-orphan",
+        top_bid="0.39",
+        top_ask="0.40",
+    )
+    from src.execution.command_bus import IdempotencyKey, IntentKind
+    from src.execution.executor import _persist_pre_submit_envelope
+    from src.state.venue_command_repo import append_event, insert_command
+
+    created_at = datetime(2026, 4, 3, 2, 0, 5, tzinfo=timezone.utc).isoformat()
+    command_id = "cmd-orphan-entry"
+    envelope_id = _persist_pre_submit_envelope(
+        conn,
+        command_id=command_id,
+        snapshot_id="snap-orphan",
+        token_id="yes-orphan",
+        side="BUY",
+        price=0.40,
+        size=10.0,
+        order_type="GTC",
+        post_only=True,
+        captured_at=created_at,
+    )
+    insert_command(
+        conn,
+        command_id=command_id,
+        envelope_id=envelope_id,
+        snapshot_id="snap-orphan",
+        position_id="orphan-position",
+        decision_id="orphan-placement",
+        idempotency_key=IdempotencyKey.from_inputs(
+            decision_id="orphan-placement",
+            token_id="yes-orphan",
+            side="BUY",
+            price=0.40,
+            size=10.0,
+            intent_kind=IntentKind.ENTRY,
+        ).value,
+        intent_kind=IntentKind.ENTRY.value,
+        market_id="cond-orphan",
+        token_id="yes-orphan",
+        side="BUY",
+        size=10.0,
+        price=0.40,
+        created_at=created_at,
+        snapshot_checked_at=created_at,
+        expected_min_tick_size=Decimal("0.01"),
+        expected_min_order_size=Decimal("5"),
+        expected_neg_risk=False,
+        venue_order_id="orphan-1",
+        reason="test_orphan_open_order",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=created_at,
+        payload={"source": "test_stale_order_cleanup"},
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_ACKED",
+        occurred_at=created_at,
+        payload={"venue_order_id": "orphan-1"},
+    )
+    conn.commit()
     conn.close()
     save_portfolio(
         PortfolioState(positions=[_position(
@@ -694,6 +771,19 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
             return {"status": "OPEN"}
 
         def cancel_order(self, order_id):
+            read_conn = get_connection(db_path)
+            try:
+                event_types = [
+                    row["event_type"]
+                    for row in read_conn.execute(
+                        "SELECT event_type FROM venue_command_events "
+                        "WHERE command_id = ? ORDER BY sequence_no",
+                        (command_id,),
+                    ).fetchall()
+                ]
+            finally:
+                read_conn.close()
+            assert event_types[-1] == "CANCEL_REQUESTED"
             cancelled.append(order_id)
             return {"status": "CANCELLED", "id": order_id}
 
@@ -717,6 +807,14 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "src.execution.exit_safety.gate_for_intent",
+        lambda intent: types.SimpleNamespace(
+            allow_cancel=True,
+            block_reason=None,
+            state=types.SimpleNamespace(value="READY"),
+        ),
+    )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
 
@@ -724,6 +822,83 @@ def test_stale_order_cleanup_cancels_orphan_open_orders(monkeypatch, tmp_path):
 
     assert summary["stale_orders_cancelled"] == 1
     assert cancelled == ["orphan-1"]
+    conn = get_connection(db_path)
+    try:
+        events = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = ? ORDER BY sequence_no",
+                (command_id,),
+            ).fetchall()
+        ]
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+    assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
+    assert state == "CANCELLED"
+
+
+def test_stale_order_cleanup_blocks_without_command_journal():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE trade_decisions (
+            id INTEGER PRIMARY KEY,
+            order_id TEXT,
+            order_posted_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_open_orders(self):
+            return [{"id": "orphan-no-journal"}]
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        DummyClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_no_journal")),
+        conn=conn,
+    )
+    conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+
+
+def test_stale_order_cleanup_blocks_without_matching_command(tmp_path):
+    conn = get_connection(tmp_path / "orphan-no-command.db")
+    init_schema(conn)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_open_orders(self):
+            return [{"id": "orphan-no-command"}]
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    cancelled_count = cycle_runtime.cleanup_orphan_open_orders(
+        PortfolioState(),
+        DummyClob(),
+        deps=types.SimpleNamespace(logger=logging.getLogger("test_no_command")),
+        conn=conn,
+    )
+    conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
 
 
 def test_reconcile_pending_positions_delegates_to_fill_tracker(monkeypatch):
@@ -1928,19 +2103,86 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     )
     conn.close()
 
-    assert best_ask == pytest.approx(0.30)
+    assert best_ask is None
     assert decision.edge.vwmp == pytest.approx(0.25)
     assert decision.edge.entry_price == pytest.approx(0.25)
     assert decision.edge.edge == pytest.approx(0.22)
     assert decision.edge_context.forward_edge == pytest.approx(0.22)
     assert json.loads(decision.edge_context_json)["forward_edge"] == pytest.approx(0.22)
-    assert decision.size_usd == pytest.approx((0.47 - 0.30) / (1 - 0.30) * 0.25 * 100.0)
+    assert decision.size_usd == pytest.approx((0.47 - 0.25) / (1 - 0.25) * 0.25 * 100.0)
     assert "executable_snapshot_repriced" in decision.applied_validations
+    assert "corrected_pricing_shadow_built" in decision.applied_validations
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["snapshot_id"] == "snap-reprice-1"
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
-    assert reprice["final_limit_price"] == pytest.approx(0.30)
+    assert reprice["final_limit_price"] == pytest.approx(0.23)
+    assert reprice["best_ask_blocked_by_slippage"] is True
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.23)
     assert reprice["repriced_size_usd"] == pytest.approx(decision.size_usd)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["shadow_only"] is True
+    assert shadow["live_submit_authority"] is False
+    assert shadow["field_semantics"] == "corrected_candidate_not_submitted"
+    assert shadow["selected_token_id"] == "yes1"
+    assert shadow["direction"] == "buy_yes"
+    assert shadow["snapshot_id"] == "snap-reprice-1"
+    assert shadow["snapshot_hash"] == reprice["executable_snapshot_hash"]
+    assert shadow["snapshot_hash"] != reprice["raw_orderbook_hash"]
+    assert shadow["candidate_final_limit_price"] == "0.23"
+    assert shadow["candidate_fee_adjusted_execution_price"] == "0.23"
+    assert shadow["sweep_attempted"] is False
+    assert shadow["sweep_depth_status"] == "NOT_MARKETABLE_PASSIVE_LIMIT"
+    assert shadow["cost_basis_hash"]
+    assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
+
+
+def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-tight-ask.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-tight-ask",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.40",
+        top_ask="0.41",
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-tight-ask",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-tight-ask"},
+    )
+    conn.close()
+
+    assert best_ask == pytest.approx(0.41)
+    assert decision.edge.vwmp == pytest.approx(0.405)
+    assert decision.size_usd == pytest.approx((0.47 - 0.41) / (1 - 0.41) * 0.25 * 100.0)
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["best_ask_slippage_bps"] == pytest.approx((0.41 - 0.405) / 0.405 * 10_000.0)
+    assert reprice["best_ask_blocked_by_slippage"] is False
+    assert reprice["final_limit_price"] == pytest.approx(0.41)
+    assert reprice["corrected_pricing_shadow"]["candidate_final_limit_price"] == "0.41"
+    assert reprice["corrected_pricing_shadow"]["candidate_fee_adjusted_execution_price"] == "0.41"
+    assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
+    assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
+    assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
 
 
 def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
@@ -2067,6 +2309,7 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
         size_usd=5.0,
         applied_validations=[],
         edge_context=types.SimpleNamespace(p_posterior=0.62),
+        decision_snapshot_id="decision-snap-buy-no-reprice",
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
@@ -2080,15 +2323,23 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
     )
     conn.close()
 
-    assert best_ask == pytest.approx(0.42)
+    assert best_ask is None
     assert decision.edge.direction == "buy_no"
     assert decision.edge.vwmp == pytest.approx(0.40)
     assert decision.edge.entry_price == pytest.approx(0.40)
     assert decision.edge.p_market == pytest.approx(0.40)
     assert decision.edge.edge == pytest.approx(0.22)
     assert decision.edge_context.forward_edge == pytest.approx(0.22)
-    assert decision.size_usd == pytest.approx((0.62 - 0.42) / (1 - 0.42) * 0.25 * 100.0)
+    assert decision.size_usd == pytest.approx((0.62 - 0.40) / (1 - 0.40) * 0.25 * 100.0)
     assert decision.tokens["executable_snapshot_reprice"]["outcome_label"] == "NO"
+    assert decision.tokens["executable_snapshot_reprice"]["best_ask_blocked_by_slippage"] is True
+    shadow = decision.tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"]
+    assert shadow["selected_token_id"] == "no1"
+    assert shadow["direction"] == "buy_no"
+    assert shadow["snapshot_id"] == "snap-reprice-no-1"
+    assert shadow["candidate_final_limit_price"] == "0.38"
+    assert shadow["sweep_attempted"] is False
+    assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap-buy-no-reprice"
 
 
 def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_path):
@@ -2128,7 +2379,8 @@ def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_pa
     assert best_ask is None
     assert decision.edge.vwmp == pytest.approx(0.34)
     assert decision.edge.edge == pytest.approx(0.13)
-    assert decision.tokens["executable_snapshot_reprice"]["final_limit_price"] == pytest.approx(0.34)
+    assert decision.tokens["executable_snapshot_reprice"]["final_limit_price"] == pytest.approx(0.32)
+    assert "corrected_pricing_shadow_error" in decision.tokens["executable_snapshot_reprice"]
 
 
 def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_path):
@@ -2141,8 +2393,8 @@ def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_p
         outcome_label="YES",
         yes_token_id="yes1",
         no_token_id="no1",
-        top_bid="0.20",
-        top_ask="0.30",
+        top_bid="0.40",
+        top_ask="0.41",
         ask_size="1",
     )
     edge = _edge()
@@ -2166,6 +2418,50 @@ def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_p
             {"executable_snapshot_id": "snap-reprice-thin-depth"},
         )
     conn.close()
+
+
+def test_executable_snapshot_repricing_ignores_thin_ask_outside_slippage_budget(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-thin-wide-ask.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-thin-wide-ask",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        bid_size="1",
+        ask_size="1",
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-thin-wide-ask"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    assert decision.edge.vwmp == pytest.approx(0.25)
+    assert decision.size_usd == pytest.approx((0.47 - 0.25) / (1 - 0.25) * 0.25 * 100.0)
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["best_ask_blocked_by_slippage"] is True
+    assert reprice["final_limit_price"] == pytest.approx(0.23)
 
 
 def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_path):
@@ -2273,12 +2569,18 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     )
     conn.close()
 
-    assert captured["intent"].limit_price == pytest.approx(0.30)
+    assert captured["intent"].limit_price == pytest.approx(0.23)
     reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
-    assert reprice["final_limit_price"] == pytest.approx(0.30)
-    assert reprice["submitted_limit_price"] == pytest.approx(0.30)
-    assert reprice["repriced_limit_forced"] is True
+    assert reprice["best_ask_blocked_by_slippage"] is True
+    assert reprice["final_limit_price"] == pytest.approx(0.23)
+    assert reprice["submitted_limit_price"] == pytest.approx(0.23)
+    assert reprice["repriced_limit_forced"] is False
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.23)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["candidate_final_limit_price"] == "0.23"
+    assert shadow["legacy_submitted_limit_price"] == "0.23"
+    assert shadow["legacy_submitted_matches_corrected_candidate"] is True
 
 
 def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
@@ -2903,7 +3205,7 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
             self.member_extrema = self.member_maxes
             self.bias_corrected = False
 
-        def p_raw_vector(self, bins):
+        def p_raw_vector(self, bins, n_mc=None):
             return np.array([0.25, 0.25, 0.25, 0.25])
 
         def spread(self):
@@ -3020,7 +3322,7 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
             self.member_extrema = self.member_maxes
             self.bias_corrected = False
 
-        def p_raw_vector(self, bins):
+        def p_raw_vector(self, bins, n_mc=None):
             return np.array([0.25, 0.25, 0.25, 0.25])
 
         def spread(self):
@@ -5783,7 +6085,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
             self.member_extrema = self.member_maxes
             self.bias_corrected = False
 
-        def p_raw_vector(self, bins):
+        def p_raw_vector(self, bins, n_mc=None):
             return np.array([0.0, 0.0, 1.0])
 
         def spread(self):
@@ -6854,6 +7156,216 @@ def _monitor_chain_deps(now: datetime):
         _utcnow=lambda: now,
         has_acknowledged_quarantine_clear=lambda token_id: False,
     )
+
+
+def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypatch):
+    pos = _position(
+        trade_id="orange-favorable",
+        state="holding",
+        entry_price=0.40,
+        p_posterior=0.62,
+        target_date="2026-04-03",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
+    captured = {}
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refreshed_pos.last_monitor_market_price = 0.43
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.42
+        refreshed_pos.last_monitor_best_ask = 0.43
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.43]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.21,
+        )
+
+    def _execute_exit(**kwargs):
+        captured["exit_context"] = kwargs["exit_context"]
+        captured["position"] = kwargs["position"]
+        return "sell_pending: orange"
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", _execute_exit)
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["risk_orange_favorable_exits"] == 1
+    assert summary["exits"] == 1
+    assert artifact.monitor_results[0].should_exit is True
+    assert artifact.monitor_results[0].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert captured["exit_context"].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
+    assert "orange_favorable_bid_gate" in pos.applied_validations
+    assert "orange_favorable_net_exit_gate" in pos.applied_validations
+
+
+def test_orange_risk_holds_when_bid_is_unfavorable(monkeypatch):
+    pos = _position(
+        trade_id="orange-unfavorable",
+        state="holding",
+        entry_price=0.40,
+        p_posterior=0.62,
+        target_date="2026-04-03",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refreshed_pos.last_monitor_market_price = 0.39
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.39
+        refreshed_pos.last_monitor_best_ask = 0.40
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.39]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.23,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unfavorable ORANGE bid must hold")),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["risk_orange_holds"] == 1
+    assert summary["exits"] == 0
+    assert artifact.monitor_results[0].should_exit is False
+    assert pos.exit_reason == ""
+
+
+def test_orange_risk_does_not_override_incomplete_exit_context(monkeypatch):
+    pos = _position(
+        trade_id="orange-incomplete-authority",
+        state="holding",
+        entry_price=0.40,
+        p_posterior=0.62,
+        target_date="2026-04-03",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refreshed_pos.last_monitor_market_price = 0.43
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.42
+        refreshed_pos.last_monitor_best_ask = 0.43
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = False
+        return types.SimpleNamespace(
+            p_market=np.array([0.43]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.19,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("incomplete ORANGE authority must hold")),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["risk_orange_holds"] == 1
+    assert summary["exits"] == 0
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
+
+
+def test_yellow_risk_does_not_take_favorable_exit(monkeypatch):
+    pos = _position(
+        trade_id="yellow-favorable",
+        state="holding",
+        entry_price=0.40,
+        p_posterior=0.62,
+        target_date="2026-04-03",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.YELLOW.value}
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refreshed_pos.last_monitor_market_price = 0.43
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.42
+        refreshed_pos.last_monitor_best_ask = 0.43
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.43]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.19,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("YELLOW must not trigger ORANGE exit")),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert "risk_orange_favorable_exits" not in summary
+    assert summary["exits"] == 0
+    assert artifact.monitor_results[0].should_exit is False
 
 
 def test_monitor_refresh_failure_near_settlement_is_operator_visible(monkeypatch):

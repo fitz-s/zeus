@@ -25,7 +25,13 @@ from src.signal.forecast_uncertainty import (
     analysis_member_maxes,
     analysis_sigma_context,
 )
-from src.strategy.market_fusion import compute_posterior
+from src.strategy.market_fusion import (
+    LEGACY_POSTERIOR_MODE,
+    MODEL_ONLY_POSTERIOR_MODE,
+    MarketPriorDistribution,
+    PosteriorMode,
+    compute_posterior,
+)
 from src.types import Bin, BinEdge
 from src.types.market import bin_probability_from_values
 
@@ -122,7 +128,7 @@ class MarketAnalysis:
         self,
         p_raw: np.ndarray,
         p_cal: np.ndarray,
-        p_market: np.ndarray,
+        p_market: np.ndarray | None,
         alpha: float,
         bins: list[Bin],
         member_maxes: np.ndarray,
@@ -140,6 +146,9 @@ class MarketAnalysis:
         market_complete: bool = True,
         p_market_no: np.ndarray | None = None,
         buy_no_quote_available: np.ndarray | None = None,
+        posterior_mode: PosteriorMode = MODEL_ONLY_POSTERIOR_MODE,
+        market_prior: MarketPriorDistribution | None = None,
+        allow_legacy_quote_prior: bool = False,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -147,7 +156,11 @@ class MarketAnalysis:
         self.bins = bins
         self.p_raw = _finite_probability_distribution("p_raw", p_raw, expected_bins)
         self.p_cal = _finite_probability_distribution("p_cal", p_cal, expected_bins)
-        self.p_market = _finite_market_price_vector("p_market", p_market, expected_bins)
+        self.p_market = (
+            None
+            if p_market is None
+            else _finite_market_price_vector("p_market", p_market, expected_bins)
+        )
         self.p_market_no = _optional_market_price_vector("p_market_no", p_market_no, expected_bins)
         self.buy_no_quote_available = _optional_bool_vector(
             "buy_no_quote_available",
@@ -155,8 +168,12 @@ class MarketAnalysis:
             expected_bins,
         )
         self.market_complete = market_complete
-        self.p_posterior = compute_posterior(self.p_cal, self.p_market, alpha, bins=bins)
-        self.vig = float(self.p_market.sum())
+        self._alpha = alpha
+        self._posterior_mode = posterior_mode
+        self._market_prior = market_prior
+        self._allow_legacy_quote_prior = allow_legacy_quote_prior
+        self.p_posterior = self._compute_posterior(self.p_cal)
+        self.vig = None if self.p_market is None else float(self.p_market.sum())
         raw_member_maxes = _finite_member_extrema(member_maxes)
         self._member_maxes = analysis_member_maxes(
             raw_member_maxes,
@@ -178,7 +195,6 @@ class MarketAnalysis:
             bias_reference=bias_reference,
         )
         self._calibrator = calibrator
-        self._alpha = alpha
         self._lead_days = lead_days
         self._unit = unit
         self._precision = precision
@@ -199,6 +215,22 @@ class MarketAnalysis:
         )  # centralized forecast-uncertainty seam
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
         self._rng = np.random.default_rng(rng_seed)
+
+    def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
+        if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
+            market_prior = None
+        elif self._posterior_mode == LEGACY_POSTERIOR_MODE:
+            market_prior = self.p_market
+        else:
+            market_prior = self._market_prior
+        return compute_posterior(
+            p_cal,
+            market_prior,
+            self._alpha,
+            bins=self.bins,
+            posterior_mode=self._posterior_mode,
+            allow_legacy_quote_prior=self._allow_legacy_quote_prior,
+        )
 
     def sigma_context(self) -> dict:
         return dict(self._sigma_context)
@@ -237,6 +269,8 @@ class MarketAnalysis:
         if not self.supports_buy_no_edges(bin_idx):
             raise ValueError(f"buy_no is not executable for bin index {bin_idx}")
         if len(self.bins) <= 2 and self.p_market_no is None:
+            if self.p_market is None:
+                raise ValueError("binary buy_no complement requires YES-side market price")
             return 1.0 - float(self.p_market[bin_idx])
         if self.p_market_no is None:
             raise ValueError("native NO market prices are unavailable")
@@ -256,6 +290,8 @@ class MarketAnalysis:
         if False: _ = None.selected_method; _ = None.entry_method
         if n_bootstrap is None:
             n_bootstrap = edge_n_bootstrap()
+        if self.p_market is None:
+            raise ValueError("find_edges requires executable YES-side market prices")
         edges = []
 
         for i, b in enumerate(self.bins):
@@ -337,6 +373,8 @@ class MarketAnalysis:
         Returns: (ci_lower, ci_upper, p_value)
         p_value = np.mean(edges <= 0) — exact, NOT approximated.
         """
+        if self.p_market is None:
+            raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
         cache_key = ("yes", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]
@@ -383,7 +421,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot_all = p_raw_all
 
-            p_post = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)
+            p_post = self._compute_posterior(p_cal_boot_all)
             bootstrap_edges[i] = p_post[bin_idx] - self.p_market[bin_idx]
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
@@ -399,6 +437,8 @@ class MarketAnalysis:
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
         """Double bootstrap CI for buy_no direction. Same procedure, inverted."""
+        if not self.supports_buy_no_edges(bin_idx):
+            raise ValueError(f"buy_no bootstrap requires executable NO-side market price for bin index {bin_idx}")
         cache_key = ("no", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]
@@ -443,7 +483,7 @@ class MarketAnalysis:
             else:
                 p_cal_boot_all = p_raw_all
 
-            p_post_yes = compute_posterior(p_cal_boot_all, self.p_market, self._alpha, bins=self.bins)[bin_idx]
+            p_post_yes = self._compute_posterior(p_cal_boot_all)[bin_idx]
             p_market_no = self.buy_no_market_price(bin_idx)
             bootstrap_edges[i] = (1.0 - p_post_yes) - p_market_no
 

@@ -325,19 +325,20 @@ class TestRCAMonitorLowMetricContinuity:
         monkeypatch.setattr(
             monitor_refresh,
             "compute_alpha",
-            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 0.0),
         )
         monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *a, **k: 1.0)
 
         posterior, applied = monitor_refresh._refresh_ens_member_counting(
             position=position,
-            current_p_market=0.50,
+            current_p_market=0.12,
             conn=SimpleNamespace(execute=lambda *a, **k: None),
             city=city,
             target_d=date(2026, 7, 15),
         )
 
         assert posterior == pytest.approx(0.8)
+        assert "model_only_posterior" in applied
         assert "alpha_posterior" in applied
         assert captured["signal_metric"].is_low() is expected_is_low
         assert captured["calibrator_metric"] == raw_metric
@@ -379,6 +380,16 @@ class TestRCAMonitorLowMetricContinuity:
                 observation_time="2026-04-29T17:45:00+00:00",
             ),
         )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_day0_observation_source_rejection_reason",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_day0_observation_quality_rejection_reason",
+            lambda *a, **k: None,
+        )
         monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {"members_hourly": np.ones((51, 24)), "times": ["2026-04-29T00:00:00Z"] * 24})
         monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
         monkeypatch.setattr(
@@ -408,7 +419,7 @@ class TestRCAMonitorLowMetricContinuity:
         monkeypatch.setattr(
             monitor_refresh,
             "compute_alpha",
-            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 1.0),
+            lambda **kwargs: SimpleNamespace(value_for_consumer=lambda consumer: 0.0),
         )
 
         posterior, applied = monitor_refresh._refresh_day0_observation(
@@ -422,7 +433,8 @@ class TestRCAMonitorLowMetricContinuity:
         bootstrap = getattr(position, "_bootstrap_context")
         np.testing.assert_allclose(bootstrap["member_extrema"], mins)
         assert bootstrap["p_raw"][0] > 0.0
-        assert posterior > 0.0
+        assert posterior == pytest.approx(bootstrap["p_raw"][0])
+        assert "model_only_posterior" in applied
         assert "alpha_posterior" in applied
 
 
@@ -550,7 +562,13 @@ class TestRCCBoundaryGateWired:
         init_schema(conn)
         apply_v2_schema(conn)
 
-        meta = _read_v2_snapshot_metadata(conn, "NYC", "2026-07-15", "low")
+        meta = _read_v2_snapshot_metadata(
+            conn,
+            "NYC",
+            "2026-07-15",
+            "low",
+            snapshot_id="missing-snapshot",
+        )
         assert meta == {}, (
             f"R-CC.1: empty v2 must yield empty dict for permissive gate; "
             f"got {meta!r}"
@@ -691,7 +709,23 @@ class TestRCCBoundaryGateWired:
         )
         conn.commit()
 
-        meta = _read_v2_snapshot_metadata(conn, "NYC", "2026-07-15", "low")
+        snapshot_id = conn.execute(
+            """
+            SELECT snapshot_id
+            FROM ensemble_snapshots_v2
+            WHERE city = 'NYC'
+              AND target_date = '2026-07-15'
+              AND temperature_metric = 'low'
+            """
+        ).fetchone()[0]
+
+        meta = _read_v2_snapshot_metadata(
+            conn,
+            "NYC",
+            "2026-07-15",
+            "low",
+            snapshot_id=str(snapshot_id),
+        )
         assert meta.get("boundary_ambiguous") is True, (
             f"R-CC.2: v2 row with boundary_ambiguous=1 must yield True in "
             f"helper output; got meta={meta!r}"

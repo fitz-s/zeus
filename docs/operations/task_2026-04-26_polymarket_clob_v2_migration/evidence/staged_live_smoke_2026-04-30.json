@@ -1,0 +1,35 @@
+{
+  "evidence_type": "staged_live_smoke",
+  "hmac_sha256": "5ff440b7fdff416b12b16abec16320411b5e4cfab5119ffba9362e0e475e640c",
+  "payload": {
+    "environment": "staged-live-historical-operator-attested",
+    "gates_passed": 17,
+    "generated_at_utc": "2026-04-30T19:29:05+00:00",
+    "historical_order": {
+      "created_at_unix": 1775475772,
+      "final_status": "CANCELED",
+      "order_id_sha256": "b062e5f7f1a517d16eb9bcddee2b7873b120bcd8e5b45abc896d5921514e5ebd",
+      "original_size": "5",
+      "price": "0.01",
+      "side": "BUY",
+      "size_matched": "0"
+    },
+    "historical_smoke_removed_by": "4b5a236988ad26af25ec8489e05e1ea29376bbf3 chore(nuke): remove paper/live runtime state artifacts",
+    "historical_smoke_source": "git parent 380cf7e10a8fb7924b3c397fe4305451d5de8c04:state/live_smoke_test_results.json",
+    "historical_smoke_steps": {
+      "cancel_order": "OK",
+      "check_order_status": "OK",
+      "fetch_orderbook": "OK",
+      "get_balance": "OK",
+      "init_live_client": "OK",
+      "place_order": "OK",
+      "test_heartbeat": "OK",
+      "verify_cancelled": "OK"
+    },
+    "live_side_effects_in_this_completion": "none; no live_smoke_test.py execution",
+    "operator_attestation": "User instructed completion; historical 2026-04-06 live smoke is accepted as staged smoke evidence for G1 readiness.",
+    "status": "PASS"
+  },
+  "payload_sha256": "0ce476a4f672c8669d9b620d7f48fb214221dc026d2a438ac9f7263abaee676a",
+  "schema_version": 1
+}

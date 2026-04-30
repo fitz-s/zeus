@@ -1,4 +1,4 @@
-# Lifecycle: created=2025-10-01; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2025-10-01; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Exit-trigger + harvester lifecycle regression tests — covers
 #          position exit detection, harvest_settlement default-HIGH routing
 #          through calibration_pairs_v2 after C5 (2026-04-24), and p_raw
@@ -9,11 +9,13 @@
 """Tests for exit triggers and harvester."""
 
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from src.engine import monitor_refresh
 from src.execution.exit_triggers import (
     evaluate_exit_triggers, clear_reversal_state,
     ExitSignal,
@@ -159,6 +161,122 @@ class TestExitTriggers:
         signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), market_vig=1.10)
         assert signal is not None
         assert signal.trigger == "VIG_EXTREME"
+
+
+class TestMonitorWhaleToxicity:
+    class _BookClob:
+        def __init__(self, books):
+            self.books = books
+
+        def get_best_bid_ask(self, token_id):
+            return self.books[token_id]
+
+    @staticmethod
+    def _siblings():
+        return [
+            {"market_id": "m-below", "range_low": 37, "range_high": 38, "token_id": "yes-below"},
+            {"market_id": "m1", "range_low": 39, "range_high": 40, "token_id": "yes-held"},
+            {"market_id": "m-above", "range_low": 41, "range_high": 42, "token_id": "yes-above"},
+        ]
+
+    @staticmethod
+    def _conn_with_prior(tmp_path, token_id: str, price: float, now: datetime):
+        conn = get_connection(tmp_path / "whale.db")
+        init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO token_price_log
+                (token_id, price, timestamp)
+            VALUES (?, ?, ?)
+            """,
+            (token_id, price, (now - timedelta(hours=2)).isoformat()),
+        )
+        conn.commit()
+        return conn
+
+    def test_orderbook_adjacent_pressure_flags_buy_yes_whale_toxicity(self, monkeypatch, tmp_path):
+        now = datetime(2026, 4, 30, 12, tzinfo=timezone.utc)
+        pos = _make_position(market_id="m1", token_id="yes-held", size_usd=10.0)
+        conn = self._conn_with_prior(tmp_path, "yes-above", 0.40, now)
+        clob = self._BookClob({
+            "yes-above": (0.50, 0.52, 100.0, 10.0),
+        })
+        monkeypatch.setattr(monitor_refresh, "get_sibling_outcomes", lambda market_id: self._siblings())
+        monkeypatch.setattr(monitor_refresh, "get_last_scan_authority", lambda: "VERIFIED")
+
+        result = monitor_refresh._detect_whale_toxicity_from_orderbook(
+            conn,
+            clob,
+            pos,
+            held_best_bid=0.40,
+            held_best_ask=0.43,
+            now=now,
+        )
+
+        assert result is True
+        assert "whale_toxicity_available:adjacent_orderbook_pressure" in pos.applied_validations
+        conn.close()
+
+    def test_orderbook_adjacent_pressure_returns_false_when_clear(self, monkeypatch, tmp_path):
+        now = datetime(2026, 4, 30, 12, tzinfo=timezone.utc)
+        pos = _make_position(market_id="m1", token_id="yes-held", size_usd=10.0)
+        conn = self._conn_with_prior(tmp_path, "yes-above", 0.42, now)
+        clob = self._BookClob({
+            "yes-above": (0.44, 0.46, 100.0, 10.0),
+        })
+        monkeypatch.setattr(monitor_refresh, "get_sibling_outcomes", lambda market_id: self._siblings())
+        monkeypatch.setattr(monitor_refresh, "get_last_scan_authority", lambda: "VERIFIED")
+
+        result = monitor_refresh._detect_whale_toxicity_from_orderbook(
+            conn,
+            clob,
+            pos,
+            held_best_bid=0.40,
+            held_best_ask=0.43,
+            now=now,
+        )
+
+        assert result is False
+        assert "whale_toxicity_available:clear" in pos.applied_validations
+        conn.close()
+
+    def test_orderbook_adjacent_pressure_stays_unknown_without_verified_scan(self, monkeypatch, tmp_path):
+        now = datetime(2026, 4, 30, 12, tzinfo=timezone.utc)
+        pos = _make_position(market_id="m1", token_id="yes-held", size_usd=10.0)
+        conn = self._conn_with_prior(tmp_path, "yes-above", 0.40, now)
+        clob = self._BookClob({
+            "yes-above": (0.60, 0.62, 100.0, 10.0),
+        })
+        monkeypatch.setattr(monitor_refresh, "get_sibling_outcomes", lambda market_id: self._siblings())
+        monkeypatch.setattr(monitor_refresh, "get_last_scan_authority", lambda: "STALE")
+
+        result = monitor_refresh._detect_whale_toxicity_from_orderbook(
+            conn,
+            clob,
+            pos,
+            held_best_bid=0.40,
+            held_best_ask=0.43,
+            now=now,
+        )
+
+        assert result is None
+        assert "whale_toxicity_unavailable:market_scan_not_verified" in pos.applied_validations
+        conn.close()
+
+    def test_orderbook_adjacent_pressure_is_not_applicable_to_buy_no(self):
+        pos = _make_position(direction="buy_no", no_token_id="no-held")
+
+        result = monitor_refresh._detect_whale_toxicity_from_orderbook(
+            None,
+            None,
+            pos,
+            held_best_bid=None,
+            held_best_ask=None,
+        )
+
+        assert result is False
+        assert "whale_toxicity_not_applicable:buy_no" in pos.applied_validations
+
 
 class TestHarvester:
     def test_harvest_creates_pairs(self, tmp_path):

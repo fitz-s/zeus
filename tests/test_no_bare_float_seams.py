@@ -1,17 +1,31 @@
+# Created: 2026-04-07
+# Last reused/audited: 2026-04-30
+# Lifecycle: created=2026-04-07; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Purpose: Protect pricing/probability/execution seam boundaries from bare-float authority drift.
+# Reuse: Reaudit against architecture/invariants.yaml and negative_constraints.yaml before extending.
+# Authority basis: docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_EXECUTION_PLAN.md
 """Tests for bare float seam elimination at Kelly and exit boundaries. §P9.7, INV-12, D3."""
 import ast
+from dataclasses import fields
 import inspect
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from src.contracts.execution_intent import FinalExecutionIntent
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.expiring_assumption import ExpiringAssumption
 from src.contracts.hold_value import HoldValue, HoldValueCostDeclarationError
 from src.contracts.vig_treatment import VigTreatment
 from src.strategy.kelly import kelly_size
-from src.strategy.market_fusion import compute_posterior
+from src.strategy.market_fusion import (
+    LEGACY_POSTERIOR_MODE,
+    MODEL_ONLY_POSTERIOR_MODE,
+    YES_FAMILY_DEVIG_SHADOW_MODE,
+    MarketPriorDistribution,
+    compute_posterior,
+)
 
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
@@ -76,12 +90,57 @@ class TestExecutionPriceConstruction:
 
 
 class TestVigTreatmentSeam:
+    def test_model_only_posterior_rejects_raw_market_quote_vector(self):
+        with pytest.raises(TypeError, match="model_only_v1 posterior cannot accept"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([0.42, 0.58]),
+                0.5,
+                posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+            )
+
+    def test_corrected_prior_mode_rejects_raw_vwmp_vector(self):
+        with pytest.raises(TypeError, match="raw quote/VWMP vectors are forbidden"):
+            compute_posterior(
+                np.array([0.6, 0.4]),
+                np.array([0.42, 0.58]),
+                0.5,
+                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+            )
+
+    def test_corrected_prior_mode_requires_named_market_prior_identity(self):
+        prior = MarketPriorDistribution(
+            probabilities=(0.45, 0.55),
+            bin_labels=("70-71F", "72-73F"),
+            prior_id="prior:test:complete-yes-family",
+            estimator_version=YES_FAMILY_DEVIG_SHADOW_MODE,
+            source_quote_hashes=("a" * 64,),
+            family_complete=True,
+            side_convention="YES_FAMILY",
+            vig_treatment="yes_family_devig",
+            freshness_status="FRESH",
+            liquidity_filter_status="PASS",
+            neg_risk_policy="none",
+            validated_for_live=False,
+        )
+
+        posterior = compute_posterior(
+            np.array([0.6, 0.4]),
+            prior,
+            0.5,
+            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+        )
+
+        assert posterior == pytest.approx(np.array([0.525, 0.475]))
+
     def test_compute_posterior_rejects_zero_market_vector(self):
         with pytest.raises(ValueError, match="sum <= 0"):
             compute_posterior(
                 np.array([0.6, 0.4]),
                 np.array([0.0, 0.0]),
                 0.5,
+                posterior_mode=LEGACY_POSTERIOR_MODE,
+                allow_legacy_quote_prior=True,
             )
 
     def test_compute_posterior_rejects_negative_market_component(self):
@@ -90,6 +149,8 @@ class TestVigTreatmentSeam:
                 np.array([0.6, 0.4]),
                 np.array([-0.1, 1.1]),
                 0.5,
+                posterior_mode=LEGACY_POSTERIOR_MODE,
+                allow_legacy_quote_prior=True,
             )
 
     def test_vig_treatment_constructor_rejects_negative_raw_component(self):
@@ -150,6 +211,17 @@ class TestNoBareFloatAtKellyBoundary:
             fee_deducted=True,
             currency="probability_units",
         )
+        with pytest.raises(ExecutionPriceContractError, match="implied_probability"):
+            ep.assert_kelly_safe()
+
+    def test_fee_adjusted_implied_probability_fails_corrected_kelly_authority(self):
+        ep = ExecutionPrice(
+            value=0.40,
+            price_type="implied_probability",
+            fee_deducted=True,
+            currency="probability_units",
+        )
+
         with pytest.raises(ExecutionPriceContractError, match="implied_probability"):
             ep.assert_kelly_safe()
 
@@ -222,6 +294,28 @@ class TestNoBareFloatAtKellyBoundary:
             "This documents the D3 systematic Kelly oversizing."
         )
 
+    def test_final_execution_intent_excludes_probability_and_quote_recompute_inputs(self):
+        intent_fields = {field.name for field in fields(FinalExecutionIntent)}
+        forbidden = {
+            "p_posterior",
+            "p_market",
+            "vwmp",
+            "entry_price",
+            "bin_edge",
+            "edge",
+            "posterior",
+            "market_prior",
+        }
+
+        assert forbidden.isdisjoint(intent_fields)
+        assert {
+            "final_limit_price",
+            "snapshot_id",
+            "snapshot_hash",
+            "cost_basis_id",
+            "cost_basis_hash",
+        } <= intent_fields
+
     def test_kelly_size_with_typed_entry_price(self):
         """Kelly accepts typed ExecutionPrice; evaluator owns the wrapping boundary."""
         from src.contracts.execution_price import ExecutionPrice
@@ -276,6 +370,33 @@ class TestNoBareFloatInExitTriggerThresholds:
             "portfolio.py should use ExpiringAssumption for at least one threshold. "
             "P9 requires thresholds traced to ExpiringAssumption or ProvenanceRecord."
         )
+
+    def test_monitor_bootstrap_refresh_keeps_held_quote_out_of_corrected_posterior(self):
+        source = (ZEUS_ROOT / "src" / "engine" / "monitor_refresh.py").read_text()
+        tree = ast.parse(source)
+        refresh_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "refresh_position"
+        )
+        market_analysis_calls = [
+            node
+            for node in ast.walk(refresh_fn)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", getattr(node.func, "attr", "")) == "MarketAnalysis"
+        ]
+
+        assert market_analysis_calls, "refresh_position should rebuild monitor bootstrap context through MarketAnalysis"
+        for call in market_analysis_calls:
+            posterior_keywords = [
+                keyword for keyword in call.keywords if keyword.arg == "posterior_mode"
+            ]
+            assert len(posterior_keywords) == 1
+            assert ast.unparse(posterior_keywords[0].value) == "MODEL_ONLY_POSTERIOR_MODE"
+            assert not any(
+                keyword.arg == "allow_legacy_quote_prior"
+                for keyword in call.keywords
+            )
 
     def test_kelly_size_entry_price_requires_execution_price(self):
         """Phase 10E DT#5 / R-BW (strict-antibody flip 2026-04-20):

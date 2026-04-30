@@ -14,11 +14,42 @@ Covers:
 import numpy as np
 import pytest
 
-from src.strategy.market_fusion import vwmp, compute_alpha, compute_posterior
+from src.strategy.market_fusion import (
+    LEGACY_POSTERIOR_MODE,
+    MODEL_ONLY_POSTERIOR_MODE,
+    YES_FAMILY_DEVIG_SHADOW_MODE,
+    MarketPriorDistribution,
+    compute_alpha,
+    compute_posterior,
+    vwmp,
+)
 from src.strategy.market_analysis import MarketAnalysis
 from src.calibration.platt import ExtendedPlattCalibrator, WIDTH_NORMALIZED_SPACE
 from src.types import Bin, BinEdge
 from src.types.temperature import TemperatureDelta
+
+
+def _legacy_kwargs() -> dict[str, object]:
+    return {
+        "posterior_mode": LEGACY_POSTERIOR_MODE,
+        "allow_legacy_quote_prior": True,
+    }
+
+
+def _legacy_compute_posterior(
+    p_cal: np.ndarray,
+    p_market: np.ndarray,
+    alpha: float,
+    *,
+    bins: list[Bin] | None = None,
+) -> np.ndarray:
+    return compute_posterior(
+        p_cal,
+        p_market,
+        alpha,
+        bins=bins,
+        **_legacy_kwargs(),
+    )
 
 
 class TestVWMP:
@@ -101,21 +132,21 @@ class TestComputePosterior:
         """α=0.5 → posterior = average of model and market."""
         p_cal = np.array([0.6, 0.4])
         p_market = np.array([0.4, 0.6])
-        result = compute_posterior(p_cal, p_market, 0.5)
+        result = _legacy_compute_posterior(p_cal, p_market, 0.5)
         np.testing.assert_array_almost_equal(result, [0.5, 0.5])
 
     def test_alpha_one(self):
         """α=1.0 → posterior = model."""
         p_cal = np.array([0.8, 0.2])
         p_market = np.array([0.3, 0.7])
-        result = compute_posterior(p_cal, p_market, 1.0)
+        result = _legacy_compute_posterior(p_cal, p_market, 1.0)
         np.testing.assert_array_almost_equal(result, p_cal)
 
     def test_vig_removed_before_blend(self):
         p_cal = np.array([0.60, 0.30, 0.10])
         p_market = np.array([0.54, 0.36, 0.18])
 
-        result = compute_posterior(p_cal, p_market, 0.4)
+        result = _legacy_compute_posterior(p_cal, p_market, 0.4)
         expected = 0.4 * p_cal + 0.6 * (p_market / p_market.sum())
         legacy_post_blend = (0.4 * p_cal + 0.6 * p_market)
         legacy_post_blend = legacy_post_blend / legacy_post_blend.sum()
@@ -123,12 +154,118 @@ class TestComputePosterior:
         np.testing.assert_allclose(result, expected)
         assert not np.allclose(result, legacy_post_blend)
 
+    def test_model_only_rejects_market_quote_input(self):
+        p_cal = np.array([0.65, 0.35])
+        raw_quote_vector = np.array([0.40, 0.60])
+
+        with pytest.raises(TypeError, match="model_only_v1"):
+            compute_posterior(p_cal, raw_quote_vector, 0.5)
+
+        with pytest.raises(TypeError, match="model_only_v1"):
+            compute_posterior(
+                p_cal,
+                raw_quote_vector,
+                0.5,
+                posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+            )
+
+    def test_model_only_posterior_is_independent_of_executable_quote_shape(self):
+        p_cal = np.array([0.65, 0.35])
+        cheap_top_of_book = vwmp(0.10, 0.20, 10.0, 100.0)
+        expensive_top_of_book = vwmp(0.70, 0.80, 100.0, 10.0)
+        assert cheap_top_of_book != pytest.approx(expensive_top_of_book)
+
+        cheap_case = compute_posterior(
+            p_cal,
+            None,
+            0.25,
+            posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        )
+        expensive_case = compute_posterior(
+            p_cal,
+            None,
+            0.25,
+            posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        )
+
+        np.testing.assert_allclose(cheap_case, p_cal)
+        np.testing.assert_allclose(expensive_case, p_cal)
+
+    def test_corrected_market_prior_requires_named_distribution(self):
+        p_cal = np.array([0.70, 0.30])
+        raw_quote_vector = np.array([0.40, 0.60])
+
+        with pytest.raises(TypeError, match="MarketPriorDistribution"):
+            compute_posterior(
+                p_cal,
+                raw_quote_vector,
+                0.5,
+                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+            )
+
+        prior = MarketPriorDistribution(
+            probabilities=(0.40, 0.60),
+            bin_labels=("cold", "warm"),
+            prior_id="shadow-devig:test-family",
+            estimator_version="yes_family_devig_v1_shadow",
+            source_quote_hashes=("quote-hash-a", "quote-hash-b"),
+            family_complete=True,
+            side_convention="YES_FAMILY",
+            vig_treatment="yes_family_devig",
+            freshness_status="FRESH",
+            liquidity_filter_status="PASS",
+            neg_risk_policy="included",
+            validated_for_live=False,
+        )
+        result = compute_posterior(
+            p_cal,
+            prior,
+            0.5,
+            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+        )
+
+        np.testing.assert_allclose(result, [0.55, 0.45])
+
+    def test_market_prior_distribution_requires_quote_lineage_and_complete_family(self):
+        kwargs = {
+            "probabilities": (0.40, 0.60),
+            "bin_labels": ("cold", "warm"),
+            "prior_id": "shadow-devig:test-family",
+            "estimator_version": YES_FAMILY_DEVIG_SHADOW_MODE,
+            "source_quote_hashes": ("quote-hash-a", "quote-hash-b"),
+            "family_complete": True,
+            "side_convention": "YES_FAMILY",
+            "vig_treatment": "yes_family_devig",
+            "freshness_status": "FRESH",
+            "liquidity_filter_status": "PASS",
+            "neg_risk_policy": "included",
+            "validated_for_live": False,
+        }
+
+        with pytest.raises(ValueError, match="source_quote_hashes"):
+            MarketPriorDistribution(**{**kwargs, "source_quote_hashes": ()})
+        with pytest.raises(ValueError, match="complete YES-family"):
+            MarketPriorDistribution(**{**kwargs, "family_complete": False})
+
+    def test_legacy_quote_prior_can_be_disabled_at_call_boundary(self):
+        p_cal = np.array([0.70, 0.30])
+        raw_quote_vector = np.array([0.40, 0.60])
+
+        with pytest.raises(ValueError, match="legacy VWMP market prior is disabled"):
+            compute_posterior(
+                p_cal,
+                raw_quote_vector,
+                0.5,
+                posterior_mode=LEGACY_POSTERIOR_MODE,
+                allow_legacy_quote_prior=False,
+            )
+
     def test_sparse_monitor_market_vector_imputes_missing_sibling_prices(self):
         """T2.c (closed by T6.3, 2026-04-24): when p_market has zero entries
         (missing sibling prices from sparse monitor snapshot), compute_posterior
-        imputes those zeros from p_cal as a fallback reference before the
-        alpha blend. The imputation source is recorded on the VigTreatment
-        record (imputation_source='p_cal_fallback').
+        imputes those zeros from p_cal only in explicit legacy mode. Corrected
+        modes reject sparse held-token vectors rather than treating them as a
+        full family prior.
 
         The p_cal fixture is intentionally asymmetric (0.20 vs 0.30 at the
         zero-filled positions) so the test discriminates between genuine
@@ -138,7 +275,12 @@ class TestComputePosterior:
         p_cal = np.array([0.20, 0.50, 0.30])  # asymmetric — kills silent-sibling-equivalence ambiguity
         p_market = np.array([0.00, 0.95, 0.00])
 
-        result = compute_posterior(p_cal, p_market, 0.5)
+        result = compute_posterior(
+            p_cal,
+            p_market,
+            0.5,
+            **_legacy_kwargs(),
+        )
         imputed_market = np.array([0.20, 0.95, 0.30])  # zeros replaced by p_cal at same positions
         raw = 0.5 * p_cal + 0.5 * imputed_market
         expected = raw / raw.sum()
@@ -166,12 +308,24 @@ class TestComputePosterior:
             "A different sibling source would produce a different ratio."
         )
 
+    def test_corrected_prior_rejects_sparse_monitor_vector(self):
+        p_cal = np.array([0.20, 0.50, 0.30])
+        held_token_only_quote = np.array([0.00, 0.95, 0.00])
+
+        with pytest.raises(TypeError, match="raw quote/VWMP vectors are forbidden"):
+            compute_posterior(
+                p_cal,
+                held_token_only_quote,
+                0.5,
+                posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+            )
+
     def test_tail_alpha_scale_applies_per_bin_and_normalizes(self):
         bins = [
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=33, high=34, label="33-34°F", unit="F"),
         ]
-        result = compute_posterior(
+        result = _legacy_compute_posterior(
             np.array([1.0, 0.0]),
             np.array([0.5, 0.5]),
             0.8,
@@ -188,7 +342,7 @@ class TestComputePosterior:
         ]
         p_cal = np.array([1.0, 0.0])
         p_market = np.array([0.648, 0.432])
-        result = compute_posterior(p_cal, p_market, 0.8, bins=bins)
+        result = _legacy_compute_posterior(p_cal, p_market, 0.8, bins=bins)
 
         alpha_vec = np.array([0.4, 0.8])
         raw = alpha_vec * p_cal + (1.0 - alpha_vec) * (p_market / p_market.sum())
@@ -209,13 +363,19 @@ class TestComputePosterior:
             bins=bins,
             member_maxes=np.array([30.0, 30.0, 30.0]),
             unit="F",
+            **_legacy_kwargs(),
         )
         ma._sigma = 0.0
 
         ci_lo, ci_hi, p_value = ma._bootstrap_bin(0, 5)
 
         # Verify posterior with p_cal[0]=1.0 yields 0.875 (was _posterior_with_bootstrapped_bin)
-        assert compute_posterior(np.array([1.0, 0.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.875)
+        assert _legacy_compute_posterior(
+            np.array([1.0, 0.0]),
+            np.array([0.5, 0.5]),
+            0.8,
+            bins=bins,
+        )[0] == pytest.approx(0.875)
         assert ci_lo == pytest.approx(0.375)
         assert ci_hi == pytest.approx(0.375)
         assert p_value == 0.0
@@ -233,13 +393,19 @@ class TestComputePosterior:
             bins=bins,
             member_maxes=np.array([40.0, 40.0, 40.0]),
             unit="F",
+            **_legacy_kwargs(),
         )
         ma._sigma = 0.0
 
         ci_lo, ci_hi, p_value = ma._bootstrap_bin_no(0, 5)
 
         # Verify posterior with p_cal[0]=0.0 yields 0.25 (was _posterior_with_bootstrapped_bin)
-        assert compute_posterior(np.array([0.0, 1.0]), np.array([0.5, 0.5]), 0.8, bins=bins)[0] == pytest.approx(0.25)
+        assert _legacy_compute_posterior(
+            np.array([0.0, 1.0]),
+            np.array([0.5, 0.5]),
+            0.8,
+            bins=bins,
+        )[0] == pytest.approx(0.25)
         assert ci_lo == pytest.approx(0.25)
         assert ci_hi == pytest.approx(0.25)
         assert p_value == 0.0
@@ -308,6 +474,84 @@ class TestMarketAnalysis:
                 unit="F",
             )
 
+    def test_model_only_market_analysis_keeps_quote_out_of_posterior(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        p_cal = np.array([0.65, 0.35])
+        executable_quotes = np.array([0.10, 0.90])
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=executable_quotes,
+            alpha=0.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        np.testing.assert_allclose(ma.p_posterior, p_cal)
+        assert ma.vig == pytest.approx(1.0)
+
+    def test_model_only_without_execution_prices_cannot_scan_edges(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        p_cal = np.array([0.65, 0.35])
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=None,
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        with pytest.raises(ValueError, match="requires executable YES-side market prices"):
+            ma.find_edges(n_bootstrap=1)
+        with pytest.raises(ValueError, match="buy_yes bootstrap requires executable YES-side"):
+            ma._bootstrap_bin(0, 1)
+
+    def test_market_analysis_corrected_prior_uses_named_distribution(self):
+        bins = [
+            Bin(low=30, high=31, label="30-31", unit="F"),
+            Bin(low=32, high=33, label="32-33", unit="F"),
+        ]
+        p_cal = np.array([0.70, 0.30])
+        prior = MarketPriorDistribution(
+            probabilities=(0.40, 0.60),
+            bin_labels=("30-31", "32-33"),
+            prior_id="shadow-devig:test-family",
+            estimator_version=YES_FAMILY_DEVIG_SHADOW_MODE,
+            source_quote_hashes=("quote-hash-a", "quote-hash-b"),
+            family_complete=True,
+            side_convention="YES_FAMILY",
+            vig_treatment="yes_family_devig",
+            freshness_status="FRESH",
+            liquidity_filter_status="PASS",
+            neg_risk_policy="included",
+            validated_for_live=False,
+        )
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=np.array([0.25, 0.75]),
+            alpha=0.5,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+            posterior_mode=YES_FAMILY_DEVIG_SHADOW_MODE,
+            market_prior=prior,
+        )
+
+        np.testing.assert_allclose(ma.p_posterior, [0.55, 0.45])
+
     def test_width_normalized_bootstrap_keeps_open_shoulders_raw(self):
         bins = [
             Bin(low=None, high=32, label="32 or below", unit="F"),
@@ -331,6 +575,7 @@ class TestMarketAnalysis:
             calibrator=calibrator,
             unit="F",
             rng_seed=1,
+            **_legacy_kwargs(),
         )
         ma._sigma = 0.0
 
@@ -354,6 +599,7 @@ class TestMarketAnalysis:
         ma = MarketAnalysis(
             p_raw=p_raw, p_cal=p_cal, p_market=p_market,
             alpha=0.65, bins=bins, member_maxes=member_maxes, lead_days=3.0,
+            **_legacy_kwargs(),
         )
 
         edges = ma.find_edges(n_bootstrap=100)
@@ -374,6 +620,7 @@ class TestMarketAnalysis:
         ma = MarketAnalysis(
             p_raw=p, p_cal=p.copy(), p_market=p.copy(),
             alpha=0.65, bins=bins, member_maxes=member_maxes, lead_days=3.0,
+            **_legacy_kwargs(),
         )
 
         edges = ma.find_edges(n_bootstrap=100)
@@ -388,6 +635,7 @@ class TestMarketAnalysis:
         ma = MarketAnalysis(
             p_raw=p_market, p_cal=p_market, p_market=p_market,
             alpha=0.5, bins=bins, member_maxes=member_maxes,
+            **_legacy_kwargs(),
         )
         assert ma.vig == pytest.approx(1.0, abs=0.01)
 
@@ -404,6 +652,7 @@ class TestMarketAnalysis:
             alpha=0.4,
             bins=bins,
             member_maxes=member_maxes,
+            **_legacy_kwargs(),
         )
 
         assert ma.vig == pytest.approx(1.08)

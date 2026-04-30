@@ -25,7 +25,7 @@ test_trust_policy:
     audit_required: "No lifecycle header or missing required dates"
   enforcement: "topology_doctor test_trust check + digest gate output"
 
-  # Machine-readable registry: 120 tests with valid lifecycle headers.
+  # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
@@ -49,6 +49,7 @@ test_trust_policy:
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -88,11 +89,13 @@ test_trust_policy:
     tests/test_k1_slice_d.py: {created: "2026-04-17", last_used: "2026-04-29"}
     tests/test_k2_slice_e.py: {created: "2026-04-21", last_used: "2026-04-27"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
+    tests/test_k6_slice_n.py: {created: "2026-04-17", last_used: "2026-04-30"}
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
+    tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-29"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -203,9 +206,11 @@ categories:
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_platt_bootstrap_equivalence.py
+    - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
     - tests/test_runtime_n_mc_floor.py
+    - tests/test_evaluator_explicit_n_mc.py
     - tests/test_cross_module_invariants.py
     - tests/test_cross_module_relationships.py
     - tests/test_data_rebuild_relationships.py
@@ -453,7 +458,7 @@ categories:
   # Midstream guardian panel — the 15 test files whose invariant-protection
   # role depends on current test-currency (dated provenance header + recent
   # passing-run evidence). Registered by T1.e of the midstream remediation
-  # packet (docs/operations/task_2026-04-23_midstream_remediation/plan.md).
+  # packet (docs/archives/packets/task_2026-04-23_midstream_remediation/plan.md).
   # Enforced in CI via scripts/test_currency_audit.py.
   #
   # Per operator directive and /Users/leofitz/CLAUDE.md §"File-header
@@ -583,6 +588,7 @@ law_gate:
       - tests/test_structural_linter.py
       - tests/test_tigge_snapshot_p_raw_backfill.py
       - tests/test_runtime_n_mc_floor.py
+      - tests/test_evaluator_explicit_n_mc.py
     protects:
       - config/settings.json
       - state/assumptions.json
@@ -591,8 +597,11 @@ law_gate:
   PLATT_BOOTSTRAP_EQUIVALENCE:
     tests:
       - tests/test_platt_bootstrap_equivalence.py
+      - tests/test_load_platt_v2_data_version_filter.py
     protects:
       - src/calibration/platt.py
+      - src/calibration/store.py
+      - src/calibration/manager.py
   FDR_FAMILY:
     tests:
       - tests/test_fdr.py

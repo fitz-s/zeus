@@ -17,6 +17,9 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from inspect import Parameter, signature
+from types import SimpleNamespace
 from typing import Optional
 
 from src.execution.collateral import check_sell_collateral
@@ -133,27 +136,39 @@ def place_sell_order(
     executable_snapshot_min_tick_size: str | None = None,
     executable_snapshot_min_order_size: str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    decision_id: str = "",
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
-    return execute_exit_order(
-        create_exit_order_intent(
-            trade_id=trade_id,
-            token_id=token_id,
-            shares=shares,
-            current_price=current_price,
-            best_bid=best_bid,
-            executable_snapshot_id=executable_snapshot_id,
-            executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
-            executable_snapshot_min_order_size=executable_snapshot_min_order_size,
-            executable_snapshot_neg_risk=executable_snapshot_neg_risk,
-        )
+    intent = create_exit_order_intent(
+        trade_id=trade_id,
+        token_id=token_id,
+        shares=shares,
+        current_price=current_price,
+        best_bid=best_bid,
+        executable_snapshot_id=executable_snapshot_id,
+        executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
+        executable_snapshot_min_order_size=executable_snapshot_min_order_size,
+        executable_snapshot_neg_risk=executable_snapshot_neg_risk,
     )
+    if decision_id:
+        try:
+            params = signature(execute_exit_order).parameters
+            accepts_decision_id = (
+                "decision_id" in params
+                or any(param.kind == Parameter.VAR_KEYWORD for param in params.values())
+            )
+        except (TypeError, ValueError):
+            accepts_decision_id = True
+        if accepts_decision_id:
+            return execute_exit_order(intent, decision_id=decision_id)
+    return execute_exit_order(intent)
 
 
 # Statuses that indicate final fill authority. MATCHED/MINED/FILLED are
 # venue/order observations; only CONFIRMED is success terminality.
 FILL_STATUSES = frozenset({"CONFIRMED"})
+PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY_MATCHED"})
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})
@@ -557,7 +572,12 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
-    snapshot_context = _latest_exit_snapshot_context(conn, token_id)
+    snapshot_context = _latest_or_capture_exit_snapshot_context(
+        conn,
+        clob,
+        position,
+        token_id,
+    )
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
 
@@ -568,6 +588,7 @@ def _execute_live_exit(
             shares=position.effective_shares,
             current_price=current_market_price,
             best_bid=best_bid,
+            decision_id=f"exit:{position.trade_id}",
             **snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
@@ -755,6 +776,220 @@ def _latest_exit_snapshot_context(
     }
 
 
+def _latest_or_capture_exit_snapshot_context(
+    conn: sqlite3.Connection | None,
+    clob,
+    position: Position,
+    token_id: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return fresh snapshot kwargs for exits, capturing one when possible.
+
+    Held positions can outlive entry snapshot freshness.  Before a live sell
+    reaches the executor's U1 gate, refresh executable market facts from the
+    current VERIFIED Gamma sibling set plus fresh CLOB market/orderbook/fee
+    facts.  If any authority link is unavailable, return an empty context so
+    executor rejects through the existing executable_snapshot_gate.
+    """
+
+    context = _latest_exit_snapshot_context(conn, token_id, now=now)
+    if context or conn is None or clob is None or not token_id:
+        return context
+
+    market_id = str(
+        getattr(position, "market_id", "")
+        or getattr(position, "condition_id", "")
+        or ""
+    ).strip()
+    yes_token = str(getattr(position, "token_id", "") or "").strip()
+    no_token = str(getattr(position, "no_token_id", "") or "").strip()
+    if not market_id or not yes_token or not no_token:
+        return {}
+
+    try:
+        from src.data.market_scanner import (
+            capture_executable_market_snapshot,
+            get_last_scan_authority,
+            get_sibling_outcomes,
+        )
+
+        siblings = get_sibling_outcomes(market_id)
+        scan_authority = get_last_scan_authority()
+        if str(scan_authority).strip().upper() != "VERIFIED":
+            logger.warning(
+                "Exit executable snapshot capture blocked for %s: scan_authority=%s",
+                position.trade_id,
+                scan_authority,
+            )
+            return {}
+        if not siblings:
+            logger.warning(
+                "Exit executable snapshot capture blocked for %s: no Gamma siblings for market_id=%s",
+                position.trade_id,
+                market_id,
+            )
+            return {}
+
+        raw_direction = getattr(position, "direction", "")
+        direction = str(getattr(raw_direction, "value", raw_direction))
+        decision_stub = SimpleNamespace(
+            tokens={
+                "market_id": market_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+            },
+            edge=SimpleNamespace(direction=direction),
+        )
+        captured_at = now or _utcnow()
+        fields = capture_executable_market_snapshot(
+            conn,
+            market={
+                "event_id": f"exit-refresh:{market_id}",
+                "slug": f"exit-refresh:{market_id}",
+                "outcomes": siblings,
+            },
+            decision=decision_stub,
+            clob=clob,
+            captured_at=captured_at,
+            scan_authority=scan_authority,
+        )
+        # The executor opens its own DB handle through place_sell_order(); make
+        # the snapshot durable before any submit-side effect can observe it.
+        conn.commit()
+        snapshot_id = str(fields.get("executable_snapshot_id") or "")
+        if not snapshot_id:
+            logger.warning(
+                "Exit executable snapshot capture returned no snapshot_id for %s token=%s",
+                position.trade_id,
+                token_id,
+            )
+            return {}
+        return {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_min_tick_size": fields.get("executable_snapshot_min_tick_size"),
+            "executable_snapshot_min_order_size": fields.get("executable_snapshot_min_order_size"),
+            "executable_snapshot_neg_risk": fields.get("executable_snapshot_neg_risk"),
+        }
+    except Exception as exc:
+        logger.warning(
+            "Exit executable snapshot capture failed for %s token=%s: %s",
+            position.trade_id,
+            token_id,
+            exc,
+        )
+        return {}
+
+
+def _payload_decimal(payload: object, *keys: str) -> Decimal | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            continue
+    return None
+
+
+def _partial_exit_delta(
+    *,
+    status: str,
+    payload: object,
+    current_open_shares: float,
+) -> tuple[float, float] | None:
+    """Return (newly_filled_shares, remaining_shares) for a partial exit fill."""
+
+    open_shares = Decimal(str(max(0.0, float(current_open_shares))))
+    if open_shares <= 0:
+        return None
+    remaining = _payload_decimal(
+        payload,
+        "remaining_size",
+        "remainingSize",
+        "remaining",
+        "open_size",
+        "openSize",
+    )
+    cumulative_filled = _payload_decimal(
+        payload,
+        "filled_size",
+        "filledSize",
+        "matched_size",
+        "matchedSize",
+        "filled",
+        "matched",
+    )
+    if remaining is None and cumulative_filled is not None:
+        remaining = open_shares - cumulative_filled
+    if remaining is None:
+        return None
+    remaining = max(Decimal("0"), remaining)
+    if remaining <= 0 or remaining >= open_shares:
+        return None
+    if (
+        status not in PARTIAL_FILL_STATUSES
+        and status not in VOID_STATUSES
+        and cumulative_filled in (None, Decimal("0"))
+    ):
+        return None
+    newly_filled = open_shares - remaining
+    if newly_filled <= 0:
+        return None
+    return float(newly_filled), float(remaining)
+
+
+def _apply_partial_exit_fill(
+    position: Position,
+    *,
+    filled_shares: float,
+    remaining_shares: float,
+    fill_price: float,
+    order_id: str,
+    status: str,
+) -> bool:
+    """Reduce local open exposure after an observed partial exit fill.
+
+    This is not a full economic close. It keeps the active position's exposure
+    aligned to the remaining CTF shares while recording the realized partial
+    slice in nested_fills for audit/replay.
+    """
+
+    open_shares = float(position.effective_shares)
+    if open_shares <= 0 or remaining_shares < 0 or remaining_shares >= open_shares:
+        return False
+    filled_shares = max(0.0, min(float(filled_shares), open_shares))
+    remaining_shares = max(0.0, min(float(remaining_shares), open_shares))
+    filled_ratio = filled_shares / open_shares
+    remaining_ratio = remaining_shares / open_shares
+    original_size = float(position.size_usd or 0.0)
+    original_cost = float(position.effective_cost_basis_usd or 0.0)
+    realized_cost = original_cost * filled_ratio
+    realized_pnl = round(filled_shares * float(fill_price) - realized_cost, 2)
+    position.nested_fills.append(
+        {
+            "type": "partial_exit_fill",
+            "order_id": order_id,
+            "status": status,
+            "filled_shares": filled_shares,
+            "remaining_shares": remaining_shares,
+            "fill_price": float(fill_price),
+            "realized_cost_basis_usd": realized_cost,
+            "realized_pnl": realized_pnl,
+            "observed_at": _utcnow().isoformat(),
+        }
+    )
+    position.shares = remaining_shares
+    position.size_usd = original_size * remaining_ratio
+    if position.cost_basis_usd > 0:
+        position.cost_basis_usd = original_cost * remaining_ratio
+    position.exit_state = "sell_pending"
+    return True
+
+
 def check_pending_exits(
     portfolio: PortfolioState,
     clob,
@@ -769,6 +1004,7 @@ def check_pending_exits(
         from src.state.db import (
             log_exit_fill_check_error_event,
             log_exit_fill_event,
+            log_exit_attempt_event,
             log_pending_exit_recovery_event,
             log_pending_exit_status_event,
             log_exit_retry_event,
@@ -861,32 +1097,71 @@ def check_pending_exits(
                         trade_id=getattr(closed, "trade_id", ""),
                     )
             stats["filled"] += 1
-        elif status in VOID_STATUSES:
-            _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)
-            if conn is not None:
-                log_pending_exit_recovery_event(
-                    conn,
-                    pos,
-                    event_type="EXIT_ORDER_VOIDED",
-                    reason=f"SELL_{status}",
-                    error=status,
+        else:
+            partial_applied = False
+            partial = _partial_exit_delta(
+                status=status,
+                payload=status_payload,
+                current_open_shares=pos.effective_shares,
+            )
+            if partial:
+                filled_shares, remaining_shares = partial
+                actual_price = _extract_fill_price(
+                    status_payload,
+                    pos.last_monitor_market_price or pos.entry_price,
+                    getattr(pos, "last_monitor_best_bid", None),
                 )
-                log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
-            stats["retried"] += 1
-        elif status == "":
-            # Empty status = CLOB outage or API error. Don't stall forever.
-            # After 3 consecutive unknown statuses, trigger retry to avoid
-            # permanent stall.
-            pos.exit_retry_count += 1
-            if pos.exit_retry_count >= 3:
-                _mark_exit_retry(pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+                partial_applied = _apply_partial_exit_fill(
+                    pos,
+                    filled_shares=filled_shares,
+                    remaining_shares=remaining_shares,
+                    fill_price=actual_price,
+                    order_id=pos.last_exit_order_id,
+                    status=status,
+                )
+                if partial_applied and conn is not None:
+                    log_exit_attempt_event(
+                        conn,
+                        pos,
+                        order_id=pos.last_exit_order_id,
+                        status=status or "PARTIAL",
+                        current_market_price=pos.last_monitor_market_price or pos.entry_price,
+                        best_bid=getattr(pos, "last_monitor_best_bid", None),
+                        shares=filled_shares,
+                        details={
+                            "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
+                            "filled_shares": filled_shares,
+                            "remaining_shares": remaining_shares,
+                        },
+                    )
+            if status in VOID_STATUSES:
+                _mark_exit_retry(pos, reason=f"SELL_{status}", error=status)
                 if conn is not None:
-                    log_exit_retry_event(conn, pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+                    log_pending_exit_recovery_event(
+                        conn,
+                        pos,
+                        event_type="EXIT_ORDER_VOIDED",
+                        reason=f"SELL_{status}",
+                        error=status,
+                    )
+                    log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
                 stats["retried"] += 1
+            elif partial_applied:
+                stats["unchanged"] += 1
+            elif status == "":
+                # Empty status = CLOB outage or API error. Don't stall forever.
+                # After 3 consecutive unknown statuses, trigger retry to avoid
+                # permanent stall.
+                pos.exit_retry_count += 1
+                if pos.exit_retry_count >= 3:
+                    _mark_exit_retry(pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+                    if conn is not None:
+                        log_exit_retry_event(conn, pos, reason="SELL_STATUS_UNKNOWN", error="3_consecutive_unknown")
+                    stats["retried"] += 1
+                else:
+                    stats["unchanged"] += 1
             else:
                 stats["unchanged"] += 1
-        else:
-            stats["unchanged"] += 1
 
     return stats
 

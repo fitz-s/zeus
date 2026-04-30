@@ -1,9 +1,12 @@
-"""Market fusion: α-weighted posterior and VWMP.
+"""Market fusion: posterior belief construction and legacy VWMP blending.
 
-Spec §4.5: p_posterior = α × p_cal + (1-α) × p_market
-α depends on calibration maturity, ensemble spread, model agreement,
-lead time, and market freshness.
+Legacy Spec §4.5 blended p_cal with p_market. Corrected pricing semantics
+separate executable quotes from posterior belief, so raw VWMP inputs are now
+accepted only through the explicit legacy mode.
 """
+
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -54,6 +57,111 @@ DEFAULT_TAIL_TREATMENT = TailTreatment(
 )
 COMPLETE_MARKET_VIG_MIN = 0.90
 COMPLETE_MARKET_VIG_MAX = 1.10
+LEGACY_POSTERIOR_MODE = "legacy_vwmp_prior_v0"
+MODEL_ONLY_POSTERIOR_MODE = "model_only_v1"
+YES_FAMILY_DEVIG_SHADOW_MODE = "yes_family_devig_v1_shadow"
+PosteriorMode = Literal[
+    "legacy_vwmp_prior_v0",
+    "model_only_v1",
+    "yes_family_devig_v1_shadow",
+]
+_CORRECTED_PRIOR_MODES = {
+    YES_FAMILY_DEVIG_SHADOW_MODE,
+}
+
+
+@dataclass(frozen=True)
+class MarketPriorDistribution:
+    """Named epistemic market prior, not an executable quote.
+
+    This transitional contract lives next to ``compute_posterior`` until the
+    wider contracts packet is admitted. It deliberately requires a complete,
+    normalized distribution plus lineage; raw token quotes/VWMP vectors are
+    still allowed only through the explicitly named legacy mode.
+    """
+
+    probabilities: tuple[float, ...]
+    bin_labels: tuple[str, ...]
+    prior_id: str
+    estimator_version: str
+    source_quote_hashes: tuple[str, ...]
+    family_complete: bool
+    side_convention: Literal["YES_FAMILY"]
+    vig_treatment: str
+    freshness_status: Literal["FRESH", "UNKNOWN"]
+    liquidity_filter_status: Literal["PASS", "UNKNOWN"]
+    neg_risk_policy: str
+    validated_for_live: bool
+    source: str = "market_prior_distribution"
+    validation_evidence_id: str | None = None
+
+    def __post_init__(self) -> None:
+        values = tuple(float(v) for v in self.probabilities)
+        if not values:
+            raise ValueError("MarketPriorDistribution.probabilities must be non-empty")
+        labels = tuple(str(label).strip() for label in self.bin_labels)
+        if len(labels) != len(values) or any(not label for label in labels):
+            raise ValueError(
+                "MarketPriorDistribution.bin_labels must be non-empty and match probabilities"
+            )
+        arr = np.asarray(values, dtype=float)
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("MarketPriorDistribution.probabilities must be finite")
+        if np.any(arr < 0.0):
+            raise ValueError("MarketPriorDistribution.probabilities must be non-negative")
+        if np.any(arr > 1.0):
+            raise ValueError("MarketPriorDistribution.probabilities components must be <= 1")
+        total = float(arr.sum())
+        if not np.isclose(total, 1.0, rtol=1e-6, atol=1e-6):
+            raise ValueError(
+                "MarketPriorDistribution.probabilities must sum to 1.0; "
+                f"got {total}"
+            )
+        if not str(self.prior_id).strip():
+            raise ValueError("MarketPriorDistribution.prior_id must be non-empty")
+        if not str(self.estimator_version).strip():
+            raise ValueError("MarketPriorDistribution.estimator_version must be non-empty")
+        quote_hashes = tuple(str(value).strip() for value in self.source_quote_hashes)
+        if not quote_hashes or any(not value for value in quote_hashes):
+            raise ValueError("MarketPriorDistribution.source_quote_hashes must be non-empty")
+        if not self.family_complete:
+            raise ValueError("MarketPriorDistribution requires complete YES-family prior")
+        if self.side_convention != "YES_FAMILY":
+            raise ValueError("MarketPriorDistribution side_convention must be YES_FAMILY")
+        if not str(self.vig_treatment).strip():
+            raise ValueError("MarketPriorDistribution.vig_treatment must be non-empty")
+        if self.freshness_status not in {"FRESH", "UNKNOWN"}:
+            raise ValueError("MarketPriorDistribution.freshness_status must be FRESH or UNKNOWN")
+        if self.liquidity_filter_status not in {"PASS", "UNKNOWN"}:
+            raise ValueError("MarketPriorDistribution.liquidity_filter_status must be PASS or UNKNOWN")
+        if not str(self.neg_risk_policy).strip():
+            raise ValueError("MarketPriorDistribution.neg_risk_policy must be non-empty")
+        object.__setattr__(self, "probabilities", values)
+        object.__setattr__(self, "bin_labels", labels)
+        object.__setattr__(self, "prior_id", str(self.prior_id).strip())
+        object.__setattr__(self, "estimator_version", str(self.estimator_version).strip())
+        object.__setattr__(self, "source_quote_hashes", quote_hashes)
+        object.__setattr__(self, "vig_treatment", str(self.vig_treatment).strip())
+        object.__setattr__(self, "neg_risk_policy", str(self.neg_risk_policy).strip())
+        object.__setattr__(self, "source", str(self.source).strip() or "market_prior_distribution")
+        evidence_id = None if self.validation_evidence_id is None else str(self.validation_evidence_id).strip()
+        object.__setattr__(self, "validation_evidence_id", evidence_id or None)
+
+    def as_array(self, expected_len: int | None = None, bins: list | None = None) -> np.ndarray:
+        arr = np.asarray(self.probabilities, dtype=float)
+        if expected_len is not None and arr.shape != (expected_len,):
+            raise ValueError(
+                "MarketPriorDistribution length mismatch: "
+                f"expected {expected_len}, got {arr.shape[0]}"
+            )
+        if bins is not None:
+            labels = tuple(str(getattr(bin, "label", "")).strip() for bin in bins)
+            if labels != self.bin_labels:
+                raise ValueError(
+                    "MarketPriorDistribution bin label mismatch: "
+                    f"expected {labels}, got {self.bin_labels}"
+                )
+        return arr
 
 
 def vwmp(best_bid: float, best_ask: float,
@@ -153,15 +261,21 @@ def compute_alpha(
 
 def compute_posterior(
     p_cal: np.ndarray,
-    p_market: np.ndarray,
-    alpha: float,
+    p_market: np.ndarray | MarketPriorDistribution | None = None,
+    alpha: float = 1.0,
     bins: list = None,
+    *,
+    posterior_mode: PosteriorMode = MODEL_ONLY_POSTERIOR_MODE,
+    allow_legacy_quote_prior: bool = False,
 ) -> np.ndarray:
-    """Compute α-weighted posterior, normalized to sum=1.0. Spec §4.5.
+    """Compute alpha-weighted posterior, normalized to sum=1.0. Spec §4.5.
 
-    p_posterior = normalize(α_per_bin × p_cal + (1-α_per_bin) × p_market)
+    Corrected modes consume only calibrated belief plus either no prior
+    (``model_only_v1``) or a named ``MarketPriorDistribution``. Raw executable
+    quote/VWMP vectors remain supported only in ``legacy_vwmp_prior_v0`` so old
+    call sites are explicit about the semantic debt they carry.
 
-    D3 analysis (2026-03-31): tail bins are 5.3× harder for the model
+    D3 analysis (2026-03-31): tail bins are 5.3x harder for the model
     (Brier 0.67 vs 0.11). Per-bin α scaling at 0.5 for tails reduces
     overall Brier by 0.042. When bins are provided, tail bins get
     α_tail = α × TAIL_ALPHA_SCALE.
@@ -171,58 +285,88 @@ def compute_posterior(
     families and stay in raw observed-price space. The final posterior is still
     normalized because per-bin tail alpha can make the blended vector drift.
     """
-    if not np.all(np.isfinite(p_market)):
-        raise ValueError("p_market must be finite")
-    if np.any(p_market < 0.0):
-        raise ValueError("p_market must be non-negative")
-    market_total = float(np.sum(p_market))
-    if market_total <= 0.0:
-        raise ValueError(f"Invalid market probability vector sum <= 0: {market_total}")
-        
-    positive_components = int(np.count_nonzero(p_market > 0.0))
-    looks_complete = positive_components >= min(len(p_market), 2)
-    has_zeros = bool(np.any(p_market == 0.0))
-    if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
-        market = VigTreatment.from_raw(p_market).clean_prices
-    elif has_zeros:
-        # T6.3 (supersedes B086): sparse monitor vectors have zeros for non-held
-        # bins. We now impute those zeros from p_cal as a fallback reference
-        # (imputation_source="p_cal_fallback"), with provenance recorded on the
-        # VigTreatment record. This is NOT a silent revival of pre-B086 behavior:
-        # the imputed bins and reference source are typed-visible on the returned
-        # VigTreatment record, so downstream auditors can tell which posterior
-        # bins were derived from market data vs model priors. A future slice may
-        # thread real cross-market sibling snapshots through this same kwarg with
-        # imputation_source="sibling_market". See
-        # docs/archives/local_scratch/2026-04-19/zeus_data_improve_bug_audit_100_resolved.md:17
-        # (B086 entry) for supersedence record.
-        market = VigTreatment.from_raw(
-            p_market,
-            sibling_snapshot=p_cal,
-            imputation_source="p_cal_fallback",
-        ).clean_prices
+    p_cal_arr = np.asarray(p_cal, dtype=float)
+    if not np.all(np.isfinite(p_cal_arr)):
+        raise ValueError("p_cal must be finite")
+    if np.any(p_cal_arr < 0.0):
+        raise ValueError("p_cal must be non-negative")
+
+    if posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
+        if p_market is not None:
+            raise TypeError("model_only_v1 posterior cannot accept market quote/prior input")
+        raw = p_cal_arr.copy()
+        total = raw.sum()
+        if total > 0:
+            return raw / total
+        return raw
+
+    if posterior_mode in _CORRECTED_PRIOR_MODES:
+        if not isinstance(p_market, MarketPriorDistribution):
+            raise TypeError(
+                f"{posterior_mode} requires MarketPriorDistribution; "
+                "raw quote/VWMP vectors are forbidden"
+            )
+        if p_market.estimator_version != posterior_mode:
+            raise ValueError(
+                "MarketPriorDistribution.estimator_version must match posterior_mode: "
+                f"{p_market.estimator_version!r} != {posterior_mode!r}"
+            )
+        market = p_market.as_array(expected_len=len(p_cal_arr), bins=bins)
+    elif posterior_mode == LEGACY_POSTERIOR_MODE:
+        if not allow_legacy_quote_prior:
+            raise ValueError("legacy VWMP market prior is disabled for this computation")
+        market = _legacy_market_vector(p_market, p_cal_arr)
     else:
-        # Distorted-vig complete market (vig out of [0.90, 1.10] band, no zeros).
-        # Pre-T6.3 behavior preserved: raw pass-through. We deliberately do NOT
-        # route through VigTreatment.from_raw with sibling_snapshot here because
-        # that would silently demote the auditable "p_cal_fallback" intent to
-        # "none" (no impute needed when raw has no zeros), masking the distorted-
-        # vig signal. Surrogate-critic 2026-04-24 HIGH finding: preserve category
-        # immunity by keeping the distorted-vig case OUT of the impute call site.
-        # A future slice may introduce imputation_source="vig_out_of_band" if
-        # auditors need that discriminator.
-        market = p_market.copy()
-        
+        raise ValueError(f"unknown posterior_mode: {posterior_mode!r}")
+
     if bins is not None and len(bins) == len(p_cal):
         alpha_vec = np.array([alpha_for_bin(alpha, b) for b in bins], dtype=float)
-        raw = alpha_vec * p_cal + (1.0 - alpha_vec) * market
+        raw = alpha_vec * p_cal_arr + (1.0 - alpha_vec) * market
     else:
-        raw = alpha * p_cal + (1.0 - alpha) * market
+        raw = alpha * p_cal_arr + (1.0 - alpha) * market
 
     total = raw.sum()
     if total > 0:
         return raw / total
     return raw
+
+
+def _legacy_market_vector(
+    p_market: np.ndarray | MarketPriorDistribution | None,
+    p_cal: np.ndarray,
+) -> np.ndarray:
+    if isinstance(p_market, MarketPriorDistribution):
+        raise TypeError("legacy_vwmp_prior_v0 requires a raw market quote vector")
+    if p_market is None:
+        raise TypeError("legacy_vwmp_prior_v0 requires p_market")
+
+    market_arr = np.asarray(p_market, dtype=float)
+    if not np.all(np.isfinite(market_arr)):
+        raise ValueError("p_market must be finite")
+    if np.any(market_arr < 0.0):
+        raise ValueError("p_market must be non-negative")
+    market_total = float(np.sum(market_arr))
+    if market_total <= 0.0:
+        raise ValueError(f"Invalid market probability vector sum <= 0: {market_total}")
+
+    positive_components = int(np.count_nonzero(market_arr > 0.0))
+    looks_complete = positive_components >= min(len(market_arr), 2)
+    has_zeros = bool(np.any(market_arr == 0.0))
+    if looks_complete and COMPLETE_MARKET_VIG_MIN <= market_total <= COMPLETE_MARKET_VIG_MAX:
+        return VigTreatment.from_raw(market_arr).clean_prices
+    if has_zeros:
+        # Legacy-only: sparse monitor vectors have zeros for non-held bins.
+        # Corrected modes reject this shape instead of laundering held-token
+        # quote data into a family prior.
+        return VigTreatment.from_raw(
+            market_arr,
+            sibling_snapshot=p_cal,
+            imputation_source="p_cal_fallback",
+        ).clean_prices
+
+    # Distorted-vig complete market (vig out of [0.90, 1.10] band, no zeros).
+    # Pre-T6.3 behavior preserved in legacy mode only.
+    return market_arr.copy()
 
 
 def alpha_for_bin(alpha: float, bin) -> float:

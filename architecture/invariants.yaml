@@ -159,7 +159,7 @@ invariants:
         - tests/test_phase4_rebuild.py::TestINV15SourceWhitelistGate::test_data_version_with_leading_space_is_rejected
         - tests/test_harvester_high_calibration_v2_route.py::test_v2_pair_training_allowed_respects_inv15
   - id: INV-16
-    # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit (docs/operations/task_2026-04-27_harness_debate/evidence/critic-harness/batch_C_review_2026-04-28.md §INV-16 finding). The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 3 relationship tests for this invariant ALREADY EXIST in tests/test_phase6_causality_status.py (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"). The schema-citation gap was real; the enforcement gap was imaginary.
+    # CITATION_REPAIR 2026-04-28: PRUNE_CANDIDATE marker REVERTED per critic-harness BATCH C cross-batch audit (docs/archives/packets/task_2026-04-27_harness_debate/evidence/critic-harness/batch_C_review_2026-04-28.md §INV-16 finding). The R1+R2+R3 verdicts based the prose-as-law claim on opponent's grep-of-`tests:`-field-only audit, which missed that 3 relationship tests for this invariant ALREADY EXIST in tests/test_phase6_causality_status.py (file docstring: "Relationship tests for Phase 6 INV-16 causality_status enforcement"). The schema-citation gap was real; the enforcement gap was imaginary.
     zones: [K2_runtime]
     statement: Day0 low slots with causality_status != 'OK' must not route through historical Platt lookup; low Day0 uses nowcast path only.
     why: Causality preservation — routing a slot that is already partly historical through a forecast Platt model produces incorrect probability estimates.
@@ -423,3 +423,38 @@ invariants:
         - tests/test_discovery_idempotency.py::test_materialize_skipped_for_submitting_command
         - tests/test_discovery_idempotency.py::test_materialize_skipped_for_unknown_command
         - tests/test_discovery_idempotency.py::test_materialize_runs_for_acked_command
+  - id: INV-33
+    zones: [K2_runtime, K3_extension]
+    statement: Corrected posterior construction must consume calibrated model belief plus either no market input or a named complete MarketPriorDistribution; raw executable quote/VWMP vectors are legacy-only.
+    why: Token quotes, VWMP, and held-side monitor prices are microstructure facts, not calibrated epistemic priors. Letting them enter corrected posterior computation silently changes the meaning of probability and corrupts edge attribution.
+    enforced_by:
+      negative_constraints: [NC-20]
+      tests:
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
+        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
+  - id: INV-34
+    zones: [K2_runtime, K3_extension]
+    statement: Corrected Kelly/FDR sizing authority must use executable cost-basis economics, not implied probability or a fee-adjusted probability relabeled as cost.
+    why: Kelly sizes money at risk. A probability estimate, even if fee-adjusted, is not proof of executable native-side fill cost/proceeds, depth, tick, min-order, fee lineage, or selected token identity.
+    enforced_by:
+      negative_constraints: [NC-21]
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_implied_probability_fails_kelly_safe
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_fee_adjusted_implied_probability_fails_corrected_kelly_authority
+  - id: INV-35
+    zones: [K2_runtime]
+    statement: Corrected FinalExecutionIntent contract shape must be submit-ready without posterior, VWMP, BinEdge, p_market, or entry_price recompute inputs.
+    why: The selected executable hypothesis, snapshot, cost basis, order policy, and final limit must be bound before submission. This Phase 0/A guardrail protects the contract surface; executor runtime no-recompute enforcement remains the later Phase G/H implementation gate.
+    enforced_by:
+      negative_constraints: [NC-22]
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatAtKellyBoundary::test_final_execution_intent_excludes_probability_and_quote_recompute_inputs
+  - id: INV-36
+    zones: [K2_runtime]
+    statement: Monitor and exit lanes must keep held-token quote/proceeds separate from posterior belief; sparse held-token market observations cannot become corrected posterior priors.
+    why: A held-position quote is executable microstructure for mark/exit economics. Treating it as a family-complete posterior prior launders sparse and side-specific liquidity into belief updates.
+    enforced_by:
+      negative_constraints: [NC-23]
+      tests:
+        - tests/test_no_bare_float_seams.py::TestNoBareFloatInExitTriggerThresholds::test_monitor_bootstrap_refresh_keeps_held_quote_out_of_corrected_posterior

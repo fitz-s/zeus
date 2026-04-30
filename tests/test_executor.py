@@ -301,15 +301,62 @@ class TestExecutor:
             market_id="m1",
             token_id="yes-token",
             no_token_id="no-token",
-            best_ask=0.30,
-            repriced_limit_price=0.30,
+            best_ask=0.234,
+            repriced_limit_price=0.234,
             executable_snapshot_id="snap-limit",
-            executable_snapshot_min_tick_size=Decimal("0.01"),
+            executable_snapshot_min_tick_size=Decimal("0.001"),
             executable_snapshot_min_order_size=Decimal("0.01"),
             executable_snapshot_neg_risk=False,
         )
 
-        assert intent.limit_price == pytest.approx(0.30)
+        assert intent.limit_price == pytest.approx(0.234)
+
+    def test_create_execution_intent_rejects_reprice_above_slippage_budget(self):
+        edge = BinEdge(
+            bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
+            direction="buy_yes",
+            edge=0.22,
+            ci_lower=0.03,
+            ci_upper=0.31,
+            p_model=0.70,
+            p_market=0.25,
+            p_posterior=0.47,
+            entry_price=0.25,
+            p_value=0.01,
+            vwmp=0.25,
+            forward_edge=0.22,
+        )
+        edge_context = EdgeContext(
+            p_raw=np.array([0.50]),
+            p_cal=np.array([0.50]),
+            p_market=np.array([0.25]),
+            p_posterior=0.47,
+            forward_edge=0.22,
+            alpha=1.0,
+            confidence_band_upper=0.31,
+            confidence_band_lower=0.03,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="test-snap",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+        with pytest.raises(ValueError, match="MAX_SLIPPAGE_EXCEEDED"):
+            create_execution_intent(
+                edge_context=edge_context,
+                edge=edge,
+                size_usd=5.0,
+                mode="opening_hunt",
+                market_id="m1",
+                token_id="yes-token",
+                no_token_id="no-token",
+                best_ask=0.30,
+                repriced_limit_price=0.30,
+                executable_snapshot_id="snap-limit",
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            )
 
     @pytest.mark.skip(reason="Phase2: paper mode removed")
     def test_paper_fill(self):

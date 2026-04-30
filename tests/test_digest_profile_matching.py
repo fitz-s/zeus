@@ -175,7 +175,7 @@ def test_source_contract_auto_conversion_routes_to_runtime_profile():
         [
             "scripts/source_contract_auto_convert.py",
             "tests/test_market_scanner_provenance.py",
-            "docs/operations/task_2026-04-30_source_auto_conversion/plan.md",
+            "docs/archives/packets/task_2026-04-30_source_auto_conversion/plan.md",
             "architecture/script_manifest.yaml",
         ],
     )
@@ -283,6 +283,44 @@ def test_phase4a_f13_realistic_wording_routes_to_selection_parity_profile():
     assert "src/strategy/market_analysis.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/market_analysis_family_scan.py" in digest["admission"]["admitted_files"]
     assert "tests/test_fdr.py" in digest["admission"]["admitted_files"]
+
+
+def test_pricing_semantics_authority_cutover_routes_to_refactor_profile():
+    digest = build_digest(
+        "pricing semantics authority cutover Phase 0/A reality semantics "
+        "guardrails probability quote VWMP executable cost isolation",
+        [
+            "architecture/invariants.yaml",
+            "architecture/negative_constraints.yaml",
+            "tests/test_no_bare_float_seams.py",
+            "tests/test_architecture_contracts.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    assert "architecture/invariants.yaml" in digest["admission"]["admitted_files"]
+    assert "architecture/negative_constraints.yaml" in digest["admission"]["admitted_files"]
+    assert "tests/test_no_bare_float_seams.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_architecture_contracts.py" in digest["admission"]["admitted_files"]
+
+
+def test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope():
+    digest = build_digest(
+        "pricing semantics authority cutover live venue submission production DB mutation",
+        [
+            "architecture/invariants.yaml",
+            "src/venue/polymarket_v2_adapter.py",
+            "state/zeus-world.db",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "blocked"
+    assert digest["admission"]["admitted_files"] == []
+    forbidden = set(digest["admission"]["forbidden_hits"])
+    assert {"src/venue/polymarket_v2_adapter.py", "state/zeus-world.db"} <= forbidden
 
 
 def test_phase5_economics_readiness_routes_to_phase5_profile():
@@ -1366,6 +1404,7 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
         [
             "scripts/live_readiness_check.py",
             "tests/test_live_readiness_gates.py",
+            "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-30.json",
             "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml",
         ],
     )
@@ -1374,6 +1413,10 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "scripts/live_readiness_check.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_readiness_gates.py" in digest["admission"]["admitted_files"]
+    assert (
+        "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-30.json"
+        in digest["admission"]["admitted_files"]
+    )
 
 
 def test_phase2c_execution_capability_routes_to_dedicated_profile():
@@ -1513,9 +1556,9 @@ def test_batch_h_legacy_day0_backfill_routes_to_contamination_profile():
             "src/execution/exit_lifecycle.py",
             "tests/test_runtime_guards.py",
             "architecture/test_topology.yaml",
-            "docs/operations/task_2026-04-28_contamination_remediation/plan.md",
-            "docs/operations/task_2026-04-28_contamination_remediation/work_log.md",
-            "docs/operations/task_2026-04-28_contamination_remediation/evidence/critic-harness/batch_h_current_diff_2026-04-28.md",
+            "docs/archives/packets/task_2026-04-28_contamination_remediation/plan.md",
+            "docs/archives/packets/task_2026-04-28_contamination_remediation/work_log.md",
+            "docs/archives/packets/task_2026-04-28_contamination_remediation/evidence/critic-harness/batch_h_current_diff_2026-04-28.md",
         ],
     )
 
@@ -1686,14 +1729,14 @@ def test_direct_operation_feedback_capsule_routes_without_persisted_files():
 def test_operation_feedback_capsule_admits_existing_packet_work_log_only():
     digest = build_digest(
         "operation feedback capsule for packet closeout",
-        ["docs/operations/task_2026-04-30_merge_protocol_conflict_first/work_log.md"],
+        ["docs/archives/packets/task_2026-04-30_merge_protocol_conflict_first/work_log.md"],
         write_intent="edit",
     )
 
     assert digest["profile"] == "direct operation feedback capsule"
     assert digest["admission"]["status"] == "admitted"
     assert digest["admission"]["admitted_files"] == [
-        "docs/operations/task_2026-04-30_merge_protocol_conflict_first/work_log.md"
+        "docs/archives/packets/task_2026-04-30_merge_protocol_conflict_first/work_log.md"
     ]
 
 
@@ -1740,9 +1783,9 @@ def test_actual_profile_resolver_stability_diff_does_not_route_to_live_readiness
             "architecture/topology.yaml",
             "architecture/topology_schema.yaml",
             "docs/operations/AGENTS.md",
-            "docs/operations/task_2026-04-29_topology_profile_resolver_stability/plan.md",
-            "docs/operations/task_2026-04-29_topology_profile_resolver_stability/receipt.json",
-            "docs/operations/task_2026-04-29_topology_profile_resolver_stability/work_log.md",
+            "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/plan.md",
+            "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/receipt.json",
+            "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/work_log.md",
             "scripts/topology_doctor.py",
             "scripts/topology_doctor_cli.py",
             "scripts/topology_doctor_digest.py",

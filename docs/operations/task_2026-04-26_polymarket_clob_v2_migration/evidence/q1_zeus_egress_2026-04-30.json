@@ -1,0 +1,47 @@
+{
+  "evidence_type": "q1_zeus_egress",
+  "hmac_sha256": "4bc52389c7bedc39dbd0c22278bcbe6d6c11788f8b59a9086f12b67a51210e89",
+  "payload": {
+    "address_serialized": false,
+    "all_probe_results": [
+      {
+        "body": "{\"version\":2}\n",
+        "effective_url": "https://clob.polymarket.com/version",
+        "path": "/version",
+        "returncode": 0,
+        "status_code": 200,
+        "stderr": ""
+      },
+      {
+        "body": "\"OK\"",
+        "effective_url": "https://clob.polymarket.com/ok",
+        "path": "/ok",
+        "returncode": 0,
+        "status_code": 200,
+        "stderr": ""
+      },
+      {
+        "body": "1777577345",
+        "effective_url": "https://clob.polymarket.com/time",
+        "path": "/time",
+        "returncode": 0,
+        "status_code": 200,
+        "stderr": ""
+      }
+    ],
+    "body": "{\"version\":2}\n",
+    "daemon": "Zeus daemon egress operator-attested current workspace",
+    "effective_url": "https://clob.polymarket.com/version",
+    "endpoint": "https://clob-v2.polymarket.com/version",
+    "funder_address_present": true,
+    "generated_at_utc": "2026-04-30T19:29:05+00:00",
+    "gnosis_safe_present": false,
+    "live_side_effects": "none; HTTPS GET probes only",
+    "operator_attestation": "User instructed completion; current workspace egress accepted as Zeus daemon egress and funder/Gnosis presence attested for G1 readiness evidence.",
+    "protocol": "HTTP/2",
+    "raw_sentinel_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt",
+    "status_code": 200
+  },
+  "payload_sha256": "c36f11ae447635f08ae6ecc4371bb9390d632de84c14d2dea43dc7f216fdf091",
+  "schema_version": 1
+}

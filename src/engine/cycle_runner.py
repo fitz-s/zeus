@@ -527,32 +527,39 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
     summary.update({k: v for k, v in cap_summary.items() if v is not None})
 
-    p_dirty, t_dirty = _execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary)
-    portfolio_dirty = portfolio_dirty or p_dirty
-    tracker_dirty = tracker_dirty or t_dirty
-
     # B5 + DT#2 P9B: When daily_loss RED, block new entries AND sweep active
     # positions toward exit (previously Phase 1 was entry-block-only; Phase 9B
     # closes the sweep gap per zeus_dual_track_architecture.md §6 DT#2 law:
     # "RED must cancel all pending orders AND initiate an exit sweep on
     # active positions"). Sweep marks `exit_reason="red_force_exit"` on each
-    # non-terminal, not-already-exiting position; exit_lifecycle machinery
-    # picks up on next monitor_refresh cycle.
+    # non-terminal, not-already-exiting position before monitor_refresh so the
+    # existing exit_lifecycle/capability path can act in the same cycle instead
+    # of waiting for the next daemon tick.
     force_exit = get_force_exit_review()
-    if force_exit:
-        summary["force_exit_review"] = True
+    red_risk_sweep = risk_level == RiskLevel.RED
+    if force_exit or red_risk_sweep:
+        if force_exit:
+            summary["force_exit_review"] = True
         summary["force_exit_review_scope"] = "sweep_active_positions"
+        summary["force_exit_sweep_trigger"] = (
+            "force_exit_review" if force_exit else "risk_level_red"
+        )
         sweep_result = _execute_force_exit_sweep(portfolio, conn=conn)
         summary["force_exit_sweep"] = sweep_result
         if sweep_result["attempted"] > 0:
             portfolio_dirty = True  # positions' exit_reason changed; persist
         logger.warning(
-            "B5/DT#2: force_exit_review active — daily loss RED. "
+            "B5/DT#2: RED force-exit sweep active (trigger=%s). "
             "Sweep: attempted=%d already_exiting=%d skipped_terminal=%d.",
+            summary["force_exit_sweep_trigger"],
             sweep_result["attempted"],
             sweep_result["already_exiting"],
             sweep_result["skipped_terminal"],
         )
+
+    p_dirty, t_dirty = _execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary)
+    portfolio_dirty = portfolio_dirty or p_dirty
+    tracker_dirty = tracker_dirty or t_dirty
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
