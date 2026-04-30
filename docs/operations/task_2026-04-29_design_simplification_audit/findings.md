@@ -759,6 +759,25 @@ cannot reach executable entry with missing or future forecast evidence. This
 reduces the legacy/v2 split's audit blind spot, but DSA-13 remains open for the
 canonical live snapshot table decision.
 
+Phase 1L status (2026-04-30): the evaluator live decision snapshot writer now
+uses `ensemble_snapshots_v2` as the canonical write target when the v2 table is
+present, preferring attached `world.ensemble_snapshots_v2` over trade/main
+shadow tables. Legacy `ensemble_snapshots` is written only as a same-ID
+compatibility projection after the v2 insert; `p_raw_json` updates are mirrored
+to both surfaces. The v2 row carries metric identity, canonical data_version,
+members unit, source/degradation provenance, training eligibility, and causal
+status. Open-Meteo-style missing issue time can be auditable but
+`training_allowed=0`/`causality_status=UNKNOWN`; degraded or non-entry-primary
+fallback becomes `UNVERIFIED`/`RUNTIME_ONLY_FALLBACK`. This closes the live
+writer/table-authority portion of DSA-13 after critic remediation: if a v2
+snapshot id collides with an unrelated legacy row, if v2 insertion conflicts
+without an exact canonical row, or if canonical `p_raw_json` cannot be updated,
+the path fails closed instead of corrupting legacy projection state or falling
+back to legacy authority. Remaining DSA-13 work is reader cleanup where
+replay/harvester consumers still use legacy compatibility surfaces; those paths
+must stay diagnostic/compatibility unless a later phase promotes them with
+economics/learning gates.
+
 ### DSA-14 [P1] Market identity is not yet one closed contract from discovery to SDK submit
 
 Classification: architecture blocker behind F03/F04/F05/F09.

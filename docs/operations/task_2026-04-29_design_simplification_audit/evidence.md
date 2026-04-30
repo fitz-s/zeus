@@ -2551,6 +2551,105 @@ Post-interruption recovery verification:
 - `python3 scripts/topology_doctor.py --planning-lock --changed-files ... --plan-evidence docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md`
   -> topology check ok.
 
+## Phase 1L Canonical Snapshot Authority - 2026-04-30
+
+Scope:
+
+- Close the DSA-13 live-writer portion of the legacy/v2 snapshot authority
+  split.
+- Make `ensemble_snapshots_v2` the canonical live decision snapshot target
+  when the v2 table exists, while keeping legacy `ensemble_snapshots` as a
+  same-ID compatibility projection.
+- No production DB mutation, no schema migration, no source routing, no Paris
+  config edit, no active TIGGE fetch, no live venue side effect, no CLOB
+  cutover, and no promotion-grade replay/economics activation.
+
+Implementation:
+
+- Added a dedicated topology profile,
+  `phase 1L canonical snapshot authority`, so DSA-13 snapshot-table work no
+  longer routes through broad source-policy or executable-snapshot profiles.
+  The profile admits evaluator/replay/harvester/status/schema/test/docs
+  surfaces but explicitly forbids state DB files, `src/data/**`, venue/control/
+  risk surfaces, config/source-routing, Paris edits, production DB mutation, and
+  live side effects.
+- `src/engine/evaluator.py::_store_ens_snapshot()` now discovers
+  `ensemble_snapshots_v2`, preferring attached `world.ensemble_snapshots_v2`
+  when available, and inserts the canonical row there before the legacy
+  projection.
+- The canonical v2 row carries explicit `temperature_metric`,
+  `physical_quantity`, `observation_field`, metric canonical `data_version`,
+  `members_unit`, unit, source/degradation provenance, `training_allowed`,
+  `causality_status`, and authority.
+- Open-Meteo-style missing `issue_time` is preserved as missing rather than
+  fabricated. The row remains auditable but not training evidence:
+  `training_allowed=0` and `causality_status=UNKNOWN`.
+- Degraded or non-entry-primary fallback rows are not promoted to verified
+  training evidence: they are stamped `authority=UNVERIFIED` and
+  `causality_status=RUNTIME_ONLY_FALLBACK`.
+- The legacy table insert now uses the v2 `snapshot_id` when the v2 insert
+  succeeds, keeping existing replay/harvester compatibility joins stable
+  without letting legacy become the first writer authority.
+- `_store_snapshot_p_raw()` updates the v2 canonical row first when present,
+  then mirrors the same `p_raw_json` into the legacy projection.
+- Critic remediation changed the legacy projection from `INSERT OR IGNORE` to a
+  strict same-ID projection contract. If a legacy row already owns the v2
+  `snapshot_id` but does not match city/date/metric/model/timestamps, snapshot
+  persistence fails closed and rolls back the v2 insert.
+- Critic remediation also made v2-present write misses fatal: if v2 insertion
+  is ignored because an existing v2 row has the same canonical key but
+  different non-key timing/model fields, evaluator refuses to fall back to
+  legacy authority.
+- `p_raw_json` persistence is no longer best-effort for canonical rows. The
+  v2 update must affect exactly one row, and the same-ID legacy projection
+  update must match the v2 row identity. A failed canonical p_raw update returns
+  `False`, and `evaluate_candidate()` blocks before edge/calibration output with
+  `ENS snapshot p_raw persistence failed: canonical p_raw unavailable`.
+- Final verifier remediation preserves the existing legacy-only helper
+  contract: if a caller supplies a snapshot id that is absent from v2 but
+  present in legacy `ensemble_snapshots`, `_store_snapshot_p_raw()` may update
+  that legacy row. This keeps old schema/helper tests and diagnostic legacy
+  consumers working, while the live evaluator path still receives a v2 id from
+  `_store_ens_snapshot()` and therefore uses the strict canonical update path.
+
+Verification:
+
+- `python3 scripts/topology_doctor.py --navigation --task "DSA-13 canonical snapshot authority: make live decision snapshot writer and status/replay/harvester readers agree on ensemble_snapshots_v2 as canonical while legacy ensemble_snapshots remains projection diagnostic; no production DB mutation no schema migration no live venue side effects no source routing no Paris config edit" ...`
+  -> navigation ok under `phase 1L canonical snapshot authority`.
+- `pytest -q -p no:cacheprovider tests/test_runtime_guards.py::test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time tests/test_runtime_guards.py::test_store_ens_snapshot_routes_to_attached_world_db tests/test_runtime_guards.py::test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption tests/test_runtime_guards.py::test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback tests/test_evaluator_metric_normalizer_failclosed.py tests/test_center_buy_repair.py::test_empty_decision_snapshot_id_blocks_before_edge_selection tests/test_center_buy_repair.py::test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection`
+  -> 15 passed.
+- `pytest -q -p no:cacheprovider tests/test_ensemble_snapshots_bias_corrected_schema.py::test_store_snapshot_p_raw_round_trip_with_fresh_schema tests/test_runtime_guards.py::test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption tests/test_runtime_guards.py::test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback tests/test_center_buy_repair.py::test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection`
+  -> 4 passed after preserving legacy-only helper compatibility.
+- `pytest -q -p no:cacheprovider tests/test_runtime_guards.py tests/test_center_buy_repair.py tests/test_ensemble_snapshots_bias_corrected_schema.py tests/test_evaluator_metric_normalizer_failclosed.py`
+  -> 163 passed.
+- `pytest -q -p no:cacheprovider tests/test_decision_evidence_runtime_invocation.py tests/test_fdr.py tests/test_digest_profile_matching.py::test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile tests/test_digest_profile_matching.py::test_dsa13_canonical_snapshot_authority_blocks_live_side_effect_scope tests/test_digest_profiles_equivalence.py`
+  -> 28 passed.
+- `pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile tests/test_digest_profile_matching.py::test_dsa13_canonical_snapshot_authority_blocks_live_side_effect_scope tests/test_digest_profiles_equivalence.py`
+  -> 6 passed.
+- `python3 -m py_compile src/engine/evaluator.py tests/test_runtime_guards.py tests/test_center_buy_repair.py`
+  -> pass.
+- `python3 scripts/digest_profiles_export.py --check` -> OK.
+- `python3 scripts/topology_doctor.py --schema` -> topology check ok.
+- `git diff --check -- src/engine/evaluator.py tests/test_runtime_guards.py tests/test_center_buy_repair.py tests/test_digest_profile_matching.py architecture/topology.yaml architecture/digest_profiles.py docs/operations/task_2026-04-29_design_simplification_audit/findings.md docs/operations/task_2026-04-29_design_simplification_audit/evidence.md docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md`
+  -> pass.
+- Final verifier subagent -> APPROVE. It confirmed v2 canonical writes do not
+  fall back to legacy after v2 write/lookup conflict, legacy projection uses
+  identity checks before insert/update, legacy-only `_store_snapshot_p_raw()`
+  compatibility is preserved when no v2 row exists, evaluator blocks on
+  canonical p_raw persistence failure, and the diff contains no production DB,
+  venue/live routing, `src/data/**`, source-routing config, or Paris/city
+  config changes.
+
+Residual blockers:
+
+- This phase closes the evaluator writer authority decision only. Replay and
+  harvester consumers still read legacy compatibility surfaces for diagnostic/
+  learning context, so they must not be treated as promotion-authoritative
+  until a later DSA-13/DSA-18/DSA-19 reader-cleanup phase proves the v2
+  read contract end-to-end.
+- This phase does not activate direct TIGGE/ECMWF, change Open-Meteo fallback
+  policy, change source routing, mutate production DB rows, or decide Paris.
+
 Phase 3 finality follow-up (2026-04-30):
 
 - User constraint clarified that `MATCHED`/`MINED` are not finality and

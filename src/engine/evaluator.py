@@ -73,6 +73,7 @@ from src.types.metric_identity import MetricIdentity
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.decision_evidence import DecisionEvidence
+from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.data.forecast_source_registry import SourceNotEnabled
@@ -1401,7 +1402,18 @@ def evaluate_candidate(
             applied_validations=[*entry_validations, "ens_snapshot_persistence"],
             p_raw=p_raw,
         )]
-    _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
+    p_raw_persisted = _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
+    if p_raw_persisted is False:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=["ENS snapshot p_raw persistence failed: canonical p_raw unavailable"],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=[*entry_validations, "ens_snapshot_p_raw_persistence"],
+            p_raw=p_raw,
+        )]
 
     # Calibration
     # K4 authority gate: verify no UNVERIFIED pairs are present for this bucket.
@@ -2330,13 +2342,159 @@ def _ensemble_snapshots_table(conn) -> str:
     return "world.ensemble_snapshots" if row is not None else "ensemble_snapshots"
 
 
+def _ensemble_snapshots_v2_table(conn) -> str:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+        ).fetchone()
+        if row is not None:
+            return "world.ensemble_snapshots_v2"
+    except Exception:
+        pass
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+        ).fetchone()
+    except Exception:
+        return ""
+    return "ensemble_snapshots_v2" if row is not None else ""
+
+
+def _members_unit_for_snapshot(city, ens_result: dict) -> str:
+    explicit = ens_result.get("members_unit")
+    if explicit:
+        return str(explicit)
+    settlement_unit = str(getattr(city, "settlement_unit", "") or "").upper()
+    if settlement_unit in {"F", "C"}:
+        return f"deg{settlement_unit}"
+    return "degC"
+
+
+def _snapshot_identity_matches(
+    row,
+    *,
+    city,
+    target_date: str,
+    temperature_metric: str,
+    data_version: str,
+    model_version: str,
+    issue_time: str | None,
+    valid_time: str | None,
+    available_at: str,
+    fetch_time: str,
+) -> bool:
+    return (
+        row is not None
+        and row["city"] == city.name
+        and row["target_date"] == target_date
+        and row["temperature_metric"] == temperature_metric
+        and row["data_version"] == data_version
+        and row["model_version"] == model_version
+        and row["issue_time"] == issue_time
+        and row["valid_time"] == valid_time
+        and row["available_at"] == available_at
+        and row["fetch_time"] == fetch_time
+    )
+
+
+def _legacy_snapshot_projection_row(conn, legacy_table: str, snapshot_id: str):
+    return conn.execute(f"""
+        SELECT city, target_date, issue_time, valid_time, available_at,
+               fetch_time, model_version, data_version, temperature_metric
+        FROM {legacy_table}
+        WHERE snapshot_id = ?
+    """, (snapshot_id,)).fetchone()
+
+
+def _ensure_legacy_snapshot_projection(
+    conn,
+    *,
+    legacy_table: str,
+    snapshot_id: str,
+    city,
+    target_date: str,
+    issue_time: str | None,
+    valid_time: str | None,
+    available_at: str,
+    fetch_time: str,
+    lead_hours: float,
+    members_json: str,
+    spread: float,
+    is_bimodal: int,
+    model_version: str,
+    data_version: str,
+    authority: str,
+    temperature_metric: str,
+) -> None:
+    existing = _legacy_snapshot_projection_row(conn, legacy_table, snapshot_id)
+    if existing is not None:
+        if not _snapshot_identity_matches(
+            existing,
+            city=city,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            data_version=data_version,
+            model_version=model_version,
+            issue_time=issue_time,
+            valid_time=valid_time,
+            available_at=available_at,
+            fetch_time=fetch_time,
+        ):
+            raise ValueError(
+                "legacy ensemble snapshot projection refused: snapshot_id "
+                f"{snapshot_id} already belongs to {existing['city']}/"
+                f"{existing['target_date']}/{existing['temperature_metric']}"
+            )
+        return
+
+    conn.execute(f"""
+        INSERT INTO {legacy_table}
+        (snapshot_id, city, target_date, issue_time, valid_time, available_at,
+         fetch_time, lead_hours, members_json, spread, is_bimodal,
+         model_version, data_version, authority, temperature_metric)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        snapshot_id,
+        city.name,
+        target_date,
+        issue_time,
+        valid_time,
+        available_at,
+        fetch_time,
+        lead_hours,
+        members_json,
+        spread,
+        is_bimodal,
+        model_version,
+        data_version,
+        authority,
+        temperature_metric,
+    ))
+    inserted = _legacy_snapshot_projection_row(conn, legacy_table, snapshot_id)
+    if not _snapshot_identity_matches(
+        inserted,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        data_version=data_version,
+        model_version=model_version,
+        issue_time=issue_time,
+        valid_time=valid_time,
+        available_at=available_at,
+        fetch_time=fetch_time,
+    ):
+        raise ValueError(
+            "legacy ensemble snapshot projection verification failed for "
+            f"snapshot_id {snapshot_id}"
+        )
+
+
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
-    import json
-
     try:
-        snapshots_table = _ensemble_snapshots_table(conn)
+        legacy_table = _ensemble_snapshots_table(conn)
+        v2_table = _ensemble_snapshots_v2_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
@@ -2365,91 +2523,293 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             )
         logger.debug("snapshot_metric=%s city=%s date=%s", snap_metric, city.name, target_date)
 
-        conn.execute(f"""
-            INSERT OR IGNORE INTO {snapshots_table}
-            (city, target_date, issue_time, valid_time, available_at, fetch_time,
-             lead_hours, members_json, spread, is_bimodal, model_version, data_version,
-             temperature_metric)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            city.name,
-            target_date,
-            issue_time_value,
-            valid_time_value,
-            available_at_value,
-            fetch_time_value,
-            max(
-                0.0,
-                lead_hours_to_date_start(
-                    target_date,
-                    city.timezone,
-                    ens_result.get("fetch_time"),
-                ),
+        data_version = _metric_identity.data_version
+        assert_data_version_allowed(
+            data_version,
+            context=f"evaluator._store_ens_snapshot:{city.name}:{target_date}:{snap_metric}",
+        )
+        members_unit = _members_unit_for_snapshot(city, ens_result)
+        validate_members_unit(
+            members_unit,
+            context=f"evaluator._store_ens_snapshot:{city.name}:{target_date}:{snap_metric}",
+        )
+        member_extrema = (
+            ens.member_extrema
+            if isinstance(getattr(ens, "member_extrema", None), np.ndarray)
+            else ens.member_maxes
+        )
+        members_json = json.dumps(member_extrema.tolist())
+        degradation_level = str(ens_result.get("degradation_level") or "OK")
+        source_role = str(ens_result.get("forecast_source_role") or "entry_primary")
+        source_id = str(ens_result.get("source_id") or ens_result.get("model") or "")
+        training_allowed = int(
+            issue_time_value is not None
+            and degradation_level == "OK"
+            and source_role == "entry_primary"
+        )
+        causality_status = "OK" if training_allowed else (
+            "RUNTIME_ONLY_FALLBACK" if source_role != "entry_primary" or degradation_level != "OK" else "UNKNOWN"
+        )
+        authority = "VERIFIED" if degradation_level == "OK" and source_role == "entry_primary" else "UNVERIFIED"
+        provenance_json = json.dumps({
+            "writer": "evaluator._store_ens_snapshot",
+            "source_id": source_id,
+            "model": ens_result.get("model"),
+            "raw_payload_hash": ens_result.get("raw_payload_hash"),
+            "authority_tier": ens_result.get("authority_tier"),
+            "degradation_level": degradation_level,
+            "forecast_source_role": source_role,
+            "legacy_projection_table": legacy_table,
+        }, sort_keys=True)
+        lead_hours = max(
+            0.0,
+            lead_hours_to_date_start(
+                target_date,
+                city.timezone,
+                ens_result.get("fetch_time"),
             ),
-            # S3e: member_extrema stores HIGH maxes for HIGH rows and LOW mins for LOW rows.
-            # Downstream (rebuild_calibration_pairs*) filters by temperature_metric column
-            # to route to the correct settlement semantics. Do NOT use members_json without
-            # checking temperature_metric first.
-            json.dumps(
-                (
-                    ens.member_extrema
-                    if isinstance(getattr(ens, "member_extrema", None), np.ndarray)
-                    else ens.member_maxes
-                ).tolist()
-            ),
-            ens.spread_float(),
-            int(ens.is_bimodal()),
-            ens_result["model"],
-            "live_v1",
-            snap_metric,
-        ))
-        row = conn.execute(f"""
-            SELECT snapshot_id FROM {snapshots_table}
-            WHERE city = ?
-              AND target_date = ?
-              AND data_version = ?
-              AND temperature_metric = ?
-              AND model_version = ?
-              AND available_at = ?
-              AND fetch_time = ?
-              AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
-              AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
-            ORDER BY snapshot_id DESC
-            LIMIT 1
-        """, (
-            city.name,
-            target_date,
-            "live_v1",
-            snap_metric,
-            ens_result["model"],
-            available_at_value,
-            fetch_time_value,
-            issue_time_value,
-            issue_time_value,
-            valid_time_value,
-            valid_time_value,
-        )).fetchone()
+        )
+
+        snapshot_id = ""
+        spread = ens.spread_float()
+        is_bimodal = int(ens.is_bimodal())
+        model_version = ens_result["model"]
+        if v2_table:
+            conn.execute(f"""
+                INSERT OR IGNORE INTO {v2_table}
+                (city, target_date, temperature_metric, physical_quantity, observation_field,
+                 issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+                 spread, is_bimodal, model_version, data_version, training_allowed,
+                 causality_status, boundary_ambiguous, provenance_json, authority,
+                 members_unit, unit)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                city.name,
+                target_date,
+                snap_metric,
+                _metric_identity.physical_quantity,
+                _metric_identity.observation_field,
+                issue_time_value,
+                valid_time_value,
+                available_at_value,
+                fetch_time_value,
+                lead_hours,
+                members_json,
+                spread,
+                is_bimodal,
+                model_version,
+                data_version,
+                training_allowed,
+                causality_status,
+                0,
+                provenance_json,
+                authority,
+                members_unit,
+                getattr(city, "settlement_unit", None),
+            ))
+            row = conn.execute(f"""
+                SELECT snapshot_id FROM {v2_table}
+                WHERE city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                  AND data_version = ?
+                  AND model_version = ?
+                  AND available_at = ?
+                  AND fetch_time = ?
+                  AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
+                  AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
+                ORDER BY snapshot_id DESC
+                LIMIT 1
+            """, (
+                city.name,
+                target_date,
+                snap_metric,
+                data_version,
+                model_version,
+                available_at_value,
+                fetch_time_value,
+                issue_time_value,
+                issue_time_value,
+                valid_time_value,
+                valid_time_value,
+            )).fetchone()
+            snapshot_id = str(row["snapshot_id"]) if row is not None else ""
+            if not snapshot_id:
+                raise ValueError(
+                    "canonical ensemble_snapshots_v2 insert/lookup failed; "
+                    "refusing to fall back to legacy ensemble_snapshots authority"
+                )
+            _ensure_legacy_snapshot_projection(
+                conn,
+                legacy_table=legacy_table,
+                snapshot_id=snapshot_id,
+                city=city,
+                target_date=target_date,
+                issue_time=issue_time_value,
+                valid_time=valid_time_value,
+                available_at=available_at_value,
+                fetch_time=fetch_time_value,
+                lead_hours=lead_hours,
+                members_json=members_json,
+                spread=spread,
+                is_bimodal=is_bimodal,
+                model_version=model_version,
+                data_version=data_version,
+                authority=authority,
+                temperature_metric=snap_metric,
+            )
+        else:
+            conn.execute(f"""
+                INSERT OR IGNORE INTO {legacy_table}
+                (city, target_date, issue_time, valid_time, available_at, fetch_time,
+                 lead_hours, members_json, spread, is_bimodal, model_version,
+                 data_version, authority, temperature_metric)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                city.name,
+                target_date,
+                issue_time_value,
+                valid_time_value,
+                available_at_value,
+                fetch_time_value,
+                lead_hours,
+                members_json,
+                spread,
+                is_bimodal,
+                model_version,
+                data_version,
+                authority,
+                snap_metric,
+            ))
+            row = conn.execute(f"""
+                SELECT snapshot_id FROM {legacy_table}
+                WHERE city = ?
+                  AND target_date = ?
+                  AND data_version = ?
+                  AND temperature_metric = ?
+                  AND model_version = ?
+                  AND available_at = ?
+                  AND fetch_time = ?
+                  AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
+                  AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
+                ORDER BY snapshot_id DESC
+                LIMIT 1
+            """, (
+                city.name,
+                target_date,
+                data_version,
+                snap_metric,
+                model_version,
+                available_at_value,
+                fetch_time_value,
+                issue_time_value,
+                issue_time_value,
+                valid_time_value,
+                valid_time_value,
+            )).fetchone()
+            snapshot_id = str(row["snapshot_id"]) if row is not None else ""
         conn.commit()
-        return str(row["snapshot_id"]) if row is not None else ""
+        return snapshot_id
     except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.warning("Failed to store ENS snapshot: %s", e)
         return ""
 
 
-def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_corrected: bool = False) -> None:
+def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_corrected: bool = False) -> bool:
     """Persist the decision-time p_raw vector and bias_corrected flag onto the snapshot row."""
 
     if not snapshot_id:
-        return
+        return False
 
     import json
 
     try:
+        p_raw_json = json.dumps(p_raw.tolist())
         snapshots_table = _ensemble_snapshots_table(conn)
-        conn.execute(
+        v2_table = _ensemble_snapshots_v2_table(conn)
+        if v2_table:
+            v2_row = conn.execute(f"""
+                SELECT city, target_date, issue_time, valid_time, available_at,
+                       fetch_time, model_version, data_version, temperature_metric
+                FROM {v2_table}
+                WHERE snapshot_id = ?
+            """, (snapshot_id,)).fetchone()
+            if v2_row is None:
+                result = conn.execute(
+                    f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
+                    (p_raw_json, int(bias_corrected), snapshot_id),
+                )
+                if result.rowcount != 1:
+                    raise ValueError(
+                        "legacy-only ensemble_snapshots p_raw update affected "
+                        f"{result.rowcount} rows for snapshot_id {snapshot_id}"
+                    )
+                conn.commit()
+                return True
+            result = conn.execute(
+                f"UPDATE {v2_table} SET p_raw_json = ? WHERE snapshot_id = ?",
+                (p_raw_json, snapshot_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError(
+                    "canonical ensemble_snapshots_v2 p_raw update affected "
+                    f"{result.rowcount} rows for snapshot_id {snapshot_id}"
+                )
+            result = conn.execute(f"""
+                UPDATE {snapshots_table}
+                SET p_raw_json = ?, bias_corrected = ?
+                WHERE snapshot_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND data_version = ?
+                  AND temperature_metric = ?
+                  AND model_version = ?
+                  AND available_at = ?
+                  AND fetch_time = ?
+                  AND ((issue_time IS NULL AND ? IS NULL) OR issue_time = ?)
+                  AND ((valid_time IS NULL AND ? IS NULL) OR valid_time = ?)
+            """, (
+                p_raw_json,
+                int(bias_corrected),
+                snapshot_id,
+                v2_row["city"],
+                v2_row["target_date"],
+                v2_row["data_version"],
+                v2_row["temperature_metric"],
+                v2_row["model_version"],
+                v2_row["available_at"],
+                v2_row["fetch_time"],
+                v2_row["issue_time"],
+                v2_row["issue_time"],
+                v2_row["valid_time"],
+                v2_row["valid_time"],
+            ))
+            if result.rowcount != 1:
+                raise ValueError(
+                    "legacy ensemble_snapshots p_raw projection update affected "
+                    f"{result.rowcount} rows for canonical snapshot_id {snapshot_id}"
+                )
+            conn.commit()
+            return True
+        result = conn.execute(
             f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
-            (json.dumps(p_raw.tolist()), int(bias_corrected), snapshot_id),
+            (p_raw_json, int(bias_corrected), snapshot_id),
         )
+        if result.rowcount != 1:
+            raise ValueError(
+                "legacy ensemble_snapshots p_raw update affected "
+                f"{result.rowcount} rows for snapshot_id {snapshot_id}"
+            )
         conn.commit()
+        return True
     except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.warning("Failed to store snapshot p_raw for %s: %s", snapshot_id, e)
+        return False
