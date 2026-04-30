@@ -428,6 +428,29 @@ def _collect_evidence(
     }
 
 
+def _weak_selectable(evidence: dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("weak_hits")
+        and (evidence.get("policy") or {}).get("single_terms_can_select")
+    )
+
+
+def _file_only_semantic_candidate(evidence: dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("semantic_file_hits")
+        and not evidence.get("strong_hits")
+        and not _weak_selectable(evidence)
+    )
+
+
+def _semantic_file_fanout(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        for path in candidate.get("semantic_file_hits") or []:
+            counts[path] = counts.get(path, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Profile resolver
 # ---------------------------------------------------------------------------
@@ -443,7 +466,8 @@ def _resolve_profile(
             "profile_id": str | None,
             "selected_by": "phrase" | "file" | "weak_term" | "fallback" |
                 "shared_file_only" | "companion_file_only" |
-                "weak_term_nonselectable" | "typed_intent",
+                "weak_term_nonselectable" | "high_fanout_file_only" |
+                "typed_intent",
             "confidence": float,
             "candidates": [...],
             "ambiguous": bool,
@@ -468,6 +492,44 @@ def _resolve_profile(
 
     top = candidates[0]
     runner_up = candidates[1] if len(candidates) > 1 else None
+
+    # Hub files such as src/engine/evaluator.py appear in many profile
+    # allowed-file lists. If a profile would be selected only because such a
+    # file was touched, the resolver must not let profile declaration order
+    # choose the task semantics. Strong phrases or typed intent can still
+    # select a profile; high-fanout file-only evidence requires narrowing.
+    if _file_only_semantic_candidate(top):
+        file_fanout = _semantic_file_fanout(candidates)
+        ambiguous_hits = [
+            path for path in top.get("semantic_file_hits") or []
+            if file_fanout.get(path, 0) > 1
+        ]
+        ambiguous_candidates = [
+            candidate["profile_id"]
+            for candidate in candidates
+            if set(candidate.get("semantic_file_hits") or []) & set(ambiguous_hits)
+        ]
+        if ambiguous_hits and len(ambiguous_candidates) > 1:
+            return {
+                "profile_id": None,
+                "selected_by": "high_fanout_file_only",
+                "confidence": top["score"],
+                "candidates": [c["profile_id"] for c in candidates],
+                "ambiguous": True,
+                "strong_hits": list(top.get("strong_hits") or []),
+                "weak_hits": list(top.get("weak_hits") or []),
+                "negative_hits": list(top.get("negative_hits") or []),
+                "file_hits": list(top.get("file_hits") or []),
+                "semantic_file_hits": list(top.get("semantic_file_hits") or []),
+                "companion_file_hits": list(top.get("companion_file_hits") or []),
+                "shared_file_hits": list(top.get("shared_file_hits") or []),
+                "evidence_class": "high_fanout_file_only",
+                "why": [
+                    "file-only profile selection is ambiguous for high-fanout "
+                    f"file(s) {ambiguous_hits}: {ambiguous_candidates}; pass "
+                    "typed intent or include a profile-specific semantic phrase"
+                ],
+            }
 
     # Ambiguity: top two within delta and both based on strong evidence.
     if (
@@ -932,6 +994,7 @@ def build_digest(
             "shared_file_only",
             "companion_file_only",
             "weak_term_nonselectable",
+            "high_fanout_file_only",
             "typed_intent_invalid",
         } or bool(resolution.get("ambiguous")),
     }

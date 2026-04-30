@@ -746,6 +746,103 @@ def test_profile_specific_files_still_select_live_readiness():
     ]
 
 
+def test_high_fanout_evaluator_file_does_not_select_profile_by_itself(monkeypatch):
+    from scripts import topology_doctor
+
+    topology = topology_doctor.load_topology()
+    topology = {**topology, "digest_profiles": list(topology["digest_profiles"])}
+    topology["digest_profiles"].extend([
+        {
+            "id": "phase 1 source policy synthetic",
+            "match_policy": {
+                "strong_phrases": ["Phase 1D forecast source policy"],
+                "weak_terms": [],
+                "negative_phrases": [],
+                "single_terms_can_select": False,
+                "min_confidence": 0.5,
+            },
+            "file_patterns": ["src/engine/evaluator.py"],
+            "allowed_files": ["src/engine/evaluator.py"],
+        },
+        {
+            "id": "snapshot policy synthetic",
+            "match_policy": {
+                "strong_phrases": ["executable market snapshot"],
+                "weak_terms": [],
+                "negative_phrases": [],
+                "single_terms_can_select": False,
+                "min_confidence": 0.5,
+            },
+            "file_patterns": ["src/engine/evaluator.py"],
+            "allowed_files": ["src/engine/evaluator.py"],
+        },
+    ])
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    digest = build_digest(
+        "Phase 1 source/snapshot policy",
+        ["src/engine/evaluator.py"],
+    )
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "ambiguous"
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
+    assert digest["profile_selection"]["evidence_class"] == "high_fanout_file_only"
+    assert digest["profile_selection"]["needs_typed_intent"] is True
+    assert "src/engine/evaluator.py" in digest["profile_selection"]["semantic_file_hits"]
+    assert "phase 1 source policy synthetic" in digest["profile_selection"]["candidates"]
+    assert "snapshot policy synthetic" in digest["profile_selection"]["candidates"]
+
+
+def test_diagnostic_text_about_wrong_capability_route_does_not_admit_evaluator(monkeypatch):
+    from scripts import topology_doctor
+
+    topology = topology_doctor.load_topology()
+    topology = {**topology, "digest_profiles": list(topology["digest_profiles"])}
+    topology["digest_profiles"].extend([
+        {
+            "id": "phase 2c execution capability proof implementation synthetic",
+            "match_policy": {
+                "strong_phrases": ["Phase 2C DSA-16 composed execution capability proof"],
+                "weak_terms": [],
+                "negative_phrases": [],
+                "single_terms_can_select": False,
+                "min_confidence": 0.5,
+            },
+            "file_patterns": ["src/engine/evaluator.py"],
+            "allowed_files": ["src/execution/executor.py"],
+            "forbidden_files": ["src/engine/**"],
+        },
+        {
+            "id": "phase 1 source policy synthetic",
+            "match_policy": {
+                "strong_phrases": ["Phase 1D forecast source policy"],
+                "weak_terms": [],
+                "negative_phrases": [],
+                "single_terms_can_select": False,
+                "min_confidence": 0.5,
+            },
+            "file_patterns": ["src/engine/evaluator.py"],
+            "allowed_files": ["src/engine/evaluator.py"],
+        },
+    ])
+    monkeypatch.setattr(topology_doctor, "load_topology", lambda: topology)
+
+    digest = build_digest(
+        "first topology probe was misrouted to Phase 2C capability profile; "
+        "narrow task wording to Phase 1 source/snapshot policy before touching evaluator",
+        ["src/engine/evaluator.py"],
+    )
+
+    assert digest["profile"] == "generic"
+    assert digest["profile"] != "phase 2c execution capability proof implementation synthetic"
+    assert digest["admission"]["status"] == "ambiguous"
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
+    assert digest["profile_selection"]["needs_typed_intent"] is True
+
+
 def test_typed_intent_overrides_phrase_scoring_without_bypassing_admission():
     digest = build_digest(
         "G1 live readiness route card implementation",
