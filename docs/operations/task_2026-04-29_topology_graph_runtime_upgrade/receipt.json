@@ -17,6 +17,7 @@
     "tests/AGENTS.md"
   ],
   "allowed_files": [
+    ".agents/skills/AGENTS.md",
     ".agents/skills/zeus-ai-handoff/SKILL.md",
     "AGENTS.md",
     "architecture/context_pack_profiles.yaml",
@@ -53,6 +54,7 @@
     "src/**"
   ],
   "changed_files": [
+    ".agents/skills/AGENTS.md",
     ".agents/skills/zeus-ai-handoff/SKILL.md",
     "AGENTS.md",
     "architecture/context_pack_profiles.yaml",
@@ -148,6 +150,17 @@
     "work-record check for this follow-up: ok true",
     "change-receipts check for this follow-up: ok true",
     "topology closeout for this follow-up: ok true",
+    "2026-04-30 mode-scoped handoff follow-up applied: zeus-ai-handoff reads/artifacts are mode-scoped, C-mode is reserved for real multi-batch/K0/K1 coordination, .agents/skills/AGENTS.md is admitted by the agent-runtime profile, and the skill registry now reports v2.2.",
+    "digest profile mirror check after skill registry admission: ok",
+    "navigation for mode-scoped handoff follow-up: ok true",
+    "planning-lock for mode-scoped handoff follow-up: ok true",
+    "map-maintenance for mode-scoped handoff follow-up: ok true",
+    "pytest handoff/reference/route/read-only slice: 9 passed, 277 deselected",
+    "pytest agent-runtime digest profile admission slice: 1 passed, 42 deselected",
+    "pytest digest profile equivalence: 4 passed",
+    "schema check after mode-scoped handoff follow-up: ok true",
+    "change-receipts check after mode-scoped handoff follow-up: ok true",
+    "topology closeout after mode-scoped handoff follow-up: ok true",
     "git diff --check: clean"
   ],
   "tests_evidence": [
