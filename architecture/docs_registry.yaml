@@ -678,24 +678,6 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/task_2026-04-30_reality_semantics_refactor_package/**
-  doc_class: package_input
-  default_read: false
-  direct_reference_allowed: false
-  current_role: compaction-safe full reality-semantics refactor package preserving the original review and mirrored pricing-semantics cutover package; package input only, not live deploy or production mutation authority
-  canonical_replaced_by: []
-  next_action: archive_after_closeout
-  lifecycle_state: transitional
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: package_input
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: packet_audit
 - path: docs/reference/zeus_domain_model.md
   doc_class: reference
   default_read: true

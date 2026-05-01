@@ -1,6 +1,6 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
-# Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p0_hardening/decisions.md §O2-c
+# Last reused/audited: 2026-05-01
+# Authority basis: AGENTS.md (INV-26)
 #
 # Runtime posture YAML — read-only at runtime (INV-26).
 #
@@ -23,9 +23,6 @@ default_posture: NO_NEW_ENTRIES
 
 branches:
   main: NO_NEW_ENTRIES
-  midstream_remediation: NO_NEW_ENTRIES
-  claude/pr18-execution-state-truth-fix-plan-2026-04-26: NO_NEW_ENTRIES
-  data-improve: NO_NEW_ENTRIES
 
 posture_grammar:
   - NORMAL
