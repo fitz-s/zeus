@@ -229,9 +229,12 @@ in the final response; for packet closeout, append it to the already-required
 work log or receipt. Cover three points: what scratch/runtime context was
 promoted, summarized, discarded, or left local; one to three actionable Zeus
 improvement insights observed during the operation; and a topology usage note
-that names what helped and what blocked or slowed the work. The capsule must
-not create standalone `evidence.md`/`findings.md` files, widen the diff, or
-turn a suggestion into implementation scope without an explicit route.
+that names what helped and what blocked or slowed the work. A useful topology
+note is not just "passed/blocked": it should compactly name the route/admission/risk
+outcome, whether that matched the semantic task, one concrete help, one concrete
+friction, and one next topology delta or `none_observed`. The capsule must not
+create standalone `evidence.md`/`findings.md` files, widen the diff, or turn a
+suggestion into implementation scope without an explicit route.
 
 Use the first-class route when an agent needs to classify this closeout habit:
 `python3 scripts/topology_doctor.py --navigation --task "direct operation feedback capsule: context recovery, Zeus improvement insights, topology helped/blocked" --intent "direct operation feedback capsule" --write-intent read_only`.

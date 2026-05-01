@@ -176,7 +176,10 @@ This is a short feedback capsule, not a new artifact stack:
    the work, such as a code simplification, test gap, doc/routing mismatch, or
    small next repair. Mark evidence versus inference when it matters.
 3. Topology experience: name what topology helped and what topology blocked,
-   misrouted, or slowed.
+   misrouted, or slowed. This should be diagnostic without becoming a report:
+   include the route/admission/risk outcome, whether it matched the semantic
+   task, one concrete help, one concrete friction, and one next topology delta
+   or `none_observed`.
 
 For Mode A, include the capsule in the final response. For packet closeout,
 append it to an already-selected work log or receipt. Do not create

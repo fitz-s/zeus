@@ -56,8 +56,10 @@ bounded impact summary without pretending every file is source.
   packs, not new authority documents.
 - Generated runtime packets should remind agents to close an operation with a
   compact feedback capsule: context recovery, Zeus improvement insights, and
-  topology helped/blocked notes. This is a final-response or consumed-packet
-  habit, not an extra closeout gate.
+  topology helped/blocked notes. The topology note should name route/admission/risk,
+  semantic match, concrete help, concrete friction, and next topology delta or
+  `none_observed`. This is a final-response or consumed-packet habit, not an
+  extra closeout gate.
 
 ## Failure modes
 

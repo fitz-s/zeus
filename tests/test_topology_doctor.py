@@ -4862,6 +4862,9 @@ def test_runtime_context_packs_include_lightweight_operation_feedback_loop():
         feedback = packet["runtime_guidance"]["operation_feedback_loop"]
         assert "Zeus improvement insights" in feedback
         assert "topology helped/blocked note" in feedback
+        assert "route/admission/risk" in feedback
+        assert "concrete friction" in feedback
+        assert "none_observed" in feedback
         assert "final response or an already-required packet work log/receipt" in feedback
         assert "standalone artifact" in feedback
 
@@ -4879,6 +4882,8 @@ def test_runtime_packet_artifact_hints_include_feedback_without_new_artifact_sta
     hints = " ".join(packet["artifact_treatment_hints"])
     assert "compact feedback capsule" in hints
     assert "already-required packet surface" in hints
+    assert "route/admission/risk" in hints
+    assert "next delta or none_observed" in hints
 
 
 def test_runtime_reference_docs_keep_feedback_capsule_non_bureaucratic():
@@ -4898,6 +4903,9 @@ def test_runtime_reference_docs_keep_feedback_capsule_non_bureaucratic():
     assert "operation-end feedback capsule" in combined
     assert "Zeus improvement insights" in combined
     assert "topology helped/blocked" in combined
+    assert "route/admission/risk" in combined
+    assert "semantic match" in combined
+    assert "none_observed" in combined
     assert "standalone `evidence.md`/`findings.md`" in combined
     assert "widening the active packet" in combined or "widen the diff" in combined
 

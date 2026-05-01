@@ -36,7 +36,9 @@ Topology has five interacting layers:
 - Operation-end feedback should create a positive loop without becoming a new
   gate: agents capture context recovery, Zeus improvement insights, and
   topology helped/blocked notes in the final response or an already-required
-  packet closeout surface.
+  packet closeout surface. The topology note should name route/admission/risk,
+  semantic match, one help, one friction, and one next topology delta or
+  `none_observed`.
 
 ## Failure modes
 
