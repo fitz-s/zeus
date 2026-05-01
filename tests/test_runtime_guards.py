@@ -47,8 +47,13 @@ from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
     DeprecatedStateFileError,
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     ExitContext,
     ExitDecision,
+    FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     PortfolioState,
     Position,
     has_same_city_range_open,
@@ -1115,9 +1120,72 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
     assert pos.chain_state == "local_only"
     assert pos.size_usd == pytest.approx(24.39 * 0.41)
     assert pos.cost_basis_usd == pytest.approx(24.39 * 0.41)
+    assert pos.entry_price_avg_fill == pytest.approx(0.41)
+    assert pos.shares_filled == pytest.approx(24.39)
+    assert pos.filled_cost_basis_usd == pytest.approx(24.39 * 0.41)
+    assert pos.shares_remaining == pytest.approx(0.0)
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_AVG_FILL_PRICE
+    assert pos.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+    assert pos.corrected_executable_economics_eligible is False
+    assert pos.has_fill_economics_authority is True
     assert pos.fill_quality == pytest.approx((0.41 - 0.40) / 0.40)
     assert exec_row is not None
     assert exec_row["terminal_exec_status"] == "filled"
+
+
+def test_reconcile_pending_partial_fill_updates_fill_authority_without_finality(monkeypatch):
+    db_path = Path(tempfile.mkdtemp()) / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+
+    portfolio = PortfolioState(positions=[_position(
+        trade_id="pending-partial-1",
+        state="pending_tracked",
+        order_id="ord-partial-1",
+        entry_order_id="",
+        entry_fill_verified=False,
+        token_id="tok_yes_partial",
+        no_token_id="tok_no_partial",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        target_notional_usd=10.0,
+        submitted_notional_usd=10.0,
+        entry_price_submitted=0.40,
+        shares_submitted=25.0,
+    )])
+
+    class DummyClob:
+        paper_mode = False
+        def get_order_status(self, order_id):
+            assert order_id == "ord-partial-1"
+            return {
+                "status": "PARTIAL",
+                "avgPrice": 0.41,
+                "filledSize": 10.0,
+                "trade_id": "venue-trade-partial-runtime",
+            }
+
+    monkeypatch.setattr(cycle_runner, "_utcnow", lambda: datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+
+    summary = cycle_runner._reconcile_pending_positions(portfolio, DummyClob(), tracker=None)
+    pos = portfolio.positions[0]
+
+    assert summary["entered"] == 0
+    assert summary["voided"] == 0
+    assert summary["dirty"] is True
+    assert pos.state == "pending_tracked"
+    assert pos.order_status == "partial"
+    assert pos.entry_fill_verified is False
+    assert pos.entry_price_avg_fill == pytest.approx(0.41)
+    assert pos.shares_filled == pytest.approx(10.0)
+    assert pos.filled_cost_basis_usd == pytest.approx(4.10)
+    assert pos.shares_remaining == pytest.approx(15.0)
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_AVG_FILL_PRICE
+    assert pos.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+    assert pos.has_fill_economics_authority is True
 
 
 def test_exposure_gate_skips_new_entries_without_forcing_reduction(monkeypatch, tmp_path):
@@ -5230,6 +5298,65 @@ def test_materialize_position_preserves_evaluator_strategy_key():
     assert pos.strategy == "center_buy"
 
 
+def test_materialize_position_splits_submitted_target_from_fill_authority():
+    decision = evaluator_module.EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"},
+        size_usd=11.0,
+        decision_id="d1",
+        selected_method="ens_member_counting",
+        edge_source="opening_inertia",
+        strategy_key="center_buy",
+    )
+    result = types.SimpleNamespace(
+        trade_id="t1",
+        fill_price=None,
+        submitted_price=0.55,
+        shares=20.0,
+        timeout_seconds=None,
+        order_id="o1",
+        status="pending",
+    )
+    city = types.SimpleNamespace(name="New York", cluster="US", settlement_unit="F")
+    candidate = types.SimpleNamespace(
+        target_date="2026-04-01",
+        hours_since_open=2.0,
+        temperature_metric="high",
+    )
+    deps = types.SimpleNamespace(
+        _utcnow=lambda: datetime(2026, 4, 3, 6, 0, tzinfo=timezone.utc),
+        _classify_edge_source=lambda mode, edge: "opening_inertia",
+        Position=cycle_runner.Position,
+        settings=types.SimpleNamespace(mode="paper"),
+    )
+
+    pos = cycle_runtime.materialize_position(
+        candidate,
+        decision,
+        result,
+        cycle_runner.PortfolioState(),
+        city,
+        DiscoveryMode.UPDATE_REACTION,
+        state="pending_tracked",
+        env="paper",
+        bankroll_at_entry=100.0,
+        deps=deps,
+    )
+
+    assert pos.target_notional_usd == pytest.approx(11.0)
+    assert pos.entry_price_submitted == pytest.approx(0.55)
+    assert pos.submitted_notional_usd == pytest.approx(11.0)
+    assert pos.shares_submitted == pytest.approx(20.0)
+    assert pos.entry_economics_authority == ENTRY_ECONOMICS_SUBMITTED_LIMIT
+    assert pos.fill_authority == FILL_AUTHORITY_NONE
+    assert pos.entry_price_avg_fill == 0.0
+    assert pos.shares_filled == 0.0
+    assert pos.filled_cost_basis_usd == 0.0
+    assert pos.corrected_executable_economics_eligible is False
+    assert pos.has_fill_economics_authority is False
+
+
 def test_materialize_position_rejects_missing_strategy_key():
     decision = evaluator_module.EdgeDecision(
         should_trade=True,
@@ -9263,6 +9390,40 @@ def test_compute_settlement_close_routes_economically_closed_through_kernel():
 
     assert closed is pos
     assert pos.state == "settled"
+
+
+def test_settlement_economics_rejects_submitted_only_position_authority():
+    from src.execution.harvester import _settlement_economics_for_position
+
+    submitted_only = _position(
+        entry_price=0.55,
+        shares=20.0,
+        size_usd=11.0,
+        cost_basis_usd=11.0,
+        target_notional_usd=11.0,
+        submitted_notional_usd=11.0,
+        entry_price_submitted=0.55,
+        shares_submitted=20.0,
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+
+    with pytest.raises(ValueError, match="fill-derived economics"):
+        _settlement_economics_for_position(submitted_only)
+
+    fill_authoritative = _position(
+        entry_price=0.53,
+        shares=20.0,
+        size_usd=10.6,
+        cost_basis_usd=10.6,
+        entry_price_avg_fill=0.53,
+        shares_filled=20.0,
+        filled_cost_basis_usd=10.6,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+
+    assert _settlement_economics_for_position(fill_authoritative) == pytest.approx((20.0, 10.6))
 
 
 def test_lifecycle_kernel_maps_entry_runtime_states_for_order_status():

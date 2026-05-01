@@ -46,6 +46,9 @@ from src.state.db import (
 )
 from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+    ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
+    ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     PortfolioState,
     compute_settlement_close,
     load_portfolio,
@@ -56,6 +59,27 @@ from src.state.strategy_tracker import get_tracker, save_tracker
 from src.riskguard.discord_alerts import alert_redeem
 
 logger = logging.getLogger(__name__)
+
+_NON_FILL_ENTRY_ECONOMICS_AUTHORITIES = frozenset({
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+    ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
+    ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+})
+
+
+def _settlement_economics_for_position(pos) -> tuple[float, float]:
+    if getattr(pos, "has_fill_economics_authority", False):
+        return float(pos.effective_shares), float(pos.effective_cost_basis_usd)
+    authority = str(getattr(pos, "entry_economics_authority", "") or "")
+    if authority in _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES:
+        raise ValueError(
+            "settlement P&L requires fill-derived economics; "
+            f"entry_economics_authority={authority!r} "
+            f"fill_authority={getattr(pos, 'fill_authority', '')!r}"
+        )
+    shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
+    cost_basis = float(getattr(pos, "cost_basis_usd", 0.0) or getattr(pos, "size_usd", 0.0) or 0.0)
+    return float(shares), cost_basis
 
 
 def _get_canonical_exit_flag() -> bool:
@@ -1758,7 +1782,11 @@ def _settle_positions(
         # Determine P&L — correct formula: shares × exit_price - cost_basis
         # Legacy-predecessor comparison found the old formula underestimated winning P&L
         won = pos.bin_label == winning_label
-        shares = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0
+        try:
+            shares, settlement_cost_basis = _settlement_economics_for_position(pos)
+        except ValueError as exc:
+            logger.warning("Skipping settlement P&L for %s: %s", pos.trade_id, exc)
+            continue
         exited_at_before_settlement = getattr(pos, "last_exit_at", "")
         if pos.direction == "buy_yes":
             exit_price = 1.0 if won else 0.0
@@ -1775,7 +1803,7 @@ def _settle_positions(
             closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
         else:
             closed = compute_settlement_close(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
-        pnl = closed.pnl if closed is not None else round(shares * exit_price - pos.size_usd, 2)
+        pnl = closed.pnl if closed is not None else round(shares * exit_price - settlement_cost_basis, 2)
         outcome = 1 if exit_price > 0 else 0
 
         if closed is not None:

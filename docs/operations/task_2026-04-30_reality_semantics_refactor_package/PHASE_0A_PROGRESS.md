@@ -370,6 +370,52 @@ Verification:
 - `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_v2_adapter.py tests/test_risk_allocator.py --json` -> ok
 - `git diff --check -- src/contracts/venue_submission_envelope.py src/data/polymarket_client.py tests/test_v2_adapter.py tests/test_risk_allocator.py`
 
+## 2026-05-01 Packet 3 - F-09 Fill Authority Split
+
+Implemented the fill-authority split as a dry-run code/test packet without
+schema apply, production DB mutation, live venue side effects, or source-routing
+changes. Topology classifies this as T4; the user provided explicit code-packet
+go, the apply guard is "no schema/prod/live action", and rollback is a clean git
+revert of this packet.
+
+Architecture outcome:
+
+- `Position` now carries target, submitted, and filled economics separately:
+  target notional, submitted notional/limit/shares, average fill price, filled
+  cost basis, filled/remaining shares, entry cost-basis id/hash, pricing
+  semantics version, and explicit entry/fill authority labels.
+- `materialize_position()` marks unfilled entries as submitted-limit authority
+  only; it does not promote target/submitted economics to fill-grade authority.
+- `fill_tracker` updates filled shares, average fill price, filled cost basis,
+  remaining shares, and fill authority on full, partial, optimistic, and
+  cancelled-remainder observations while keeping legacy fields synchronized for
+  existing consumers.
+- `harvester` refuses settlement P&L for positions explicitly marked
+  submitted/model/corrected-cost-only without fill-derived economics. Legacy
+  unclassified rows keep the historical fallback for backward compatibility.
+- `recent_exits` now carries the split economics fields so F-10 report/replay
+  gates can hard-fail or segregate cohorts instead of reconstructing from
+  `entry_price`/`size_usd` alone.
+
+Verification:
+
+- `python3 -m pytest tests/test_runtime_guards.py::test_materialize_position_preserves_evaluator_strategy_key tests/test_runtime_guards.py::test_materialize_position_splits_submitted_target_from_fill_authority tests/test_runtime_guards.py::test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local tests/test_runtime_guards.py::test_reconcile_pending_partial_fill_updates_fill_authority_without_finality tests/test_runtime_guards.py::test_settlement_economics_rejects_submitted_only_position_authority -q` -> 5 passed
+- `python3 -m pytest tests/test_runtime_guards.py::test_reconcile_pending_positions_delegates_to_fill_tracker tests/test_runtime_guards.py::test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local tests/test_runtime_guards.py::test_reconcile_pending_partial_fill_updates_fill_authority_without_finality tests/test_runtime_guards.py::test_materialize_position_preserves_evaluator_strategy_key tests/test_runtime_guards.py::test_materialize_position_splits_submitted_target_from_fill_authority tests/test_runtime_guards.py::test_materialize_position_rejects_missing_strategy_key tests/test_runtime_guards.py::test_compute_settlement_close_routes_economically_closed_through_kernel tests/test_runtime_guards.py::test_settlement_economics_rejects_submitted_only_position_authority -q` -> 8 passed
+- `python3 -m pytest tests/test_command_recovery.py tests/test_provenance_5_projections.py tests/test_harvester_metric_identity.py tests/test_harvester_dr33_live_enablement.py -q` -> 86 passed
+- `python3 -m compileall -q src/state/portfolio.py src/engine/cycle_runtime.py src/execution/fill_tracker.py src/execution/harvester.py tests/test_runtime_guards.py`
+- `python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-09 fill authority split closeout without schema apply: position materialization and fill tracker split submitted target, filled quantity, filled cost basis, average fill price, remaining shares, and economics authority on Position/read-model surfaces; harvester requires fill-derived authority for corrected settlement PnL; explicit operator-go from user for code packet only; dry-run tests only; rollback is git revert; no schema apply, no production DB mutation, no live venue side effects" --files src/engine/cycle_runtime.py src/execution/fill_tracker.py src/execution/harvester.py src/state/portfolio.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted T4 with operator-go/dry-run/apply-guard/rollback requirements
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_runtime_guards.py --json` -> ok
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files src/engine/cycle_runtime.py src/execution/fill_tracker.py src/execution/harvester.py src/state/portfolio.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/engine/cycle_runtime.py src/execution/fill_tracker.py src/execution/harvester.py src/state/portfolio.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `git diff --check -- src/state/portfolio.py src/engine/cycle_runtime.py src/execution/fill_tracker.py src/execution/harvester.py tests/test_runtime_guards.py`
+
+Known verification gap:
+
+- `python3 -m pytest tests/test_runtime_guards.py -q` again hung after visible
+  progress past the same long-running point observed in Packet 1 and was killed
+  after roughly one minute. Focused F-09 runtime cases and the related command
+  recovery/provenance/harvester suites passed.
+
 ## Not Completed
 
 This slice does not implement runtime rewiring. Legacy executor limit

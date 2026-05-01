@@ -205,6 +205,31 @@ ADMIN_EXITS = frozenset({
 # check `pos.is_quarantine_placeholder` instead of comparing city == "UNKNOWN".
 QUARANTINE_SENTINEL = "QUARANTINE_UNRESOLVED"
 
+ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
+ENTRY_ECONOMICS_MODEL_EDGE_PRICE = "model_edge_price"
+ENTRY_ECONOMICS_SUBMITTED_LIMIT = "submitted_limit"
+ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
+ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
+
+FILL_AUTHORITY_NONE = "none"
+FILL_AUTHORITY_OPTIMISTIC_SUBMITTED = "optimistic_submitted"
+FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL = "venue_confirmed_partial"
+FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
+FILL_AUTHORITY_CANCELLED_REMAINDER = "cancelled_remainder"
+FILL_AUTHORITY_SETTLED = "settled"
+CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION = "corrected_executable_cost_v1"
+
+FILL_GRADE_ENTRY_AUTHORITIES = frozenset({
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+})
+FILL_GRADE_FILL_AUTHORITIES = frozenset({
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+})
+
 
 @dataclass
 class Position:
@@ -238,6 +263,21 @@ class Position:
     edge: float = 0.0
     shares: float = 0.0  # size_usd / entry_price
     cost_basis_usd: float = 0.0  # = size_usd
+    target_notional_usd: float = 0.0
+    submitted_notional_usd: float = 0.0
+    filled_cost_basis_usd: float = 0.0
+    entry_price_submitted: float = 0.0
+    entry_price_avg_fill: float = 0.0
+    shares_submitted: float = 0.0
+    shares_filled: float = 0.0
+    shares_remaining: float = 0.0
+    entry_cost_basis_id: str = ""
+    entry_cost_basis_hash: str = ""
+    entry_economics_authority: str = ENTRY_ECONOMICS_LEGACY_UNKNOWN
+    fill_authority: str = FILL_AUTHORITY_NONE
+    pricing_semantics_version: str = "legacy_unclassified"
+    execution_cost_basis_version: str = ""
+    corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
     day0_entered_at: str = ""
@@ -353,6 +393,8 @@ class Position:
 
     @property
     def effective_shares(self) -> float:
+        if self.has_fill_economics_authority:
+            return self.shares_filled
         if self.shares > 0:
             return self.shares
         if self.entry_price > 0:
@@ -361,7 +403,18 @@ class Position:
 
     @property
     def effective_cost_basis_usd(self) -> float:
+        if self.has_fill_economics_authority:
+            return self.filled_cost_basis_usd
         return self.cost_basis_usd if self.cost_basis_usd > 0 else self.size_usd
+
+    @property
+    def has_fill_economics_authority(self) -> bool:
+        return (
+            self.entry_economics_authority in FILL_GRADE_ENTRY_AUTHORITIES
+            and self.fill_authority in FILL_GRADE_FILL_AUTHORITIES
+            and self.shares_filled > 0
+            and self.filled_cost_basis_usd > 0
+        )
 
     @property
     def unrealized_pnl(self) -> float:
@@ -1622,6 +1675,21 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         # Entry context (replay-critical)
         "entry_price": pos.entry_price,
         "size_usd": pos.size_usd,
+        "target_notional_usd": pos.target_notional_usd,
+        "submitted_notional_usd": pos.submitted_notional_usd,
+        "filled_cost_basis_usd": pos.filled_cost_basis_usd,
+        "entry_price_submitted": pos.entry_price_submitted,
+        "entry_price_avg_fill": pos.entry_price_avg_fill,
+        "shares_submitted": pos.shares_submitted,
+        "shares_filled": pos.shares_filled,
+        "shares_remaining": pos.shares_remaining,
+        "entry_cost_basis_id": pos.entry_cost_basis_id,
+        "entry_cost_basis_hash": pos.entry_cost_basis_hash,
+        "entry_economics_authority": pos.entry_economics_authority,
+        "fill_authority": pos.fill_authority,
+        "pricing_semantics_version": pos.pricing_semantics_version,
+        "execution_cost_basis_version": pos.execution_cost_basis_version,
+        "corrected_executable_economics_eligible": pos.corrected_executable_economics_eligible,
         "p_posterior": pos.p_posterior,
         "edge": pos.edge,
         "entry_ci_width": pos.entry_ci_width,
