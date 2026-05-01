@@ -169,10 +169,43 @@ Authority and tests now register the first corrected-semantics guardrails:
 - `INV-35` / `NC-22`: `FinalExecutionIntent` contract shape carries submit-ready final-limit lineage without posterior/VWMP recompute inputs
 - `INV-36` / `NC-23`: monitor held-token quote refresh stays out of corrected posterior prior evidence
 
+## 2026-05-01 Packet 0 Route Repair
+
+The remaining blocked surfaces were real architecture gates, not nuisance
+failures. Packet 0 updates only routing/package boundaries so the next packets
+can re-enter through explicit topology:
+
+- F-06 is admitted through the client/envelope/test seam while `src/venue/**`
+  remains forbidden until a separate venue-governed packet exists.
+- F-08 is admitted through existing execution-intent/order-policy contracts;
+  a new unregistered cost-basis authority file remains out of scope.
+- F-09 is admitted as a planning-lock fill-authority packet with schema
+  authority plus existing realized-fill / harvester / DB tests visible, but
+  schema apply and production DB mutation still forbidden.
+- F-10 is admitted only as a post-F-09 report/replay cohort gate; it must
+  hard-fail or segregate mixed legacy/corrected cohorts after durable fill
+  economics fields exist.
+- Candidate new test filenames remain unclassified until their packet creates
+  and registers them; the first executable routes use existing tests so
+  topology navigation can pass before runtime edits.
+
+No runtime behavior, live venue submission, production data, source routing,
+schema apply, config, or strategy-promotion surface changed in Packet 0.
+
 ## Evidence
 
 Passing checks:
 
+- `python3 -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py` -> 151 passed
+- `python3 scripts/digest_profiles_export.py --check`
+- `python3 scripts/topology_doctor.py --schema`
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_digest_profile_matching.py --json`
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files architecture/source_rationale.yaml architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files architecture/source_rationale.yaml architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python3 -m py_compile tests/test_digest_profile_matching.py architecture/digest_profiles.py`
+- `git diff --check -- architecture/source_rationale.yaml architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- topology navigation now admits F-06 client/envelope/test route, F-08 existing-contract route, F-09 fill-authority route, and F-10 report/replay route
+- topology navigation still blocks `src/venue/polymarket_v2_adapter.py` under this profile and still rejects unregistered `src/contracts/executable_cost_basis.py`
 - `pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py`
 - `pytest -q -p no:cacheprovider tests/test_architecture_contracts.py::test_pricing_semantics_guardrail_law_is_registered tests/test_no_bare_float_seams.py`
 - `python3 scripts/digest_profiles_export.py --check`
