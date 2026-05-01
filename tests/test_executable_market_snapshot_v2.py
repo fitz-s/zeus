@@ -1175,7 +1175,7 @@ def test_clob_sweep_non_crossing_limit_is_depth_insufficient_not_empty_book():
     assert sweep.average_price is None
 
 
-def test_passive_limit_candidate_cost_basis_is_not_live_safe():
+def test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_intent():
     cost_basis = _buy_no_cost_basis(
         use_sweep=False,
         depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
@@ -1184,6 +1184,8 @@ def test_passive_limit_candidate_cost_basis_is_not_live_safe():
 
     with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
         cost_basis.assert_live_safe()
+    with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
+        cost_basis.assert_submit_safe()
     with pytest.raises(ValueError, match="NOT_MARKETABLE_PASSIVE_LIMIT"):
         FinalExecutionIntent.from_hypothesis_and_cost_basis(
             hypothesis=hypothesis,

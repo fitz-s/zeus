@@ -1,25 +1,33 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-04-30
 # Authority basis: R3 Z1 cutover guard audit; pre-existing executor behavior tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tests for executor and portfolio."""
 
 import sqlite3
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from src.execution.executor import (
+    OrderResult,
     create_execution_intent,
     create_exit_order_intent,
+    execute_final_intent,
     execute_exit_order,
     execute_intent,
 )
-from src.contracts import EdgeContext, EntryMethod
+from src.contracts import (
+    DecisionSourceContext,
+    EdgeContext,
+    EntryMethod,
+    FinalExecutionIntent,
+)
 import numpy as np
 from src.config import settings
 from src.state.portfolio import (
@@ -30,6 +38,7 @@ from src.types import Bin, BinEdge
 
 _TEST_CONN = None
 _NOW = datetime(2026, 4, 27, tzinfo=timezone.utc)
+_DEFAULT_DECISION_SOURCE = object()
 
 
 @pytest.fixture(autouse=True)
@@ -70,14 +79,43 @@ def _snapshot_kwargs(token_id: str) -> dict:
     }
 
 
-def _ensure_snapshot(conn, *, token_id: str) -> str:
+def _ensure_snapshot(
+    conn,
+    *,
+    token_id: str,
+    direction: str = "buy_yes",
+    final_limit_price: Decimal = Decimal("0.33"),
+    snapshot_top_ask: Decimal | None = None,
+    snapshot_top_bid: Decimal | None = None,
+    ask_size: str = "100",
+    bid_size: str = "100",
+) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     assert conn is not None
-    snapshot_id = f"snap-{token_id}"
+    snapshot_id = f"snap-{direction}-{token_id}"
     if get_snapshot(conn, snapshot_id) is not None:
         return snapshot_id
+    selected_is_no = str(direction).endswith("_no")
+    yes_token_id = f"{token_id}-yes" if selected_is_no else token_id
+    no_token_id = token_id if selected_is_no else f"{token_id}-no"
+    outcome_label = "NO" if selected_is_no else "YES"
+    if snapshot_top_ask is not None:
+        top_ask = snapshot_top_ask
+    elif str(direction).startswith("sell_"):
+        top_ask = min(Decimal("0.99"), final_limit_price + Decimal("0.01"))
+    else:
+        top_ask = final_limit_price
+    if snapshot_top_bid is not None:
+        top_bid = snapshot_top_bid
+    elif str(direction).startswith("sell_"):
+        top_bid = final_limit_price
+    else:
+        top_bid = max(
+            Decimal("0.01"),
+            top_ask - Decimal("0.01"),
+        )
     insert_snapshot(
         conn,
         ExecutableMarketSnapshotV2(
@@ -87,10 +125,10 @@ def _ensure_snapshot(conn, *, token_id: str) -> str:
             event_slug="event-test",
             condition_id="condition-test",
             question_id="question-test",
-            yes_token_id=token_id,
-            no_token_id=f"{token_id}-no",
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
             selected_outcome_token_id=token_id,
-            outcome_label="YES",
+            outcome_label=outcome_label,
             enable_orderbook=True,
             active=True,
             closed=False,
@@ -109,12 +147,17 @@ def _ensure_snapshot(conn, *, token_id: str) -> str:
                 "fee_rate_source_field": "fee_rate_fraction",
                 "fee_rate_raw_unit": "fraction",
             },
-            token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
+            token_map_raw={"YES": yes_token_id, "NO": no_token_id},
             rfqe=None,
             neg_risk=False,
-            orderbook_top_bid=Decimal("0.49"),
-            orderbook_top_ask=Decimal("0.51"),
-            orderbook_depth_jsonb="{}",
+            orderbook_top_bid=top_bid,
+            orderbook_top_ask=top_ask,
+            orderbook_depth_jsonb=json.dumps(
+                {
+                    "bids": [{"price": str(top_bid), "size": bid_size}],
+                    "asks": [{"price": str(top_ask), "size": ask_size}],
+                }
+            ),
             raw_gamma_payload_hash="a" * 64,
             raw_clob_market_info_hash="b" * 64,
             raw_orderbook_hash="c" * 64,
@@ -143,6 +186,95 @@ def _final_submit_result(bound_envelope, *, order_id: str | None, status: str = 
     if order_id is not None:
         result["orderID"] = order_id
     return result
+
+
+def _decision_source_context() -> DecisionSourceContext:
+    return DecisionSourceContext(
+        source_id="nws-forecast",
+        model_family="ens",
+        forecast_issue_time="2026-04-26T00:00:00+00:00",
+        forecast_valid_time="2026-04-27T00:00:00+00:00",
+        forecast_fetch_time="2026-04-26T00:05:00+00:00",
+        forecast_available_at="2026-04-26T00:01:00+00:00",
+        raw_payload_hash="e" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-04-26T01:00:00+00:00",
+        decision_time_status="OK",
+    )
+
+
+def _final_execution_intent(
+    *,
+    token_id: str = "yes-token",
+    direction: str = "buy_yes",
+    size_kind: str = "notional_usd",
+    size_value: Decimal = Decimal("3.30"),
+    final_limit_price: Decimal = Decimal("0.33"),
+    order_policy: str = "limit_may_take_conservative",
+    order_type: str = "GTC",
+    post_only: bool = False,
+    cancel_after=None,
+    event_id: str | None = None,
+    resolution_window: str = "2026-04-27",
+    correlation_key: str = "nyc:2026-04-27",
+    decision_source_context=_DEFAULT_DECISION_SOURCE,
+    snapshot_top_ask: Decimal | None = None,
+    snapshot_top_bid: Decimal | None = None,
+    ask_size: str = "100",
+    bid_size: str = "100",
+) -> FinalExecutionIntent:
+    if cancel_after is None:
+        cancel_after = datetime.now(timezone.utc) + timedelta(hours=1)
+    snapshot_id = _ensure_snapshot(
+        _TEST_CONN,
+        token_id=token_id,
+        direction=direction,
+        final_limit_price=final_limit_price,
+        snapshot_top_ask=snapshot_top_ask,
+        snapshot_top_bid=snapshot_top_bid,
+        ask_size=ask_size,
+        bid_size=bid_size,
+    )
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(_TEST_CONN, snapshot_id)
+    assert snapshot is not None
+    if event_id is None:
+        event_id = snapshot.event_id
+    cost_basis_hash = "d" * 64
+    return FinalExecutionIntent(
+        hypothesis_id="hyp-final-1",
+        selected_token_id=token_id,
+        direction=direction,
+        size_kind=size_kind,
+        size_value=size_value,
+        final_limit_price=final_limit_price,
+        expected_fill_price_before_fee=final_limit_price,
+        fee_adjusted_execution_price=final_limit_price,
+        order_policy=order_policy,
+        order_type=order_type,
+        post_only=post_only,
+        cancel_after=cancel_after,
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot.executable_snapshot_hash,
+        cost_basis_id=f"cost_basis:{cost_basis_hash[:16]}",
+        cost_basis_hash=cost_basis_hash,
+        max_slippage_bps=Decimal("200"),
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        fee_rate=Decimal("0"),
+        neg_risk=False,
+        event_id=event_id,
+        resolution_window=resolution_window,
+        correlation_key=correlation_key,
+        decision_source_context=(
+            _decision_source_context()
+            if decision_source_context is _DEFAULT_DECISION_SOURCE
+            else decision_source_context
+        ),
+    )
 
 
 class TestPortfolio:
@@ -357,6 +489,276 @@ class TestExecutor:
                 executable_snapshot_min_order_size=Decimal("0.01"),
                 executable_snapshot_neg_risk=False,
             )
+
+    def test_execute_final_intent_submits_frozen_price_without_recompute(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-final",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        captured = {}
+
+        def fail_recompute(*args, **kwargs):
+            raise AssertionError("legacy recompute path must not run")
+
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(
+                trade_id=trade_id,
+                intent=intent,
+                shares=shares,
+                decision_id=decision_id,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="pending",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
+
+        monkeypatch.setattr("src.execution.executor.compute_native_limit_price", fail_recompute)
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN)
+
+        assert result.status == "pending"
+        submitted = captured["intent"]
+        assert submitted.token_id == "yes-token-final"
+        assert submitted.direction.value == "buy_yes"
+        assert submitted.limit_price == pytest.approx(0.33)
+        assert submitted.target_size_usd == pytest.approx(3.30)
+        assert submitted.executable_snapshot_id == final_intent.snapshot_id
+        assert submitted.event_id == "event-test"
+        assert submitted.resolution_window == "2026-04-27"
+        assert submitted.correlation_key == "nyc:2026-04-27"
+        assert captured["shares"] == pytest.approx(10.0)
+        assert captured["decision_id"] == "hyp-final-1"
+
+    def test_execute_final_intent_routes_buy_no_selected_token(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            token_id="no-token-final",
+            direction="buy_no",
+            final_limit_price=Decimal("0.41"),
+            size_value=Decimal("4.10"),
+        )
+        captured = {}
+
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(intent=intent, shares=shares)
+            return OrderResult(trade_id=trade_id, status="pending")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
+
+        assert captured["intent"].direction.value == "buy_no"
+        assert captured["intent"].token_id == "no-token-final"
+        assert captured["intent"].limit_price == pytest.approx(0.41)
+        assert captured["shares"] == pytest.approx(10.0)
+
+    def test_execute_final_intent_reaches_live_submit_with_decision_source(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-live-final",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                return _final_submit_result(self.bound_envelope, order_id="final-buy-1")
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
+
+        assert result.status == "pending"
+        assert result.order_id == "final-buy-1"
+        command = _TEST_CONN.execute(
+            "SELECT market_id, token_id FROM venue_commands WHERE decision_id = ?",
+            ("decision-final",),
+        ).fetchone()
+        assert dict(command) == {
+            "market_id": "gamma-test",
+            "token_id": "yes-token-live-final",
+        }
+        assert captured == {
+            "token_id": "yes-token-live-final",
+            "price": pytest.approx(0.33),
+            "size": pytest.approx(10.0),
+            "side": "BUY",
+            "order_type": "GTC",
+        }
+
+    def test_execute_final_intent_fails_closed_when_a2_order_type_would_change(self, monkeypatch):
+        final_intent = _final_execution_intent(order_type="GTC")
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
+
+        assert result.status == "rejected"
+        assert result.reason == "final_order_type_mismatch: intent=GTC selected=FOK"
+
+    @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+    def test_execute_final_intent_submits_allocator_immediate_order_type_when_frozen(
+        self,
+        monkeypatch,
+        order_type,
+    ):
+        final_intent = _final_execution_intent(
+            token_id=f"yes-token-{order_type.lower()}-final",
+            order_type=order_type,
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(order_type=order_type, token_id=token_id, price=price, size=size)
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id=f"final-{order_type.lower()}-1",
+                )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: order_type)
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        result = execute_final_intent(
+            final_intent,
+            conn=_TEST_CONN,
+            decision_id=f"decision-final-{order_type.lower()}",
+        )
+
+        assert result.status == "pending"
+        assert captured["order_type"] == order_type
+        assert captured["token_id"] == f"yes-token-{order_type.lower()}-final"
+
+    def test_execute_final_intent_rejects_unfrozen_share_size_on_legacy_entry_executor(self):
+        final_intent = _final_execution_intent(
+            size_kind="shares",
+            size_value=Decimal("10"),
+        )
+
+        with pytest.raises(ValueError, match="notional_usd sizing"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_expired_cancel_after(self):
+        final_intent = _final_execution_intent(
+            cancel_after=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with pytest.raises(ValueError, match="cancel_after has already expired"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_requires_decision_source_context(self):
+        final_intent = _final_execution_intent(decision_source_context=None)
+
+        with pytest.raises(ValueError, match="missing decision_source_context"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_snapshot_token_mismatch(self):
+        final_intent = _final_execution_intent(token_id="yes-token-final")
+        mismatched = replace(final_intent, selected_token_id="other-token")
+
+        with pytest.raises(ValueError, match="selected_token_id"):
+            execute_final_intent(mismatched, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_snapshot_event_mismatch(self):
+        final_intent = _final_execution_intent(event_id="wrong-event")
+
+        with pytest.raises(ValueError, match="event_id does not match executable snapshot"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_direction_token_side_mismatch(self):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-side-final",
+            direction="buy_yes",
+        )
+        mismatched = replace(final_intent, direction="buy_no")
+
+        with pytest.raises(ValueError, match="direction does not match executable snapshot side"):
+            execute_final_intent(mismatched, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_passive_limit_without_snapshot_depth(self):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-passive-final",
+            final_limit_price=Decimal("0.32"),
+            snapshot_top_ask=Decimal("0.33"),
+        )
+
+        with pytest.raises(ValueError, match="executable depth validation failed"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_expected_fill_not_backed_by_snapshot_sweep(self):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-fill-mismatch-final",
+            final_limit_price=Decimal("0.34"),
+            snapshot_top_ask=Decimal("0.33"),
+        )
+
+        with pytest.raises(ValueError, match="expected_fill_price_before_fee"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_validates_depth_for_rounded_submit_shares(self):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-rounded-depth-final",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("5.00"),
+            ask_size="15.1516",
+        )
+
+        with pytest.raises(ValueError, match="executable depth validation failed"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_legacy_unrepresentable_order_semantics(self):
+        final_intent = _final_execution_intent(
+            order_policy="post_only_passive_limit",
+            post_only=True,
+        )
+
+        with pytest.raises(ValueError, match="post_only"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_rejects_sell_direction_on_entry_executor(self):
+        final_intent = _final_execution_intent(direction="sell_yes")
+
+        with pytest.raises(ValueError, match="only supports buy_yes/buy_no"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
+    def test_execute_final_intent_requires_final_intent_contract(self):
+        with pytest.raises(TypeError, match="FinalExecutionIntent"):
+            execute_final_intent(object(), conn=_TEST_CONN)  # type: ignore[arg-type]
 
     @pytest.mark.skip(reason="Phase2: paper mode removed")
     def test_paper_fill(self):
