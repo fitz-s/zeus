@@ -368,7 +368,7 @@ profiles:
     required_reads:
       - AGENTS.md
       - workspace_map.md
-      - docs/operations/task_2026-04-29_topology_graph_runtime_upgrade/plan.md
+      - docs/operations/_archive/task_2026-04-29_topology_graph_runtime_upgrade/plan.md
       - architecture/topology_schema.yaml
       - architecture/context_pack_profiles.yaml
     current_fact_surfaces:
