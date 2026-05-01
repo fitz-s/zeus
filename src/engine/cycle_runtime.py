@@ -109,19 +109,51 @@ def _decimal_payload(value: Decimal) -> str:
     return f"-{text}" if sign else text
 
 
-def _attach_corrected_pricing_shadow(
+def _floor_to_tick(value: Decimal, tick_size: Decimal) -> Decimal:
+    if tick_size <= Decimal("0"):
+        raise ValueError("tick_size must be positive")
+    return (value // tick_size) * tick_size
+
+
+def _mode_timeout_seconds(mode_value: str) -> int:
+    from src.execution.executor import MODE_TIMEOUTS
+
+    normalized = str(mode_value or "").strip()
+    if normalized not in MODE_TIMEOUTS:
+        raise ValueError(
+            f"Unknown execution mode '{normalized}' cannot default to timeout. "
+            "Explicit runtime mode required."
+        )
+    return MODE_TIMEOUTS[normalized]
+
+
+def _select_final_submit_order_type(conn, snapshot_id: str, deps) -> str:
+    selector = getattr(deps, "select_final_order_type", None)
+    if callable(selector):
+        return str(selector(conn, snapshot_id))
+    from src.execution.executor import _select_risk_allocator_order_type
+
+    return str(_select_risk_allocator_order_type(conn, snapshot_id))
+
+
+def _attach_corrected_pricing_authority(
     *,
     decision,
     snapshot,
     candidate_limit_price: float,
     candidate_expected_fill_price_before_fee: float,
     candidate_size_usd: float,
+    order_type: str = "GTC",
+    cancel_after: datetime | None = None,
+    resolution_window: str = "default",
+    correlation_key: str = "",
 ) -> dict:
-    """Attach corrected pricing candidate evidence without changing submit flow."""
+    """Attach corrected pricing evidence and the frozen final submit intent."""
 
     from src.contracts.execution_intent import (
         ExecutableCostBasis,
         ExecutableTradeHypothesis,
+        FinalExecutionIntent,
         simulate_clob_sweep,
     )
 
@@ -129,6 +161,7 @@ def _attach_corrected_pricing_shadow(
     edge = getattr(decision, "edge", None)
     if edge is None:
         raise ValueError("corrected pricing shadow requires edge")
+    setattr(decision, "final_execution_intent", None)
     decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip()
     if not decision_snapshot_id:
         decision_snapshot_id = str(
@@ -179,19 +212,31 @@ def _attach_corrected_pricing_shadow(
             "sweep_unfilled_size_value": _decimal_payload(sweep.unfilled_size_value),
         }
 
-    cost_basis = ExecutableCostBasis.from_snapshot(
-        snapshot=snapshot,
-        direction=direction,
-        order_policy="limit_may_take_conservative",
-        requested_size_kind="notional_usd",
-        requested_size_value=candidate_size,
-        final_limit_price=candidate_limit,
-        expected_fill_price_before_fee=candidate_expected_fill,
-        fee_adjusted_execution_price=None,
-        depth_status=depth_status,
-    )
+    if is_marketable:
+        cost_basis = ExecutableCostBasis.from_snapshot_sweep(
+            snapshot=snapshot,
+            direction=direction,
+            order_policy="limit_may_take_conservative",
+            requested_size_kind="notional_usd",
+            requested_size_value=candidate_size,
+            final_limit_price=candidate_limit,
+            fee_adjusted_execution_price=None,
+        )
+    else:
+        cost_basis = ExecutableCostBasis.from_snapshot(
+            snapshot=snapshot,
+            direction=direction,
+            order_policy="limit_may_take_conservative",
+            requested_size_kind="notional_usd",
+            requested_size_value=candidate_size,
+            final_limit_price=candidate_limit,
+            expected_fill_price_before_fee=candidate_expected_fill,
+            fee_adjusted_execution_price=None,
+            depth_status=depth_status,
+        )
+    snapshot_event_id = str(snapshot.event_id or "")
     hypothesis = ExecutableTradeHypothesis.from_cost_basis(
-        event_id=str(snapshot.event_id or tokens.get("event_id") or ""),
+        event_id=snapshot_event_id,
         bin_id=str(getattr(getattr(edge, "bin", None), "label", "") or ""),
         payoff_probability=Decimal(str(edge.p_posterior)),
         posterior_distribution_id=f"decision_snapshot:{decision_snapshot_id}",
@@ -199,11 +244,32 @@ def _attach_corrected_pricing_shadow(
         fdr_family_id=f"legacy_selection_family:{decision_snapshot_id}",
         cost_basis=cost_basis,
     )
+    final_intent = None
+    if is_marketable:
+        final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+            order_type=order_type,
+            post_only=False,
+            cancel_after=cancel_after,
+            max_slippage_bps=Decimal("200"),
+            event_id=snapshot_event_id,
+            resolution_window=resolution_window,
+            correlation_key=correlation_key,
+            decision_source_context=_decision_source_context_from_epistemic_json(
+                getattr(decision, "epistemic_context_json", None)
+            ),
+        )
+        setattr(decision, "final_execution_intent", final_intent)
     payload = {
         "pricing_semantics_version": cost_basis.pricing_semantics_version,
-        "shadow_only": True,
-        "live_submit_authority": False,
-        "field_semantics": "corrected_candidate_not_submitted",
+        "shadow_only": final_intent is None,
+        "live_submit_authority": final_intent is not None,
+        "field_semantics": (
+            "final_execution_intent_submit_authority"
+            if final_intent is not None
+            else "passive_limit_requires_maker_only_support"
+        ),
         "selected_token_id": cost_basis.selected_token_id,
         "direction": cost_basis.direction,
         "snapshot_id": cost_basis.quote_snapshot_id,
@@ -211,7 +277,21 @@ def _attach_corrected_pricing_shadow(
         "cost_basis_id": cost_basis.cost_basis_id,
         "cost_basis_hash": cost_basis.cost_basis_hash,
         "hypothesis_id": hypothesis.fdr_hypothesis_id,
+        "final_execution_intent_id": None if final_intent is None else final_intent.hypothesis_id,
         "order_policy": cost_basis.order_policy,
+        "order_type": order_type if final_intent is None else final_intent.order_type,
+        "cancel_after": (
+            None
+            if final_intent is None or final_intent.cancel_after is None
+            else final_intent.cancel_after.isoformat()
+        ),
+        "event_id": snapshot_event_id,
+        "resolution_window": (
+            resolution_window if final_intent is None else final_intent.resolution_window
+        ),
+        "correlation_key": (
+            correlation_key if final_intent is None else final_intent.correlation_key
+        ),
         "candidate_final_limit_price": _decimal_payload(cost_basis.final_limit_price),
         "candidate_expected_fill_price_before_fee": _decimal_payload(
             cost_basis.expected_fill_price_before_fee
@@ -225,17 +305,30 @@ def _attach_corrected_pricing_shadow(
         "posterior_distribution_id": hypothesis.posterior_distribution_id,
         "market_prior_id": hypothesis.market_prior_id,
         "payoff_probability": _decimal_payload(hypothesis.payoff_probability),
-        "legacy_submitted_limit_price": None,
+        "submitted_limit_price": None,
+        "submit_path": None,
     }
+    if final_intent is None:
+        payload["unsupported_reason"] = "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
     payload.update(sweep_payload)
     tokens["corrected_pricing_shadow"] = payload
     decision.tokens = tokens
-    if "corrected_pricing_shadow_built" not in decision.applied_validations:
-        decision.applied_validations.append("corrected_pricing_shadow_built")
+    validation = (
+        "final_execution_intent_built"
+        if final_intent is not None
+        else "corrected_pricing_shadow_built"
+    )
+    if validation not in decision.applied_validations:
+        decision.applied_validations.append(validation)
     return payload
 
 
-def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: dict) -> float | None:
+def _reprice_decision_from_executable_snapshot(
+    conn,
+    decision,
+    snapshot_fields: dict,
+    final_intent_context: dict | None = None,
+) -> float | None:
     """Reprice a selected entry decision from the executable snapshot book.
 
     The evaluator quote selects a candidate. The post-decision executable
@@ -299,6 +392,12 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         NativeSidePrice(float(snapshot_vwmp), direction),
         limit_offset=float(settings["execution"]["limit_offset_pct"]),
     )
+    tick_size_decimal = Decimal(str(snapshot.min_tick_size))
+    snapshot_limit_decimal = _floor_to_tick(
+        Decimal(str(round(float(snapshot_limit_price), 12))),
+        tick_size_decimal,
+    )
+    snapshot_limit_price = float(snapshot_limit_decimal)
     slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
     max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
     best_ask_slippage_bps = 0.0
@@ -330,56 +429,68 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
     corrected_candidate_expected_fill = float(snapshot_limit_price)
     corrected_candidate_size = repriced_size_at_snapshot_vwmp
     best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
+    p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
+    slippage_reference_decimal = Decimal(str(slippage_reference_price))
+    slippage_cap_decimal = slippage_reference_decimal * (
+        Decimal("1") + Decimal(str(max_slippage.fraction))
+    )
+    positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+    depth_sweep_limit_decimal = Decimal("0")
+    if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
+        depth_sweep_limit_decimal = _floor_to_tick(
+            min(slippage_cap_decimal, positive_edge_cap_decimal),
+            tick_size_decimal,
+        )
+    depth_sweep_limit_float = float(depth_sweep_limit_decimal)
     best_ask_inside_slippage_budget = (
-        slippage_reference_price > 0.0
-        and best_ask_float <= slippage_reference_price * (1.0 + max_slippage.fraction)
+        depth_sweep_limit_float > 0.0
+        and best_ask_float <= depth_sweep_limit_float
     )
     if best_ask_edge > 0.0 and best_ask_inside_slippage_budget:
-        size_at_best_ask = _size_at_execution_price_boundary(
+        size_at_depth_limit = _size_at_execution_price_boundary(
             p_posterior=float(decision.edge.p_posterior),
-            entry_price=best_ask_float,
+            entry_price=depth_sweep_limit_float,
             fee_rate=fee_rate,
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
             safety_cap_usd=safety_cap,
         )
-        if size_at_best_ask <= 0.0:
+        if size_at_depth_limit <= 0.0:
             final_best_ask = None
         else:
             best_ask_sweep = simulate_clob_sweep(
                 snapshot=snapshot,
                 direction=str(decision.edge.direction),
                 requested_size_kind="notional_usd",
-                requested_size_value=Decimal(str(size_at_best_ask)),
-                limit_price=Decimal(str(best_ask_float)),
+                requested_size_value=Decimal(str(size_at_depth_limit)),
+                limit_price=depth_sweep_limit_decimal,
             )
             if best_ask_sweep.depth_status != "PASS":
                 raise ValueError(
-                    "BUY_NO_TAKER_DEPTH_CONSTRAINED: "
+                    "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
                     f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
-                    f"required_usd={size_at_best_ask:.6f}"
+                    f"required_usd={size_at_depth_limit:.6f}"
                 )
-            final_best_ask = best_ask_float
-            final_price = best_ask_float
-            repriced_size = size_at_best_ask
-            corrected_candidate_price = best_ask_float
+            final_best_ask = depth_sweep_limit_float
+            final_price = depth_sweep_limit_float
+            repriced_size = size_at_depth_limit
+            corrected_candidate_price = depth_sweep_limit_float
             corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
-            corrected_candidate_size = size_at_best_ask
+            corrected_candidate_size = size_at_depth_limit
 
-    corrected_pricing_shadow = None
-    try:
-        corrected_pricing_shadow = _attach_corrected_pricing_shadow(
-            decision=decision,
-            snapshot=snapshot,
-            candidate_limit_price=float(corrected_candidate_price),
-            candidate_expected_fill_price_before_fee=float(corrected_candidate_expected_fill),
-            candidate_size_usd=float(corrected_candidate_size),
-        )
-        tokens = dict(getattr(decision, "tokens", {}) or {})
-    except Exception as exc:
-        tokens = dict(getattr(decision, "tokens", {}) or {})
-        tokens["corrected_pricing_shadow_error"] = str(exc)
-        decision.tokens = tokens
+    final_intent_context = final_intent_context or {}
+    corrected_pricing_shadow = _attach_corrected_pricing_authority(
+        decision=decision,
+        snapshot=snapshot,
+        candidate_limit_price=float(corrected_candidate_price),
+        candidate_expected_fill_price_before_fee=float(corrected_candidate_expected_fill),
+        candidate_size_usd=float(corrected_candidate_size),
+        order_type=str(final_intent_context.get("order_type") or "GTC"),
+        cancel_after=final_intent_context.get("cancel_after"),
+        resolution_window=str(final_intent_context.get("resolution_window") or "default"),
+        correlation_key=str(final_intent_context.get("correlation_key") or ""),
+    )
+    tokens = dict(getattr(decision, "tokens", {}) or {})
 
     decision.edge = replace(
         decision.edge,
@@ -423,11 +534,17 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         "snapshot_limit_price": float(snapshot_limit_price),
         "slippage_reference_price": float(slippage_reference_price),
         "max_slippage_bps": float(max_slippage.value_bps),
+        "depth_sweep_limit_price": depth_sweep_limit_float,
         "best_ask_slippage_bps": float(best_ask_slippage_bps),
         "best_ask_blocked_by_slippage": bool(
             best_ask_edge > 0.0
             and not best_ask_inside_slippage_budget
             and best_ask_slippage_bps > max_slippage.value_bps
+        ),
+        "best_ask_blocked_by_edge_boundary": bool(
+            best_ask_edge > 0.0
+            and not best_ask_inside_slippage_budget
+            and best_ask_slippage_bps <= max_slippage.value_bps
         ),
         "final_limit_price": final_price,
         "final_best_ask": final_best_ask,
@@ -436,13 +553,15 @@ def _reprice_decision_from_executable_snapshot(conn, decision, snapshot_fields: 
         "corrected_candidate_size_usd": float(corrected_candidate_size),
         "repriced_edge": repriced_edge,
         "repriced_size_usd": float(repriced_size),
+        "live_submit_authority": bool(corrected_pricing_shadow.get("live_submit_authority"))
+        if isinstance(corrected_pricing_shadow, dict)
+        else False,
+        "final_execution_intent_id": corrected_pricing_shadow.get("final_execution_intent_id")
+        if isinstance(corrected_pricing_shadow, dict)
+        else None,
     }
     if corrected_pricing_shadow is not None:
         tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"] = corrected_pricing_shadow
-    if "corrected_pricing_shadow_error" in tokens:
-        tokens["executable_snapshot_reprice"]["corrected_pricing_shadow_error"] = tokens[
-            "corrected_pricing_shadow_error"
-        ]
     decision.tokens = tokens
     return final_best_ask
 
@@ -2156,10 +2275,25 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     snapshot_best_ask = None
                     if str(env or "").strip().lower() == "live":
                         try:
+                            mode_value = str(getattr(mode, "value", mode))
+                            timeout_seconds = _mode_timeout_seconds(mode_value)
+                            final_intent_context = {
+                                "order_type": _select_final_submit_order_type(
+                                    conn,
+                                    snapshot_fields["executable_snapshot_id"],
+                                    deps,
+                                ),
+                                "cancel_after": decision_time + timedelta(seconds=timeout_seconds),
+                                "resolution_window": candidate.target_date,
+                                "correlation_key": (
+                                    f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
+                                ),
+                            }
                             snapshot_best_ask = _reprice_decision_from_executable_snapshot(
                                 conn,
                                 d,
                                 snapshot_fields,
+                                final_intent_context,
                             )
                         except Exception as exc:
                             summary["no_trades"] += 1
@@ -2212,64 +2346,132 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_stage="",
                         rejection_reasons=[],
                     )
+                    result = None
                     try:
-                        intent = deps.create_execution_intent(
-                            edge_context=d.edge_context,
-                            edge=d.edge,
-                            size_usd=d.size_usd,
-                            mode=mode.value,
-                            market_id=d.tokens["market_id"],
-                            token_id=d.tokens["token_id"],
-                            no_token_id=d.tokens["no_token_id"],
-                            best_ask=snapshot_best_ask,
-                            repriced_limit_price=snapshot_best_ask,
-                            event_id=(
-                                candidate.event_id
-                                or candidate.slug
-                                or f"{city.name}:{candidate.target_date}"
-                            ),
-                            resolution_window=candidate.target_date,
-                            correlation_key=(
-                                f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
-                            ),
-                            executable_snapshot_id=snapshot_fields["executable_snapshot_id"],
-                            executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
-                            executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
-                            executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
-                            decision_source_context=_decision_source_context_from_epistemic_json(
-                                d.epistemic_context_json
-                            ),
-                        )
-                        if str(env or "").strip().lower() == "live" and isinstance(getattr(d, "tokens", None), dict):
+                        is_live_env = str(env or "").strip().lower() == "live"
+                        if is_live_env:
+                            if not isinstance(getattr(d, "tokens", None), dict):
+                                raise ValueError("FINAL_EXECUTION_INTENT_MISSING: decision tokens unavailable")
                             reprice_payload = d.tokens.get("executable_snapshot_reprice")
-                            if isinstance(reprice_payload, dict):
-                                submitted_limit = float(getattr(intent, "limit_price", 0.0) or 0.0)
-                                if snapshot_best_ask is not None and abs(submitted_limit - float(snapshot_best_ask)) > 1e-9:
-                                    raise ValueError(
-                                        "EXECUTABLE_LIMIT_MISMATCH: "
-                                        f"repriced_final={float(snapshot_best_ask):.6f} "
-                                        f"intent_limit={submitted_limit:.6f}"
-                                    )
-                                reprice_payload["submitted_limit_price"] = submitted_limit
-                                reprice_payload["final_limit_price"] = submitted_limit
-                                reprice_payload["repriced_limit_forced"] = snapshot_best_ask is not None
-                                shadow_payload = reprice_payload.get("corrected_pricing_shadow")
+                            if not isinstance(reprice_payload, dict):
+                                raise ValueError("FINAL_EXECUTION_INTENT_MISSING: reprice payload unavailable")
+                            final_intent = getattr(d, "final_execution_intent", None)
+                            shadow_payload = reprice_payload.get("corrected_pricing_shadow")
+                            if reprice_payload.get("live_submit_authority") is not True:
+                                unsupported_reason = None
                                 if isinstance(shadow_payload, dict):
-                                    shadow_payload["legacy_submitted_limit_price"] = _decimal_payload(
-                                        Decimal(str(submitted_limit))
+                                    unsupported_reason = shadow_payload.get("unsupported_reason")
+                                raise ValueError(
+                                    "FINAL_EXECUTION_INTENT_UNAVAILABLE:"
+                                    f"{unsupported_reason or 'live_submit_authority_false'}"
+                                )
+                            if final_intent is None:
+                                raise ValueError("FINAL_EXECUTION_INTENT_MISSING")
+                            if (
+                                reprice_payload.get("final_execution_intent_id")
+                                != final_intent.hypothesis_id
+                            ):
+                                raise ValueError("FINAL_EXECUTION_INTENT_ID_MISMATCH")
+                            try:
+                                corrected_candidate_limit = Decimal(
+                                    str(reprice_payload["corrected_candidate_limit_price"])
+                                )
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise ValueError(
+                                    "FINAL_EXECUTION_LIMIT_MISMATCH: missing corrected candidate limit"
+                                ) from exc
+                            final_limit_decimal = Decimal(str(final_intent.final_limit_price))
+                            tick_tolerance = Decimal(
+                                str(snapshot_fields["executable_snapshot_min_tick_size"])
+                            ) / Decimal("1000000")
+                            if abs(final_limit_decimal - corrected_candidate_limit) > tick_tolerance:
+                                raise ValueError(
+                                    "FINAL_EXECUTION_LIMIT_MISMATCH: "
+                                    f"corrected_candidate={float(corrected_candidate_limit):.6f} "
+                                    f"final_intent_limit={float(final_limit_decimal):.6f}"
+                                )
+                            execute_final = getattr(deps, "execute_final_intent", None)
+                            if not callable(execute_final):
+                                from src.execution.executor import execute_final_intent as execute_final
+                            result = execute_final(
+                                final_intent,
+                                conn=conn,
+                                decision_id=str(d.decision_id) if d.decision_id else "",
+                                snapshot_conn=conn,
+                            )
+                            submitted_limit = float(final_limit_decimal)
+                            submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
+                            reprice_payload["execution_path"] = "final_execution_intent"
+                            reprice_payload["submitted_limit_price"] = (
+                                None if submit_rejected else submitted_limit
+                            )
+                            reprice_payload["final_limit_price"] = submitted_limit
+                            reprice_payload["repriced_limit_forced"] = snapshot_best_ask is not None
+                            reprice_payload["submit_path"] = (
+                                None if submit_rejected else "final_execution_intent"
+                            )
+                            reprice_payload["final_execution_intent_id"] = final_intent.hypothesis_id
+                            if submit_rejected:
+                                reprice_payload["submit_rejected_reason"] = getattr(
+                                    result,
+                                    "reason",
+                                    None,
+                                )
+                            if isinstance(shadow_payload, dict):
+                                shadow_payload["execution_path"] = "final_execution_intent"
+                                shadow_payload["submitted_limit_price"] = (
+                                    None
+                                    if submit_rejected
+                                    else _decimal_payload(final_limit_decimal)
+                                )
+                                shadow_payload["submit_path"] = (
+                                    None if submit_rejected else "final_execution_intent"
+                                )
+                                shadow_payload["submitted_matches_corrected_candidate"] = (
+                                    False
+                                    if submit_rejected
+                                    else abs(final_limit_decimal - corrected_candidate_limit) <= tick_tolerance
+                                )
+                                if submit_rejected:
+                                    shadow_payload["submit_rejected_reason"] = getattr(
+                                        result,
+                                        "reason",
+                                        None,
                                     )
-                                    shadow_payload["legacy_submit_path"] = "legacy_execution_intent"
-                                    try:
-                                        candidate_limit = float(
-                                            shadow_payload.get("candidate_final_limit_price")
-                                        )
-                                    except (TypeError, ValueError):
-                                        candidate_limit = float("nan")
-                                    shadow_payload["legacy_submitted_matches_corrected_candidate"] = (
-                                        abs(candidate_limit - submitted_limit) <= 1e-9
-                                        if math.isfinite(candidate_limit)
-                                        else False
-                                    )
+                        else:
+                            intent = deps.create_execution_intent(
+                                edge_context=d.edge_context,
+                                edge=d.edge,
+                                size_usd=d.size_usd,
+                                mode=mode.value,
+                                market_id=d.tokens["market_id"],
+                                token_id=d.tokens["token_id"],
+                                no_token_id=d.tokens["no_token_id"],
+                                best_ask=snapshot_best_ask,
+                                repriced_limit_price=snapshot_best_ask,
+                                event_id=(
+                                    candidate.event_id
+                                    or candidate.slug
+                                    or f"{city.name}:{candidate.target_date}"
+                                ),
+                                resolution_window=candidate.target_date,
+                                correlation_key=(
+                                    f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
+                                ),
+                                executable_snapshot_id=snapshot_fields["executable_snapshot_id"],
+                                executable_snapshot_min_tick_size=snapshot_fields["executable_snapshot_min_tick_size"],
+                                executable_snapshot_min_order_size=snapshot_fields["executable_snapshot_min_order_size"],
+                                executable_snapshot_neg_risk=snapshot_fields["executable_snapshot_neg_risk"],
+                                decision_source_context=_decision_source_context_from_epistemic_json(
+                                    d.epistemic_context_json
+                                ),
+                            )
+                            result = deps.execute_intent(
+                                intent,
+                                d.edge.vwmp,
+                                d.edge.bin.label,
+                                decision_id=str(d.decision_id) if d.decision_id else "",
+                            )
                     except Exception as exc:
                         summary["no_trades"] += 1
                         rejection_stage = "EXECUTION_FAILED"
@@ -2314,18 +2516,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
-                    # P1.S5: thread decision_id from d.decision_id so the
-                    # executor can use a stable upstream ID for idempotency.
-                    # We do NOT pass conn from cycle_runtime (P2 concern: the
-                    # cycle conn targets zeus.db, not zeus_trades.db where
-                    # venue_commands live). The executor opens its own
-                    # get_trade_connection_with_world() fallback.
-                    result = deps.execute_intent(
-                        intent,
-                        d.edge.vwmp,
-                        d.edge.bin.label,
-                        decision_id=str(d.decision_id) if d.decision_id else "",
-                    )
                     artifact.add_trade(
                         {
                             "decision_id": d.decision_id,

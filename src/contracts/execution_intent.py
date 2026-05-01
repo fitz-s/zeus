@@ -559,6 +559,7 @@ class ExecutionIntent:
     resolution_window: str = "default"
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
+    submit_order_type: OrderType | None = None
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -582,6 +583,13 @@ class ExecutionIntent:
         object.__setattr__(self, "event_id", normalized_event)
         object.__setattr__(self, "resolution_window", normalized_window)
         object.__setattr__(self, "correlation_key", normalized_correlation)
+        if self.submit_order_type is not None and self.submit_order_type not in {
+            "GTC",
+            "GTD",
+            "FOK",
+            "FAK",
+        }:
+            raise ValueError(f"unsupported submit_order_type {self.submit_order_type!r}")
         decision_source_context = self.decision_source_context
         if decision_source_context is not None and not isinstance(
             decision_source_context, DecisionSourceContext
@@ -904,6 +912,25 @@ class ExecutableCostBasis:
             min_order_size=self.min_order_size,
         )
 
+    def assert_submit_safe(self) -> None:
+        """Fail closed unless this cost basis can authorize a live limit submit."""
+
+        if self.tick_status != "PASS":
+            raise ValueError("tick validation failed")
+        if self.min_order_status != "PASS":
+            raise ValueError("min-order validation failed")
+        if self.depth_status != "PASS":
+            raise ValueError(f"depth validation failed: {self.depth_status}")
+        if self.depth_proof_source != "CLOB_SWEEP":
+            raise ValueError("PASS depth_status requires CLOB_SWEEP proof")
+        _assert_tick_aligned(self.final_limit_price, self.tick_size)
+        _assert_min_order_satisfied(
+            size_kind=self.requested_size_kind,
+            size_value=self.requested_size_value,
+            final_limit_price=self.final_limit_price,
+            min_order_size=self.min_order_size,
+        )
+
 
 @dataclass(frozen=True)
 class ExecutableTradeHypothesis:
@@ -1138,6 +1165,10 @@ class FinalExecutionIntent:
     min_order_size: Decimal
     fee_rate: Decimal
     neg_risk: bool
+    event_id: str = ""
+    resolution_window: str = "default"
+    correlation_key: str = ""
+    decision_source_context: DecisionSourceContext | None = None
     pricing_semantics_version: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1152,9 +1183,19 @@ class FinalExecutionIntent:
         post_only: bool = False,
         cancel_after: datetime | None = None,
         max_slippage_bps: Decimal = Decimal("200"),
+        event_id: str = "",
+        resolution_window: str = "default",
+        correlation_key: str = "",
+        decision_source_context: DecisionSourceContext | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
-        cost_basis.assert_live_safe()
+        cost_basis.assert_submit_safe()
+        normalized_event_id = str(event_id or hypothesis.event_id or "").strip()
+        hypothesis_event_id = str(hypothesis.event_id or "").strip()
+        if normalized_event_id and hypothesis_event_id and normalized_event_id != hypothesis_event_id:
+            raise ValueError(
+                "FinalExecutionIntent event_id does not match executable hypothesis"
+            )
         return cls(
             hypothesis_id=hypothesis.fdr_hypothesis_id,
             selected_token_id=cost_basis.selected_token_id,
@@ -1177,6 +1218,10 @@ class FinalExecutionIntent:
             min_order_size=cost_basis.min_order_size,
             fee_rate=cost_basis.worst_case_fee_rate,
             neg_risk=cost_basis.neg_risk,
+            event_id=normalized_event_id,
+            resolution_window=resolution_window,
+            correlation_key=correlation_key,
+            decision_source_context=decision_source_context,
         )
 
     def __post_init__(self) -> None:
@@ -1199,6 +1244,15 @@ class FinalExecutionIntent:
             raise ValueError(
                 "FinalExecutionIntent only supports corrected_executable_cost_v1"
             )
+        normalized_event = str(self.event_id or "").strip()
+        normalized_window = str(self.resolution_window or "default").strip() or "default"
+        normalized_correlation = (
+            str(self.correlation_key or normalized_event or self.hypothesis_id or "")
+            .strip()
+        )
+        object.__setattr__(self, "event_id", normalized_event)
+        object.__setattr__(self, "resolution_window", normalized_window)
+        object.__setattr__(self, "correlation_key", normalized_correlation)
         if self.cancel_after is not None and not isinstance(self.cancel_after, datetime):
             raise TypeError("cancel_after must be datetime or None")
         self.assert_submit_ready()
