@@ -11,9 +11,14 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from src.config import cities_by_name, get_mode, settings
+from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
+# S-4 fix (architect audit 2026-04-30, recovery 2026-05-01): module-level import
+# so test monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", ...) takes effect.
+# Per-cycle freshness consumer wired into run_cycle() top to short-circuit DAY0_CAPTURE
+# and tag OPENING_HUNT degraded_data when source_health.json shows stale upstreams.
+from src.control.freshness_gate import evaluate_freshness_mid_run
 from src.data.market_scanner import (
     capture_executable_market_snapshot,
     find_weather_markets,
@@ -401,6 +406,32 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         "trades": 0,
         "no_trades": 0,
     }
+
+    # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01) — per-cycle
+    # freshness gate. evaluate_freshness_mid_run is imported at module level so
+    # tests can monkeypatch it. Three branches per design §3.1:
+    #   FRESH    → fall through (normal cycle)
+    #   STALE w/ day0_capture_disabled + DiscoveryMode.DAY0_CAPTURE → short-circuit
+    #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → tag degraded_data, continue
+    # The DAY0 short-circuit returns the summary BEFORE any IO so the trading stack
+    # never touches stale upstream data. OPENING_HUNT continues with the flag set
+    # so downstream entry decisions can be tagged in decision_log.
+    try:
+        _freshness_verdict = evaluate_freshness_mid_run(STATE_DIR)
+    except Exception as exc:
+        # Mid-run gate is fail-soft per design — log and proceed.
+        logger.warning("freshness_gate mid_run evaluation failed: %s", exc)
+        _freshness_verdict = None
+    if _freshness_verdict is not None:
+        if _freshness_verdict.day0_capture_disabled and mode == DiscoveryMode.DAY0_CAPTURE:
+            summary["skipped"] = True
+            summary["skip_reason"] = "cycle_skipped_freshness_degraded"
+            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
+            return summary
+        if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
+            summary["degraded_data"] = True
+            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
+
     artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)
 
     try:
