@@ -57,6 +57,37 @@ forbidden, unclassified, or scope-expanding. No live submit, production DB
 mutation, schema apply, config/source-routing flip, venue adapter rewrite, or
 strategy promotion is authorized by this merge.
 
+### Packet 0 Routing Repair
+
+Packet 0 admits only the route/profile/package boundary needed for the next
+repair packets. It harmonizes `architecture/topology.yaml`,
+`architecture/digest_profiles.py`, `tests/test_digest_profile_matching.py`, and
+this package record with the remaining F-06/F-08/F-09/F-10 work.
+
+Design constraints:
+
+- F-06 may enter through `src/data/polymarket_client.py`,
+  `src/contracts/venue_submission_envelope.py`, `tests/test_v2_adapter.py`, and
+  `tests/test_risk_allocator.py`; `src/venue/**` remains forbidden.
+- F-08 must reuse the existing `FinalExecutionIntent` /
+  `ExecutableCostBasis` seam in `src/contracts/execution_intent.py`; an
+  unregistered `src/contracts/executable_cost_basis.py` remains out of scope.
+- F-09 may route through fill tracker, harvester, canonical schema authority,
+  state portfolio/runtime surfaces, and existing realized-fill / harvester /
+  DB tests, but schema migration apply and production DB mutation remain
+  forbidden.
+- F-10 may route through report/replay consumers only after F-09 durable fill
+  quantity, filled cost basis, average fill price, and economics-version fields
+  exist; mixed legacy/corrected cohorts must hard-fail or be segregated.
+- New top-level test files are not pre-admitted while absent from disk; if a
+  later packet needs a new test filename, create/register it through the test
+  topology route in that packet rather than treating the name as already
+  classified.
+
+Packet 0 rollback is a clean revert of the routing/profile commit. It performs
+no live side effect, production data mutation, schema apply, source-routing
+flip, config change, or strategy promotion.
+
 ## Phase Workflow
 
 ### Phase 0/A — Authority, Guardrails, Behavior Locks

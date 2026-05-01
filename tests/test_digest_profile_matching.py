@@ -7,7 +7,7 @@ cannot collide with safety-critical profiles like "modify data ingestion".
 
 These cases come directly from §15 of docs/reference/Zeus_Apr25_review.md.
 """
-# Lifecycle: created=2026-04-25; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-25; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock the new word-boundary + denylist + veto profile resolver against
 # regression to the legacy substring matcher.
 # Reuse: When adding a new profile, add adversarial cases here first.
@@ -357,6 +357,146 @@ def test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_t
     assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
     assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_safety_invariants.py" in digest["admission"]["admitted_files"]
+
+
+def test_pricing_semantics_authority_cutover_admits_f06_client_envelope_first_packet():
+    digest = build_digest(
+        "pricing semantics authority cutover F-06 compatibility venue envelope "
+        "live gate without venue adapter edit",
+        [
+            "src/data/polymarket_client.py",
+            "src/contracts/venue_submission_envelope.py",
+            "tests/test_v2_adapter.py",
+            "tests/test_risk_allocator.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/data/polymarket_client.py" in admitted
+    assert "src/contracts/venue_submission_envelope.py" in admitted
+    assert "tests/test_v2_adapter.py" in admitted
+    assert "src/venue/polymarket_v2_adapter.py" not in admitted
+
+
+def test_pricing_semantics_authority_cutover_keeps_venue_adapter_blocked():
+    digest = build_digest(
+        "pricing semantics authority cutover F-06 compatibility venue envelope "
+        "requires venue adapter live submission proof",
+        [
+            "src/data/polymarket_client.py",
+            "src/venue/polymarket_v2_adapter.py",
+            "tests/test_v2_adapter.py",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "blocked"
+    assert "src/venue/polymarket_v2_adapter.py" in digest["admission"]["forbidden_hits"]
+
+
+def test_pricing_semantics_authority_cutover_admits_f08_order_policy_existing_contract_packet():
+    digest = build_digest(
+        "pricing semantics authority cutover F-08 order-policy cost authority "
+        "using existing execution intent contracts",
+        [
+            "src/contracts/execution_intent.py",
+            "src/execution/executor.py",
+            "src/engine/cycle_runtime.py",
+            "src/strategy/kelly.py",
+            "tests/test_execution_intent_typed_slippage.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_v2_adapter.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/contracts/execution_intent.py" in admitted
+    assert "src/strategy/kelly.py" in admitted
+    assert "tests/test_v2_adapter.py" in admitted
+
+
+def test_pricing_semantics_authority_cutover_blocks_unregistered_cost_basis_authority_file():
+    digest = build_digest(
+        "pricing semantics authority cutover F-08 order-policy cost authority "
+        "new executable cost basis authority file",
+        [
+            "src/contracts/execution_intent.py",
+            "src/contracts/executable_cost_basis.py",
+            "tests/test_execution_intent_typed_slippage.py",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert "src/contracts/executable_cost_basis.py" in digest["admission"]["out_of_scope_files"]
+
+
+def test_pricing_semantics_authority_cutover_admits_f09_fill_authority_packet_with_existing_tests():
+    digest = build_digest(
+        "pricing semantics authority cutover F-09 fill authority split "
+        "submitted target filled quantity filled cost basis average fill price "
+        "economics authority no schema apply",
+        [
+            "src/contracts/realized_fill.py",
+            "src/engine/cycle_runtime.py",
+            "src/state/portfolio.py",
+            "src/execution/fill_tracker.py",
+            "src/execution/harvester.py",
+            "architecture/2026_04_02_architecture_kernel.sql",
+            "tests/test_realized_fill.py",
+            "tests/test_realized_fill_at_receipt.py",
+            "tests/test_harvester_metric_identity.py",
+            "tests/test_db.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "src/contracts/realized_fill.py" in admitted
+    assert "src/execution/fill_tracker.py" in admitted
+    assert "src/execution/harvester.py" in admitted
+    assert "architecture/2026_04_02_architecture_kernel.sql" in admitted
+    assert "tests/test_realized_fill.py" in admitted
+    assert "tests/test_db.py" in admitted
+    assert "schema migration" in digest["forbidden_files"]
+
+
+def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_packet_after_fill_fields():
+    digest = build_digest(
+        "pricing semantics authority cutover F-10 report replay cohort hard gate "
+        "after F-09 durable fill fields",
+        [
+            "scripts/profit_validation_replay.py",
+            "scripts/equity_curve.py",
+            "src/execution/harvester.py",
+            "src/state/db.py",
+            "tests/test_run_replay_cli.py",
+            "tests/test_pnl_flow_and_audit.py",
+            "tests/test_backtest_skill_economics.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    admitted = set(digest["admission"]["admitted_files"])
+    assert "scripts/profit_validation_replay.py" in admitted
+    assert "scripts/equity_curve.py" in admitted
+    assert "src/state/db.py" in admitted
+    assert "tests/test_run_replay_cli.py" in admitted
+    assert "tests/test_pnl_flow_and_audit.py" in admitted
+    assert any(
+        "F-10 report/replay gating begins before F-09 durable fill" in stop
+        for stop in digest["stop_conditions"]
+    )
 
 
 def test_phase5_economics_readiness_routes_to_phase5_profile():

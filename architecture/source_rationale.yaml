@@ -328,6 +328,14 @@ files:
     - src/engine/evaluator.py
     - src/execution/executor.py
     - src/strategy/kelly.py
+  src/contracts/realized_fill.py:
+    zone: K0_frozen_kernel
+    authority_role: realized_fill_contract
+    why: Captures actual execution price, expected intent price, slippage, side, shares, and trade identity as typed fill truth rather than collapsing filled economics back into requested size or a bare fill_price scalar.
+    downstream:
+    - src/execution/fill_tracker.py
+    - src/execution/harvester.py
+    - src/state/db.py
   src/contracts/fx_classification.py:
     zone: K0_frozen_kernel
     authority_role: fx_classification_contract
