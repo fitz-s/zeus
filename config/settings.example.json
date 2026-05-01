@@ -1,0 +1,155 @@
+{
+  "_SETUP": "Copy this file to settings.json and fill in the operator-specific values marked null.",
+  "capital_base_usd": null,
+  "live_safety_cap_usd": null,
+  "_live_safety_cap_usd_note": "Runtime safety rail. Kelly output is hard-clipped to this ceiling. Set by operator.",
+  "smoke_test_portfolio_cap_usd": null,
+  "_smoke_test_portfolio_cap_usd_note": "Portfolio-wide filled+pending exposure cap for initial validation window. Set by operator; remove once first full lifecycle has been observed.",
+  "discovery": {
+    "opening_hunt_interval_min": 30,
+    "update_reaction_times_utc": [
+      "07:00",
+      "09:00",
+      "19:00",
+      "21:00"
+    ],
+    "day0_interval_min": 15,
+    "ecmwf_open_data_times_utc": [
+      "01:30",
+      "13:30"
+    ],
+    "max_lead_days": 7,
+    "preferred_lead_days": [
+      3,
+      4,
+      5
+    ],
+    "min_hours_to_resolution": 6
+  },
+  "ensemble": {
+    "primary": "ecmwf_ifs025",
+    "crosscheck": "gfs025",
+    "primary_members": 51,
+    "crosscheck_members": 31,
+    "n_mc": 10000,
+    "_n_mc_note": "Runtime per-trade Monte Carlo iterations.",
+    "instrument_noise_f": 0.5,
+    "instrument_noise_c": 0.28,
+    "bimodal_kde_order": 10,
+    "bimodal_gap_ratio": 0.3,
+    "boundary_window": 0.5,
+    "unimodal_range_epsilon": 0.5,
+    "conflict_kl_threshold": 0.15
+  },
+  "calibration": {
+    "method": "platt",
+    "refit_every_n": 50,
+    "n_bootstrap": 200,
+    "seasonal_dates": [
+      "03-20",
+      "06-21",
+      "09-22",
+      "12-21"
+    ],
+    "maturity": {
+      "level1": 150,
+      "level2": 50,
+      "level3": 15
+    }
+  },
+  "day0": {
+    "n_mc": 10000,
+    "_n_mc_note": "Day0 nowcast Monte Carlo iterations."
+  },
+  "edge": {
+    "n_bootstrap": 500,
+    "base_alpha": {
+      "level1": 0.65,
+      "level2": 0.55,
+      "level3": 0.4,
+      "level4": 0.25,
+      "level5": 0.25
+    },
+    "_base_alpha_note": "HARDCODED. Replace after 100+ settlements.",
+    "spread_tight_f": 2.0,
+    "_spread_tight_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city.",
+    "spread_wide_f": 5.0,
+    "_spread_wide_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city.",
+    "fdr_alpha": 0.1,
+    "_fdr_alpha_note": "HARDCODED. Replace after 500+ candidate evaluations.",
+    "opening_alpha_bonus": 0.15
+  },
+  "sizing": {
+    "kelly_multiplier": 0.25,
+    "_kelly_multiplier_note": "HARDCODED. Replace after 500+ settlements.",
+    "max_single_position_pct": 0.1,
+    "max_portfolio_heat_pct": 0.5,
+    "max_correlated_pct": 0.25,
+    "max_city_pct": 0.2,
+    "min_order_usd": 1.0
+  },
+  "correlation": {
+    "default_cross_cluster": 0.1
+  },
+  "exit": {
+    "reversal_confirmations": 2,
+    "_reversal_confirmations_note": "Legacy alias retained for compatibility.",
+    "expiry_hours": 4,
+    "_expiry_hours_note": "Legacy alias retained for compatibility.",
+    "consecutive_confirmations": 2,
+    "_consecutive_confirmations_note": "HARDCODED. Replace after 500+ exit events.",
+    "near_settlement_hours": 4.0,
+    "_near_settlement_hours_note": "HARDCODED. Replace after 100+ near-settlement trades per city.",
+    "buy_no_scaling_factor": 0.5,
+    "_buy_no_scaling_factor_note": "HARDCODED. Replace after 200+ buy_no settlements.",
+    "buy_yes_scaling_factor": 0.3,
+    "_buy_yes_scaling_factor_note": "HARDCODED. Replace after 200+ buy_yes settlements.",
+    "buy_no_floor": -0.02,
+    "_buy_no_floor_note": "HARDCODED.",
+    "buy_no_ceiling": -0.15,
+    "_buy_no_ceiling_note": "HARDCODED.",
+    "buy_yes_floor": -0.01,
+    "_buy_yes_floor_note": "HARDCODED.",
+    "buy_yes_ceiling": -0.1,
+    "_buy_yes_ceiling_note": "HARDCODED.",
+    "divergence_soft_threshold": 0.2,
+    "_divergence_soft_threshold_note": "HARDCODED.",
+    "divergence_hard_threshold": 0.3,
+    "_divergence_hard_threshold_note": "HARDCODED.",
+    "divergence_velocity_confirm": -0.05,
+    "_divergence_velocity_confirm_note": "HARDCODED.",
+    "fee_rate": 0.05,
+    "_fee_rate_note": "Polymarket fee schedule estimate. HARDCODED.",
+    "daily_hurdle_rate": 0.0001,
+    "_daily_hurdle_rate_note": "Opportunity-cost rate per day of locked capital. HARDCODED.",
+    "correlation_crowding_rate": 0.0,
+    "_correlation_crowding_rate_note": "Correlation-crowding cost rate. Default 0.0 = no-op."
+  },
+  "riskguard": {
+    "brier_yellow": 0.25,
+    "brier_orange": 0.3,
+    "brier_red": 0.35,
+    "accuracy_orange": 0.45,
+    "win_rate_yellow": 0.4,
+    "win_rate_orange": 0.35,
+    "max_daily_loss_pct": 0.08,
+    "max_weekly_loss_pct": 0.15,
+    "max_drawdown_pct": 0.2,
+    "staleness_hours": 6
+  },
+  "execution": {
+    "order_type": "limit_only",
+    "limit_offset_pct": 0.02,
+    "fill_timeout_seconds": 600,
+    "cancel_if_not_filled": true
+  },
+  "bias_correction_enabled": false,
+  "feature_flags": {
+    "CANONICAL_EXIT_PATH": false,
+    "HOLD_VALUE_EXIT_COSTS": false,
+    "_HOLD_VALUE_EXIT_COSTS_note": "Flag-gates HoldValue.compute_with_exit_costs. Default OFF.",
+    "NATIVE_MULTIBIN_BUY_NO_SHADOW": false,
+    "NATIVE_MULTIBIN_BUY_NO_LIVE": false,
+    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization; live gates entry submission."
+  }
+}

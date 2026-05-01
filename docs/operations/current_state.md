@@ -8,7 +8,7 @@ Zeus is live on `main`. Plan-pre5 R3 engineering hardening merged 2026-05-01.
 
 - Branch: `main`
 - Runtime entry: `src/main.py` (ZEUS_MODE=live)
-- Posture: Phase 1 canary — `live_safety_cap_usd: 5.0`, `smoke_test_portfolio_cap_usd: 5.0` (config/settings.json)
+- Posture: live (operator params in `config/settings.json`)
 
 ## Active monitoring
 

@@ -186,9 +186,10 @@ config/reality_contracts/*.private.*
 config/city_correlation_matrix.json
 config/city_monthly_bounds.json
 
-# When runtime supports example + local overlay:
-# config/settings.json
-# !config/settings.example.json
+# settings.json holds operator-specific financial params — local only.
+# Copy config/settings.example.json to config/settings.json and fill in values.
+config/settings.json
+!config/settings.example.json
 
 # ----------------------------------------------------------------------
 # Generated office/docs artifacts
