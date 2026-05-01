@@ -22,10 +22,10 @@ Topology doctor has five layers:
 1. **Loaders** read `architecture/**`, scoped `AGENTS.md`, docs registries, and current operation pointers.
 2. **Validators** emit `TopologyIssue` objects with legacy fields and optional typed metadata.
 3. **Mode policy** decides whether an issue blocks `navigation`, `closeout`, `strict_full_repo`, or remains `global_health` context.
-4. **Runtime route cards** summarize admission, risk tier, dominant driver,
-   next action, safe next files, gate budget, requested claims, artifact
-   persistence target, merge evidence predicate, provenance notes, and
-   expansion hints before appendices.
+4. **Runtime route cards** compile an operation vector from finite facts, then
+   summarize admission, risk tier, dominant driver, next action, safe next
+   files, gate budget, requested claims, artifact persistence target, merge
+   evidence predicate, provenance notes, and expansion hints before appendices.
 5. **Renderers** emit human and JSON outputs for navigation, strict lanes, context packs, and closeout.
 
 The checker family is intentionally split across `scripts/topology_doctor_*.py`: registry/docs/source/test/script checks report facts; `scripts/topology_doctor.py` and `scripts/topology_doctor_cli.py` expose the public facade; `scripts/topology_doctor_closeout.py` compiles changed-file closeout.
@@ -47,6 +47,11 @@ bounded impact summary without pretending every file is source.
 - Every new top-level script/test/doc route needs its owning manifest updated when the manifest owns that class of fact.
 - Typed `intent` may select a digest profile, but admission still reconciles
   files against `allowed_files` and forbidden patterns.
+- Operation-vector fields are the preferred disambiguation layer for runtime
+  facts: `operation_stage`, `mutation_surfaces`, `side_effect`,
+  `artifact_target`, and `merge_state`. They prevent topology from depending on
+  endless natural-language alias tables. Profile matching remains compatibility
+  routing; admission still owns write authority.
 - High-fanout file-only evidence is soft ambiguity: the doctor should return
   advisory-only/no-admission instead of making navigation look failed. Strong
   phrase ties and invalid typed intents remain hard ambiguous.
@@ -95,6 +100,14 @@ bounded impact summary without pretending every file is source.
 - Start future runtime-oriented work with the composed command when the caller
   needs one packet rather than separate digest/bootstrap/context invocations:
   `python scripts/topology_doctor.py runtime --task "<task>" --files <files> --intent "<intent>" --task-class <class> --write-intent <intent>`.
+- When wording is ambiguous, provide typed operation facts instead of inventing
+  another phrase: `--operation-stage closeout --artifact-target final_response`
+  for a direct feedback capsule, `--operation-stage merge --merge-state clean`
+  for clean merge closeout, `--operation-stage plan --artifact-target plan_packet`
+  for a planning packet, or `--mutation-surface source_behavior` for a
+  source-control edit with admitted files. Do not let "pre-merge hook" wording
+  trigger merge-conflict escalation; that is runtime-hook work unless an actual
+  merge conflict is present.
 - Use `python3 scripts/topology_doctor.py runtime ...` when a caller needs the
   composed agent-runtime packet: route card, optional semantic boot, optional
   role context, claims, dispatch guidance, gate budget, and artifact-treatment
@@ -108,6 +121,10 @@ bounded impact summary without pretending every file is source.
   annoyance from repeatable routing friction. Repeatable friction should become
   a focused test, manifest repair, or reference-doc adjustment; one-off notes
   stay in the closeout capsule.
+- For broad fix packages, topology should treat listed implementation files as
+  read-only impact context, guide the agent to one `operation planning packet`,
+  and then require separate admitted routes for each structural decision slice.
+  This keeps planning helpful without authorizing a mixed edit batch.
 - For direct feedback tasks, prefer
   `--intent "direct operation feedback capsule"` with no files for final
   response only, or with an already-required packet `work_log.md`/`receipt.json`
