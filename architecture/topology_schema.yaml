@@ -171,6 +171,15 @@ agent_runtime_contract:
     - hard_stops
     - claims
     - expansion_hints
+    - dominant_driver
+    - why_not_admitted
+    - suggested_next_command
+    - safe_next_files
+    - blocked_file_reasons
+    - persistence_target
+    - merge_conflict_scan
+    - merge_evidence_required
+    - provenance_notes
     - claim_scope
   risk_tiers:
     T0: read-only orientation or exploration

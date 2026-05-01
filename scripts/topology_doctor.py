@@ -1627,6 +1627,226 @@ def _route_card_expansion_hints(admission_status: str, risk_tier: str) -> list[s
     ]
 
 
+def _route_card_why_not_admitted(admission: dict[str, Any]) -> list[str]:
+    status = str(admission.get("status") or "advisory_only")
+    if status in {"admitted", "advisory_only"} and not admission.get("out_of_scope_files"):
+        return []
+    decision = admission.get("decision_basis") or {}
+    reasons = [str(reason) for reason in decision.get("why") or [] if str(reason)]
+    if admission.get("out_of_scope_files"):
+        reasons.append(f"out_of_scope_files={list(admission.get('out_of_scope_files') or [])}")
+    if admission.get("forbidden_hits"):
+        reasons.append(f"forbidden_hits={list(admission.get('forbidden_hits') or [])}")
+    if status not in {"admitted", "advisory_only"}:
+        reasons.insert(0, f"admission_status={status}")
+    return list(dict.fromkeys(reasons))
+
+
+def _route_card_safe_next_files(task: str, profile: str, admission: dict[str, Any]) -> list[str]:
+    admitted = list(admission.get("admitted_files") or [])
+    if admitted:
+        return admitted
+    task_l = task.lower()
+    if "provider hot-swap" in task_l or ("canary" in task_l and "freshness" in task_l):
+        return ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"]
+    if profile == "direct operation feedback capsule":
+        return []
+    suggested = list(admission.get("profile_suggested_files") or [])
+    return [path for path in suggested if isinstance(path, str) and not any(mark in path for mark in ("*", "<"))][:5]
+
+
+def _route_card_suggested_next_command(
+    *,
+    task: str,
+    profile: str,
+    status: str,
+    intent: str | None,
+    write_intent: str | None,
+    safe_next_files: list[str],
+) -> str | None:
+    if status == "admitted":
+        return None
+    task_l = task.lower()
+    if profile == "direct operation feedback capsule" and not safe_next_files:
+        return None
+    if "provider hot-swap" in task_l or ("canary" in task_l and "freshness" in task_l):
+        return (
+            "python3 scripts/topology_doctor.py --navigation "
+            "--intent \"source canary readiness hot-swap\" --write-intent edit "
+            f"--files {' '.join(safe_next_files or ['src/control/freshness_gate.py', 'src/engine/cycle_runner.py'])}"
+        )
+    if "dead navigation" in task_l or "stale operations packet reference" in task_l:
+        return (
+            "python3 scripts/topology_doctor.py --navigation "
+            "--intent \"docs navigation cleanup\" --write-intent edit "
+            "--files docs/operations/current_state.md"
+        )
+    if "evaluator" in task_l and "script" in task_l:
+        return (
+            "python3 scripts/topology_doctor.py --navigation "
+            "--intent \"evaluator script import bridge\" --write-intent edit "
+            "--files src/engine/evaluator.py"
+        )
+    if intent:
+        return None
+    if safe_next_files:
+        write_flag = f"--write-intent {write_intent or 'edit'}"
+        return (
+            "python3 scripts/topology_doctor.py --navigation "
+            f"--task \"{task}\" {write_flag} --files {' '.join(safe_next_files)}"
+        )
+    return None
+
+
+def _script_manifest_note_for_path(path: str) -> dict[str, Any] | None:
+    if not path.startswith("scripts/"):
+        return None
+    manifest = load_script_manifest()
+    name = Path(path).name
+    entry = _effective_script_entry(manifest, name)
+    if not entry:
+        return {"kind": "script_manifest", "path": path, "status": "unregistered"}
+    return {
+        "kind": "script_manifest",
+        "path": path,
+        "class": entry.get("class"),
+        "status": entry.get("status"),
+        "lifecycle": entry.get("lifecycle"),
+        "canonical_command": entry.get("canonical_command"),
+        "replacement": entry.get("replacement"),
+        "dangerous_if_run": bool(entry.get("dangerous_if_run", False)),
+    }
+
+
+def _docs_provenance_note_for_path(path: str) -> dict[str, Any] | None:
+    if not path.startswith("docs/"):
+        return None
+    full = ROOT / path
+    if path.startswith("docs/archives/"):
+        status = "archived" if full.exists() else "missing"
+    elif path.startswith("docs/operations/task_"):
+        status = "active" if full.exists() else "missing"
+    elif path in {"docs/operations/current_state.md", "docs/operations/AGENTS.md", "docs/archive_registry.md"}:
+        status = "active" if full.exists() else "missing"
+    else:
+        status = "present" if full.exists() else "missing"
+    return {"kind": "docs_path", "path": path, "status": status}
+
+
+def _route_card_provenance_notes(files: list[str]) -> list[dict[str, Any]]:
+    notes: list[dict[str, Any]] = []
+    for path in files:
+        script_note = _script_manifest_note_for_path(path)
+        if script_note:
+            notes.append(script_note)
+            continue
+        docs_note = _docs_provenance_note_for_path(path)
+        if docs_note:
+            notes.append(docs_note)
+    return notes
+
+
+def _route_card_blocked_file_reasons(
+    *,
+    admission: dict[str, Any],
+    provenance_notes: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    reasons: dict[str, list[str]] = {}
+    for path in admission.get("out_of_scope_files") or []:
+        reasons.setdefault(path, []).append("not declared in selected profile.allowed_files")
+    for path in admission.get("forbidden_hits") or []:
+        reasons.setdefault(path, []).append("matched selected profile forbidden_files")
+    for path in list(admission.get("out_of_scope_files") or []) + list(admission.get("forbidden_hits") or []):
+        if str(path).startswith(".omx/context"):
+            reasons.setdefault(path, []).append("local runtime scratch, not repo evidence")
+    for note in provenance_notes:
+        path = str(note.get("path") or "")
+        if note.get("kind") == "script_manifest":
+            status = str(note.get("status") or "")
+            lifecycle = str(note.get("lifecycle") or "")
+            script_class = str(note.get("class") or "")
+            if status == "deprecated" or lifecycle == "deprecated_fail_closed" or script_class == "stale_deprecated":
+                reasons.setdefault(path, []).append(
+                    "script manifest provenance: deprecated or fail-closed"
+                )
+            elif status == "unregistered":
+                reasons.setdefault(path, []).append("script manifest provenance: unregistered script")
+        elif note.get("kind") == "docs_path" and note.get("status") == "missing":
+            reasons.setdefault(path, []).append("docs provenance: path is missing")
+    return reasons
+
+
+def _route_card_persistence_target(profile: str, task: str, files: list[str]) -> str | None:
+    task_l = task.lower()
+    if profile != "direct operation feedback capsule" and "context recovery" not in task_l:
+        return None
+    if any(path.startswith(".omx/context") for path in files) or ".omx/context" in task_l:
+        return "context_worklog"
+    if any(path.endswith("receipt.json") for path in files):
+        return "receipt"
+    if any(path.endswith("work_log.md") for path in files):
+        return "work_log"
+    return "final_response"
+
+
+def _route_card_merge_conflict_scan(task: str) -> str:
+    task_l = task.lower()
+    if "clean merge" in task_l or "no conflict" in task_l or "no-conflict" in task_l:
+        return "clean"
+    if "conflict" in task_l or "merge" in task_l:
+        return "unknown"
+    return "not_applicable"
+
+
+def _route_card_merge_evidence_required(task: str) -> dict[str, Any]:
+    task_l = task.lower()
+    if "merge" not in task_l and "critic evidence" not in task_l and "contamination" not in task_l:
+        return {"required": False, "reason": "not_a_merge_task"}
+    high_risk = any(
+        phrase in task_l
+        for phrase in (
+            "broad conflict",
+            "multi-zone conflict",
+            "schema conflict",
+            "lifecycle conflict",
+            "db conflict",
+            "control conflict",
+            "live conflict",
+            "semantic ambiguity",
+        )
+    )
+    if high_risk:
+        return {"required": True, "reason": "conflict_first_escalation_trigger"}
+    return {"required": False, "reason": "conflict_first_advisory_clean_or_unknown"}
+
+
+def _route_card_dominant_driver(
+    *,
+    task: str,
+    profile: str,
+    status: str,
+    profile_selection: dict[str, Any],
+    persistence_target: str | None,
+    provenance_notes: list[dict[str, Any]],
+    blocked_file_reasons: dict[str, list[str]],
+    merge_evidence_required: dict[str, Any],
+) -> str:
+    task_l = task.lower()
+    if persistence_target:
+        return f"persistence_target:{persistence_target}"
+    if "provider hot-swap" in task_l or ("canary" in task_l and "freshness" in task_l):
+        return "source_canary_readiness_hot_swap"
+    blocked_paths = set(blocked_file_reasons)
+    if any(note.get("kind") == "script_manifest" and note.get("path") in blocked_paths for note in provenance_notes):
+        return "script_manifest_provenance"
+    if merge_evidence_required.get("reason") != "not_a_merge_task":
+        return "merge_conflict_first"
+    if status != "admitted":
+        selected_by = profile_selection.get("selected_by") or profile_selection.get("evidence_class") or "unknown"
+        return f"profile_needs_typed_intent:{selected_by}"
+    return f"profile:{profile}"
+
+
 def build_runtime_route_card(
     *,
     task: str,
@@ -1643,12 +1863,22 @@ def build_runtime_route_card(
     status = str(admission.get("status") or "advisory_only")
     risk_tier = _runtime_risk_tier(files, task=task, write_intent=write_intent)
     gate_budget = RUNTIME_RISK_GATE_BUDGETS[risk_tier]
+    profile = str(digest.get("profile", "generic"))
+    safe_next_files = _route_card_safe_next_files(task, profile, admission)
+    provenance_notes = _route_card_provenance_notes(list(files or []))
+    blocked_file_reasons = _route_card_blocked_file_reasons(
+        admission=admission,
+        provenance_notes=provenance_notes,
+    )
+    persistence_target = _route_card_persistence_target(profile, task, list(files or []))
+    merge_conflict_scan = _route_card_merge_conflict_scan(task)
+    merge_evidence_required = _route_card_merge_evidence_required(task)
     return {
         "schema_version": "1",
         "authority_status": "generated_route_card_not_authority",
         "mode": mode,
         "task": task,
-        "profile": digest.get("profile", "generic"),
+        "profile": profile,
         "intent": intent,
         "task_class": task_class,
         "write_intent": write_intent,
@@ -1666,6 +1896,31 @@ def build_runtime_route_card(
         "hard_stops": list(digest.get("stop_conditions") or []),
         "claims": normalize_runtime_claims(claims),
         "expansion_hints": _route_card_expansion_hints(status, risk_tier),
+        "dominant_driver": _route_card_dominant_driver(
+            task=task,
+            profile=profile,
+            status=status,
+            profile_selection=profile_selection,
+            persistence_target=persistence_target,
+            provenance_notes=provenance_notes,
+            blocked_file_reasons=blocked_file_reasons,
+            merge_evidence_required=merge_evidence_required,
+        ),
+        "why_not_admitted": _route_card_why_not_admitted(admission),
+        "suggested_next_command": _route_card_suggested_next_command(
+            task=task,
+            profile=profile,
+            status=status,
+            intent=intent,
+            write_intent=write_intent,
+            safe_next_files=safe_next_files,
+        ),
+        "safe_next_files": safe_next_files,
+        "blocked_file_reasons": blocked_file_reasons,
+        "persistence_target": persistence_target,
+        "merge_conflict_scan": merge_conflict_scan,
+        "merge_evidence_required": merge_evidence_required,
+        "provenance_notes": provenance_notes,
         "appendix_policy": "expand appendices only when the task claim depends on them or risk_tier is T3/T4",
         "claim_scope": {
             "admission": "blocks editing when status is not admitted",

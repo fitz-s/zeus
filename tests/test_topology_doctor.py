@@ -4552,6 +4552,106 @@ def test_runtime_claims_appear_in_route_card_and_digest_inputs():
     assert digest["typed_runtime_inputs"]["claims"] == ["admission_valid"]
 
 
+def test_runtime_route_card_explains_generic_source_canary_probe():
+    digest = topology_doctor.build_digest(
+        "change source freshness handling for provider hot-swap for Paris canary readiness only, no live execution",
+        ["src"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert card["dominant_driver"] in {"source_canary_readiness_hot_swap", "profile_needs_typed_intent"}
+    assert card["why_not_admitted"]
+    assert "source canary readiness hot-swap" in card["suggested_next_command"]
+    assert "src/control/freshness_gate.py" in card["safe_next_files"]
+    assert card["merge_evidence_required"]["required"] is False
+
+
+def test_runtime_route_card_surfaces_script_manifest_provenance_for_bridge():
+    digest = topology_doctor.build_digest(
+        "A downstream evaluator import is blocked because topology says my script change is script-health, "
+        "but I think it is a semantic pricing path issue.",
+        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs_v2.py"],
+        intent="evaluator script import bridge",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "evaluator script import bridge"
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "scripts/rebuild_calibration_pairs_v2.py" in digest["admission"]["out_of_scope_files"]
+    assert card["blocked_file_reasons"]["scripts/rebuild_calibration_pairs_v2.py"]
+    assert any(
+        note.get("path") == "scripts/rebuild_calibration_pairs_v2.py"
+        and note.get("kind") == "script_manifest"
+        and note.get("canonical_command")
+        for note in card["provenance_notes"]
+    )
+
+
+def test_runtime_route_card_does_not_block_import_only_do_not_run_helpers():
+    digest = topology_doctor.build_digest(
+        "agent runtime route card typed intent",
+        ["scripts/topology_doctor_cli.py"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/topology_doctor_cli.py" not in card["blocked_file_reasons"]
+    assert any(
+        note.get("path") == "scripts/topology_doctor_cli.py"
+        and note.get("canonical_command") == "DO_NOT_RUN"
+        for note in card["provenance_notes"]
+    )
+
+
+def test_runtime_route_card_types_capsule_persistence_target():
+    digest = topology_doctor.build_digest(
+        "direct operation feedback capsule: context recovery, Zeus improvement insights, topology helped/blocked",
+        [],
+        intent="direct operation feedback capsule",
+        write_intent="read_only",
+    )
+    card = digest["route_card"]
+
+    assert card["persistence_target"] == "final_response"
+    assert card["suggested_next_command"] is None
+    assert card["why_not_admitted"] == []
+
+
+def test_runtime_route_card_types_context_worklog_persistence_target():
+    digest = topology_doctor.build_digest(
+        "context recovery note wants to persist under .omx/context",
+        [".omx/context/runtime-handoff.md"],
+        intent="direct operation feedback capsule",
+        write_intent="read_only",
+    )
+    card = digest["route_card"]
+
+    assert card["persistence_target"] == "context_worklog"
+    assert ".omx/context/runtime-handoff.md" in card["blocked_file_reasons"]
+    assert any("local runtime scratch" in reason for reason in card["blocked_file_reasons"][".omx/context/runtime-handoff.md"])
+
+
+def test_runtime_route_card_keeps_clean_merge_critic_evidence_predicate_off():
+    digest = topology_doctor.build_digest(
+        "clean merge with contamination history wording should not ask for critic evidence when conflict scan is clean",
+        ["architecture/worktree_merge_protocol.yaml"],
+        intent="topology graph agent runtime upgrade",
+        task_class="agent_runtime",
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["merge_conflict_scan"] == "clean"
+    assert card["merge_evidence_required"]["required"] is False
+    assert "conflict_first" in card["merge_evidence_required"]["reason"]
+
+
 def test_invalid_typed_navigation_intent_blocks_without_profile_fallback(monkeypatch):
     ok = topology_doctor.StrictResult(ok=True, issues=[])
 
@@ -4860,6 +4960,10 @@ def test_runtime_context_packs_include_lightweight_operation_feedback_loop():
         )
 
         feedback = packet["runtime_guidance"]["operation_feedback_loop"]
+        route_card_guidance = packet["runtime_guidance"]["route_card_runtime_packet"]
+        assert "dominant_driver" in route_card_guidance
+        assert "suggested_next_command" in route_card_guidance
+        assert "provenance_notes" in route_card_guidance
         assert "Zeus improvement insights" in feedback
         assert "topology helped/blocked note" in feedback
         assert "route/admission/risk" in feedback

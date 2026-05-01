@@ -135,6 +135,57 @@ def test_source_contract_watch_script_routes_to_script_profile():
     assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
 
 
+def test_source_canary_readiness_hot_swap_routes_without_live_execution():
+    digest = build_digest(
+        "source freshness provider hot-swap Paris canary readiness only no live execution",
+        ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/control/freshness_gate.py" in digest["admission"]["admitted_files"]
+    assert "src/engine/cycle_runner.py" in digest["admission"]["admitted_files"]
+
+
+def test_source_canary_readiness_hot_swap_blocks_live_execution_surface():
+    digest = build_digest(
+        "source freshness provider hot-swap Paris canary readiness only no live execution",
+        ["src/control/freshness_gate.py", "src/execution/executor.py"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["admission"]["status"] == "blocked"
+    assert "src/execution/executor.py" in digest["admission"]["forbidden_hits"]
+
+
+def test_docs_navigation_cleanup_routes_without_settlement_replay_semantic_edit():
+    digest = build_digest(
+        "Clean up a stale operations packet reference in docs only. "
+        "Keep settlement learning and replay wording untouched.",
+        ["docs/operations/current_state.md"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "docs navigation cleanup"
+    assert digest["admission"]["status"] == "admitted"
+    assert "docs/operations/current_state.md" in digest["admission"]["admitted_files"]
+
+
+def test_evaluator_script_import_bridge_admits_evaluator_but_not_script_side_effect():
+    digest = build_digest(
+        "evaluator script import bridge for downstream evaluator import safety",
+        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs_v2.py"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "evaluator script import bridge"
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
+    assert "scripts/rebuild_calibration_pairs_v2.py" in digest["admission"]["out_of_scope_files"]
+
+
 def test_source_watch_venus_sensing_integration_routes_to_script_profile():
     digest = build_digest(
         "add or change script: runtime_support source-contract watch integration for Venus sensing report",

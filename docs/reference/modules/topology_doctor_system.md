@@ -22,8 +22,10 @@ Topology doctor has five layers:
 1. **Loaders** read `architecture/**`, scoped `AGENTS.md`, docs registries, and current operation pointers.
 2. **Validators** emit `TopologyIssue` objects with legacy fields and optional typed metadata.
 3. **Mode policy** decides whether an issue blocks `navigation`, `closeout`, `strict_full_repo`, or remains `global_health` context.
-4. **Runtime route cards** summarize admission, risk tier, next action, gate
-   budget, requested claims, and expansion hints before appendices.
+4. **Runtime route cards** summarize admission, risk tier, dominant driver,
+   next action, safe next files, gate budget, requested claims, artifact
+   persistence target, merge evidence predicate, provenance notes, and
+   expansion hints before appendices.
 5. **Renderers** emit human and JSON outputs for navigation, strict lanes, context packs, and closeout.
 
 The checker family is intentionally split across `scripts/topology_doctor_*.py`: registry/docs/source/test/script checks report facts; `scripts/topology_doctor.py` and `scripts/topology_doctor_cli.py` expose the public facade; `scripts/topology_doctor_closeout.py` compiles changed-file closeout.
@@ -49,7 +51,10 @@ bounded impact summary without pretending every file is source.
   advisory-only/no-admission instead of making navigation look failed. Strong
   phrase ties and invalid typed intents remain hard ambiguous.
 - `--route-card-only` is the lightweight first-screen path for T0/T1 work; it
-  should not print appendices, repo-health lists, or unrelated drift.
+  should not print appendices, repo-health lists, or unrelated drift. It should
+  still show the fields a real runtime needs to avoid retry loops:
+  `dominant_driver`, `why_not_admitted`, `suggested_next_command`,
+  `persistence_target`, and `merge_evidence_required` when present.
 - `--claim` turns optional evidence into claim-scoped gates. A stale graph
   blocks `graph_impact_validated`, not ordinary navigation or closeout.
 - Workflow, skill-use, and work-ethic guidance belongs in generated context
@@ -96,6 +101,9 @@ bounded impact summary without pretending every file is source.
   hints.
 - Use role context packs (`explorer`, `executor`, `critic`, `verifier`) when the
   next agent needs a bounded runtime contract rather than the full packet.
+- Treat `provenance_notes` as first-layer routing evidence. Script manifest
+  lifecycle/status, docs path status, and runtime scratch classification should
+  appear in the route card before an agent has to read broad reference docs.
 - Use operation feedback to improve topology only after separating a one-off
   annoyance from repeatable routing friction. Repeatable friction should become
   a focused test, manifest repair, or reference-doc adjustment; one-off notes
