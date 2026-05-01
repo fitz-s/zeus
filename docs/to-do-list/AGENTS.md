@@ -8,8 +8,6 @@ task queues or audit inventories. They are operational evidence, not authority.
 | File | Purpose |
 |------|---------|
 | `known_gaps_archive.md` | Closed gap antibody archive; immune-system record of resolved FIXED/CLOSED gaps; moved from docs/operations 2026-05-01 |
-| `zeus_operations_archive_deferrals_2026-04-24.md` | Operations archive deferrals workbook (2026-04-26 status: D3 absorbed by `zeus-pr18-fix-plan-20260426`; D4 closed; D5 near-closed; D1+D2 awaiting operator decision); task queue, not authority |
-| `archive/2026-04-26_closed/` | Workbooks archived in the 2026-04-26 audit pass (5 files). Verdicts and successor packets recorded in directory README. Open items from `zeus_live_readiness_upgrade_checklist_2026-04-23.md` were absorbed into `docs/operations/task_2026-04-26_live_readiness_completion/`. |
 
 ## Rules
 
