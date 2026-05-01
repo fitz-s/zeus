@@ -27,14 +27,25 @@ if str(ROOT) not in sys.path:
 
 from src.config import STATE_DIR, state_path
 from src.contracts.reality_contracts_loader import load_contracts
+from src.state.db import get_trade_connection_with_world
+from src.state.truth_files import read_truth_json
 
 # Paths
-ZEUS_DB = STATE_DIR / "zeus.db"
+ZEUS_DB = STATE_DIR / "zeus_trades.db"
 RISK_DB = state_path("risk_state.db")
 POSITIONS_JSON = state_path("positions.json")
 REPORT_PATH = STATE_DIR / "venus_sensing_report.json"
 SOURCE_WATCH_CITY_ENV = "ZEUS_VENUS_SOURCE_WATCH_CITY"
 SOURCE_WATCH_REPORT_ONLY_ENV = "ZEUS_VENUS_SOURCE_WATCH_REPORT_ONLY"
+_TERMINAL_POSITION_STATES = {
+    "settled",
+    "voided",
+    "quarantined",
+    "admin_closed",
+    "closed",
+    "exited",
+    "economically_closed",
+}
 
 
 def _utcnow() -> datetime:
@@ -120,24 +131,56 @@ def _collect_positions_json() -> dict:
         return {"_error": f"{POSITIONS_JSON.name} not found"}
 
     try:
-        data = json.loads(POSITIONS_JSON.read_text())
+        data, truth = read_truth_json(POSITIONS_JSON)
     except Exception as exc:
         return {"_error": f"parse error: {exc}"}
 
-    positions = data.get("positions", data.get("active_positions", []))
+    raw_positions = data.get("positions", data.get("active_positions", []))
+    if isinstance(raw_positions, dict):
+        positions = list(raw_positions.values())
+    elif isinstance(raw_positions, list):
+        positions = raw_positions
+    else:
+        positions = []
     states: dict[str, int] = {}
     for p in positions:
-        s = p.get("state", "unknown")
+        s = str(p.get("phase") or p.get("state") or "unknown")
         states[s] = states.get(s, 0) + 1
 
-    active = sum(1 for p in positions if p.get("state", "") in ("entered", "day0_window", "pending_entry", "active"))
-    exited = sum(1 for p in positions if p.get("state", "") in ("economically_closed", "exited", "settled"))
+    active_positions = [
+        p for p in positions
+        if isinstance(p, dict)
+        and str(p.get("phase") or p.get("state") or "").strip().lower() not in _TERMINAL_POSITION_STATES
+    ]
+    exited = sum(
+        1 for p in positions
+        if isinstance(p, dict)
+        and str(p.get("phase") or p.get("state") or "").strip().lower() in _TERMINAL_POSITION_STATES
+    )
 
     return {
-        "active_count": active,
+        "authority": "legacy_json_derived_observability_only",
+        "canonical_truth_source": "position_current",
+        "deprecated": bool(truth.get("deprecated", False)),
+        "generated_at": truth.get("generated_at"),
+        "stale_age_seconds": truth.get("stale_age_seconds"),
+        "status": "legacy_active_positions" if active_positions else "empty",
+        "active_count": len(active_positions),
         "exit_count": exited,
         "total_count": len(positions),
         "states": states,
+        "sample_positions": [
+            {
+                "trade_id": p.get("trade_id"),
+                "city": p.get("city"),
+                "target_date": p.get("target_date"),
+                "direction": p.get("direction"),
+                "state": p.get("phase") or p.get("state"),
+                "strategy_key": p.get("strategy_key") or p.get("strategy"),
+                "chain_state": p.get("chain_state"),
+            }
+            for p in active_positions[:10]
+        ],
     }
 
 
@@ -301,7 +344,18 @@ def _collect_consistency(conn: sqlite3.Connection, surfaces: dict) -> dict:
 
     # position_current vs positions.json active count
     pj_active = pj.get("active_count", 0)
-    pc_vs_json = {"pc": pc_count, "json_active": pj_active, "match": pc_count == pj_active}
+    legacy_conflicts: list[str] = []
+    if pc_count == 0 and pj_active > 0:
+        legacy_conflicts.append("canonical_empty_legacy_active_positions")
+    pc_vs_json = {
+        "pc": pc_count,
+        "json_active": pj_active,
+        "match": pc_count == pj_active,
+        "authority": "legacy_json_derived_observability_only",
+        "canonical_truth_source": "position_current",
+        "status": "conflict" if legacy_conflicts else ("match" if pc_count == pj_active else "mismatch"),
+        "conflicts": legacy_conflicts,
+    }
 
     # Ghost positions (entered with past target dates)
     ghost_count = 0
@@ -425,12 +479,10 @@ def generate_sensing_report() -> dict:
     """Generate the full sensing report (diagnostics, surfaces, consistency, relationship_checks, deltas)."""
     generated_at = _utcnow().isoformat()
 
-    # Open zeus.db
     try:
-        conn = sqlite3.connect(str(ZEUS_DB))
-        conn.row_factory = sqlite3.Row
+        conn = get_trade_connection_with_world()
     except Exception as exc:
-        return {"generated_at": generated_at, "_error": f"cannot open zeus.db: {exc}"}
+        return {"generated_at": generated_at, "_error": f"cannot open canonical trade DB: {exc}"}
 
     try:
         diagnostics = _collect_diagnostics()

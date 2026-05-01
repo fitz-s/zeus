@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-04-29
-# Authority basis: Phase 10B DT-Seam Cleanup and 2026-04-29 design simplification audit F4.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Last reused/audited: 2026-05-01
+# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, and 2026-05-01 stale live-state artifact tracking.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -511,6 +511,123 @@ class TestRCPV2RowCountSensor:
         assert all(v == 0 for v in counts.values()), (
             "Missing v2 table must return 0 count, not raise exception"
         )
+
+    def test_legacy_positions_artifact_flags_canonical_empty_conflict(self, tmp_path, monkeypatch):
+        """Legacy positions.json is telemetry only, but nonterminal rows must be visible."""
+        from src.observability import status_summary as status_summary_module
+
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({
+            "updated_at": "2026-04-12T19:59:43+00:00",
+            "positions": [
+                {
+                    "trade_id": "stale-json-live",
+                    "market_id": "m1",
+                    "city": "Seattle",
+                    "target_date": "2026-04-14",
+                    "bin_label": "Will the highest temperature in Seattle be between 50-51F on April 14?",
+                    "direction": "buy_no",
+                    "state": "entered",
+                    "strategy_key": "opening_inertia",
+                    "chain_state": "synced",
+                    "cost_basis_usd": 4.9047,
+                }
+            ],
+        }))
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+
+        summary = status_summary_module._legacy_positions_artifact_summary({
+            "status": "empty",
+            "open_positions": 0,
+        })
+
+        assert summary["authority"] == "legacy_json_derived_observability_only"
+        assert summary["canonical_truth_source"] == "position_current"
+        assert summary["status"] == "conflict"
+        assert summary["active_positions"] == 1
+        assert summary["active_cost_basis_usd"] == pytest.approx(4.9047)
+        assert summary["target_dates"] == ["2026-04-14"]
+        assert summary["chain_state_counts"] == {"synced": 1}
+        assert summary["sample_positions"][0]["trade_id"] == "stale-json-live"
+        assert summary["conflicts"] == ["canonical_empty_legacy_active_positions"]
+
+    def test_status_summary_escalates_legacy_positions_conflict_to_infrastructure_red(self, tmp_path, monkeypatch):
+        """Relationship: status remains DB-empty while surfacing stale legacy state as RED telemetry."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({
+            "updated_at": "2026-04-12T19:59:43+00:00",
+            "positions": [
+                {
+                    "trade_id": "stale-json-live",
+                    "market_id": "m1",
+                    "city": "Seattle",
+                    "target_date": "2026-04-14",
+                    "bin_label": "Will the highest temperature in Seattle be between 50-51F on April 14?",
+                    "direction": "buy_no",
+                    "state": "entered",
+                    "strategy_key": "opening_inertia",
+                    "chain_state": "synced",
+                    "cost_basis_usd": 4.9047,
+                }
+            ],
+        }))
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", positions_path)
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "empty",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "query_execution_event_summary", lambda conn, not_before=None: {"overall": {}})
+        monkeypatch.setattr(status_summary_module, "query_learning_surface_summary", lambda conn, not_before=None: {"by_strategy": {}})
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(status_summary_module, "recommended_commands_from_status", lambda status, include_review_required=True: [])
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+
+        status_summary_module.write_status({"mode": "opening_hunt", "risk_level": "GREEN"})
+        status = json.loads(status_path.read_text())
+
+        assert status["portfolio"]["open_positions"] == 0
+        assert status["portfolio"]["legacy_artifact"]["active_positions"] == 1
+        assert status["portfolio"]["legacy_artifact"]["conflicts"] == [
+            "canonical_empty_legacy_active_positions"
+        ]
+        assert status["risk"]["infrastructure_level"] == "RED"
+        assert "legacy_positions_json_conflicts_with_canonical_empty" in status["risk"]["infrastructure_issues"]
 
 
 # ---------------------------------------------------------------------------

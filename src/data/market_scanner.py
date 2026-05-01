@@ -112,6 +112,10 @@ class MarketSupportTopology:
 
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
+_SOURCE_URL_RE = re.compile(
+    r"https?://[^\s)>\]\"']+",
+    re.IGNORECASE,
+)
 
 _LOW_METRIC_KEYWORDS = (
     "lowest temperature",
@@ -1000,8 +1004,20 @@ def _market_city_sanity_rejection(event: dict, matched_city: City) -> str | None
     return None
 
 
-def _collect_resolution_sources(event: dict) -> tuple[str, ...]:
-    """Collect explicit settlement source fields from a Gamma event payload."""
+def _dedupe_resolution_sources(values: list[str]) -> tuple[str, ...]:
+    deduped: list[str] = []
+    seen = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        identity = normalized.lower()
+        if identity not in seen:
+            seen.add(identity)
+            deduped.append(normalized)
+    return tuple(deduped)
+
+
+def _collect_structured_resolution_sources(event: dict) -> tuple[str, ...]:
+    """Collect structured settlement source fields from a Gamma event payload."""
     values: list[str] = []
     source_keys = (
         "resolutionSource",
@@ -1032,15 +1048,63 @@ def _collect_resolution_sources(event: dict) -> tuple[str, ...]:
         for key in source_keys:
             add_value(market.get(key))
 
-    deduped: list[str] = []
-    seen = set()
-    for value in values:
-        normalized = re.sub(r"\s+", " ", value).strip()
-        identity = normalized.lower()
-        if identity not in seen:
-            seen.add(identity)
-            deduped.append(normalized)
-    return tuple(deduped)
+    return _dedupe_resolution_sources(values)
+
+
+def _description_source_text_fields(event: dict) -> list[str]:
+    text_fields = [
+        event.get("description", ""),
+        event.get("title", ""),
+        event.get("slug", ""),
+        event.get("groupItemTitle", ""),
+        event.get("group_item_title", ""),
+    ]
+    for market in event.get("markets", []) or []:
+        text_fields.extend(
+            [
+                market.get("description", ""),
+                market.get("question", ""),
+                market.get("slug", ""),
+                market.get("groupItemTitle", ""),
+                market.get("group_item_title", ""),
+            ]
+        )
+    return [str(field) for field in text_fields if str(field or "").strip()]
+
+
+def _collect_description_resolution_sources(event: dict) -> tuple[str, ...]:
+    """Extract settlement-source proof from current market prose when Gamma's
+    structured source fields are blank.
+
+    This is deliberately narrower than arbitrary text inference: unsupported
+    URLs are ignored here, and explicit structured source fields still win.
+    """
+    values: list[str] = []
+    combined_text = "\n".join(_description_source_text_fields(event))
+    for match in _SOURCE_URL_RE.finditer(combined_text):
+        source = match.group(0).rstrip(".,;:")
+        if _infer_source_family(source) is not None:
+            values.append(source)
+    if re.search(
+        r"(?<![a-z0-9])hong kong observatory(?![a-z0-9])",
+        combined_text,
+        re.IGNORECASE,
+    ):
+        values.append("Hong Kong Observatory")
+    return _dedupe_resolution_sources(values)
+
+
+def _collect_resolution_sources(event: dict) -> tuple[str, ...]:
+    """Collect settlement-source proof from Gamma.
+
+    Structured ``resolutionSource`` fields are authoritative when present. If
+    Gamma omits those fields, fall back to the current market description text,
+    which Polymarket uses as the public settlement contract surface.
+    """
+    structured_sources = _collect_structured_resolution_sources(event)
+    if structured_sources:
+        return structured_sources
+    return _collect_description_resolution_sources(event)
 
 
 def _infer_source_family(source: str) -> str | None:
@@ -1093,14 +1157,16 @@ def _extract_station_id(source: str, city: City) -> str | None:
 
 def _check_source_contract(event: dict, city: City) -> SourceContractCheck:
     """Compare Gamma resolutionSource metadata against configured settlement source."""
-    sources = _collect_resolution_sources(event)
+    structured_sources = _collect_structured_resolution_sources(event)
+    sources = structured_sources or _collect_description_resolution_sources(event)
+    source_label = "resolutionSource" if structured_sources else "market description"
     expected_family = city.settlement_source_type or "wu_icao"
     expected_station = _configured_station_id(city)
 
     if not sources:
         return SourceContractCheck(
             status="MISSING",
-            reason="Gamma payload has no resolutionSource field",
+            reason="Gamma payload has no resolutionSource field or supported description source proof",
             resolution_sources=(),
             source_family=None,
             station_id=None,
@@ -1201,7 +1267,7 @@ def _check_source_contract(event: dict, city: City) -> SourceContractCheck:
 
     return SourceContractCheck(
         status="MATCH",
-        reason="resolutionSource matches configured settlement source contract",
+        reason=f"{source_label} matches configured settlement source contract",
         resolution_sources=sources,
         source_family=source_family or expected_family,
         station_id=station_id,
