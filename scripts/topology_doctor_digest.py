@@ -746,6 +746,8 @@ def _operation_vector_resolution(
     }
 
     candidate_ids: list[str] = []
+    if operation_stage == "plan" or artifact_target == "plan_packet":
+        candidate_ids.append("operation planning packet")
     if operation_stage == "closeout" and (feedback_artifact_target or feedback_task_hint):
         candidate_ids.append("direct operation feedback capsule")
     if "source_behavior" in mutation_surfaces and (

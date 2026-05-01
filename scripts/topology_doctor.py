@@ -1560,15 +1560,19 @@ def build_digest(
     )
 
 
-OPERATION_STAGES = frozenset({"explore", "edit", "merge", "closeout", "handoff"})
+OPERATION_STAGES = frozenset({"explore", "plan", "edit", "merge", "closeout", "handoff"})
 MUTATION_SURFACES = frozenset(
     {
         "none",
         "docs",
         "runtime_tooling",
+        "runtime_hooks",
+        "static_analysis_rules",
+        "architecture_policy",
         "source_behavior",
         "evaluator_behavior",
         "execution_behavior",
+        "db_schema_truth",
         "state_truth",
         "data_truth",
     }
@@ -1580,6 +1584,7 @@ ARTIFACT_TARGETS = frozenset(
         "final_response",
         "existing_work_log",
         "receipt",
+        "plan_packet",
         "runtime_scratch",
         "new_evidence",
         "new_findings",
@@ -1618,6 +1623,8 @@ def _clean_typed(value: str | None) -> str | None:
 
 
 def _authority_surface_for_path(path: str) -> str:
+    if path.startswith(".claude/hooks/") or path == ".claude/settings.json":
+        return "runtime_hooks"
     if path.startswith("src/control/"):
         return "src_control"
     if path.startswith("src/execution/"):
@@ -1646,6 +1653,14 @@ def _authority_surface_for_path(path: str) -> str:
 
 
 def _mutation_surface_for_path(path: str, *, profile: str = "") -> str:
+    if path.startswith(".claude/hooks/") or path == ".claude/settings.json":
+        return "runtime_hooks"
+    if path.startswith("architecture/ast_rules/"):
+        return "static_analysis_rules"
+    if path in {"architecture/invariants.yaml", "architecture/negative_constraints.yaml"}:
+        return "architecture_policy"
+    if path == "src/state/db.py":
+        return "db_schema_truth"
     if path == "src/engine/evaluator.py":
         return "evaluator_behavior"
     if path.startswith("src/execution/"):
@@ -1671,12 +1686,17 @@ def _mutation_surface_for_path(path: str, *, profile: str = "") -> str:
     return "none"
 
 
+def _merge_task_text(task: str) -> str:
+    # "pre-merge hook" is runtime tooling, not a git merge operation.
+    return re.sub(r"\bpre[-_ ]merge\b", "premerge", task.lower())
+
+
 def _infer_merge_state(task: str, explicit: str | None, sources: dict[str, str]) -> str:
     explicit_state = _clean_typed(explicit)
     if explicit_state and explicit_state in MERGE_STATES:
         sources["merge_state"] = "cli"
         return explicit_state
-    task_l = task.lower()
+    task_l = _merge_task_text(task)
     if "clean merge" in task_l or "no conflict" in task_l or "no-conflict" in task_l:
         sources["merge_state"] = "task_hint"
         return "clean"
@@ -1698,11 +1718,37 @@ def _infer_merge_state(task: str, explicit: str | None, sources: dict[str, str])
     if "narrow conflict" in task_l or "mechanical conflict" in task_l:
         sources["merge_state"] = "task_hint"
         return "narrow_conflict"
-    if "merge" in task_l or "conflict" in task_l:
+    if re.search(r"\b(?:merge|rebase|pull|am|cherry[-_ ]?pick)\b", task_l) or "conflict" in task_l:
         sources["merge_state"] = "task_hint"
         return "unknown"
     sources["merge_state"] = "default"
     return "not_merge"
+
+
+def _task_is_planning_package(task: str, files: list[str]) -> bool:
+    task_l = task.lower()
+    planning_markers = (
+        "plan",
+        "planning",
+        "prepare fix",
+        "prepare repair",
+        "fix package",
+        "repair package",
+        "remediation package",
+        "impact analysis",
+        "影响范围",
+        "计划",
+        "准备修复",
+        "分组",
+    )
+    if any(marker in task_l for marker in planning_markers):
+        return True
+    semantic_files = [
+        path
+        for path in files
+        if path.startswith(("architecture/", "src/", ".claude/hooks/", "tests/"))
+    ]
+    return len(semantic_files) > 4 and any(word in task_l for word in ("issues", "critical", "fix"))
 
 
 def _infer_artifact_target(task: str, files: list[str], profile: str, explicit: str | None, sources: dict[str, str]) -> str:
@@ -1736,6 +1782,9 @@ def _infer_artifact_target(task: str, files: list[str], profile: str, explicit: 
     if any(path.endswith("receipt.json") for path in files):
         sources["artifact_target"] = "file_fact"
         return "receipt"
+    if any(path.endswith(("/PLAN.md", "/plan.md", "/implementation_plan.md")) for path in files):
+        sources["artifact_target"] = "file_fact"
+        return "plan_packet"
     if any(path.endswith("work_log.md") for path in files):
         sources["artifact_target"] = "file_fact"
         return "existing_work_log"
@@ -1813,6 +1862,9 @@ def build_operation_vector(
     elif inferred_merge_state != "not_merge":
         inferred_stage = "merge"
         sources["operation_stage"] = "merge_state"
+    elif inferred_artifact_target == "plan_packet" or _task_is_planning_package(task, normalized_files):
+        inferred_stage = "plan"
+        sources["operation_stage"] = "artifact_or_task_hint"
     elif inferred_artifact_target != "none":
         inferred_stage = "closeout"
         sources["operation_stage"] = "artifact_target"
@@ -1864,6 +1916,8 @@ def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | 
     if any(
         path.startswith(("architecture/", "docs/authority/", "src/state/", "src/control/", "src/supervisor_api/"))
         or path in {"AGENTS.md", "workspace_map.md"}
+        or path.startswith(".claude/hooks/")
+        or path == ".claude/settings.json"
         or path.startswith("scripts/topology_doctor")
         for path in normalized
     ):
@@ -1873,7 +1927,12 @@ def _runtime_risk_tier(files: list[str], *, task: str = "", write_intent: str | 
     return "T1"
 
 
-def _route_card_next_action(admission_status: str, risk_tier: str) -> str:
+def _route_card_next_action(
+    admission_status: str,
+    risk_tier: str,
+    operation_vector: dict[str, Any] | None = None,
+) -> str:
+    operation_stage = str((operation_vector or {}).get("operation_stage") or "")
     if admission_status == "admitted":
         if risk_tier == "T3":
             return (
@@ -1885,6 +1944,11 @@ def _route_card_next_action(admission_status: str, risk_tier: str) -> str:
             return "stop until explicit operator-go, dry-run evidence, apply guard, and rollback plan exist"
         return "proceed with admitted files and focused verification"
     if admission_status == "advisory_only":
+        if operation_stage == "plan":
+            return (
+                "planning only: use requested files as read-only impact context, "
+                "write/route one plan packet, then split implementation by structural decision"
+            )
         return "read-only orientation only; pass typed intent or narrower files before editing"
     if admission_status == "scope_expansion_required":
         return "stop and update packet/profile scope before editing out-of-scope files"
@@ -1895,13 +1959,24 @@ def _route_card_next_action(admission_status: str, risk_tier: str) -> str:
     return "stop and inspect admission decision"
 
 
-def _route_card_expansion_hints(admission_status: str, risk_tier: str) -> list[str]:
+def _route_card_expansion_hints(
+    admission_status: str,
+    risk_tier: str,
+    operation_vector: dict[str, Any] | None = None,
+) -> list[str]:
+    operation_stage = str((operation_vector or {}).get("operation_stage") or "")
     if admission_status not in {"admitted", "advisory_only"}:
         return [
             "inspect admission.decision_basis before changing files",
             "do not edit until requested files are admitted",
         ]
     if admission_status == "advisory_only":
+        if operation_stage == "plan":
+            return [
+                "treat requested files as impact context, not edit permission",
+                "write one plan packet before touching governed/source files",
+                "run separate navigation + planning-lock for each structural decision slice",
+            ]
         return [
             "treat requested files as orientation context, not edit permission",
             "pass typed intent or narrow task wording before editing",
@@ -1970,6 +2045,7 @@ def _route_card_suggested_next_command(
     if status == "admitted":
         return None
     task_l = task.lower()
+    operation_stage = str(operation_vector.get("operation_stage") or "")
     artifact_target = str(operation_vector.get("artifact_target") or "none")
     if profile == "direct operation feedback capsule":
         if artifact_target == "final_response":
@@ -1993,6 +2069,14 @@ def _route_card_suggested_next_command(
             )
         if not safe_next_files:
             return None
+    if operation_stage == "plan" and artifact_target != "plan_packet":
+        return (
+            "python3 scripts/topology_doctor.py --navigation --route-card-only "
+            "--task \"operation planning packet: structural decisions, impact context, "
+            "slice routes, and verification plan\" --intent \"operation planning packet\" "
+            "--write-intent edit --operation-stage plan --artifact-target plan_packet "
+            "--files docs/operations/task_YYYY-MM-DD_slug/PLAN.md"
+        )
     if merge_evidence_required.get("required"):
         return (
             "python3 scripts/topology_doctor.py --navigation "
@@ -2082,6 +2166,7 @@ def _route_card_blocked_file_reasons(
     provenance_notes: list[dict[str, Any]],
 ) -> dict[str, list[str]]:
     reasons: dict[str, list[str]] = {}
+    admitted_paths = {str(path) for path in admission.get("admitted_files") or []}
     for path in admission.get("out_of_scope_files") or []:
         reasons.setdefault(path, []).append("not declared in selected profile.allowed_files")
     for path in admission.get("forbidden_hits") or []:
@@ -2101,7 +2186,11 @@ def _route_card_blocked_file_reasons(
                 )
             elif status == "unregistered":
                 reasons.setdefault(path, []).append("script manifest provenance: unregistered script")
-        elif note.get("kind") == "docs_path" and note.get("status") == "missing":
+        elif (
+            note.get("kind") == "docs_path"
+            and note.get("status") == "missing"
+            and path not in admitted_paths
+        ):
             reasons.setdefault(path, []).append("docs provenance: path is missing")
     return reasons
 
@@ -2116,6 +2205,8 @@ def _route_card_persistence_target(profile: str, task: str, files: list[str], op
         return "context_worklog"
     if artifact_target == "existing_work_log":
         return "work_log"
+    if artifact_target == "plan_packet":
+        return "plan_packet"
     if artifact_target in {"final_response", "receipt", "new_evidence", "new_findings"}:
         return artifact_target
     task_l = task.lower()
@@ -2154,6 +2245,37 @@ def _route_card_merge_evidence_required(operation_vector: dict[str, Any]) -> dic
     return {"required": False, "reason": "conflict_first_advisory_unknown"}
 
 
+def _route_card_structural_decision_hints(operation_vector: dict[str, Any]) -> list[str]:
+    if str(operation_vector.get("operation_stage") or "") != "plan":
+        return []
+    if str(operation_vector.get("artifact_target") or "") == "plan_packet":
+        return [
+            "plan packet should name K structural decisions before implementation",
+            "each implementation slice still needs its own admitted navigation route",
+        ]
+    surfaces = [str(surface) for surface in operation_vector.get("mutation_surfaces") or []]
+    if not surfaces or surfaces == ["none"]:
+        return [
+            "plan packet should name the structural decisions before implementation",
+            "implementation still needs a separate admitted navigation route per slice",
+        ]
+    labels = {
+        "runtime_hooks": "hook fail-closed behavior",
+        "static_analysis_rules": "static rule precision",
+        "architecture_policy": "invariant/negative-constraint authority",
+        "db_schema_truth": "DB schema/default semantics",
+        "state_truth": "state truth semantics",
+        "runtime_tooling": "runtime tooling/governance",
+        "docs": "docs/reference consistency",
+    }
+    grouped = [labels.get(surface, surface) for surface in surfaces if surface != "none"]
+    return [
+        "split implementation by structural decision, not by every issue",
+        f"candidate split surfaces: {', '.join(dict.fromkeys(grouped))}",
+        "requested implementation files remain read-only impact context until each slice is admitted",
+    ]
+
+
 def _route_card_dominant_driver(
     *,
     task: str,
@@ -2168,6 +2290,8 @@ def _route_card_dominant_driver(
 ) -> str:
     if persistence_target:
         return f"persistence_target:{persistence_target}"
+    if str(operation_vector.get("operation_stage") or "") == "plan":
+        return "planning_package_split"
     if str(operation_vector.get("merge_state") or "not_merge") != "not_merge":
         return "merge_conflict_first"
     if "source_behavior" in set(operation_vector.get("mutation_surfaces") or []) and "source canary" in profile:
@@ -2236,15 +2360,16 @@ def build_runtime_route_card(
         "admission_status": status,
         "risk_tier": risk_tier,
         "gate_budget": gate_budget,
-        "next_action": _route_card_next_action(status, risk_tier),
+        "next_action": _route_card_next_action(status, risk_tier, operation_vector),
         "admitted_files": list(admission.get("admitted_files") or []),
         "out_of_scope_files": list(admission.get("out_of_scope_files") or []),
         "forbidden_hits": list(admission.get("forbidden_hits") or []),
         "hard_stops": list(digest.get("stop_conditions") or []),
         "claims": normalize_runtime_claims(claims),
-        "expansion_hints": _route_card_expansion_hints(status, risk_tier),
+        "expansion_hints": _route_card_expansion_hints(status, risk_tier, operation_vector),
         "operation_vector": operation_vector,
         "operation_vector_sources": dict(operation_payload.get("field_sources") or {}),
+        "structural_decision_hints": _route_card_structural_decision_hints(operation_vector),
         "dominant_driver": _route_card_dominant_driver(
             task=task,
             profile=profile,
@@ -2344,11 +2469,17 @@ def _navigation_direct_blockers(issues: list[dict[str, Any]], requested_paths: l
     return blockers
 
 
-def _navigation_requested_file_issues(requested_paths: list[str]) -> list[dict[str, Any]]:
+def _navigation_requested_file_issues(
+    requested_paths: list[str],
+    admitted_paths: list[str] | None = None,
+) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
+    admitted = {path.strip().removeprefix("./").rstrip("/") for path in admitted_paths or []}
     for requested in requested_paths:
         normalized = requested.strip().removeprefix("./").rstrip("/")
         if not normalized:
+            continue
+        if normalized in admitted:
             continue
         if (ROOT / normalized).exists():
             continue
@@ -2424,7 +2555,10 @@ def run_navigation(
     )
     admission = digest.get("admission") or {}
     admission_status = admission.get("status", "advisory_only")
-    route_issues = _navigation_requested_file_issues(requested_paths)
+    route_issues = _navigation_requested_file_issues(
+        requested_paths,
+        list(admission.get("admitted_files") or []),
+    )
     health_issues = [
         _issue_with_lane(lane, issue, issue_schema_version)
         for lane, result in checks.items()

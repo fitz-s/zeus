@@ -4565,6 +4565,7 @@ def test_runtime_route_card_contract_matches_schema():
     assert card["expansion_hints"]
     assert card["operation_vector"]["operation_stage"]
     assert card["operation_vector_sources"]
+    assert "structural_decision_hints" in card
 
 
 def test_runtime_claims_appear_in_route_card_and_digest_inputs():
@@ -4609,6 +4610,74 @@ def test_operation_vector_selects_source_canary_without_canonical_phrase():
     assert digest["profile_selection"]["selected_by"] == "operation_vector"
     assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
     assert card["dominant_driver"] == "source_canary_readiness_hot_swap"
+
+
+def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
+    digest = topology_doctor.build_digest(
+        "harden pre-merge hook fail-closed behavior",
+        [".claude/hooks/pre-merge-contamination-check.sh"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert "runtime_hooks" in card["operation_vector"]["mutation_surfaces"]
+    assert card["merge_evidence_required"]["required"] is False
+    assert card["dominant_driver"] != "merge_conflict_first"
+
+
+def test_operation_vector_guides_broad_fix_package_to_planning_packet():
+    digest = topology_doctor.build_digest(
+        "ultrareview-25 fix package: harden pre-commit/pre-merge hooks fail-closed, "
+        "narrow semgrep zeus-no-json-authority-write, remove temperature_metric DEFAULT high, "
+        "and repair docs rules bidirectional references",
+        [
+            ".claude/hooks/pre-commit-invariant-test.sh",
+            ".claude/hooks/pre-merge-contamination-check.sh",
+            ".claude/hooks/pre-edit-architecture.sh",
+            ".claude/settings.json",
+            "architecture/ast_rules/semgrep_zeus.yml",
+            "architecture/negative_constraints.yaml",
+            "architecture/invariants.yaml",
+            "src/state/db.py",
+            "tests/test_pscb_hook.py",
+            "tests/test_tigge_schema_contract.py",
+            "tests/test_architecture_contracts.py",
+        ],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert card["operation_vector"]["operation_stage"] == "plan"
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert "runtime_hooks" in card["operation_vector"]["mutation_surfaces"]
+    assert "static_analysis_rules" in card["operation_vector"]["mutation_surfaces"]
+    assert "architecture_policy" in card["operation_vector"]["mutation_surfaces"]
+    assert "db_schema_truth" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] == "planning_package_split"
+    assert card["merge_evidence_required"]["required"] is False
+    assert "operation planning packet" in card["suggested_next_command"]
+    assert card["structural_decision_hints"]
+
+
+def test_operation_vector_admits_first_class_planning_packet():
+    digest = topology_doctor.build_digest(
+        "operation planning packet: structural decisions, impact context, slice routes, and verification plan",
+        ["docs/operations/task_2026-05-01_ultrareview25/PLAN.md"],
+        write_intent="edit",
+        operation_stage="plan",
+        artifact_target="plan_packet",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "operation planning packet"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert card["persistence_target"] == "plan_packet"
+    assert card["suggested_next_command"] is None
 
 
 def test_operation_vector_requires_explicit_surface_for_high_fanout_evaluator_profile():
