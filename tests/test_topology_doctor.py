@@ -5992,8 +5992,39 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PRE_MERGE_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-merge-contamination-check.sh")
 
 
-def _run_pre_merge_hook(command, env=None, evidence_path=None):
-    """Invoke pre-merge hook with a fake Bash tool payload; return (rc, stderr)."""
+@pytest.fixture(scope="module")
+def _protected_branch_worktree(tmp_path_factory):
+    """Session-scoped fixture creating a temp worktree on `main` so the hook's
+    branch-protection check fires the merge-class detection paths under test.
+    The hook short-circuits on non-protected branches; without this fixture,
+    the test runner's current branch (e.g. a feature branch) would silently
+    bypass coverage of F3/F4/F13/F17 antibodies."""
+    repo_root = _REPO_ROOT
+    worktree_dir = tmp_path_factory.mktemp("hook-test-worktree")
+    rc = _subprocess.run(
+        ["git", "-C", repo_root, "worktree", "add", "--detach", str(worktree_dir), "main"],
+        capture_output=True, text=True,
+    )
+    if rc.returncode != 0:
+        pytest.skip(f"could not create main worktree for hook tests: {rc.stderr[:200]}")
+    _subprocess.run(
+        ["git", "-C", str(worktree_dir), "checkout", "main"],
+        capture_output=True, text=True, check=False,
+    )
+    yield str(worktree_dir)
+    _subprocess.run(
+        ["git", "-C", repo_root, "worktree", "remove", "--force", str(worktree_dir)],
+        capture_output=True, text=True,
+    )
+
+
+def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
+    """Invoke pre-merge hook with a fake Bash tool payload; return (rc, stderr).
+
+    `cwd` selects the working directory the hook runs in. Pass the
+    `_protected_branch_worktree` fixture value to exercise protected-branch
+    code paths regardless of the test runner's current branch.
+    """
     payload = _json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     proc_env = dict(os.environ)
     if env:
@@ -6008,6 +6039,7 @@ def _run_pre_merge_hook(command, env=None, evidence_path=None):
         capture_output=True,
         text=True,
         env=proc_env,
+        cwd=cwd,
     )
     return proc.returncode, proc.stderr
 
@@ -6036,10 +6068,10 @@ def _run_pre_merge_hook(command, env=None, evidence_path=None):
         # (lines 31-35 of the hook); the hook errs fail-closed in that case.
     ],
 )
-def test_hook_pre_merge_F3_detector_catches_evil_inputs(command, must_detect):
+def test_hook_pre_merge_F3_detector_catches_evil_inputs(command, must_detect, _protected_branch_worktree):
     """F3 antibody: regex must catch every form of merge-class command on
     a protected branch, including multi-space, absolute path, -C form."""
-    rc, stderr = _run_pre_merge_hook(command)
+    rc, stderr = _run_pre_merge_hook(command, cwd=_protected_branch_worktree)
     detected = "ADVISORY" in stderr or "BLOCKED" in stderr or "PASS" in stderr or "OVERRIDE" in stderr
     if must_detect:
         assert detected, f"F3 regression: failed to detect merge-class in {command!r}"
@@ -6072,7 +6104,7 @@ def test_hook_pre_merge_F4_protected_branch_regex():
     assert not is_protected("topology-runtime-hooks-governance")
 
 
-def test_hook_pre_merge_F13_blocks_commented_critic_verdict(tmp_path):
+def test_hook_pre_merge_F13_blocks_commented_critic_verdict(tmp_path, _protected_branch_worktree):
     """F13 antibody: a fully-commented evidence file must NOT satisfy the
     critic_verdict existence check (comment-injection spoof)."""
     spoof = tmp_path / "evidence_spoof.txt"
@@ -6081,12 +6113,11 @@ def test_hook_pre_merge_F13_blocks_commented_critic_verdict(tmp_path):
         "# diff_scope: 1 file\n"
         "# drift_keyword_scan: clean\n"
     )
-    # Run on a protected branch context (current repo HEAD is main per setup)
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(spoof))
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(spoof), cwd=_protected_branch_worktree)
     assert "BLOCKED" in stderr, f"F13 regression: spoofed evidence accepted: {stderr[:300]}"
 
 
-def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path):
+def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path, _protected_branch_worktree):
     """F13 dual: a legit evidence file with both a comment mentioning the field
     AND a real un-commented field must PASS."""
     legit = tmp_path / "evidence_legit.txt"
@@ -6096,19 +6127,62 @@ def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path
         "diff_scope: 5 files +200/-50\n"
         "drift_keyword_scan: bidirectional clean\n"
     )
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(legit))
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(legit), cwd=_protected_branch_worktree)
     assert "PASS" in stderr, f"F13 false positive on legit evidence: {stderr[:300]}"
 
 
-def test_hook_pre_merge_F17_OVERRIDE_does_not_claim_drift_table_log():
-    """F17 antibody: the OVERRIDE docstring must NOT claim writes to
-    docs/operations/current_state.md drift table (which the code does not do).
-    The honest replacement language is preserved."""
+def test_hook_pre_merge_F17_OVERRIDE_docstring_matches_implementation():
+    """F17 antibody: the OVERRIDE docstring must match the actual log target
+    (.claude/logs/merge-overrides.log), and must NOT claim writes to the
+    docs/operations/current_state.md drift table (which the code does not do)."""
     with open(_PRE_MERGE_HOOK, "r") as f:
         text = f.read()
     assert "logged to docs/operations/current_state.md drift table" not in text, (
         "F17 regression: false log-target claim is back in the OVERRIDE docstring"
     )
-    assert "audit trail emitted to stderr" in text, (
-        "F17 regression: honest replacement language has been removed"
+    assert ".claude/logs/merge-overrides.log" in text, (
+        "F17 regression: docstring no longer references the durable log file"
+    )
+    # Implementation pin: the OVERRIDE block must contain the actual write
+    assert "OVERRIDE_LOG_PATH" in text, (
+        "F17 regression: OVERRIDE log-write implementation missing"
+    )
+
+
+def test_hook_pre_merge_F17_OVERRIDE_writes_durable_log_on_protected_branch(_protected_branch_worktree):
+    """F17 behavior antibody: when OVERRIDE fires on a protected branch, the
+    hook must append a forensic record to .claude/logs/merge-overrides.log."""
+    import pathlib
+    worktree_dir = pathlib.Path(_protected_branch_worktree)
+    log_path = worktree_dir / ".claude" / "logs" / "merge-overrides.log"
+    if log_path.exists():
+        log_path.unlink()
+    rc, stderr = _run_pre_merge_hook(
+        "git merge feature-x",
+        evidence_path="OVERRIDE_pytest_F17_durable_log",
+        cwd=str(worktree_dir),
+    )
+    assert rc == 0, f"OVERRIDE should exit 0, got {rc}: {stderr[:300]}"
+    assert "OVERRIDE" in stderr, f"Expected OVERRIDE in stderr: {stderr[:300]}"
+    assert log_path.exists(), (
+        f"F17 regression: OVERRIDE did not create durable log at {log_path}. "
+        f"stderr: {stderr[:300]}"
+    )
+    log_text = log_path.read_text()
+    assert "reason=pytest_F17_durable_log" in log_text, f"log missing reason field: {log_text}"
+
+
+def test_hook_pre_merge_F13_blocks_yaml_nested_critic_verdict_spoof(tmp_path, _protected_branch_worktree):
+    """F13 antibody (tightened): a YAML-nested critic_verdict (under another
+    top-level key) must NOT satisfy admission. Schema is strictly flat."""
+    nested = tmp_path / "evidence_nested.txt"
+    nested.write_text(
+        "some_parent:\n"
+        "  critic_verdict: APPROVE\n"
+        "  diff_scope: 1 file\n"
+        "  drift_keyword_scan: clean\n"
+    )
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(nested), cwd=_protected_branch_worktree)
+    assert "BLOCKED" in stderr, (
+        f"F13 regression: YAML-nested verdict spoof accepted: {stderr[:300]}"
     )
