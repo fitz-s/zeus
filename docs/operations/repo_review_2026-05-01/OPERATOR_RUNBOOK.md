@@ -204,33 +204,44 @@ $EDITOR scripts/check_identity_column_defaults.py
 
 ## C. Operator-machine-only tasks
 
-### C1. launchd credential injection (P1-1)
+### C1. launchd credential injection — **DONE 2026-05-01**
 
-**Status**: Cannot be automated by Claude — requires your machine.
-**Reference**: `docs/operations/repo_review_2026-05-01/security.md` P1-1, P1-2
+**What was actually done** (corrects original P1-1 framing):
 
-**What's missing**:
-1. `ZEUS_CUTOVER_OPERATOR_TOKEN_SECRET` not in any launchd plist → HMAC gate silently unavailable on fresh boot
-2. Polymarket WS L2 creds (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`) not in launchd → `WSAuth.from_env()` raises `WSAuthMissing` at boot → user-channel WS ingest silently fails
+1. **Polymarket L2 WS creds** — `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE` added to `~/Library/LaunchAgents/com.zeus.live-trading.plist` `EnvironmentVariables` via PlistBuddy (matches the existing `WU_API_KEY` plaintext pattern). Values pulled from macOS Keychain entries `openclaw-polymarket-api-{key,secret,passphrase}` which already exist.
 
-**To apply**:
+2. **`ZEUS_CUTOVER_OPERATOR_TOKEN_SECRET`** — **NOT injected**. Audit revealed:
+   - The HMAC-token validation path (`src/control/cutover_guard.py:_validate_operator_token`) has NO daemon caller (`grep cutover_transition` in daemon entrypoints returned empty).
+   - `scripts/arm_live_mode.sh` (the actual operator cutover workflow) writes `state/cutover_guard.json` directly, bypassing the HMAC path.
+   - The env var is dormant — adding it to the plist would be plaintext-secret-on-disk with no current consumer.
+
+3. **`ZEUS_USER_CHANNEL_WS_ENABLED`** — **NOT set**. The WS user channel feature is gated by this flag (`src/main.py:200`); with the flag unset (default 0), `WSAuth.from_env()` is never called, so the new creds wait until the operator explicitly turns the flag on. This is the safe default.
+
+**Operator's next step (when ready to enable WS user channel)**:
+
 ```bash
-# 1. Find the relevant launchd plist (probably in ~/Library/LaunchAgents/)
-ls ~/Library/LaunchAgents/com.zeus.*.plist
+# Verify creds are in plist
+/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" ~/Library/LaunchAgents/com.zeus.live-trading.plist | grep POLYMARKET
 
-# 2. Edit the EnvironmentVariables block to add:
-#       ZEUS_CUTOVER_OPERATOR_TOKEN_SECRET   (resolve via keychain_resolver)
-#       POLYMARKET_API_KEY
-#       POLYMARKET_API_SECRET
-#       POLYMARKET_API_PASSPHRASE
+# Turn on the flag
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:ZEUS_USER_CHANNEL_WS_ENABLED string 1" ~/Library/LaunchAgents/com.zeus.live-trading.plist
 
-# 3. Reload the daemon
-launchctl unload ~/Library/LaunchAgents/com.zeus.<name>.plist
-launchctl load   ~/Library/LaunchAgents/com.zeus.<name>.plist
+# Set the condition_ids (required when flag is on, per src/main.py:209-210)
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:POLYMARKET_USER_WS_CONDITION_IDS string 'cond_xxx,cond_yyy'" ~/Library/LaunchAgents/com.zeus.live-trading.plist
 
-# 4. Verify the daemon picks them up
-log show --predicate 'process == "python3" AND (eventMessage CONTAINS "WSAuth" OR eventMessage CONTAINS "ZEUS_CUTOVER")' --info --last 1m
+# Load (or reload if already loaded)
+launchctl unload ~/Library/LaunchAgents/com.zeus.live-trading.plist 2>/dev/null
+launchctl load ~/Library/LaunchAgents/com.zeus.live-trading.plist
+
+# Verify daemon ingestor started
+log show --predicate 'eventMessage CONTAINS "user-channel ingestor"' --info --last 5m
 ```
+
+**Why the original RUNBOOK code block was wrong**:
+- Used `<name>` placeholder instead of explicit `live-trading.plist`
+- Listed `ZEUS_CUTOVER_OPERATOR_TOKEN_SECRET` as required (it isn't, per audit)
+- Didn't specify the keychain-to-plist value-retrieval mechanism
+- Didn't mention the `ZEUS_USER_CHANNEL_WS_ENABLED` flag gating
 
 ---
 
