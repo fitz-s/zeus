@@ -460,6 +460,7 @@ class Position:
                     forward_edge,
                     current_p_posterior=float(exit_context.fresh_prob),
                     current_market_price=float(exit_context.current_market_price),
+                    best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     day0_active=True,
                     applied=applied,
@@ -580,6 +581,7 @@ class Position:
                 forward_edge,
                 current_p_posterior=float(exit_context.fresh_prob),
                 current_market_price=float(exit_context.current_market_price),
+                best_bid=exit_context.best_bid,
                 hours_to_settlement=exit_context.hours_to_settlement,
                 day0_active=bool(exit_context.day0_active),
                 applied=applied,
@@ -770,6 +772,7 @@ class Position:
         forward_edge: float,
         current_p_posterior: float,
         current_market_price: float,
+        best_bid: Optional[float] = None,
         hours_to_settlement: Optional[float] = None,
         day0_active: bool = False,
         applied: Optional[list[str]] = None,
@@ -780,10 +783,9 @@ class Position:
 
         T6.4: routes the EV gate through HoldValue contract (previously
         bypassed). When feature_flags.HOLD_VALUE_EXIT_COSTS is enabled,
-        exit decisions include fee + time opportunity cost. Sell price
-        for buy_no is current_market_price (native NO-space probability
-        from the orderbook); polymarket_fee formula p*(1-p) is symmetric
-        so passing current_market_price as best_bid is semantically OK.
+        exit decisions include fee + time opportunity cost. Buy-no sell value
+        uses held-token best_bid; current_market_price remains the probability
+        / forward-edge input and must not masquerade as executable proceeds.
 
         T6.4-phase2: portfolio_positions + bankroll thread correlation-
         crowding substrate; defaults preserve pre-phase2 behavior (cost 0.0)
@@ -797,7 +799,16 @@ class Position:
 
         if day0_active and evidence_edge < edge_threshold:
             applied.append("day0_observation_gate")
-            if self.entry_price > 0:
+            if best_bid is None:
+                applied.append("best_bid_unavailable")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            if best_bid is not None and self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
@@ -809,7 +820,7 @@ class Position:
                         portfolio_positions=portfolio_positions,
                         bankroll=bankroll,
                         shares=shares,
-                        best_bid=current_market_price,
+                        best_bid=best_bid,
                         crowding_rate=exit_correlation_crowding_rate(),
                     )
                     if _crowding > 0.0:
@@ -817,7 +828,7 @@ class Position:
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,
-                        best_bid=current_market_price,
+                        best_bid=best_bid,
                         hours_to_settlement=hours_to_settlement,
                         fee_rate=exit_fee_rate(),
                         daily_hurdle_rate=exit_daily_hurdle_rate(),
@@ -829,7 +840,7 @@ class Position:
                         fee_cost=0.0,
                         time_cost=0.0,
                     )
-                sell_value = shares * current_market_price
+                sell_value = shares * best_bid
                 if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
@@ -873,7 +884,16 @@ class Position:
             self.neg_edge_count = 0
 
         if self.neg_edge_count >= consecutive_confirmations():
-            if self.entry_price > 0:
+            if best_bid is None:
+                applied.append("best_bid_unavailable")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            if best_bid is not None and self.entry_price > 0:
                 applied.append("ev_gate")
                 shares = self.size_usd / self.entry_price
                 if hold_value_exit_costs_enabled():
@@ -885,7 +905,7 @@ class Position:
                         portfolio_positions=portfolio_positions,
                         bankroll=bankroll,
                         shares=shares,
-                        best_bid=current_market_price,
+                        best_bid=best_bid,
                         crowding_rate=exit_correlation_crowding_rate(),
                     )
                     if _crowding > 0.0:
@@ -893,7 +913,7 @@ class Position:
                     hold_value = HoldValue.compute_with_exit_costs(
                         shares=shares,
                         current_p_posterior=current_p_posterior,
-                        best_bid=current_market_price,
+                        best_bid=best_bid,
                         hours_to_settlement=hours_to_settlement,
                         fee_rate=exit_fee_rate(),
                         daily_hurdle_rate=exit_daily_hurdle_rate(),
@@ -905,7 +925,7 @@ class Position:
                         fee_cost=0.0,
                         time_cost=0.0,
                     )
-                sell_value = shares * current_market_price
+                sell_value = shares * best_bid
                 if sell_value <= hold_value.net_value:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(

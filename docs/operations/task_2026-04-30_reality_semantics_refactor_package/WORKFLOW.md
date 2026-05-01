@@ -26,6 +26,37 @@ as Mode A direct cleanup.
 Package-file preparation itself is Mode A direct work because it is reversible
 docs/package organization.
 
+## Latest-Plan-Pre5 Realignment For Blocked Surfaces
+
+The refactor package is now being merged into `plan-pre5`, not `main`. Treat
+`plan-pre5` as the current mainline authority for this package. Conflict
+resolution must preserve its newer `FinalExecutionIntent` live-submit work:
+snapshot-bound final limit, native side/token identity, depth-proofed frozen
+submitted shares, allocator order-type agreement, and executor no-recompute
+behavior.
+
+Latest topology reroute on the merged branch keeps these follow-ups separate:
+
+1. F-06 venue identity gate: do not start by editing
+   `src/venue/polymarket_v2_adapter.py`. Re-enter through admitted
+   client/envelope/test surfaces first; open a venue-governed packet only if
+   adapter proof is still required.
+2. F-08 order-policy cost authority: extend the existing
+   `src/contracts/execution_intent.py` contracts first. Do not add an
+   unregistered `src/contracts/executable_cost_basis.py`; `FinalExecutionIntent`
+   and `ExecutableCostBasis` already own the typed cost/order-policy seam.
+3. F-09 fill authority split: schema, fill tracker, harvester, and new tests
+   remain planning-lock scope. Split submitted target, filled quantity, filled
+   cost basis, average fill price, and economics authority in a separate packet.
+4. F-10 report/replay cohort hard gates: start only after F-09 provides durable
+   fill/economics-version fields. Reports and replay should hard-fail mixed
+   corrected/legacy cohorts or explicitly segregate them.
+
+Stop instead of improvising if topology still marks a target as blocked,
+forbidden, unclassified, or scope-expanding. No live submit, production DB
+mutation, schema apply, config/source-routing flip, venue adapter rewrite, or
+strategy promotion is authorized by this merge.
+
 ## Phase Workflow
 
 ### Phase 0/A — Authority, Guardrails, Behavior Locks

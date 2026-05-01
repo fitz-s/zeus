@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Purpose: Regression coverage for market-analysis edge math, posterior modes, and executable quote authority.
+# Reuse: Run when market fusion, edge scan, bootstrap CI, or buy_no quote authority changes.
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: first-principles safety implementation 2026-04-30
 
 """Tests for MarketAnalysis and market fusion.
@@ -389,6 +392,8 @@ class TestComputePosterior:
             p_raw=np.array([0.0, 1.0]),
             p_cal=np.array([0.0, 1.0]),
             p_market=np.array([0.5, 0.5]),
+            p_market_no=np.array([0.5, 0.5]),
+            buy_no_quote_available=np.array([True, True]),
             alpha=0.8,
             bins=bins,
             member_maxes=np.array([40.0, 40.0, 40.0]),
@@ -516,6 +521,53 @@ class TestMarketAnalysis:
             ma.find_edges(n_bootstrap=1)
         with pytest.raises(ValueError, match="buy_yes bootstrap requires executable YES-side"):
             ma._bootstrap_bin(0, 1)
+
+    def test_binary_buy_no_complement_is_diagnostic_not_executable(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        p_cal = np.array([0.20, 0.80])
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=np.array([0.40, 0.60]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        assert ma.supports_buy_no_edges(0) is False
+        assert ma.buy_no_complement_diagnostic_price(0) == pytest.approx(0.60)
+        with pytest.raises(ValueError, match="buy_no is not executable"):
+            ma.buy_no_market_price(0)
+        with pytest.raises(ValueError, match="buy_no bootstrap requires executable NO-side"):
+            ma._bootstrap_bin_no(0, 1)
+
+    def test_buy_no_uses_native_no_quote_when_available(self):
+        bins = [
+            Bin(low=None, high=32, label="32 or below", unit="F"),
+            Bin(low=33, high=None, label="33 or higher", unit="F"),
+        ]
+        p_cal = np.array([0.20, 0.80])
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=np.array([0.40, 0.60]),
+            p_market_no=np.array([0.68, 0.32]),
+            buy_no_quote_available=np.array([True, False]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        assert ma.supports_buy_no_edges(0) is True
+        assert ma.buy_no_market_price(0) == pytest.approx(0.68)
+        assert ma.supports_buy_no_edges(1) is False
 
     def test_market_analysis_corrected_prior_uses_named_distribution(self):
         bins = [

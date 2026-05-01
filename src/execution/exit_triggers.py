@@ -120,7 +120,12 @@ def evaluate_exit_triggers(
 
     # 3. EDGE_REVERSAL / BUY_NO_EDGE_EXIT (Layer 1: direction-specific paths)
     if position.direction == "buy_no":
-        exit_signal = _evaluate_buy_no_exit(position, current_edge_context, hours_to_settlement)
+        exit_signal = _evaluate_buy_no_exit(
+            position,
+            current_edge_context,
+            hours_to_settlement,
+            best_bid,
+        )
     else:
         exit_signal = _evaluate_buy_yes_exit(position, current_edge_context, best_bid)
 
@@ -183,6 +188,7 @@ def _evaluate_buy_no_exit(
     position: Position,
     current_edge_context: EdgeContext,
     hours_to_settlement: Optional[float] = None,
+    best_bid: Optional[float] = None,
 ) -> Optional[ExitSignal]:
     """Layer 1: Buy-no gets its own exit path.
 
@@ -219,10 +225,9 @@ def _evaluate_buy_no_exit(
 
     if position.neg_edge_count >= consecutive_needed:
         # EV gate: don't exit if holding to settlement is worth more than selling now
-        if len(current_edge_context.p_market) > 0:
+        if best_bid is not None:
             shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0.0
-            current_market = float(current_edge_context.p_market[0])
-            net_sell = shares * current_market
+            net_sell = shares * float(best_bid)
             net_hold = _declared_zero_cost_hold_value(shares, current_edge_context.p_posterior).net_value
             if net_sell <= net_hold:
                 logger.info(
