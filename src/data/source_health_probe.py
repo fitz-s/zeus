@@ -45,7 +45,11 @@ EXPECTED_SOURCES = [
     "tigge_mars",
 ]
 
-_MANUAL_OPERATOR_SOURCES = {"tigge_mars"}
+# tigge_mars is now actively probed by _probe_tigge_mars (2026-05-01) — it
+# reads ~/.ecmwfapirc + scheduler_jobs_health.json to decide success/failure.
+# Kept for backwards compatibility with the dispatch path; sources listed here
+# return a manual-operator stub instead of running their probe function.
+_MANUAL_OPERATOR_SOURCES: set[str] = set()
 
 
 def _now_iso() -> str:
@@ -159,13 +163,27 @@ def _probe_wu_pws(timeout: float) -> dict[str, Any]:
 
 
 def _probe_hko(timeout: float) -> dict[str, Any]:
-    """Probe Hong Kong Observatory data endpoint."""
+    """Probe Hong Kong Observatory data endpoint.
+
+    Targets the HKO open-data climate API (the same endpoint daily_obs_append
+    writes from). The previous probe URL — the legacy `cis/statClim` HTML page
+    — was retired by HKO in early 2026 and now returns 404. The opendata API
+    is the canonical, machine-readable replacement and is what the ingest
+    pipeline already consumes; probing it keeps source-health aligned with
+    actual data availability rather than a dead landing page.
+    """
     import httpx
+
+    today = datetime.now(timezone.utc)
+    probe_url = (
+        "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
+        f"?dataType=CLMMAXT&year={today.year}&month={today.month:02d}&station=HKO"
+    )
 
     start = time.monotonic()
     try:
         resp = httpx.get(
-            "https://www.hko.gov.hk/en/cis/statClim/extract/html/HKO/max_temp.htm",
+            probe_url,
             timeout=timeout,
             follow_redirects=True,
         )
@@ -307,6 +325,97 @@ def _probe_noaa(timeout: float) -> dict[str, Any]:
         }
 
 
+def _probe_tigge_mars(timeout: float) -> dict[str, Any]:
+    """Probe TIGGE/MARS readiness.
+
+    Two-part probe:
+      1. Credentials present and well-formed (~/.ecmwfapirc readable JSON).
+      2. The latest ingest_tigge_daily job in scheduler_jobs_health.json must
+         not be in FAILED state.
+
+    Latency is the credentials parse time (cheap; we never hit MARS from the
+    probe loop because MARS retrieval is minutes-scale and would dominate
+    the 10-minute probe cadence).
+    """
+    start = time.monotonic()
+    now = _now_iso()
+
+    # Step 1: credential file.
+    try:
+        from src.data.tigge_pipeline import check_mars_credentials
+        cred = check_mars_credentials()
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "last_success_at": None,
+            "last_failure_at": now,
+            "consecutive_failures": 1,
+            "degraded_since": now,
+            "latency_ms": latency_ms,
+            "error": f"tigge_pipeline import failed: {exc}"[:200],
+        }
+    if not cred.get("ok"):
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "last_success_at": None,
+            "last_failure_at": now,
+            "consecutive_failures": 1,
+            "degraded_since": now,
+            "latency_ms": latency_ms,
+            "error": str(cred.get("error", "tigge_mars credentials missing"))[:200],
+        }
+
+    # Step 2: scheduler_jobs_health.json — most recent ingest_tigge_daily job.
+    try:
+        from src.config import state_path
+        health_path = Path(state_path("scheduler_jobs_health.json"))
+        if not health_path.exists():
+            # First-run / pre-deploy: not-yet-run is not a failure.
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return {
+                "last_success_at": now,
+                "last_failure_at": None,
+                "consecutive_failures": 0,
+                "degraded_since": None,
+                "latency_ms": latency_ms,
+                "error": "credentials_ok; daemon not yet run ingest_tigge_daily",
+            }
+        data = json.loads(health_path.read_text())
+        entry = data.get("ingest_tigge_daily", {})
+        status = entry.get("status")
+        if status == "FAILED":
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return {
+                "last_success_at": entry.get("last_success_at"),
+                "last_failure_at": entry.get("last_failure_at") or now,
+                "consecutive_failures": 1,
+                "degraded_since": entry.get("last_failure_at") or now,
+                "latency_ms": latency_ms,
+                "error": str(entry.get("last_failure_reason", "ingest_tigge_daily FAILED"))[:200],
+            }
+    except Exception as exc:
+        # Probe instrumentation failure should not mask credential success.
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "last_success_at": now,
+            "last_failure_at": None,
+            "consecutive_failures": 0,
+            "degraded_since": None,
+            "latency_ms": latency_ms,
+            "error": f"credentials_ok; scheduler_health probe error: {exc}"[:200],
+        }
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    return {
+        "last_success_at": now,
+        "last_failure_at": None,
+        "consecutive_failures": 0,
+        "degraded_since": None,
+        "latency_ms": latency_ms,
+        "error": None,
+    }
+
+
 def _probe_source(source: str, timeout: float) -> dict[str, Any]:
     """Dispatch probe for one source. Returns result dict."""
     if source in _MANUAL_OPERATOR_SOURCES:
@@ -325,6 +434,7 @@ def _probe_source(source: str, timeout: float) -> dict[str, Any]:
         "ogimet": _probe_ogimet,
         "ecmwf_open_data": _probe_ecmwf_open_data,
         "noaa": _probe_noaa,
+        "tigge_mars": _probe_tigge_mars,
     }
     fn = dispatch.get(source)
     if fn is None:

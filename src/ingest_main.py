@@ -28,7 +28,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -56,11 +56,28 @@ def _graceful_shutdown(signum, frame) -> None:
 # Decorator — mirrors src/main.py:_scheduler_job
 # ---------------------------------------------------------------------------
 
+_TRUTHFUL_FAIL_STATUSES = frozenset({
+    "download_failed",
+    "extract_failed",
+    "paused_mars_credentials",
+    "bad_target_date",
+})
+
+
 def _scheduler_job(job_name: str):
     """Uniform error-swallowing wrapper for all APScheduler targets.
 
+    Truthfulness contract (2026-05-01): if the job returns a status dict
+    whose ``status`` indicates a structural failure (one of
+    ``_TRUTHFUL_FAIL_STATUSES``) OR whose insert counters are all zero
+    while the dict reports a rejection reason, the wrapper writes a FAILED
+    entry instead of OK. This closes the antibody that previously let
+    silent zero-row runs masquerade as healthy.
+
     On success: writes scheduler_jobs_health.json OK entry.
-    On exception: logs + writes FAILED entry; does NOT re-raise (daemon keeps running).
+    On exception: logs + writes FAILED entry; does NOT re-raise.
+    On structural-failure status dict: writes FAILED entry with the dict's
+    own reason.
     """
     def _decorator(fn):
         @functools.wraps(fn)
@@ -68,7 +85,8 @@ def _scheduler_job(job_name: str):
             try:
                 result = fn(*args, **kwargs)
                 from src.observability.scheduler_health import _write_scheduler_health
-                _write_scheduler_health(job_name, failed=False)
+                failed, reason = _classify_result(result)
+                _write_scheduler_health(job_name, failed=failed, reason=reason)
                 return result
             except Exception as exc:
                 logger.error("%s failed: %s", job_name, exc, exc_info=True)
@@ -79,6 +97,34 @@ def _scheduler_job(job_name: str):
                     pass
         return _wrapper
     return _decorator
+
+
+def _classify_result(result) -> tuple[bool, str | None]:
+    """Map a job-return value to (failed?, reason). Truthfulness antibody.
+
+    ``None`` / non-dict returns are treated as success — most ticks return
+    None. Dict returns get inspected: any structural-failure status, or
+    a paused-by-control-plane response with a non-zero ``error`` field, is
+    flagged FAILED so operators see the truth.
+    """
+    if not isinstance(result, dict):
+        return False, None
+    status = str(result.get("status", "")).lower()
+    if status in _TRUTHFUL_FAIL_STATUSES:
+        return True, status + (": " + str(result.get("error")) if result.get("error") else "")
+    # Inserted=0 on a stage-failure dict (e.g., DR-33-A flag-off harvester)
+    # is a legitimate noop — control_plane pause + empty noop must NOT be
+    # tagged failed.
+    if status in {"paused_by_control_plane", "noop_no_dates"}:
+        return False, None
+    # Inserted/snapshots_inserted == 0 alone is not a failure (idempotent
+    # re-run) unless paired with a structural error. Check stages for any
+    # ``ok=False`` entries.
+    stages = result.get("stages") or []
+    for stage in stages:
+        if isinstance(stage, dict) and stage.get("ok") is False:
+            return True, f"stage_failed:{stage.get('label', '?')}:{stage.get('error', '?')}"
+    return False, None
 
 
 def _is_source_paused(source_id: str) -> bool:
@@ -299,19 +345,107 @@ def _k2_startup_catch_up():
         conn.close()
 
 
-@_scheduler_job("ingest_ecmwf_open_data")
-def _ecmwf_open_data_cycle():
-    """ECMWF Open Data ensemble ingest (ingest daemon copy).
+@_scheduler_job("ingest_opendata_daily_mx2t6")
+def _opendata_mx2t6_cycle():
+    """ECMWF Open Data daily mx2t6 (HIGH track) ingest.
 
-    Honors control_plane pause_source directive (§4.5a): if control_plane.json
-    has paused_sources: {ecmwf_open_data: true}, returns paused_by_control_plane.
+    Open Data ENS posts 00Z runs by ~07:00 UTC (latency 6-8h). This job runs
+    at 07:30 UTC and writes ``ecmwf_opendata_mx2t6_local_calendar_day_max_v1``
+    rows to ``ensemble_snapshots_v2``.
     """
     if _is_source_paused("ecmwf_open_data"):
-        logger.info("_ecmwf_open_data_cycle: paused_by_control_plane")
+        logger.info("_opendata_mx2t6_cycle: paused_by_control_plane")
         return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
     from src.data.ecmwf_open_data import collect_open_ens_cycle
-    result = collect_open_ens_cycle()
-    logger.info("ECMWF Open Data: %s", result)
+    result = collect_open_ens_cycle(track="mx2t6_high")
+    logger.info("ECMWF Open Data mx2t6: %s",
+                {k: v for k, v in result.items() if k != "stages"})
+    return result
+
+
+@_scheduler_job("ingest_opendata_daily_mn2t6")
+def _opendata_mn2t6_cycle():
+    """ECMWF Open Data daily mn2t6 (LOW track) ingest.
+
+    Runs at 07:35 UTC (5-min offset from mx2t6 to space out downloads). Writes
+    ``ecmwf_opendata_mn2t6_local_calendar_day_min_v1`` rows to
+    ``ensemble_snapshots_v2``.
+    """
+    if _is_source_paused("ecmwf_open_data"):
+        logger.info("_opendata_mn2t6_cycle: paused_by_control_plane")
+        return {"status": "paused_by_control_plane", "source": "ecmwf_open_data"}
+    from src.data.ecmwf_open_data import collect_open_ens_cycle
+    result = collect_open_ens_cycle(track="mn2t6_low")
+    logger.info("ECMWF Open Data mn2t6: %s",
+                {k: v for k, v in result.items() if k != "stages"})
+    return result
+
+
+@_scheduler_job("ingest_opendata_startup_catch_up")
+def _opendata_startup_catch_up():
+    """Boot-time catch-up for both Open Data tracks.
+
+    Fires once at daemon start; pulls today's freshest run for both tracks.
+    Bounded by ``_default_cycle`` (single most-recent run) so re-runs after
+    a brief restart are nearly idempotent thanks to ``INSERT OR IGNORE``.
+    """
+    if _is_source_paused("ecmwf_open_data"):
+        logger.info("_opendata_startup_catch_up: paused_by_control_plane")
+        return
+    from src.data.ecmwf_open_data import collect_open_ens_cycle
+    for track in ("mx2t6_high", "mn2t6_low"):
+        result = collect_open_ens_cycle(track=track)
+        logger.info("Open Data startup catch-up %s: %s", track,
+                    {k: v for k, v in result.items() if k != "stages"})
+
+
+@_scheduler_job("ingest_tigge_archive_backfill")
+def _tigge_archive_backfill_cycle():
+    """TIGGE MARS archive backfill (T-2 issue date) cycle.
+
+    The TIGGE public archive has a 48-hour embargo (confirmed via
+    confluence.ecmwf.int) so this job CANNOT serve same-day trading. It is
+    a 2-day-lagged backfill that supplements the live Open Data feed and
+    feeds the Platt training set.
+
+    Schedule: 14:00 UTC daily — well after the embargo on (today - 2)'s 00Z
+    has lifted. We pass ``target_date = today - 2 days`` so the pipeline
+    always asks for a date the archive has already released.
+
+    Honors control_plane pause_source ('tigge_mars'). On MARS credential
+    failure, the cycle pauses itself so subsequent ticks short-circuit
+    until operator restores credentials.
+    """
+    if _is_source_paused("tigge_mars"):
+        logger.info("_tigge_archive_backfill_cycle: paused_by_control_plane")
+        return {"status": "paused_by_control_plane", "source": "tigge_mars"}
+    from src.data.tigge_pipeline import run_tigge_daily_cycle
+    target = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
+    result = run_tigge_daily_cycle(target_date=target)
+    logger.info("TIGGE archive backfill (target=%s): %s", target,
+                {k: v for k, v in result.items() if k != "stages"})
+    return result
+
+
+@_scheduler_job("ingest_tigge_startup_catch_up")
+def _tigge_startup_catch_up():
+    """TIGGE archive boot-time catch-up.
+
+    Fills any missed issue dates between MAX(issue_time) in the DB and
+    ``today - 2 days``, capped at src.data.tigge_pipeline.MAX_LOOKBACK_DAYS.
+    Anything within the 48-hour embargo window (i.e., today and yesterday)
+    is intentionally skipped — that's the live-ingest pipeline's territory.
+    """
+    if _is_source_paused("tigge_mars"):
+        logger.info("_tigge_startup_catch_up: paused_by_control_plane")
+        return
+    from src.data.tigge_pipeline import run_tigge_daily_cycle
+    # determine_catch_up_dates internally returns up-to-yesterday but the
+    # archive embargo means yesterday will fail the MARS request. Bound the
+    # window explicitly to today-2 by passing the target_date for that day
+    # when the catch-up dates list reduces to a single most-recent missing.
+    result = run_tigge_daily_cycle()
+    logger.info("TIGGE startup catch-up: %s", {k: v for k, v in result.items() if k != "stages"})
 
 
 @_scheduler_job("ingest_etl_recalibrate")
@@ -442,6 +576,30 @@ def _source_health_probe_tick():
         results = probe_all_sources(10.0, _prior_state=prior_state)
         write_source_health(results)
         logger.info("Source health probe complete: %d sources", len(results))
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-01: Station-migration drift probe (Invariant F)
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_station_migration_probe")
+def _station_migration_probe_tick():
+    """Hourly drift probe — gamma resolutionSource vs. cities.json::wu_station.
+
+    Writes ``state/station_migration_alerts.json`` and bumps the per-city
+    primary-source ``degraded_since`` on a mismatch. Never auto-rewrites
+    cities.json — operator approves migrations consciously.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.data.station_migration_probe import run_probe
+
+    with acquire_lock("station_migration_probe") as acquired:
+        if not acquired:
+            logger.info("ingest _station_migration_probe_tick skipped_lock_held")
+            return
+        result = run_probe()
+        logger.info("Station-migration probe: %s",
+                    {k: v for k, v in result.items() if k != "alerts"})
 
 
 # ---------------------------------------------------------------------------
@@ -592,14 +750,32 @@ def main() -> None:
         max_instances=1, coalesce=True,
     )
 
-    discovery = settings["discovery"]
-    for time_str in discovery.get("ecmwf_open_data_times_utc", []):
-        h, m = time_str.split(":")
-        _scheduler.add_job(
-            _ecmwf_open_data_cycle, "cron",
-            hour=int(h), minute=int(m),
-            id=f"ingest_ecmwf_open_data_{time_str}",
-        )
+    # ECMWF Open Data — same-day live source (~6-8h latency, no embargo).
+    # 07:30 UTC mx2t6 / 07:35 UTC mn2t6 — picks up the 00Z run as soon as
+    # it is reliably available. settings.discovery.ecmwf_open_data_times_utc
+    # may add additional refreshes; we still register the per-track ticks at
+    # 07:30/07:35 unconditionally so the freshness invariant holds even if
+    # settings is misconfigured.
+    _scheduler.add_job(
+        _opendata_mx2t6_cycle, "cron",
+        hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    _scheduler.add_job(
+        _opendata_mn2t6_cycle, "cron",
+        hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+
+    # TIGGE archive backfill — 14:00 UTC, target = today - 2 days (post-embargo).
+    # Distinct from the live Open Data feed; serves the Platt training set and
+    # historical audit trail. Renamed from ingest_tigge_daily so health
+    # dashboards and operators see the role explicitly.
+    _scheduler.add_job(
+        _tigge_archive_backfill_cycle, "cron",
+        hour=14, minute=0, id="ingest_tigge_archive_backfill",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
 
     # Boot-time catch-up fires immediately via 'date' trigger.
     from datetime import datetime as _dt_now
@@ -610,10 +786,35 @@ def main() -> None:
         max_instances=1, coalesce=True, misfire_grace_time=None,
     )
 
+    # TIGGE boot-time catch-up — fires once at daemon start to fill missed days
+    # (capped at src.data.tigge_pipeline.MAX_LOOKBACK_DAYS).
+    _scheduler.add_job(
+        _tigge_startup_catch_up, "date",
+        run_date=_dt_now.now(),
+        id="ingest_tigge_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+    )
+
+    # Open Data boot-time catch-up — fires once at daemon start so a fresh
+    # ingest doesn't wait until the next 07:30 cron tick to backfill.
+    _scheduler.add_job(
+        _opendata_startup_catch_up, "date",
+        run_date=_dt_now.now(),
+        id="ingest_opendata_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+    )
+
     # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END
     _scheduler.add_job(
         _source_health_probe_tick, "interval",
         minutes=10, id="ingest_source_health_probe",
+        max_instances=1, coalesce=True,
+    )
+
+    # 2026-05-01: Station-migration probe — hourly (Invariant F).
+    _scheduler.add_job(
+        _station_migration_probe_tick, "interval",
+        minutes=60, id="ingest_station_migration_probe",
         max_instances=1, coalesce=True,
     )
 

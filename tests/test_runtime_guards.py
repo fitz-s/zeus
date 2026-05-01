@@ -7898,6 +7898,15 @@ def test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback(tmp_path
     assert v2_count == 1
 
 
+@pytest.mark.skip(
+    reason=(
+        "2026-05-01 structural rewrite: collect_open_ens_cycle now writes to "
+        "ensemble_snapshots_v2 (not legacy ensemble_snapshots) with data_version "
+        "ecmwf_opendata_mx2t6_local_calendar_day_max_v1 (and _min_v1). The new "
+        "antibody tests/test_opendata_writes_v2_table.py covers the replacement "
+        "behavior. This legacy test asserted the v1 path that is now retired."
+    )
+)
 def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypatch, tmp_path):
     from src.data.forecast_source_registry import SOURCES, SourceNotEnabled, gate_source_role
 
@@ -7955,6 +7964,14 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
         gate_source_role(SOURCES["ecmwf_open_data"], "entry_primary")
 
 
+@pytest.mark.skip(
+    reason=(
+        "Phase 3 (src/ingest_main.py introduction) moved every ecmwf_open_data "
+        "job out of src/main.py. The 2026-05-01 daemon-correctness fix renamed "
+        "the jobs to ingest_opendata_daily_mx2t6 / _mn2t6. Replacement antibody: "
+        "tests/test_opendata_writes_v2_table.py covers the ingest daemon path."
+    )
+)
 def test_main_registers_only_policy_owned_ecmwf_open_data_jobs(monkeypatch, tmp_path):
     from src.data.forecast_source_registry import SOURCES
 

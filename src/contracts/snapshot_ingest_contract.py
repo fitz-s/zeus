@@ -16,10 +16,19 @@ from dataclasses import dataclass
 
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
+# 2026-05-01: Open Data ENS data_versions accepted alongside the TIGGE archive
+# data_versions. Same physical_quantity / temperature_metric / observation_field
+# spec — different source-provenance prefix. Both rows can coexist in
+# ensemble_snapshots_v2 for the same (city, target_date, metric); readers use
+# data_version_priority_for_metric() to prefer Open Data when present.
+_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
 _ALLOWED_DATA_VERSIONS: dict[str, MetricIdentity] = {
     HIGH_LOCALDAY_MAX.data_version: HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN.data_version: LOW_LOCALDAY_MIN,
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN,
 }
 
 

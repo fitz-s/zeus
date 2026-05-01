@@ -65,9 +65,18 @@ from typing import Iterable
 
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
+# 2026-05-01: Open Data ENS data_versions added so the ingest daemon can
+# write same-day forecasts to ensemble_snapshots_v2 alongside the TIGGE archive
+# (which has a 48h public embargo and serves only as a 2-day-lagged training
+# backfill). These data_versions are written by src/data/ecmwf_open_data.py.
+ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+
 CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
     HIGH_LOCALDAY_MAX.data_version,
     LOW_LOCALDAY_MIN.data_version,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION,
+    ECMWF_OPENDATA_LOW_DATA_VERSION,
 })
 
 # M3 (2026-04-24): deprecation alias. The historical name
