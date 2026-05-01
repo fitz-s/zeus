@@ -559,22 +559,64 @@ class TestR2V2PreflightBlocksPlacement:
 
         P1.S3: _live_order now requires a conn for the persist phase; an in-memory
         DB with schema is supplied via the _mem_conn fixture.
+
+        B4 Phase 4 (2026-05-01): _live_order now persists a final submission
+        envelope from the SDK return dict at `executor.py:2291`. The mock must
+        therefore embed a valid `_venue_submission_envelope` payload, otherwise
+        `_persist_final_submission_envelope_payload` raises
+        FinalSubmissionEnvelopePersistenceError → status='unknown_side_effect'.
         """
+        from decimal import Decimal
         from src.execution.executor import _live_order
 
         intent = self._make_intent(_mem_conn)
 
+        envelope_payload = {
+            "schema_version": 1,
+            "sdk_package": "py-clob-client-v2",
+            "sdk_version": "1.0.0",
+            "host": "https://clob-v2.polymarket.com",
+            "chain_id": 137,
+            "funder_address": "0xfunder",
+            "condition_id": "condition-p0-r2",
+            "question_id": "question-p0-r2",
+            "yes_token_id": intent.token_id,
+            "no_token_id": f"{intent.token_id}-no",
+            "selected_outcome_token_id": intent.token_id,
+            "outcome_label": "YES",
+            "side": "BUY",
+            "price": Decimal("0.55"),
+            "size": Decimal("18.19"),
+            "order_type": "GTC",
+            "post_only": False,
+            "tick_size": Decimal("0.01"),
+            "min_order_size": Decimal("0.01"),
+            "neg_risk": False,
+            "fee_details": {"fee_rate_bps": 0},
+            "canonical_pre_sign_payload_hash": "a" * 64,
+            "signed_order": b"fake-signed-order",
+            "signed_order_hash": "b" * 64,
+            "raw_request_hash": "c" * 64,
+            "raw_response_json": '{"orderID": "test-order-123", "status": "placed"}',
+            "order_id": "test-order-123",
+            "trade_ids": ("test-trade-002",),
+            "transaction_hashes": ("0xtx",),
+            "error_code": None,
+            "error_message": None,
+            "captured_at": "2026-04-27T00:00:00+00:00",
+        }
+
         with self._bypass_unrelated_submit_guards(), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
-            # Inject a mock SDK client that DOES expose get_ok (positive case).
             mock_clob = MagicMock()
-            mock_clob.get_ok.return_value = None  # get_ok present and succeeds
+            mock_clob.get_ok.return_value = None
             mock_instance._clob_client = mock_clob
-            mock_instance.v2_preflight.return_value = None  # preflight succeeds
+            mock_instance.v2_preflight.return_value = None
             mock_instance.place_limit_order.return_value = {
                 "orderID": "test-order-123",
                 "status": "placed",
+                "_venue_submission_envelope": envelope_payload,
             }
 
             result = _live_order(
@@ -584,10 +626,11 @@ class TestR2V2PreflightBlocksPlacement:
                 conn=_mem_conn,
             )
 
-        # v2_preflight must have been called (INV-25 gate active)
         mock_instance.v2_preflight.assert_called_once()
         mock_instance.place_limit_order.assert_called_once()
-        assert result.status == "pending"
+        assert result.status == "pending", (
+            f"Expected pending but got {result.status!r}: reason={result.reason!r}"
+        )
 
     def test_v2_preflight_fails_when_sdk_lacks_get_ok(self):
         """Negative case: when SDK lacks get_ok, v2_preflight raises V2PreflightError.
