@@ -506,7 +506,49 @@ def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):
         sdk_snapshot=adapter._compat_snapshot_for_token("yes-token"),
     )
     assert envelope.side == "SELL"
+    assert envelope.is_compatibility_placeholder is True
+    with pytest.raises(ValueError, match="compatibility submission envelope"):
+        envelope.assert_live_submit_bound()
     assert envelope.canonical_pre_sign_payload_hash != buy_envelope.canonical_pre_sign_payload_hash
+
+
+def test_polymarket_client_bound_compatibility_envelope_rejects_before_adapter_submit(tmp_path):
+    from src.data.polymarket_client import PolymarketClient
+
+    adapter, _ = _adapter(tmp_path, FakeTwoStepClient())
+    envelope = adapter._create_compat_submission_envelope(
+        token_id="yes-token",
+        price=Decimal("0.5"),
+        size=Decimal("3.25"),
+        side="BUY",
+        order_type="GTC",
+        sdk_snapshot=adapter._compat_snapshot_for_token("yes-token"),
+    )
+
+    class FakeAdapter:
+        def submit(self, bound_envelope):  # pragma: no cover - tripwire
+            raise AssertionError("compatibility envelope must reject before adapter submit")
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+    client.bind_submission_envelope(envelope)
+
+    result = client.place_limit_order(
+        token_id="yes-token",
+        price=0.5,
+        size=3.25,
+        side="BUY",
+        order_type="GTC",
+    )
+
+    assert result["success"] is False
+    assert result["errorCode"] == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "compatibility submission envelope" in result["errorMessage"]
+    assert result["_venue_submission_envelope"]["condition_id"].startswith("legacy:")
+    assert (
+        result["_venue_submission_envelope"]["error_code"]
+        == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    )
 
 
 def test_polymarket_client_unbound_place_limit_order_fails_closed_without_submit():

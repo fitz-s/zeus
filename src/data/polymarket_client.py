@@ -270,6 +270,22 @@ class PolymarketClient:
         pending_envelope = getattr(self, "_pending_submission_envelope", None)
         if pending_envelope is not None:
             self._pending_submission_envelope = None
+            live_bound_error = _submission_envelope_live_bound_error(pending_envelope)
+            if live_bound_error:
+                rejected_envelope = _submission_envelope_with_error(
+                    pending_envelope,
+                    error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                    error_message=live_bound_error,
+                )
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "errorCode": "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                    "errorMessage": live_bound_error,
+                    "_venue_submission_envelope": _submission_envelope_to_dict(
+                        rejected_envelope
+                    ),
+                }
             mismatch = _submission_envelope_mismatch(
                 pending_envelope,
                 token_id=token_id,
@@ -284,7 +300,9 @@ class PolymarketClient:
                     "status": "rejected",
                     "errorCode": "BOUND_ENVELOPE_MISMATCH",
                     "errorMessage": mismatch,
-                    "_venue_submission_envelope": pending_envelope.to_dict(),
+                    "_venue_submission_envelope": _submission_envelope_to_dict(
+                        pending_envelope
+                    ),
                 }
             try:
                 adapter = self._ensure_v2_adapter()
@@ -531,6 +549,38 @@ def _submission_envelope_mismatch(
     if Decimal(str(getattr(envelope, "size", ""))) != Decimal(str(size)):
         return "bound envelope size does not match submit size"
     return ""
+
+
+def _submission_envelope_live_bound_error(envelope: Any) -> str:
+    validator = getattr(envelope, "assert_live_submit_bound", None)
+    if not callable(validator):
+        return "bound envelope does not expose live-submit validation"
+    try:
+        validator()
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
+def _submission_envelope_with_error(
+    envelope: Any,
+    *,
+    error_code: str,
+    error_message: str,
+) -> Any:
+    updater = getattr(envelope, "with_updates", None)
+    if callable(updater):
+        return updater(error_code=error_code, error_message=error_message)
+    return envelope
+
+
+def _submission_envelope_to_dict(envelope: Any) -> dict:
+    to_dict = getattr(envelope, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    if isinstance(envelope, dict):
+        return dict(envelope)
+    return {"repr": repr(envelope)}
 
 
 def _legacy_order_result_from_submit(submit: Any) -> dict:

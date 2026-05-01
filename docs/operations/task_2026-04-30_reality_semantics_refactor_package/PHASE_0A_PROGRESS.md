@@ -339,6 +339,37 @@ Review gates:
   Day0 bid remains the market/exit surface, topology expansion is narrow, and
   commit can proceed
 
+## 2026-05-01 Packet 2 - F-06 Compatibility Envelope Live Gate
+
+Implemented the compatibility-envelope cutover without touching
+`src/venue/**`, live venue adapters, production data, or schema apply paths.
+
+Architecture outcome:
+
+- `VenueSubmissionEnvelope` now exposes explicit compatibility-placeholder
+  detection (`legacy:` condition ids, `legacy-compat` question ids, or
+  collapsed YES/NO token identity) and a live-submit guard.
+- `PolymarketClient.place_limit_order()` rejects a bound compatibility
+  envelope before adapter submit with
+  `BOUND_ENVELOPE_NOT_LIVE_AUTHORITY`, preserving the final rejected envelope
+  payload for journal/review surfaces.
+- Bound real envelopes remain the executable submit authority; the legacy
+  compatibility wrapper stays usable only as a fake/test seam and cannot
+  authorize live submit.
+- Risk allocator submit tests were updated to use real snapshot fee semantics
+  and bound-envelope final ACK payloads, matching current executor authority.
+
+Verification:
+
+- `python3 -m pytest tests/test_v2_adapter.py::test_legacy_sell_compatibility_hashes_final_side_and_size tests/test_v2_adapter.py::test_polymarket_client_bound_compatibility_envelope_rejects_before_adapter_submit tests/test_v2_adapter.py::test_polymarket_client_bound_envelope_bypasses_legacy_compat_submit tests/test_v2_adapter.py::test_polymarket_client_bound_envelope_rejects_submit_shape_mismatch -q` -> 4 passed
+- `python3 -m pytest tests/test_risk_allocator.py::test_polymarket_client_threads_selected_order_type_to_v2_adapter -q` -> 1 passed
+- `python3 -m pytest tests/test_v2_adapter.py -q` -> 29 passed
+- `python3 -m pytest tests/test_risk_allocator.py -q` -> 25 passed
+- `python3 -m pytest tests/test_v2_adapter.py tests/test_risk_allocator.py -q` -> 54 passed
+- `python3 -m compileall -q src/contracts/venue_submission_envelope.py src/data/polymarket_client.py tests/test_v2_adapter.py tests/test_risk_allocator.py`
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_v2_adapter.py tests/test_risk_allocator.py --json` -> ok
+- `git diff --check -- src/contracts/venue_submission_envelope.py src/data/polymarket_client.py tests/test_v2_adapter.py tests/test_risk_allocator.py`
+
 ## Not Completed
 
 This slice does not implement runtime rewiring. Legacy executor limit
