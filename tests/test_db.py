@@ -1018,10 +1018,10 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
         (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
          direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
          entry_method, strategy_key, edge_source, discovery_mode, chain_state,
-         order_id, order_status, updated_at)
+         order_id, order_status, updated_at, temperature_metric)
         VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-04-01','39-40\u00b0F',
                 'buy_yes','F',8.0,20.0,8.0,0.4,0.6,'ens_member_counting','center_buy',
-                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z')
+                'center_buy','opening_hunt','unknown','','filled','2026-04-01T00:00:00Z', 'high')
         """
     )
     db.commit()
@@ -1047,12 +1047,12 @@ def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, m
             position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'legacy-stale', 'active', 'legacy-stale', 'm-legacy', 'NYC', 'US-Northeast', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 10.0, 20.0, 10.0, 0.4, 0.6,
             'snap-legacy', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -1080,12 +1080,12 @@ def test_load_portfolio_prefers_sibling_mode_db_for_unqualified_path(tmp_path, m
             position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'paper-ok', 'active', 'paper-ok', 'm-paper', 'NYC', 'US-Northeast', '2099-04-01', '41-42°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             'snap-paper', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2099-04-04T00:00:00Z', 'high'
         )
         """
     )

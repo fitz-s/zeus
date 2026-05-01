@@ -738,8 +738,8 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     init_schema(conn)
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label, direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior, entry_method, strategy_key, edge_source, discovery_mode, chain_state, order_id, order_status, updated_at)
-        VALUES ('t1', 'active', 't1', 'm1', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', 8.0, 20.0, 8.0, 0.4, 0.6, 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt', 'unknown', '', 'filled', '2026-04-01T00:00:00Z')
+        INSERT INTO position_current (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label, direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior, entry_method, strategy_key, edge_source, discovery_mode, chain_state, order_id, order_status, updated_at, temperature_metric)
+        VALUES ('t1', 'active', 't1', 'm1', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', 8.0, 20.0, 8.0, 0.4, 0.6, 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt', 'unknown', '', 'filled', '2026-04-01T00:00:00Z', 'high')
         """
     )
     conn.commit()
@@ -5116,13 +5116,13 @@ def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_toke
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-chain-only', 'quarantined', 'db-chain-only', 'cond-1', 'UNKNOWN', 'Other', 'UNKNOWN', 'UNKNOWN',
             'unknown', 'F', 5.04, 12.0, 5.04, 0.42, 0.42,
             NULL, NULL, NULL,
             NULL, '', 'opening_inertia', NULL, NULL,
-            'quarantined', 'yes-chain-only', NULL, 'cond-1', NULL, NULL, '2026-04-04T00:00:00Z'
+            'quarantined', 'yes-chain-only', NULL, 'cond-1', NULL, NULL, '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -5729,13 +5729,13 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-t1', 'active', 'db-t1', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -5793,13 +5793,13 @@ def test_load_portfolio_reads_token_identity_from_position_current(tmp_path, mon
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-token', 'active', 'db-token', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -5846,13 +5846,13 @@ def test_load_portfolio_reads_ignored_tokens_from_canonical_suppression(tmp_path
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at
+            chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-token', 'active', 'db-token', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', 'yes-db-token', 'no-db-token', 'condition-db', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -5990,13 +5990,13 @@ def test_load_portfolio_ignores_deprecated_json_when_projection_authoritative(tm
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-deprecated-json', 'active', 'db-deprecated-json', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -6026,13 +6026,13 @@ def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_p
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-corrupt-json', 'active', 'db-corrupt-json', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -6117,13 +6117,13 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'db-recent-exit', 'active', 'db-recent-exit', 'm-db', 'NYC', 'NYC', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 12.0, 30.0, 12.0, 0.4, 0.61,
             NULL, NULL, NULL,
             'snap-db', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2026-04-04T00:00:00Z'
+            'unknown', '', 'filled', '2026-04-04T00:00:00Z', 'high'
         )
         """
     )

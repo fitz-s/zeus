@@ -1920,12 +1920,12 @@ def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monke
             position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'trade-1', 'active', 'trade-1', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
+            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00', 'high'
         )
         """
     )
@@ -1964,12 +1964,12 @@ def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypa
             position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'shadow-trade', 'day0_window', 'shadow-trade', 'm1', 'Dallas', 'Dallas', '2099-04-07', '76-77°F',
             'buy_no', 'F', 1.18, 1.28, 1.18, 0.92, 0.55,
             'snap-1', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-07T10:58:44.847407+00:00'
+            'unknown', '', 'filled', '2099-04-07T10:58:44.847407+00:00', 'high'
         )
         """
     )
@@ -2008,12 +2008,12 @@ def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shado
             position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'pending-trade', 'pending_entry', 'pending-trade', 'm1', 'NYC', 'NYC', '2099-04-01', '39-40°F',
             'buy_yes', 'F', 5.0, 14.29, 5.0, 0.35, 0.6,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'opening_hunt',
-            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00'
+            'unknown', '', 'filled', '2099-04-01T11:45:45.242001+00:00', 'high'
         )
         """
     )

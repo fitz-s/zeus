@@ -69,9 +69,9 @@ def _insert_position_current(
         INSERT INTO position_current
             (position_id, phase, strategy_key, updated_at, city, target_date,
              bin_label, direction, market_id, edge_source, size_usd, shares,
-             cost_basis_usd, entry_price, unit, token_id)
+             cost_basis_usd, entry_price, unit, token_id, temperature_metric)
         VALUES (?, 'active', ?, ?, ?, ?, '50-51°F', 'buy_yes', 'm-test', '',
-                10.0, 100, 10.0, 0.5, 'F', ?)
+                10.0, 100, 10.0, 0.5, 'F', ?, 'high')
         """,
         (position_id, strategy_key, "2026-04-23T12:00:00+00:00", city, target_date, token_id),
     )

@@ -754,12 +754,12 @@ def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'pos-1', 'active', 'trade-1', 'm1', 'NYC', 'US-Northeast', '2026-04-01', '39-40°F',
             'buy_yes', 'F', 10.0, 20.0, 10.0, 0.5, NULL, NULL, NULL, NULL,
             'snap-1', 'ens_member_counting', 'center_buy', 'center_buy', 'update_reaction',
-            'unknown', NULL, NULL, '2026-04-04T00:00:00Z'
+            'unknown', NULL, NULL, '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -770,12 +770,12 @@ def test_replay_parity_reports_projection_vs_legacy_export(tmp_path):
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
+            chain_state, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
             'pos-2', 'pending_exit', 'trade-2', 'm2', 'NYC', 'US-Northeast', '2026-04-01', '41-42°F',
             'buy_yes', 'F', 12.0, 24.0, 12.0, 0.5, NULL, NULL, NULL, NULL,
             'snap-2', 'ens_member_counting', 'opening_inertia', 'opening_inertia', 'update_reaction',
-            'unknown', NULL, NULL, '2026-04-04T00:00:00Z'
+            'unknown', NULL, NULL, '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -3365,10 +3365,10 @@ def test_harvester_settlement_skips_stale_in_memory_pos_when_position_current_sh
     conn.execute(
         """INSERT INTO position_current
            (position_id, trade_id, city, target_date, bin_label, direction,
-            size_usd, entry_price, p_posterior, strategy_key, phase, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            size_usd, entry_price, p_posterior, strategy_key, phase, updated_at, temperature_metric)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         ("rt-pos-1", "rt-pos-1", "NYC", "2026-04-03", "39-40\u00b0F", "buy_yes",
-         10.0, 0.5, 0.6, "center_buy", "settled", "2026-04-03T01:00:00Z"),
+         10.0, 0.5, 0.6, "center_buy", "settled", "2026-04-03T01:00:00Z", "high"),
     )
     conn.commit()
 

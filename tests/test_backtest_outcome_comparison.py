@@ -45,11 +45,11 @@ def _insert_position_and_outcome(trade):
          direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
          last_monitor_prob, last_monitor_edge, last_monitor_market_price,
          decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-         chain_state, order_id, order_status, updated_at)
+         chain_state, order_id, order_status, updated_at, temperature_metric)
         VALUES ('pos-1', 'settled', 'pos-1', 'mkt', 'NYC', 'US-Northeast', '2026-04-03',
                 '39-40°F', 'buy_yes', 'F', 5.0, 10.0, 5.0, 0.5, 0.6,
                 0.6, 0.1, 0.5, 'snap-1', 'entry', 'center_buy', 'edge',
-                'opening_hunt', 'on_chain', 'ord-1', 'filled', '2026-04-02T00:00:00Z')
+                'opening_hunt', 'on_chain', 'ord-1', 'filled', '2026-04-02T00:00:00Z', 'high')
         """
     )
     trade.execute(
@@ -135,11 +135,11 @@ def test_trade_history_audit_coverage_counts_only_requested_window(tmp_path, mon
          direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
          last_monitor_prob, last_monitor_edge, last_monitor_market_price,
          decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-         chain_state, order_id, order_status, updated_at)
+         chain_state, order_id, order_status, updated_at, temperature_metric)
         VALUES ('pos-out', 'settled', 'pos-out', 'mkt', 'NYC', 'US-Northeast', '2026-04-10',
                 '39-40°F', 'buy_yes', 'F', 5.0, 10.0, 5.0, 0.5, 0.6,
                 0.6, 0.1, 0.5, 'snap-2', 'entry', 'center_buy', 'edge',
-                'opening_hunt', 'on_chain', 'ord-2', 'filled', '2026-04-09T00:00:00Z')
+                'opening_hunt', 'on_chain', 'ord-2', 'filled', '2026-04-09T00:00:00Z', 'high')
         """
     )
     trade.execute(

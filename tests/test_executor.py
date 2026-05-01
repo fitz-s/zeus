@@ -342,10 +342,10 @@ class TestPortfolio:
             (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
              direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
              entry_method, strategy_key, edge_source, discovery_mode, chain_state,
-             order_id, order_status, updated_at)
+             order_id, order_status, updated_at, temperature_metric)
             VALUES ('t1','active','t1','m1','NYC','US-Northeast','2026-01-15','39-40',
                     'buy_yes','F',15.0,0.0,0.0,0.40,0.60,'ens_member_counting','center_buy',
-                    'center_buy','opening_hunt','unknown','','filled','2026-01-12T00:00:00Z')
+                    'center_buy','opening_hunt','unknown','','filled','2026-01-12T00:00:00Z', 'high')
             """
         )
         db.commit()

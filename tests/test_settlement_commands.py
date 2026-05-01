@@ -217,8 +217,8 @@ def test_redeem_failure_does_not_mark_position_settled(conn, monkeypatch):
     allow_redemption(monkeypatch)
     conn.execute(
         """
-        INSERT INTO position_current (position_id, phase, trade_id, strategy_key, updated_at)
-        VALUES ('pos-r1', 'active', 'trade-r1', 'center_buy', ?)
+        INSERT INTO position_current (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
+        VALUES ('pos-r1', 'active', 'trade-r1', 'center_buy', ?, 'high')
         """,
         (NOW.isoformat(),),
     )
