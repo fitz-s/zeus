@@ -323,6 +323,80 @@ def test_websocket_disconnect_triggers_reconcile_sweep_marker_and_blocks_submit(
         ws_gap_guard.assert_ws_allows_submit("condition-ws")
 
 
+def test_first_subscribed_message_after_not_configured_clears_m5_reconcile_required(conn):
+    """RELATIONSHIP test (live-blockers 2026-05-01): boot transition must unlatch.
+
+    Function-level dry tests passed for record_message preserving
+    m5_reconcile_required (correct in isolation), AND for the module-init
+    value being True (correct in isolation). But no test asserted the
+    cross-module invariant: 'after a clean boot + first SUBSCRIBED message,
+    is the WS gate UNLATCHED enough for entries to flow?' Result was a
+    daemon that booted healthy, connected fine, received messages — and
+    still permanently blocked entries because m5_reconcile_required was
+    never cleared in any production path.
+
+    This is the relationship test that should have existed from day one.
+    """
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = ws_gap_guard.record_message(
+        observed_at=NOW,
+        subscription_state="SUBSCRIBED",
+    )
+
+    assert status.m5_reconcile_required is False, (
+        "first SUBSCRIBED message after a clean (not_configured) boot must "
+        "clear m5_reconcile_required — there's no missed-orders risk because "
+        "the daemon never had a connection to lose messages from"
+    )
+    assert status.connected is True
+    assert status.subscription_state == "SUBSCRIBED"
+    summary = ws_gap_guard.summary(now=NOW + timedelta(seconds=1))
+    assert summary["entry"]["allow_submit"] is True, (
+        "after clean-boot subscribe, ws_user_channel.entry.allow_submit must "
+        "be True — otherwise reduce_only stays latched and orders never flow"
+    )
+
+
+def test_mid_run_reconnect_after_real_disconnect_preserves_m5_reconcile_required(conn):
+    """Counter-test: genuine mid-run reconnect must NOT auto-clear.
+
+    If WS dropped during runtime (ConnectionClosedError, auth_failed, etc.),
+    we may have missed fills that landed in the gap window. The m5_reconcile_required
+    flag is the marker that REST reconciliation must run before we trust the WS
+    again. Only the not_configured boot path is safe to auto-clear.
+    """
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = ws_gap_guard.record_message(
+        observed_at=NOW,
+        subscription_state="SUBSCRIBED",
+    )
+
+    assert status.m5_reconcile_required is True, (
+        "mid-run reconnect after a real disconnect must preserve "
+        "m5_reconcile_required so REST reconciliation runs before entries resume"
+    )
+
+
 def test_not_configured_default_blocks_submit_until_user_channel_truth_exists(conn):
     """M3 is live-truth-gated; absent WS configuration is not an implicit PASS."""
     ws_gap_guard.configure_status(
