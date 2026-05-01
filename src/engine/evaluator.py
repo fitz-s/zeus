@@ -1882,7 +1882,9 @@ def evaluate_candidate(
     market_is_complete = True
     mapped_outcomes = 0
     try:
-        probe_native_no_quotes = len(bins) > 2 and native_multibin_buy_no_shadow_enabled()
+        # The legacy flag name says "multibin", but the authority rule is now
+        # broader: every executable buy_no needs native NO-token quote evidence.
+        probe_native_no_quotes = native_multibin_buy_no_shadow_enabled()
     except ValueError as exc:
         return [EdgeDecision(
             False,
