@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-24; last_reviewed=2026-04-24; last_reused=never
+# Lifecycle: created=2026-04-24; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Antibody for Law 5 (R-AJ) at the ingest layer — asserts the
 #          `ingest_json_file` path surfaces MISSING_CAUSALITY_FIELD instead of
 #          silently defaulting absent causality via setdefault.
@@ -93,7 +93,14 @@ def test_absent_causality_field_is_rejected_by_ingest(ingest_env, tmp_path):
         model_version="ecmwf_ens",
         overwrite=True,
     )
-    assert status == "contract_rejected: MISSING_CAUSALITY_FIELD", status
+    # 2026-04-29: Schema contract fix (Antibody #16) moves causality check earlier:
+    # TiggeSnapshotPayload.from_json_dict now rejects missing causality at provenance level
+    # (PROVENANCE_VIOLATION) before snapshot_ingest_contract.validate_snapshot_contract is called.
+    # Both strings represent the same invariant enforced: absent causality is rejected.
+    assert status in (
+        "contract_rejected: MISSING_CAUSALITY_FIELD",
+        "contract_rejected: PROVENANCE_VIOLATION",
+    ), status
 
     count = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots_v2").fetchone()[0]
     assert count == 0, "rejected payload must not write to ensemble_snapshots_v2"

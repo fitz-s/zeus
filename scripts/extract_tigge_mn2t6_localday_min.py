@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-04-18; last_reused=2026-04-18
+# Lifecycle: created=2026-04-17; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: GRIB→JSON extractor for mn2t6 local-calendar-day min (low track);
 #          emits canonical payload per 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §5;
 #          implements Phase 5B R-AG (boundary quarantine), R-AH (causality N/A), R-AI (data_version).
@@ -58,6 +58,7 @@ from eccodes import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload  # noqa: E402
 from src.types.metric_identity import LOW_LOCALDAY_MIN  # noqa: E402
 
 # Phase 7B-followup: shared helpers relocated to scripts/_tigge_common.py
@@ -349,52 +350,54 @@ def build_low_snapshot_json(
     }
     manifest_hash = compute_manifest_hash(provenance_fields)
 
-    return {
-        "generated_at": _now_utc_iso(),
-        "data_version": DATA_VERSION,
-        "physical_quantity": PHYSICAL_QUANTITY,
-        "temperature_metric": TEMPERATURE_METRIC,
-        "param": PARAM,
-        "paramId": PARAM_ID,
-        "short_name": SHORT_NAME,
-        "step_type": STEP_TYPE,
-        "aggregation_window_hours": AGGREGATION_WINDOW_HOURS,
-        "city": city_name,
-        "lat": nearest_lat,
-        "lon": nearest_lon,
-        "unit": MEMBERS_UNIT,
-        "members_unit": MEMBERS_UNIT,
-        "manifest_sha256": manifest_sha256_value,
-        "issue_time_utc": issue_utc.isoformat(),
-        "target_date_local": target_date.isoformat(),
-        "lead_day": lead_day,
-        "lead_day_anchor": "issue_utc.date()",
-        "timezone": city_tz,
-        "local_day_start_utc": day_start_utc.isoformat(),
-        "local_day_end_utc": day_end_utc.isoformat(),
-        "step_horizon_hours": float(step_horizon_hours),
-        "step_horizon_deficit_hours": step_horizon_deficit_hours,
-        "local_day_window": {
+    payload = TiggeSnapshotPayload.make_low_track(
+        generated_at=_now_utc_iso(),
+        data_version=DATA_VERSION,
+        physical_quantity=PHYSICAL_QUANTITY,
+        temperature_metric=TEMPERATURE_METRIC,
+        param=PARAM,
+        paramId=PARAM_ID,
+        short_name=SHORT_NAME,
+        step_type=STEP_TYPE,
+        aggregation_window_hours=AGGREGATION_WINDOW_HOURS,
+        city=city_name,
+        lat=nearest_lat,
+        lon=nearest_lon,
+        unit=MEMBERS_UNIT,
+        members_unit=MEMBERS_UNIT,
+        timezone=city_tz,
+        manifest_sha256=manifest_sha256_value,
+        manifest_hash=manifest_hash,
+        issue_time_utc=issue_utc.isoformat(),
+        target_date_local=target_date.isoformat(),
+        lead_day=lead_day,
+        lead_day_anchor="issue_utc.date()",
+        local_day_start_utc=day_start_utc.isoformat(),
+        local_day_end_utc=day_end_utc.isoformat(),
+        local_day_window={
             "start": day_start_utc.isoformat(),
             "end": day_end_utc.isoformat(),
         },
-        "causality": causality,
-        "boundary_policy": {
+        step_horizon_hours=float(step_horizon_hours),
+        step_horizon_deficit_hours=step_horizon_deficit_hours,
+        causality=causality,
+        boundary_ambiguous=any_boundary_ambiguous,
+        boundary_policy={
             "training_rule": "use_inner_only_and_exclude_if_boundary_can_win",
             "boundary_ambiguous": any_boundary_ambiguous,
             "ambiguous_member_count": ambiguous_member_count,
         },
-        "selected_step_ranges_inner": sorted(all_inner_ranges),
-        "selected_step_ranges_boundary": sorted(all_boundary_ranges),
-        "nearest_grid_lat": nearest_lat,
-        "nearest_grid_lon": nearest_lon,
-        "nearest_grid_distance_km": nearest_dist,
-        "member_count": MEMBER_COUNT,
-        "missing_members": missing,
-        "training_allowed": training_allowed,
-        "manifest_hash": manifest_hash,
-        "members": members_out,
-    }
+        selected_step_ranges_inner=sorted(all_inner_ranges),
+        selected_step_ranges_boundary=sorted(all_boundary_ranges),
+        nearest_grid_lat=nearest_lat,
+        nearest_grid_lon=nearest_lon,
+        nearest_grid_distance_km=nearest_dist,
+        member_count=MEMBER_COUNT,
+        missing_members=missing,
+        training_allowed=training_allowed,
+        members=members_out,
+    )
+    return payload.to_json_dict()
 
 
 def validate_low_extraction(payload: dict) -> list[str]:

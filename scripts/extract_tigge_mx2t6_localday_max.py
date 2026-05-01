@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-04-18; last_reused=2026-04-18
+# Lifecycle: created=2026-04-17; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: GRIB→JSON extractor for mx2t6 local-calendar-day max (high track);
 #          emits canonical payload consumed by scripts/ingest_grib_to_snapshots.py;
 #          implements Phase 4.5 R-Q..R-U (step horizon, causality, manifest hash,
@@ -52,6 +52,7 @@ from eccodes import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX  # noqa: E402
 
 # Phase 7B-followup: shared helpers relocated to scripts/_tigge_common.py
@@ -263,46 +264,45 @@ def extract_one_grib_file(
     }
     manifest_hash = compute_manifest_hash(provenance_fields)
 
-    return {
-        "generated_at": _now_utc_iso(),
-        "data_version": DATA_VERSION,
-        "physical_quantity": PHYSICAL_QUANTITY,
-        "param": PARAM,
-        "paramId": PARAM_ID,
-        "short_name": SHORT_NAME,
-        "step_type": STEP_TYPE,
-        "aggregation_window_hours": AGGREGATION_WINDOW_HOURS,
-        "city": city_name,
-        "lat": city_lat,
-        "lon": city_lon,
-        "unit": city_unit,
-        "manifest_sha256": manifest_sha256_value,
-        "issue_time_utc": issue_utc.isoformat(),
-        "target_date_local": target_date.isoformat(),
-        "lead_day": lead_day,
-        "lead_day_anchor": "issue_utc.date()",
-        "timezone": city_tz,
-        # MAJOR-1: top-level provenance fields for ensemble_snapshots_v2
-        "local_day_start_utc": day_start_utc.isoformat(),
-        "local_day_end_utc": day_end_utc.isoformat(),
-        "step_horizon_hours": float(step_horizon_hours),
-        "step_horizon_deficit_hours": step_horizon_deficit_hours,
-        "local_day_window": {
+    payload = TiggeSnapshotPayload.make_high_track(
+        generated_at=_now_utc_iso(),
+        data_version=DATA_VERSION,
+        physical_quantity=PHYSICAL_QUANTITY,
+        param=PARAM,
+        paramId=PARAM_ID,
+        short_name=SHORT_NAME,
+        step_type=STEP_TYPE,
+        aggregation_window_hours=AGGREGATION_WINDOW_HOURS,
+        city=city_name,
+        lat=city_lat,
+        lon=city_lon,
+        unit=city_unit,
+        timezone=city_tz,
+        manifest_sha256=manifest_sha256_value,
+        manifest_hash=manifest_hash,
+        issue_time_utc=issue_utc.isoformat(),
+        target_date_local=target_date.isoformat(),
+        lead_day=lead_day,
+        lead_day_anchor="issue_utc.date()",
+        local_day_start_utc=day_start_utc.isoformat(),
+        local_day_end_utc=day_end_utc.isoformat(),
+        local_day_window={
             "start": day_start_utc.isoformat(),
             "end": day_end_utc.isoformat(),
         },
-        "causality": causality,
-        "boundary_ambiguous": False,  # high track: no boundary quarantine (MAJOR-2)
-        "nearest_grid_lat": nearest_lat,
-        "nearest_grid_lon": nearest_lon,
-        "nearest_grid_distance_km": nearest_dist,
-        "selected_step_ranges": sorted(selected_steps),
-        "member_count": MEMBER_COUNT,
-        "missing_members": missing,
-        "training_allowed": training_allowed,
-        "manifest_hash": manifest_hash,
-        "members": members_out,
-    }
+        step_horizon_hours=float(step_horizon_hours),
+        step_horizon_deficit_hours=step_horizon_deficit_hours,
+        causality=causality,
+        nearest_grid_lat=nearest_lat,
+        nearest_grid_lon=nearest_lon,
+        nearest_grid_distance_km=nearest_dist,
+        selected_step_ranges=sorted(selected_steps),
+        member_count=MEMBER_COUNT,
+        missing_members=missing,
+        training_allowed=training_allowed,
+        members=members_out,
+    )
+    return payload.to_json_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -598,46 +598,45 @@ def _finalize_record(record: dict[str, Any], manifest_sha: str) -> dict:
     }
     mhash = compute_manifest_hash(provenance_fields)
 
-    return {
-        "generated_at": _now_utc_iso(),
-        "data_version": DATA_VERSION,
-        "physical_quantity": PHYSICAL_QUANTITY,
-        "param": PARAM,
-        "paramId": PARAM_ID,
-        "short_name": SHORT_NAME,
-        "step_type": STEP_TYPE,
-        "aggregation_window_hours": AGGREGATION_WINDOW_HOURS,
-        "city": city_name,
-        "lat": float(city_cfg["lat"]),
-        "lon": float(city_cfg["lon"]),
-        "unit": city_unit,
-        "manifest_sha256": manifest_sha,
-        "issue_time_utc": issue_utc.isoformat(),
-        "target_date_local": target_date.isoformat(),
-        "lead_day": lead_day,
-        "lead_day_anchor": "issue_utc.date()",
-        "timezone": city_tz,
-        # MAJOR-1: top-level provenance fields for ensemble_snapshots_v2
-        "local_day_start_utc": day_start_utc.isoformat(),
-        "local_day_end_utc": day_end_utc.isoformat(),
-        "step_horizon_hours": float(step_horizon_hours),
-        "step_horizon_deficit_hours": step_horizon_deficit_hours,
-        "local_day_window": {
+    payload = TiggeSnapshotPayload.make_high_track(
+        generated_at=_now_utc_iso(),
+        data_version=DATA_VERSION,
+        physical_quantity=PHYSICAL_QUANTITY,
+        param=PARAM,
+        paramId=PARAM_ID,
+        short_name=SHORT_NAME,
+        step_type=STEP_TYPE,
+        aggregation_window_hours=AGGREGATION_WINDOW_HOURS,
+        city=city_name,
+        lat=float(city_cfg["lat"]),
+        lon=float(city_cfg["lon"]),
+        unit=city_unit,
+        timezone=city_tz,
+        manifest_sha256=manifest_sha,
+        manifest_hash=mhash,
+        issue_time_utc=issue_utc.isoformat(),
+        target_date_local=target_date.isoformat(),
+        lead_day=lead_day,
+        lead_day_anchor="issue_utc.date()",
+        local_day_start_utc=day_start_utc.isoformat(),
+        local_day_end_utc=day_end_utc.isoformat(),
+        local_day_window={
             "start": day_start_utc.isoformat(),
             "end": day_end_utc.isoformat(),
         },
-        "causality": causality,
-        "boundary_ambiguous": False,  # high track: no boundary quarantine (MAJOR-2)
-        "nearest_grid_lat": record["nearest_lat"],
-        "nearest_grid_lon": record["nearest_lon"],
-        "nearest_grid_distance_km": record["nearest_dist"],
-        "selected_step_ranges": sorted(record["selected_steps"]),
-        "member_count": MEMBER_COUNT,
-        "missing_members": missing,
-        "training_allowed": training_allowed,
-        "manifest_hash": mhash,
-        "members": members_out,
-    }
+        step_horizon_hours=float(step_horizon_hours),
+        step_horizon_deficit_hours=step_horizon_deficit_hours,
+        causality=causality,
+        nearest_grid_lat=record["nearest_lat"],
+        nearest_grid_lon=record["nearest_lon"],
+        nearest_grid_distance_km=record["nearest_dist"],
+        selected_step_ranges=sorted(record["selected_steps"]),
+        member_count=MEMBER_COUNT,
+        missing_members=missing,
+        training_allowed=training_allowed,
+        members=members_out,
+    )
+    return payload.to_json_dict()
 
 
 # ---------------------------------------------------------------------------
