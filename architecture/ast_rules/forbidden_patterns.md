@@ -26,7 +26,8 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
 
 5. **FM-08** — bare implicit unit assumptions (`F` default, `C` default) in semantic code paths  
    Rationale: °F and °C cities have different settlement semantics (2°F range vs 1°C point bins). Hardcoded unit assumptions silently produce wrong probabilities for the wrong city set.  
-   Enforcement: semgrep + test (NC-08)
+   Enforcement: semgrep `zeus-no-default-unit-fallback` (severity: WARNING — see follow-up below) + test `tests/test_cross_module_invariants.py::test_inv04_no_bare_temperature_threshold_comparisons_in_src` (NC-08).  
+   Severity follow-up: trading-system safety argues for ERROR (silent unit confusion → wrong settlement). Upgrade requires excluding the unit-identity definition sites in `src/contracts/calibration_bins.py` and `src/contracts/settlement_semantics.py` from the rule's `paths.include`, and refactoring `src/data/observation_client.py:~411` to derive `unit` from the city rather than hard-code `"F"` (ASOS-implicit). Tracked as ultrareview-25 F16 follow-up.
 
 6. **FM-NC-16** — `place_limit_order(...)` calls outside the gateway boundary
    Rationale: live order submission must flow through the executor seam so V2
