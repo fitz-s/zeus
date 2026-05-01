@@ -53,6 +53,10 @@ Topology has five interacting layers:
 - Use `--route-card-only` for first-screen orientation and `--claim` only when
   the completion statement depends on a specific gate such as graph impact,
   repo health, packet closeout, semantic boot, or live authorization.
+- Treat high-fanout file-only matches as soft advisory routing, not as a hard
+  ambiguous topology failure. They must not admit edits or choose a profile,
+  but they should let the agent continue orientation and then pass typed intent
+  only when the edit actually needs that file.
 - Use typed issue `owner_manifest` and `repair_kind` metadata to select the owning registry.
 - Stop and plan when planning-lock or unknown ownership appears.
 - Close with targeted tests. Add changed-file `closeout` and work/receipt

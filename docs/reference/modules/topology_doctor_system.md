@@ -45,6 +45,9 @@ bounded impact summary without pretending every file is source.
 - Every new top-level script/test/doc route needs its owning manifest updated when the manifest owns that class of fact.
 - Typed `intent` may select a digest profile, but admission still reconciles
   files against `allowed_files` and forbidden patterns.
+- High-fanout file-only evidence is soft ambiguity: the doctor should return
+  advisory-only/no-admission instead of making navigation look failed. Strong
+  phrase ties and invalid typed intents remain hard ambiguous.
 - `--route-card-only` is the lightweight first-screen path for T0/T1 work; it
   should not print appendices, repo-health lists, or unrelated drift.
 - `--claim` turns optional evidence into claim-scoped gates. A stale graph
@@ -64,6 +67,8 @@ bounded impact summary without pretending every file is source.
 - A graph or context-pack appendix is treated as authority rather than derived context.
 - Process controls become bureaucratic when every stale warning blocks every
   task instead of only the claim that depends on it.
+- Generic fixes become bureaucratic when file-only uncertainty is reported as
+  a topology failure instead of advisory no-admission.
 - Feedback loops become bureaucratic when they require a new file per task or
   turn every observation into immediate scope expansion.
 
