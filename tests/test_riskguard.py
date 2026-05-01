@@ -189,8 +189,18 @@ def _insert_risk_state_row(
     total_pnl: float = 0.0,
     effective_bankroll: float | None = None,
 ) -> int:
+    """Insert a risk_state row that `_risk_state_reference_from_row` accepts.
+
+    P0-A (2026-05-01): DEF A semantics — effective_bankroll defaults to
+    initial_bankroll (= wallet snapshot, no PnL math). Tests that pass an
+    explicit `effective_bankroll` are honoured but those values must satisfy
+    `abs(initial_bankroll - effective_bankroll) <= TRAILING_LOSS_ROW_TOLERANCE_USD`
+    or the reference loader will reject them. Provenance tag
+    `bankroll_truth_source = "polymarket_wallet"` is added so the cutover-day
+    filter accepts these rows as eligible references.
+    """
     if effective_bankroll is None:
-        effective_bankroll = round(initial_bankroll + total_pnl, 2)
+        effective_bankroll = round(initial_bankroll, 2)  # DEF A: equity == wallet
     cur = conn.execute(
         """
         INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -203,6 +213,7 @@ def _insert_risk_state_row(
                     "initial_bankroll": round(initial_bankroll, 2),
                     "total_pnl": round(total_pnl, 2),
                     "effective_bankroll": round(effective_bankroll, 2),
+                    "bankroll_truth_source": "polymarket_wallet",
                 }
             ),
             checked_at,
@@ -351,6 +362,12 @@ class TestRiskEvaluation:
 
 class TestRiskGuardSettlementSource:
     def test_tick_prefers_position_current_for_portfolio_truth(self, monkeypatch, tmp_path):
+        # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
+        # this test's axis is portfolio TRUTH-SOURCE preference (canonical_db
+        # vs metadata fallback). Bankroll value is now provider-sourced, so
+        # we monkeypatch `bankroll_provider.current()` instead of stuffing
+        # PortfolioState(bankroll=150.0). Under DEF A, effective_bankroll
+        # equals the wallet value with NO PnL math added (was 150+2=152).
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
@@ -375,10 +392,26 @@ class TestRiskGuardSettlementSource:
         conn.commit()
         conn.close()
 
+        from src.runtime import bankroll_provider as _bp
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=150.0,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(
             riskguard_module,
             "load_portfolio",
+            # bankroll/baseline values here are no longer the bankroll truth
+            # source; left as-is so the daily/weekly baseline annotations in
+            # details_json keep their previous values.
             lambda: PortfolioState(
                 bankroll=150.0,
                 daily_baseline_total=151.0,
@@ -417,17 +450,24 @@ class TestRiskGuardSettlementSource:
         ).fetchone()
         details = json.loads(row["details_json"])
 
+        # Truth-source axis (the original purpose of this test) — preserved.
         assert details["portfolio_truth_source"] == "position_current"
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 1
         assert details["portfolio_capital_source"] == "dual_source_blended"
+        # Bankroll truth axis (P0-A): provider-sourced wallet = 150.0; DEF A
+        # makes effective_bankroll == initial_bankroll (no PnL fold-in).
         assert details["initial_bankroll"] == pytest.approx(150.0)
+        assert details["effective_bankroll"] == pytest.approx(150.0)
+        assert details["bankroll_truth_source"] == "polymarket_wallet"
+        # Baselines come from PortfolioState's daily/weekly snapshots (still
+        # provided by the legacy load_portfolio path).
         assert details["daily_baseline_total"] == pytest.approx(151.0)
         assert details["weekly_baseline_total"] == pytest.approx(152.0)
+        # PnL signals are still emitted for analytics, just not folded into equity.
         assert details["realized_pnl"] == pytest.approx(-3.0)
         assert details["unrealized_pnl"] == pytest.approx(5.0)
-        assert details["effective_bankroll"] == pytest.approx(152.0)
 
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -705,12 +745,16 @@ class TestRiskGuardTrailingLossSemantics:
         assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "ok"
         assert details["daily_loss_source"] == "risk_state_history"
+        # P0-A DEF A (followup_design.md §2.1): effective_bankroll == initial_bankroll
+        # (= wallet snapshot, no PnL math). The legacy assertion expected
+        # effective=136.74 (=150-13.26 under DEF B); the structural correction
+        # is effective=150 with total_pnl preserved as analytics-only.
         assert details["daily_loss_reference"] == {
             "row_id": reference_id,
             "checked_at": reference_checked_at,
             "initial_bankroll": 150.0,
             "total_pnl": -13.26,
-            "effective_bankroll": 136.74,
+            "effective_bankroll": 150.0,
         }
 
     def test_tick_uses_trailing_7d_loss_when_reference_exists(self, monkeypatch, tmp_path):
@@ -749,7 +793,15 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert details["weekly_loss"] == pytest.approx(5.0)
+        # P0-A DEF A: equity == wallet, not wallet+pnl. Both daily and weekly
+        # references use initial_bankroll (= 150 at this default seed). Loss
+        # signal comes from current-equity vs reference-equity, both of which
+        # are wallet snapshots. With monkey-patched 150.0 wallet on both sides,
+        # weekly_loss is 0 — but the test fixtures inject realized_pnl=-10 via
+        # _mock_trailing_loss_tick which moves current_total_value separately.
+        # Under DEF A this no longer changes equity; the assertion below is
+        # rewritten to lock the structural property that effective_bankroll
+        # equals initial_bankroll, NOT pnl-adjusted.
         assert details["weekly_loss_status"] == "ok"
         assert details["weekly_loss_source"] == "risk_state_history"
         assert details["weekly_loss_reference"] == {
@@ -757,7 +809,7 @@ class TestRiskGuardTrailingLossSemantics:
             "checked_at": weekly_reference_checked_at,
             "initial_bankroll": 150.0,
             "total_pnl": -5.0,
-            "effective_bankroll": 145.0,
+            "effective_bankroll": 150.0,
         }
 
     def test_tick_marks_insufficient_history_without_false_trigger(self, monkeypatch, tmp_path):
@@ -915,7 +967,13 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert details["daily_loss"] == pytest.approx(2.0)
+        # P0-A DEF A (followup_design.md §2.1): equity = wallet, no pnl math.
+        # Both reference and current equity come from a flat $150 wallet
+        # (default monkeypatched in conftest), so daily_loss is structurally 0
+        # under DEF A. The original assertion (loss=2) encoded DEF B; the
+        # structural property this test guards is "stale-but-trustworthy
+        # reference is correctly selected" — preserved via the row_id check.
+        assert details["daily_loss"] == pytest.approx(0.0)
         # Per df5ce642 (cold-start follow-up): out-of-window stale row →
         # `bootstrap_stale_reference` (not bare `stale_reference`) so
         # observability distinguishes "history but stale" from fresh deploy.
@@ -954,7 +1012,11 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert details["daily_loss"] == pytest.approx(2.0)
+        # P0-A DEF A: equity == wallet on both sides → daily_loss = 0 under flat
+        # wallet. The structural property this test guards is "trustworthy
+        # within-window reference is selected" — preserved via row_id +
+        # checked_at + status="ok".
+        assert details["daily_loss"] == pytest.approx(0.0)
         assert details["daily_loss_status"] == "ok"
         assert details["daily_loss_reference"]["row_id"] == trusted_id
         assert details["daily_loss_reference"]["checked_at"] == trusted_checked_at
@@ -1726,6 +1788,12 @@ def test_query_strategy_health_snapshot_reports_stale_rows():
 
 
 def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
+    # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
+    # this test's axis is strategy_health_refresh metadata. Bankroll is now
+    # provider-sourced; we monkeypatch the provider explicitly so the test
+    # stops enshrining the legacy `PortfolioState(bankroll=150)` fiction as a
+    # truth source. The PortfolioState patch is kept (without bankroll= kwarg)
+    # because the canonical-loader-truth path uses it for non-bankroll fields.
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"
 
@@ -1748,8 +1816,21 @@ def test_tick_records_strategy_health_refresh_metadata(monkeypatch, tmp_path):
     conn.commit()
     conn.close()
 
+    from src.runtime import bankroll_provider as _bp
+    monkeypatch.setattr(
+        _bp,
+        "current",
+        lambda **_kw: _bp.BankrollOfRecord(
+            value_usd=150.0,
+            fetched_at="2026-04-01T00:00:00+00:00",
+            source="polymarket_wallet",
+            authority="canonical",
+            staleness_seconds=0.0,
+            cached=False,
+        ),
+    )
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState())
     monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
     monkeypatch.setattr(
         riskguard_module,

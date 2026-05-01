@@ -3026,7 +3026,10 @@ def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch
 
     assert status["portfolio"]["realized_pnl"] == pytest.approx(4.5)
     assert status["portfolio"]["total_pnl"] == pytest.approx(4.5)
-    assert status["portfolio"]["effective_bankroll"] == pytest.approx(154.5)
+    # P0-A DEF A (followup_design.md §2.1): effective_bankroll == wallet_balance,
+    # NOT wallet+pnl. Was 150+4.5=154.5 under DEF B; now equals the wallet
+    # snapshot (default conftest provider returns 150.0).
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(150.0)
 
 
 def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
@@ -3135,8 +3138,25 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
             return get_connection(risk_db)
         return get_connection(zeus_db)
 
+    # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
+    # this test's axis is "INV settlement source = position_events"; bankroll
+    # is now provider-sourced. Monkeypatch bankroll_provider.current() so the
+    # test stops enshrining PortfolioState(bankroll=150) as a truth source.
+    from src.runtime import bankroll_provider as _bp
+    monkeypatch.setattr(
+        _bp,
+        "current",
+        lambda **_kw: _bp.BankrollOfRecord(
+            value_usd=150.0,
+            fetched_at="2026-04-01T00:00:00+00:00",
+            source="polymarket_wallet",
+            authority="canonical",
+            staleness_seconds=0.0,
+            cached=False,
+        ),
+    )
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState())
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(
