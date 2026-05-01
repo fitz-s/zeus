@@ -4,6 +4,8 @@
 #   block，这本来就不是一个合理的配置，只有这种冷启动状态才会出现没有outcome
 #   fact" + architect agent (aef59fd) confirmation that the deadlock is in
 #   `_trailing_loss_snapshot` / risk_state lookup, not outcome_fact.
+#   Updated 2026-05-01: P0-A bankroll-truth-chain landed; reference rows now
+#   require `bankroll_truth_source = "polymarket_wallet"` provenance.
 """Antibody: riskguard must not flag fresh deploys as DATA_DEGRADED.
 
 A fresh deploy or post-long-outage restart has either no `risk_state` rows
@@ -41,9 +43,16 @@ def fresh_risk_conn():
 
 
 def _seed_row(conn: sqlite3.Connection, *, ts: str, initial_bankroll=200.0, total_pnl=0.0):
-    """Insert a risk_state row that `_risk_state_reference_from_row` accepts."""
+    """Insert a risk_state row that `_risk_state_reference_from_row` accepts.
+
+    P0-A (2026-05-01): under DEF A semantics `effective_bankroll == initial_bankroll`
+    (= wallet snapshot, no PnL math). The `total_pnl` field is preserved for
+    analytics observability but is no longer added into the equity. Reference
+    rows must carry `bankroll_truth_source = "polymarket_wallet"` to pass the
+    cutover-day filter in `_risk_state_reference_from_row`.
+    """
     import json
-    effective = round(initial_bankroll + total_pnl, 2)
+    effective = round(initial_bankroll, 2)  # DEF A: equity == wallet, not wallet+pnl
     conn.execute(
         "INSERT INTO risk_state (checked_at, level, details_json) VALUES (?, ?, ?)",
         (
@@ -54,6 +63,7 @@ def _seed_row(conn: sqlite3.Connection, *, ts: str, initial_bankroll=200.0, tota
                     "initial_bankroll": initial_bankroll,
                     "total_pnl": total_pnl,
                     "effective_bankroll": effective,
+                    "bankroll_truth_source": "polymarket_wallet",
                 }
             ),
         ),
