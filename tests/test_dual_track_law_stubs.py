@@ -10,6 +10,8 @@ pytest.skip() body with the actual assertion.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -390,6 +392,87 @@ def test_red_force_exit_marker_drives_evaluate_exit_to_exit():
     assert "dt2_red_force_exit_sweep_actuated" in decision.applied_validations, (
         f"R-BY: applied_validations must trace the DT#2 actuator; got "
         f"{decision.applied_validations!r}"
+    )
+
+
+# INV-19a — DATA_DEGRADED design semantics (ultrareview25_remediation 2026-05-01 P0-4)
+def test_data_degraded_does_not_trigger_force_exit_sweep():
+    """INV-19a (sibling to INV-19): DATA_DEGRADED is YELLOW-equivalent — it
+    blocks new entries (covered by tests/test_phase8_shadow_code.py:425+
+    P9A entries_blocked_reason antibody) but does NOT trigger the active-
+    position force-exit sweep that RED triggers.
+
+    Design rationale (locked by this test, also stated in
+    src/riskguard/risk_level.py:17 LEVEL_ACTIONS comment): DATA_DEGRADED
+    attests that we cannot prove a loss-boundary breach, NOT that one has
+    occurred. Sweeping active positions on every transient data glitch (a
+    missed snapshot, a stale trailing-loss reference, a degraded portfolio
+    loader) would force exits at unfavorable prices and amplify rather than
+    reduce risk. RED is reserved for known boundary breaches and genuine
+    compute errors (riskguard.py:1058/1067/1074); MISSING/STALE truth input
+    routes to DATA_DEGRADED (riskguard.py:269-277/286-292/1030).
+
+    AGENTS.md §"Risk levels" today reads "Computation error or broken truth
+    input → RED. Fail-closed." The 2026-05-01 review (docs/operations/
+    repo_review_2026-05-01/SYNTHESIS.md P0-4 reclassification) records that
+    the code intentionally distinguishes:
+      - GENUINE compute error → RED (current code does this)
+      - MISSING / STALE truth input → DATA_DEGRADED (block entries, hold
+        positions, alert; do NOT force-sell)
+
+    This antibody pins that semantic so a future agent doesn't misread
+    AGENTS.md and "fix" DATA_DEGRADED back into RED. If the design changes
+    (operator decides DATA_DEGRADED should sweep), update in this order:
+      1. Update AGENTS.md to remove the DATA_DEGRADED nuance.
+      2. Update src/riskguard/risk_level.py:17 LEVEL_ACTIONS comment.
+      3. Update src/riskguard/riskguard.py:286 design comment.
+      4. Update src/engine/cycle_runner.py:570 sweep predicate.
+      5. Update this test (or delete it) AS THE LAST STEP, with a relationship
+         test pre-condition for the new design.
+    """
+    import re
+    from src.riskguard.risk_level import RiskLevel, overall_level
+    from src.engine import cycle_runner as cr_module
+
+    # 1) Rank order locks YELLOW > DATA_DEGRADED so the entry-block + hold
+    # semantic flows through unchanged. If DATA_DEGRADED ever outranks YELLOW
+    # via overall_level, every multi-source level computation flips and the
+    # entry-block list at cycle_runner.py:732 stops behaving as a max-rule.
+    assert overall_level(RiskLevel.YELLOW, RiskLevel.DATA_DEGRADED) == RiskLevel.YELLOW, (
+        "INV-19a: YELLOW must outrank DATA_DEGRADED in overall_level so the "
+        "max-of-all-sources rule preserves the YELLOW-equivalent semantic of "
+        "DATA_DEGRADED. See src/riskguard/risk_level.py:28-29 order dict."
+    )
+
+    # 2) Rank order locks RED > DATA_DEGRADED so a single-source RED still
+    # triggers the sweep even when other sources are degraded.
+    assert overall_level(RiskLevel.RED, RiskLevel.DATA_DEGRADED) == RiskLevel.RED, (
+        "INV-19a: RED must outrank DATA_DEGRADED so a single-source RED "
+        "still triggers the force-exit sweep when other sources are degraded."
+    )
+
+    # 3) cycle_runner uses STRICT equality (==) not (>=) for the sweep gate.
+    # If anyone "tightens" this to `>=`, DATA_DEGRADED (rank 1) would not
+    # trigger sweep today (because rank 1 < rank 4 RED) — but ANY future
+    # rank-order change could let DATA_DEGRADED slip in. Pinning the predicate
+    # shape protects against rank-order drift.
+    src_text = Path(cr_module.__file__).read_text()
+    assert re.search(
+        r"red_risk_sweep\s*=\s*risk_level\s*==\s*RiskLevel\.RED",
+        src_text,
+    ), (
+        "INV-19a: cycle_runner.py must gate the force-exit sweep on STRICT "
+        "equality `risk_level == RiskLevel.RED`. Switching to `>=` couples "
+        "the sweep semantic to the rank-order dict, which is a separate "
+        "concern. Both predicates can be valid independently — they should "
+        "be locked by separate antibodies, not coupled."
+    )
+    assert not re.search(
+        r"red_risk_sweep\s*=\s*risk_level\s*>=\s*RiskLevel\.RED",
+        src_text,
+    ), (
+        "INV-19a: cycle_runner.py must NOT use `>=` on the sweep gate. See "
+        "the strict-equality assertion above for rationale."
     )
 
 

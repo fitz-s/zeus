@@ -4,15 +4,22 @@ The active evaluator uses this module after the full-family scan. Family scope
 is determined by `family_id`: currently one candidate/market/snapshot family
 across strategy keys, not one whole-cycle family across all markets.
 
-Phase 1 (2026-04-16): make_family_id() is deprecated. Use the two scope-aware
-functions instead:
+Two scope-aware family-id helpers — the only canonical entry points:
   - make_hypothesis_family_id() — per-candidate BH budget, no strategy_key
   - make_edge_family_id()       — per-strategy BH budget, requires strategy_key
+
+Phase 1 (2026-04-16) introduced these alongside a deprecated `make_family_id()`
+wrapper for migration. ultrareview25_remediation 2026-05-01 P1-6 retired the
+wrapper after `tests/test_no_deprecated_make_family_id_calls.py` confirmed
+zero production callers remain. INV-22 ("one canonical family grammar") is now
+satisfied structurally — the wrapper is gone, not just unused.
+
+If you find yourself wanting to re-add `make_family_id()`, route through the
+two scope-aware helpers instead — they are the canonical contract.
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import Literal
 
@@ -87,53 +94,6 @@ def make_edge_family_id(
     if decision_snapshot_id:
         parts.append(decision_snapshot_id)
     return "|".join(parts)
-
-
-def make_family_id(
-    *,
-    cycle_mode: str,
-    city: str,
-    target_date: str,
-    strategy_key: str,
-    discovery_mode: str,
-    decision_snapshot_id: str = "",
-    temperature_metric: Literal["high", "low"] = "high",
-) -> str:
-    """DEPRECATED: use make_hypothesis_family_id or make_edge_family_id.
-
-    Routes based on strategy_key:
-    - Empty/None strategy_key → hypothesis scope (make_hypothesis_family_id)
-    - Real strategy_key       → edge scope (make_edge_family_id)
-
-    Emits DeprecationWarning on every call.
-
-    S4 R9 P10B: temperature_metric param added with default "high" for
-    backward-compat (deprecated callers pre-P10B need not update).
-    """
-    warnings.warn(
-        "make_family_id() is deprecated. Use make_hypothesis_family_id() for "
-        "per-candidate scope or make_edge_family_id() for per-strategy scope.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if not strategy_key:
-        return make_hypothesis_family_id(
-            cycle_mode=cycle_mode,
-            city=city,
-            target_date=target_date,
-            temperature_metric=temperature_metric,
-            discovery_mode=discovery_mode,
-            decision_snapshot_id=decision_snapshot_id,
-        )
-    return make_edge_family_id(
-        cycle_mode=cycle_mode,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        strategy_key=strategy_key,
-        discovery_mode=discovery_mode,
-        decision_snapshot_id=decision_snapshot_id,
-    )
 
 
 def benjamini_hochberg_mask(p_values: list[float], q: float) -> list[bool]:

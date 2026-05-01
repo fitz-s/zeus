@@ -2,40 +2,69 @@
 # Created: 2026-04-27
 # Last reused/audited: 2026-05-01
 # Authority basis: round2_verdict.md §4.1 #5 + judge_ledger.md §54 + ultrareview-25 F2 fix
+#                  + ultrareview25_remediation 2026-05-01 P0-2 (dual-channel)
 #
-# pre-commit-invariant-test.sh — runs pytest tests/test_architecture_contracts.py
-# before any `git commit` is executed via Bash, and aborts on new failures vs the
-# LIVE baseline. The current baseline value is the BASELINE_PASSED variable below
-# (single source of truth — historical progression appears in the BATCH comment block).
+# Dual-channel pre-commit invariant gate. Runs the pytest baseline check on
+# every `git commit`, regardless of whether the commit was issued by an agent
+# (Claude Code Bash tool) or directly by the operator. Single source of truth
+# for the BASELINE_PASSED count.
 #
-# Wired as a PreToolUse hook for Bash with command-pattern match on `git commit`
-# in .claude/settings.json. Receives a JSON payload on stdin.
-# Exit 0 = allow; exit 2 = block.
+# Channel A (agent / PreToolUse Bash): wired in .claude/settings.json with
+# matcher "Bash". The hook receives a JSON payload on stdin; we parse it,
+# filter to `git commit` invocations, and run the test.
+#
+# Channel B (operator / git pre-commit hook): wired by symlinking this file to
+# .claude/hooks/pre-commit and running `git config core.hooksPath .claude/hooks`
+# (operator runs scripts/install_hooks.sh once per fresh clone). git invokes
+# the hook with NO stdin; we detect this via basename($0) == "pre-commit" or
+# the GIT_INDEX_FILE env var that git sets for every hook.
+#
+# Both channels share BASELINE_PASSED, the test file list, and the opt-out env
+# var so coverage is identical regardless of who runs `git commit`.
+#
+# Exit 0 = allow; exit 2 = block (works for both channels).
 
 set -euo pipefail
 
-INPUT=$(cat)
+# ---------------------------------------------------------------------------
+# Channel detection
+# ---------------------------------------------------------------------------
+SCRIPT_BASENAME=$(basename "$0")
+if [ "$SCRIPT_BASENAME" = "pre-commit" ] || [ -n "${GIT_INDEX_FILE:-}" ]; then
+    CHANNEL=git
+else
+    CHANNEL=agent
+fi
 
-# Only run on `git commit` Bash invocations
-COMMAND=$(printf '%s' "$INPUT" | python3 -c "
+# ---------------------------------------------------------------------------
+# Channel A (agent): parse JSON, filter to `git commit`
+# ---------------------------------------------------------------------------
+if [ "$CHANNEL" = "agent" ]; then
+    INPUT=$(cat)
+    COMMAND=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('')
+    sys.exit(0)
 ti = d.get('tool_input', {}) or {}
 print(ti.get('command') or '')
 " 2>/dev/null || echo "")
 
-if [ -z "$COMMAND" ]; then
-    exit 0
+    if [ -z "$COMMAND" ]; then
+        exit 0
+    fi
+    # Detect `git commit` invocation (allow `git commit-tree`, `git commit-graph` plumbing).
+    if ! printf '%s' "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
+        exit 0
+    fi
 fi
+# Channel B (git): no JSON, no command filter — git already filtered to commit.
 
-# Detect `git commit` invocation (allow `git commit-tree`, `git commit-graph` plumbing).
-if ! printf '%s' "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
-    exit 0
-fi
-
-# Allow opt-out for trusted operator overrides
+# Shared opt-out for trusted overrides (both channels).
 if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
-    echo "[pre-commit-invariant-test] SKIPPED (COMMIT_INVARIANT_TEST_SKIP=1)" >&2
+    echo "[pre-commit-invariant-test] SKIPPED (COMMIT_INVARIANT_TEST_SKIP=1) channel=${CHANNEL}" >&2
     exit 0
 fi
 
@@ -64,8 +93,15 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   LEARNING_LOOP BATCH 1 (settlement→pair→retrain pipeline state projection + retrain_trigger.py read fn + tests): 189 → 203 (+14: 3 reader + 8 projection + 3 helper tests)
 #   LEARNING_LOOP BATCH 2 (detect_learning_loop_stall 3 composable stall_kinds + per-kind insufficient_data + severity boundaries): 203 → 210 (+7)
 #   LEARNING_LOOP BATCH 3 (weekly runner e2e + cross-module orchestration + AGENTS.md + 2 LOW carry-forwards: LOW-DESIGN-LL-2-1 documentation + LOW-DOCSTRING-CALIBRATION-3-2 5-runner extension): 210 → 217 (+7 e2e)
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py"
-BASELINE_PASSED=217
+#   ultrareview25_remediation P0-3 (INV-05 antibody test_risk_actions_exist_in_schema): 217 → 218 (+1)
+#   ultrareview25_remediation P0-5 (for_city routing antibody test_settlement_semantics_construction_routes_through_for_city): 218 → 219 (+1)
+#   ultrareview25_remediation P1-8 (invariant citation gate test_invariant_citations.py — 2 tests + co-tenant): 219 → 222 (+3)
+#   ultrareview25_remediation P1-9 (INV-03 append-first + INV-07 lifecycle grammar + INV-10 LLM-not-authority antibodies — 7 tests): 222 → 229 (+7)
+#   ultrareview25_remediation P1-2 (identity-column DEFAULT regression gate — 2 tests): 229 → 231 (+2)
+#   ultrareview25_remediation P1-3 (TruthAuthority StrEnum closure — 5 tests): 231 → 236 (+5)
+#   ultrareview25_remediation P1-3+ (is_authoritative + requires_human_review predicates — 5 tests): 236 → 241 (+5)
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py"
+BASELINE_PASSED=241
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then

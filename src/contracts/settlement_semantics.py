@@ -268,6 +268,42 @@ def settle_market(city_name: str, raw_temp_c: Decimal,
     Mismatch raises TypeError BEFORE any rounding happens — i.e., the wrong
     rounding for the wrong city is structurally unconstructable. Per Fitz
     Constraint #1 (make the category impossible).
+
+    -------------------------------------------------------------------------
+    PRODUCTION-CALLER STATUS (audited 2026-05-01, ultrareview25_remediation P0-5):
+
+      `settle_market` has ZERO call sites in `src/`. It is the type-encoded
+      FUTURE migration target ("Tier 3 P8 territory" per the line-194 author
+      note above). The cross-city wrong-rounding failure mode it guards
+      against is ALREADY structurally impossible in production today — but
+      via the SOCIAL gate, not the TYPE gate:
+
+        SettlementSemantics.for_city(city)
+          ├── settlement_source_type == 'hko' → rounding_rule='oracle_truncate'
+          └── otherwise                       → rounding_rule='wmo_half_up'
+
+      `tests/test_settlement_semantics.py::test_settlement_semantics_
+      construction_routes_through_for_city` LOCKS the SOCIAL discipline:
+      no `src/` file outside this module may construct SettlementSemantics
+      directly or pass `rounding_rule='...'` as a string-literal kwarg.
+      Together with `for_city()`'s dispatch table, that makes WMO-for-HK
+      structurally unconstructable today.
+
+      Until the Tier 3 P8 migration wires `settle_market` into
+      `assert_settlement_value`, prefer the type-encoded path for NEW code,
+      and keep the SOCIAL gate routing for EXISTING call sites. Activating
+      the type gate everywhere would touch every settlement DB write and is
+      not justified by the marginal additional protection over the SOCIAL
+      gate the routing test now enforces.
+
+      `architecture/fatal_misreads.yaml:141`'s claim that this antibody
+      makes the misread "unconstructable at compile/import time" is
+      ACCURATE for callers that use settle_market() directly, and
+      OVERSTATED for the (entirety of) production code that goes through
+      `for_city()` — that path is type-checked at runtime via the dispatch
+      table, not at compile time. See SYNTHESIS.md P0-5 reclassification
+      for the proposal to amend the YAML wording.
+    -------------------------------------------------------------------------
     """
     if not isinstance(policy, SettlementRoundingPolicy):
         raise TypeError(

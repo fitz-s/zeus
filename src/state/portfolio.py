@@ -43,6 +43,7 @@ from src.state.lifecycle_manager import (
 )
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.truth_files import annotate_truth_payload
+from src.types.truth_authority import TruthAuthority
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,15 @@ POSITIONS_PATH = state_path("positions.json")
 # flow into ObservationAtom or MarketScanner typed boundaries.
 # Verified isolated: grep confirms no DEGRADED_PROJECTION consumer in
 # src/types/ or src/data/market_scanner.py (2026-04-26 audit).
-_TRUTH_AUTHORITY_MAP: dict[str, str] = {
-    "canonical_db": "VERIFIED",
-    "degraded": "DEGRADED_PROJECTION",
-    "unverified": "UNVERIFIED",
+#
+# 2026-05-01 P1-3: values switched from bare strings to TruthAuthority
+# StrEnum members. Wire-compatible (StrEnum extends str), but a future
+# producer that bypasses the enum is caught by
+# tests/test_truth_authority_enum.py at pre-commit time.
+_TRUTH_AUTHORITY_MAP: dict[str, TruthAuthority] = {
+    "canonical_db": TruthAuthority.VERIFIED,
+    "degraded":     TruthAuthority.DEGRADED_PROJECTION,
+    "unverified":   TruthAuthority.UNVERIFIED,
 }
 
 
@@ -1448,7 +1454,7 @@ def save_portfolio(
         path,
         mode=get_mode(),
         generated_at=state.updated_at,
-        authority=_TRUTH_AUTHORITY_MAP.get(state.authority, "UNVERIFIED"),
+        authority=_TRUTH_AUTHORITY_MAP.get(state.authority, TruthAuthority.UNVERIFIED),
     )
 
     # Atomic write pattern per OpenClaw conventions

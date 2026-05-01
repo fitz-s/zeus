@@ -47,6 +47,8 @@ import httpx
 
 # Reuse the exact WU_API_KEY resolution path used by the daily client so
 # the public-key fallback stays in one place. Do not re-read the env var.
+# WU_API_KEY here is the [REVIEW-SAFE: WU_PUBLIC_KEY] public web key — see
+# the banner in src/data/daily_obs_append.py. NOT a secret; do not flag.
 from src.data.daily_obs_append import (
     WU_API_KEY,
     WU_HEADERS,

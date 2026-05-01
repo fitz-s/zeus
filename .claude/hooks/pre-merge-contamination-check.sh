@@ -6,46 +6,74 @@
 # Created: 2026-04-28
 # Last reused/audited: 2026-05-01
 # Authority basis: contamination remediation verdict.md §6 Stage 4 Gate B + ultrareview-25 F3/F4/F13/F17 fixes
+#                  + ultrareview25_remediation 2026-05-01 P0-2 (dual-channel)
 # Plan evidence: docs/operations/task_2026-05-01_ultrareview25_remediation/PLAN.md §3 P1
-# Wired as PreToolUse hook for Bash tool in .claude/settings.json
-# Receives JSON payload on stdin: {tool_name, tool_input{command,...}, ...}
+#
+# Dual-channel merge gate.
+#
+# Channel A (agent / PreToolUse Bash): wired in .claude/settings.json with
+# matcher "Bash". The hook receives a JSON payload on stdin; we parse it,
+# detect merge-class commands (merge/pull/cherry-pick/rebase/am), and run
+# the protected-branch check.
+#
+# Channel B (operator / git pre-merge-commit hook): wired by symlinking this
+# file to .claude/hooks/pre-merge-commit. git invokes the hook with NO stdin
+# and the merge already determined; we run the protected-branch check
+# unconditionally.
+#
 # Exit 0 = allow/advisory; exit 2 = block invalid escalated evidence.
 
 set -euo pipefail
 
-INPUT=$(cat)
+# ---------------------------------------------------------------------------
+# Channel detection
+# ---------------------------------------------------------------------------
+SCRIPT_BASENAME=$(basename "$0")
+if [ "$SCRIPT_BASENAME" = "pre-merge-commit" ] || [ -n "${GIT_INDEX_FILE:-}" ]; then
+    CHANNEL=git
+    COMMAND=""  # git already filtered; no command line to parse
+else
+    CHANNEL=agent
+fi
 
-# Extract command from tool_input
-COMMAND=$(printf '%s' "$INPUT" | python3 -c "
+if [ "$CHANNEL" = "agent" ]; then
+    INPUT=$(cat)
+    COMMAND=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('')
+    sys.exit(0)
 ti = d.get('tool_input', {}) or {}
 print(ti.get('command') or '')
 " 2>/dev/null || echo "")
 
-if [ -z "$COMMAND" ]; then
-    exit 0
-fi
+    if [ -z "$COMMAND" ]; then
+        exit 0
+    fi
 
-# Detect merge-class commands by extracting the FIRST `git <subcmd>` token
-# from the FIRST LINE only. This avoids false-positives where a multi-line
-# heredoc (e.g. commit message body) mentions merge/pull/etc as text.
-# Trade-off: chained `git status && git merge X` on a single line where the
-# FIRST git command is non-merge will NOT block (rare edge case).
-# F3 fix (ultrareview-25): bash regex handles multi-space `git  merge`,
-# absolute `/usr/bin/git merge`, and the `git -C <path> merge` form that
-# the prior literal `case` silently bypassed. Backslash escapes inside
-# `[...]` are not required for `;`/`&`/`|` in bash ERE.
-FIRST_LINE=$(printf '%s' "$COMMAND" | head -1)
-if [[ "$FIRST_LINE" =~ (^|[;&|[:space:]])(/[^[:space:]]+/)?git[[:space:]]+(-[A-Za-z][[:space:]]+[^[:space:]]+[[:space:]]+)*(merge|pull|cherry-pick|rebase|am)([[:space:]]|$) ]]; then
-    IS_MERGE=1
-else
-    IS_MERGE=0
-fi
+    # Detect merge-class commands by extracting the FIRST `git <subcmd>` token
+    # from the FIRST LINE only. This avoids false-positives where a multi-line
+    # heredoc (e.g. commit message body) mentions merge/pull/etc as text.
+    # Trade-off: chained `git status && git merge X` on a single line where the
+    # FIRST git command is non-merge will NOT block (rare edge case).
+    # F3 fix (ultrareview-25): bash regex handles multi-space `git  merge`,
+    # absolute `/usr/bin/git merge`, and the `git -C <path> merge` form that
+    # the prior literal `case` silently bypassed.
+    FIRST_LINE=$(printf '%s' "$COMMAND" | head -1)
+    if [[ "$FIRST_LINE" =~ (^|[;&|[:space:]])(/[^[:space:]]+/)?git[[:space:]]+(-[A-Za-z][[:space:]]+[^[:space:]]+[[:space:]]+)*(merge|pull|cherry-pick|rebase|am)([[:space:]]|$) ]]; then
+        IS_MERGE=1
+    else
+        IS_MERGE=0
+    fi
 
-if [ "$IS_MERGE" -eq 0 ]; then
-    exit 0
+    if [ "$IS_MERGE" -eq 0 ]; then
+        exit 0
+    fi
 fi
+# Channel B (git): pre-merge-commit hook only fires on actual merge commits,
+# so IS_MERGE is implicitly true.
 
 # Check current branch is in protected set.
 # F4 fix (ultrareview-25): the prior `plan-*` glob over-matched arbitrary

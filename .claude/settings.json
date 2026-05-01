@@ -22,6 +22,11 @@
           },
           {
             "type": "command",
+            "command": ".claude/hooks/pre-commit-secrets.sh",
+            "description": "Run gitleaks against staged content before any `git commit`; honors .gitleaks.toml allowlist + SECURITY-FALSE-POSITIVES.md (ultrareview25_remediation 2026-05-01 P0-2 — parity with operator-direct git pre-commit hook; gracefully skips if gitleaks not on PATH)"
+          },
+          {
+            "type": "command",
             "command": ".claude/hooks/pre-merge-contamination-check.sh",
             "description": "Advise conflict-first handling for git merge/pull/cherry-pick/rebase/am on protected branches; validate MERGE_AUDIT_EVIDENCE only for escalated broad/high-risk conflict surfaces"
           }

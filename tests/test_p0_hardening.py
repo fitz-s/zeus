@@ -298,6 +298,92 @@ def test_place_limit_order_gateway_only():
 
 
 # ---------------------------------------------------------------------------
+# INV-24 runtime call-stack guard (ultrareview25_remediation P1-5)
+# Sibling of test_place_limit_order_gateway_only (lint-time AST gate). This
+# pair is the K-A two-ring enforcement of NC-16:
+#   - lint:    AST scan of src/+scripts/ for forbidden call sites
+#   - runtime: caller-frame allowlist inside place_limit_order
+# ---------------------------------------------------------------------------
+
+
+def test_place_limit_order_runtime_guard_blocks_unauthorized_caller(
+    monkeypatch,
+):
+    """K-A INV-24 runtime ring: place_limit_order rejects any caller that
+    isn't in `_INV24_ALLOWED_CALLER_ABS_PATHS`.
+
+    The semgrep rule covers the lint plane. This test covers the runtime
+    plane. Together they make NC-16 unconstructable EITHER at PR review
+    time OR at execution time.
+
+    Note: this test deliberately UN-sets `PYTEST_CURRENT_TEST` for the
+    duration of the call so we can exercise the production path. With it set
+    (the default during pytest), the guard auto-allows so existing tests
+    keep working.
+    """
+    import importlib
+
+    # Import the live client module fresh to get the guard helper.
+    from src.data import polymarket_client as pm_module
+
+    # Build a callable that lives outside any allowlist file. We use a
+    # lambda created here in test_p0_hardening.py — `tests/test_p0_hardening.py`
+    # is NOT in `_INV24_ALLOWED_CALLER_ABS_PATHS`, so when the lambda invokes
+    # `_enforce_inv24_caller_allowlist`, the guard must trip.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("INV24_CALLSTACK_GUARD_SKIP", raising=False)
+
+    with pytest.raises(RuntimeError, match=r"INV-24 violation"):
+        pm_module._enforce_inv24_caller_allowlist()
+
+
+def test_place_limit_order_runtime_guard_allows_pytest_context(monkeypatch):
+    """Sibling: with PYTEST_CURRENT_TEST set (which pytest does automatically),
+    the guard must NOT trip — otherwise existing test_v2_adapter.py tests
+    that exercise place_limit_order would fail spuriously.
+
+    We restore PYTEST_CURRENT_TEST explicitly so the guard takes the
+    auto-allow branch, then assert it returns without raising.
+    """
+    from src.data import polymarket_client as pm_module
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_p0_hardening.py")
+    monkeypatch.delenv("INV24_CALLSTACK_GUARD_SKIP", raising=False)
+
+    # Should not raise.
+    pm_module._enforce_inv24_caller_allowlist()
+
+
+def test_place_limit_order_runtime_guard_override_logs_audit(
+    monkeypatch, tmp_path
+):
+    """Operator override path: INV24_CALLSTACK_GUARD_SKIP=1 must allow the
+    call AND append an audit line to .claude/logs/inv24-overrides.log so the
+    bypass is forensically visible.
+
+    We monkey-patch _INV24_OVERRIDE_LOG to a tmp path so we can read it back.
+    """
+    from src.data import polymarket_client as pm_module
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("INV24_CALLSTACK_GUARD_SKIP", "1")
+
+    log_path = tmp_path / "inv24-overrides.log"
+    monkeypatch.setattr(pm_module, "_INV24_OVERRIDE_LOG", log_path)
+
+    pm_module._enforce_inv24_caller_allowlist()  # must not raise
+
+    assert log_path.exists(), (
+        "INV-24 override path must append an audit line to .claude/logs/"
+        "inv24-overrides.log; the file was not created."
+    )
+    content = log_path.read_text()
+    assert "pid=" in content and "cwd=" in content, (
+        f"audit line missing required fields; got: {content!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # R-2 — V2 preflight x placement (K5 / INV-25)
 # ---------------------------------------------------------------------------
 

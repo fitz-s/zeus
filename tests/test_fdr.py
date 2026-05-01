@@ -35,7 +35,7 @@ from src.strategy.fdr_filter import fdr_filter
 import src.strategy.market_analysis as market_analysis_module
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.risk_limits import RiskLimits
-from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_family_id, make_edge_family_id
+from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_edge_family_id
 from src.types import Bin, BinEdge
 
 

@@ -166,106 +166,49 @@ class TestEdgeFamilyIdValidation:
             )
 
 
-class TestMakeFamilyIdDeprecatedWrapper:
-    """R3 migration: the old make_family_id() must survive as a deprecated wrapper.
+class TestMakeFamilyIdRetired:
+    """R3 migration completed: the deprecated `make_family_id()` wrapper is RETIRED.
 
-    The executor creates this wrapper.  These tests assert that:
-    1. The old name still exists (no silent breakage of call sites during migration).
-    2. Calling it emits a DeprecationWarning.
-    3. With strategy_key="" it routes to hypothesis scope.
-    4. With a real strategy_key it routes to edge scope.
+    History: Phase 1 (2026-04-16) introduced two scope-aware helpers
+    (`make_hypothesis_family_id`, `make_edge_family_id`) alongside a deprecated
+    `make_family_id()` wrapper that emitted DeprecationWarning. Production
+    callers were migrated. ultrareview25_remediation 2026-05-01 P1-6 retired
+    the wrapper after `tests/test_no_deprecated_make_family_id_calls.py`
+    confirmed zero callers in `src/` and `scripts/`.
+
+    INV-22 ("one canonical family grammar") is now satisfied structurally —
+    the wrapper does not exist, so a future agent cannot accidentally call
+    it. Combined with `test_no_deprecated_make_family_id_calls.py` (which
+    blocks new calls) and the type signatures of the two canonical helpers
+    (which require explicit scope intent), the family-grammar surface is
+    paired-antibody locked: no callers + no definition.
     """
 
-    def _import_deprecated(self):
-        try:
-            from src.strategy.selection_family import make_family_id
-            return make_family_id
-        except ImportError:
-            pytest.fail(
-                "Phase 1 not yet implemented: make_family_id wrapper not found in "
-                "src.strategy.selection_family (it should still exist as deprecated)"
-            )
+    def test_make_family_id_wrapper_is_retired(self):
+        """R3 cleanup: `make_family_id` must NOT exist in selection_family.
 
-    def test_make_family_id_emits_deprecation_warning(self):
-        """R3 migration: calling the old make_family_id() raises DeprecationWarning.
-
-        Today make_family_id() exists but does NOT emit DeprecationWarning — this
-        test FAILS today and becomes green after the deprecated wrapper is installed.
+        If a future PR re-adds the wrapper (back to the migration-period
+        state), this test fails immediately — preventing INV-22 regression.
+        Use `make_hypothesis_family_id` (no strategy_key) or
+        `make_edge_family_id` (with strategy_key) instead.
         """
-        make_family_id = self._import_deprecated()
+        import src.strategy.selection_family as selection_family
 
-        with pytest.warns(DeprecationWarning):
-            make_family_id(
-                cycle_mode="opening_hunt",
-                city="NYC",
-                target_date="2026-04-01",
-                strategy_key="center_buy",
-                discovery_mode="opening_hunt",
-                decision_snapshot_id="snap-1",
-            )
-
-    def test_make_family_id_empty_strategy_key_routes_to_hypothesis_scope(self):
-        """R3 migration: make_family_id(strategy_key='') routes to hypothesis scope.
-
-        After Phase 1, this must produce the same ID as make_hypothesis_family_id().
-        Today both the DeprecationWarning and make_hypothesis_family_id are absent —
-        this test fails on the import of make_hypothesis_family_id.
-        """
-        make_family_id = self._import_deprecated()
-
-        try:
-            from src.strategy.selection_family import make_hypothesis_family_id
-        except ImportError:
-            pytest.fail(
-                "Phase 1 not yet implemented: make_hypothesis_family_id not found"
-            )
-
-        kwargs = dict(
-            cycle_mode="opening_hunt",
-            city="NYC",
-            target_date="2026-04-01",
-            temperature_metric="high",
-            discovery_mode="opening_hunt",
-            decision_snapshot_id="snap-1",
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            deprecated_id = make_family_id(**kwargs, strategy_key="")
-
-        canonical_id = make_hypothesis_family_id(**kwargs)
-        assert deprecated_id == canonical_id, (
-            "Deprecated wrapper with strategy_key='' must route to hypothesis scope "
-            "and produce the same ID as make_hypothesis_family_id."
+        assert not hasattr(selection_family, "make_family_id"), (
+            "INV-22 regression: `make_family_id` re-appeared in "
+            "src.strategy.selection_family. The deprecated wrapper was "
+            "retired 2026-05-01 (ultrareview25_remediation P1-6). Use "
+            "make_hypothesis_family_id (no strategy_key, per-candidate scope) "
+            "or make_edge_family_id (with strategy_key, per-strategy scope) "
+            "instead. Re-introducing the wrapper revives the doc-vs-code "
+            "drift that R3 cleanup closed."
         )
 
-    def test_make_family_id_real_strategy_key_routes_to_edge_scope(self):
-        """R3 migration: make_family_id(strategy_key='center_buy') routes to edge scope.
-
-        After Phase 1, this must produce the same ID as make_edge_family_id().
+    def test_canonical_helpers_remain_present(self):
+        """Pair-positive: the two canonical helpers MUST still be present;
+        retirement of the wrapper must not be confused with their loss.
         """
-        make_family_id = self._import_deprecated()
-
-        try:
-            from src.strategy.selection_family import make_edge_family_id
-        except ImportError:
-            pytest.fail(
-                "Phase 1 not yet implemented: make_edge_family_id not found"
-            )
-
-        kwargs = dict(
-            cycle_mode="opening_hunt",
-            city="NYC",
-            target_date="2026-04-01",
-            temperature_metric="high",
-            discovery_mode="opening_hunt",
-            decision_snapshot_id="snap-1",
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            deprecated_id = make_family_id(**kwargs, strategy_key="center_buy")
-
-        canonical_id = make_edge_family_id(**kwargs, strategy_key="center_buy")
-        assert deprecated_id == canonical_id, (
-            "Deprecated wrapper with a real strategy_key must route to edge scope "
-            "and produce the same ID as make_edge_family_id."
+        from src.strategy.selection_family import (  # noqa: F401
+            make_edge_family_id,
+            make_hypothesis_family_id,
         )

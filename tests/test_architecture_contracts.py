@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -89,6 +90,318 @@ def test_strategy_policy_tables_exist_in_schema():
     # B070: control_overrides is an event-sourced VIEW over control_overrides_history
     assert "CREATE TABLE IF NOT EXISTS control_overrides_history" in sql
     assert "CREATE VIEW IF NOT EXISTS control_overrides AS" in sql
+
+
+def test_risk_actions_exist_in_schema():
+    # INV-05 antibody — `architecture/invariants.yaml:55-56` cites this exact
+    # test name. Prior to 2026-05-01 the citation was doc-only (the test did
+    # not exist anywhere); the architect/critic/test-engineer reviews flagged
+    # this as a P0 invariant with no real enforcement. Added as part of
+    # ultrareview25_remediation 2026-05-01 P0-3.
+    #
+    # INV-05 statement: "Risk must change behavior."
+    # INV-05 why: "Advisory-only risk outputs are theater."
+    #
+    # The antibody asserts (a) the risk_actions table exists, (b) its
+    # action_type CHECK domain enumerates ONLY behavior-changing actions —
+    # adding 'advisory' / 'log_only' / 'note' would violate the invariant — and
+    # (c) the source domain includes 'riskguard' so runtime attribution holds.
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS risk_actions" in sql, (
+        "INV-05 violation: risk_actions table missing from kernel schema"
+    )
+
+    match = re.search(
+        r"action_type\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*action_type\s+IN\s*\((.+?)\)\s*\)",
+        sql,
+        re.DOTALL,
+    )
+    assert match, (
+        "INV-05 violation: action_type CHECK constraint missing or unparseable; "
+        "without the CHECK the domain is unbounded and 'advisory' becomes constructable"
+    )
+    action_types = {t.strip().strip("'\"") for t in match.group(1).split(",")}
+
+    expected = {"gate", "allocation_multiplier", "threshold_multiplier", "exit_only"}
+    assert action_types == expected, (
+        f"INV-05 violation: action_type domain drift. Expected {expected}, "
+        f"got {action_types}. Adding any value outside this set (in particular "
+        "'advisory', 'log_only', 'note', 'warning') violates the invariant — "
+        "advisory-only risk outputs are theater per architecture/invariants.yaml:52. "
+        "If a new action type is genuinely behavior-changing, update both the "
+        "schema and this test, AND extend tests/test_runtime_guards.py to prove "
+        "the new action actually gates the executor."
+    )
+
+    assert "'riskguard'" in sql, (
+        "INV-05 violation: source domain must include 'riskguard' so runtime "
+        "rows can be attributed to the riskguard module"
+    )
+    assert "'active'" in sql, (
+        "INV-05 violation: status domain must include 'active' so consumers "
+        "can filter live (vs expired/revoked) actions"
+    )
+
+
+# ---------------------------------------------------------------------------
+# INV-10 — LLM output is never authority (governance + runtime surface)
+# ---------------------------------------------------------------------------
+
+# Forbidden modules: any LLM-vendor SDK that would let `src/` make a runtime
+# decision based on a model call. Grouped by vendor to make diagnostics
+# readable. Update both this set AND requirements.txt simultaneously if a
+# new vendor SDK family appears in the wild.
+_FORBIDDEN_LLM_SDK_TOPLEVEL_MODULES = frozenset({
+    # OpenAI family
+    "openai",
+    # Anthropic family
+    "anthropic",
+    # Google generative-AI family
+    "google.generativeai",
+    "google_generativeai",
+    "vertexai",
+    # Aggregators / multi-vendor
+    "langchain",
+    "langchain_core",
+    "langchain_community",
+    "litellm",
+    "llamaindex",
+    "llama_index",
+    # Other vendors
+    "cohere",
+    "together",
+    "mistralai",
+    "groq",
+    "replicate",
+})
+
+
+def _all_imports_in_src() -> set[tuple[str, str]]:
+    """Return the set of (module_name, file_path) pairs imported under src/."""
+    import ast as _ast
+
+    found: set[tuple[str, str]] = set()
+    for py_file in (ROOT / "src").rglob("*.py"):
+        try:
+            tree = _ast.parse(py_file.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        rel = str(py_file.relative_to(ROOT))
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Import):
+                for alias in node.names:
+                    found.add((alias.name, rel))
+            elif isinstance(node, _ast.ImportFrom):
+                if node.module:
+                    found.add((node.module, rel))
+    return found
+
+
+def test_inv10_no_llm_sdk_imports_in_src():
+    # INV-10 antibody — `architecture/invariants.yaml:104` claims "LLM output
+    # is never authority" but cited only governance artifacts (a script + a
+    # doc) with NO pytest antibody. The runtime side of this invariant is
+    # encodable structurally: if `src/` imports an LLM SDK, then by
+    # definition there's a code path that could let model output influence
+    # a trading decision. Walk every Python file in `src/` and assert zero
+    # imports from any known LLM vendor SDK family. ULTRAREVIEW25 P1-9c.
+    imports = _all_imports_in_src()
+    violations: list[str] = []
+    for module_name, file_rel in imports:
+        # Match either exact name (e.g. `import openai`) or dotted prefix
+        # (e.g. `from openai.types import ChatCompletion` → module="openai.types"
+        # → top-level "openai" forbidden).
+        top = module_name.split(".")[0]
+        if module_name in _FORBIDDEN_LLM_SDK_TOPLEVEL_MODULES:
+            violations.append(f"{file_rel}: imports {module_name!r}")
+        elif top in {m.split(".")[0] for m in _FORBIDDEN_LLM_SDK_TOPLEVEL_MODULES}:
+            violations.append(
+                f"{file_rel}: imports {module_name!r} "
+                f"(top-level {top!r} is forbidden)"
+            )
+
+    assert not violations, (
+        "INV-10 violation: src/ imports an LLM-vendor SDK. The runtime "
+        "must not depend on model output for any trading decision; "
+        "generated code is only valid after packet, gates, and evidence "
+        "(architecture/invariants.yaml:107). If you genuinely need an LLM "
+        "for a non-authority concern (e.g., a debug summarizer), put it in "
+        "`scripts/` or `tools/`, not `src/`. Offending sites:\n  "
+        + "\n  ".join(violations)
+    )
+
+
+def test_inv10_no_llm_sdk_in_requirements():
+    # Sibling antibody: catch the dependency surface even if the import side
+    # is currently clean. A new pin in requirements.txt is the canary that
+    # an SDK is about to be introduced — fail loudly before the import lands.
+    req_text = (ROOT / "requirements.txt").read_text()
+    forbidden_pin_prefixes = sorted(
+        m.split(".")[0] for m in _FORBIDDEN_LLM_SDK_TOPLEVEL_MODULES
+    )
+    violations = []
+    for line in req_text.splitlines():
+        line_clean = line.strip().lower()
+        if not line_clean or line_clean.startswith("#"):
+            continue
+        # pkg name is everything before any version specifier or extras.
+        pkg = re.split(r"[<>=!~\[]", line_clean)[0].strip()
+        # Normalize hyphens/underscores; PyPI is case-insensitive.
+        pkg_norm = pkg.replace("-", "_")
+        for forbidden in forbidden_pin_prefixes:
+            if pkg_norm == forbidden.replace("-", "_"):
+                violations.append(f"  {line.strip()!r}  (pkg={pkg!r})")
+
+    assert not violations, (
+        "INV-10 violation: requirements.txt lists an LLM-vendor SDK. "
+        "Even if no src/ file imports it today, the dependency surface is "
+        "the canary. Remove the pin or move it to a dev-only / tools-only "
+        "requirement file. Offending lines:\n" + "\n".join(violations)
+    )
+
+
+def test_inv10_governance_artifacts_exist():
+    # Smoke-check the artifacts INV-10 cites under enforced_by.scripts and
+    # enforced_by.docs. If either is silently deleted, the invariant becomes
+    # documentation-only. ULTRAREVIEW25 P1-9c.
+    cited_script = ROOT / "scripts/check_work_packets.py"
+    cited_doc = ROOT / "architecture/self_check/zero_context_entry.md"
+    assert cited_script.is_file(), (
+        f"INV-10 enforced_by.scripts cites {cited_script.relative_to(ROOT)} "
+        "but the file is missing. Either restore the script or update the "
+        "invariants.yaml citation."
+    )
+    assert cited_doc.is_file(), (
+        f"INV-10 enforced_by.docs cites {cited_doc.relative_to(ROOT)} "
+        "but the file is missing. Either restore the doc or update the "
+        "invariants.yaml citation."
+    )
+
+
+def test_inv03_append_only_triggers_actually_fire_at_runtime():
+    # INV-03 antibody — `architecture/invariants.yaml:29-38` claims
+    # "Canonical authority is append-first and projection-backed" but cited
+    # only the schema file + `scripts/replay_parity.py`, with NO pytest
+    # antibody. Prior to 2026-05-01 the existing
+    # `test_schema_has_append_only_triggers` only grepped the SQL text for
+    # the comment string `"position_events is append-only"` — it never
+    # exercised the triggers. A trigger that was textually mentioned but
+    # logically removed would pass that test silently. This test applies the
+    # kernel schema to an in-memory DB, inserts a synthetic row into each of
+    # the three documented append-only tables, and verifies UPDATE / DELETE
+    # raise sqlite3.IntegrityError with the expected diagnostic. ULTRAREVIEW25
+    # P1-9a (per repo_review_2026-05-01 SYNTHESIS K-A two-ring enforcement).
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    # ---- position_events ------------------------------------------------
+    append_many_and_project(conn, [_canonical_event()], _canonical_projection())
+
+    with pytest.raises(sqlite3.IntegrityError, match=r"position_events is append-only"):
+        conn.execute(
+            "UPDATE position_events SET event_type = 'TAMPERED' WHERE event_id = 'evt-1'"
+        )
+        conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match=r"position_events is append-only"):
+        conn.execute("DELETE FROM position_events WHERE event_id = 'evt-1'")
+        conn.commit()
+
+    # ---- control_overrides_history --------------------------------------
+    conn.execute(
+        """
+        INSERT INTO control_overrides_history (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, reason, precedence, operation, recorded_at
+        ) VALUES (
+            'ovr-1', 'strategy', 'center_buy', 'pause', 'true',
+            'p1-9a-antibody', '2026-05-01T00:00:00Z', 'antibody insertion',
+            100, 'upsert', '2026-05-01T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match=r"control_overrides_history is append-only"):
+        conn.execute(
+            "UPDATE control_overrides_history SET value = 'false' WHERE override_id = 'ovr-1'"
+        )
+        conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match=r"control_overrides_history is append-only"):
+        conn.execute("DELETE FROM control_overrides_history WHERE override_id = 'ovr-1'")
+        conn.commit()
+
+    # ---- token_suppression_history --------------------------------------
+    conn.execute(
+        """
+        INSERT INTO token_suppression_history (
+            token_id, suppression_reason, source_module,
+            created_at, updated_at, recorded_at
+        ) VALUES (
+            'tok-1', 'operator_quarantine_clear',
+            'tests.test_architecture_contracts',
+            '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+            '2026-05-01T00:00:00Z'
+        )
+        """
+    )
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match=r"token_suppression_history is append-only"):
+        conn.execute(
+            "UPDATE token_suppression_history SET suppression_reason = 'TAMPERED' WHERE token_id = 'tok-1'"
+        )
+        conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match=r"token_suppression_history is append-only"):
+        conn.execute("DELETE FROM token_suppression_history WHERE token_id = 'tok-1'")
+        conn.commit()
+
+    conn.close()
+
+
+def test_inv03_projection_view_reflects_appended_event():
+    # Pair-positive antibody for INV-03's "projection-backed" half. The
+    # control_overrides VIEW must project the latest recorded_at per
+    # override_id from control_overrides_history; appending a NEW row with a
+    # later timestamp must shift the VIEW's reading without any explicit
+    # write to the projection.
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    conn.executemany(
+        """
+        INSERT INTO control_overrides_history (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, reason, precedence, operation, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("ovr-2", "strategy", "center_buy", "pause", "true", "p1-9a-antibody",
+             "2026-05-01T00:00:00Z", "first", 100, "upsert", "2026-05-01T00:00:00Z"),
+            ("ovr-2", "strategy", "center_buy", "pause", "false", "p1-9a-antibody",
+             "2026-05-01T01:00:00Z", "second", 100, "upsert", "2026-05-01T01:00:00Z"),
+        ],
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT override_id, value, reason FROM control_overrides "
+        "WHERE override_id = 'ovr-2'"
+    ).fetchall()
+    assert len(rows) == 1, (
+        "INV-03: projection VIEW must collapse history to one row per override_id; "
+        f"got {len(rows)} rows."
+    )
+    assert dict(rows[0]) == {"override_id": "ovr-2", "value": "false", "reason": "second"}, (
+        "INV-03: projection VIEW must reflect the LATEST history_id; the "
+        "ordering came back wrong, which means the VIEW logic drifted."
+    )
+    conn.close()
 
 
 def test_token_suppression_table_exists_in_kernel_schema():
@@ -1237,6 +1550,77 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
         canonical_phase_for_position(_runtime_position(state="admin_closed"))
         == "admin_closed"
     )
+
+
+def test_inv07_lifecycle_grammar_sql_python_consistency():
+    # INV-07 antibody — `architecture/invariants.yaml:66-74` claims
+    # "Lifecycle grammar is finite and authoritative" but cited only the
+    # schema file + a semgrep rule, with NO pytest antibody linking the
+    # Python enum to the SQL CHECK clauses. If a future PR adds a new phase
+    # to LifecyclePhase but forgets the kernel SQL (or vice versa), every
+    # row using the new phase fails IntegrityError at insert time and the
+    # error surfaces only on the offending row — i.e., a partial outage.
+    # This antibody parses the SQL CHECK clauses directly, compares to the
+    # Python enum (minus the UNKNOWN sentinel which is in-flight only and
+    # never stored), and fails loudly on any drift. ULTRAREVIEW25 P1-9b.
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
+
+    # The kernel uses the same phase set in three CHECK clauses:
+    # position_events.phase_before, position_events.phase_after, and
+    # position_current.phase. All three must be identical.
+    check_blocks = re.findall(
+        r"phase(?:_before|_after)?\s+TEXT\s+(?:NOT\s+NULL\s+)?CHECK\s*\(\s*phase(?:_before|_after)?\s*(?:IS\s+NULL\s+OR\s+phase(?:_before|_after)?\s+)?IN\s*\((.+?)\)\s*\)",
+        sql,
+        re.DOTALL,
+    )
+    assert len(check_blocks) >= 3, (
+        f"INV-07 schema parse failure: expected 3 phase CHECK clauses (before/after/current), "
+        f"found {len(check_blocks)}. Did the schema layout change? Update this regex."
+    )
+
+    phase_sets = [
+        frozenset(p.strip().strip("'\"") for p in block.split(",") if p.strip())
+        for block in check_blocks
+    ]
+    canonical_sql_phases = phase_sets[0]
+    for i, ps in enumerate(phase_sets[1:], start=2):
+        assert ps == canonical_sql_phases, (
+            f"INV-07 internal SQL drift: phase CHECK block #{i} differs from #1.\n"
+            f"  block #1: {sorted(canonical_sql_phases)}\n"
+            f"  block #{i}: {sorted(ps)}\n"
+            f"All three phase CHECK clauses (phase_before, phase_after, "
+            f"position_current.phase) must enumerate the SAME set."
+        )
+
+    python_phases = {p.value for p in LifecyclePhase} - {"unknown"}
+    assert python_phases == canonical_sql_phases, (
+        "INV-07 schema-vs-code drift: the kernel SQL phase CHECK clauses and "
+        "the Python LifecyclePhase enum disagree.\n"
+        f"  in SQL only:    {sorted(canonical_sql_phases - python_phases)}\n"
+        f"  in Python only: {sorted(python_phases - canonical_sql_phases)}\n"
+        "If you added a new phase, update both sites in lockstep. If you "
+        "removed one, audit existing rows AND every consumer of the enum "
+        "value before removing from this comparison. The 'unknown' sentinel "
+        "is intentionally excluded from the SQL set (in-flight only)."
+    )
+
+
+def test_inv07_fold_rejects_invented_phase_strings():
+    # INV-07 sibling antibody: `fold_lifecycle_phase` must refuse phase
+    # strings that aren't in the LifecyclePhase enum. Existing test
+    # `test_lifecycle_phase_kernel_rejects_illegal_fold` covers
+    # known-phase-to-known-phase illegal transitions (e.g., settled→active)
+    # but NOT "agent invents a new phase string". The fatal_misread #10
+    # ("phase strings invented outside enum") corresponds to exactly this
+    # gap. ULTRAREVIEW25 P1-9b.
+    from src.state.lifecycle_manager import fold_lifecycle_phase
+
+    with pytest.raises((ValueError, KeyError)):
+        fold_lifecycle_phase("active", "MADE_UP_PHASE_2026")
+    with pytest.raises((ValueError, KeyError)):
+        fold_lifecycle_phase("CREATIVE_PHASE", "active")
 
 
 def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():

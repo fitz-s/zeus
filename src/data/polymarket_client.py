@@ -8,8 +8,11 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import warnings
+from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -26,6 +29,110 @@ CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
 
 
+# ---------------------------------------------------------------------------
+# INV-24 / NC-16 runtime call-stack guard for place_limit_order
+# ---------------------------------------------------------------------------
+# Two-ring enforcement (per repo_review_2026-05-01 SYNTHESIS K-A):
+#   Ring 1 (lint-time): semgrep `zeus-place-limit-order-gateway-only` in
+#                       architecture/ast_rules/semgrep_zeus.yml
+#   Ring 2 (runtime, this file): refuse calls whose immediate non-self caller
+#                                frame is not under one of the allowed paths
+#                                below.
+# Test contexts are auto-allowed via PYTEST_CURRENT_TEST. Operator emergency
+# override: INV24_CALLSTACK_GUARD_SKIP=1 (audit-logged).
+
+_INV24_REPO_ROOT = Path(__file__).resolve().parents[2]
+_INV24_ALLOWED_CALLER_ABS_PATHS = frozenset(
+    str(_INV24_REPO_ROOT / rel)
+    for rel in (
+        # Authoritative gateway. The executor seam: every order placement
+        # flows through executor.execute_intent / _live_order.
+        "src/execution/executor.py",
+        # Self-references (recursion or wrapper paths inside this module).
+        "src/data/polymarket_client.py",
+        # Operator-only smoke harness; calls v2_preflight() itself per INV-25.
+        "scripts/live_smoke_test.py",
+    )
+)
+_INV24_OVERRIDE_LOG = _INV24_REPO_ROOT / ".claude" / "logs" / "inv24-overrides.log"
+
+
+def _enforce_inv24_caller_allowlist() -> None:
+    """Refuse `place_limit_order` calls from any caller outside the documented
+    gateway allowlist. Raises RuntimeError on bypass.
+
+    Matches the semgrep allowlist at architecture/ast_rules/semgrep_zeus.yml
+    rule `zeus-place-limit-order-gateway-only`. Extending one without the
+    other creates lint-vs-runtime drift. If you genuinely need a new caller,
+    update BOTH this allowlist AND the semgrep rule AND
+    architecture/negative_constraints.yaml NC-16.
+
+    Test contexts: pytest sets PYTEST_CURRENT_TEST automatically; we honor
+    that as a blanket allow so existing tests do not need a manual env flag.
+    The semgrep rule already excludes tests/** at lint time.
+
+    Override (operator emergency): INV24_CALLSTACK_GUARD_SKIP=1; audit-logged
+    to .claude/logs/inv24-overrides.log so post-hoc forensics is possible.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
+    if os.environ.get("INV24_CALLSTACK_GUARD_SKIP") == "1":
+        try:
+            _INV24_OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with _INV24_OVERRIDE_LOG.open("a") as fh:
+                fh.write(
+                    f"{datetime.now(timezone.utc).isoformat()}\t"
+                    f"pid={os.getpid()}\t"
+                    f"cwd={os.getcwd()}\n"
+                )
+        except OSError:
+            pass  # Override is the operator's escape hatch; do not block.
+        logger.warning(
+            "INV-24 runtime guard SKIPPED via INV24_CALLSTACK_GUARD_SKIP=1; "
+            "logged to %s",
+            _INV24_OVERRIDE_LOG,
+        )
+        return
+
+    self_file = str(Path(__file__).resolve())
+    # Frame 0 = this guard; walk up until we leave polymarket_client.py.
+    frame = sys._getframe(1)
+    while frame is not None:
+        caller_file = str(Path(frame.f_code.co_filename).resolve())
+        if caller_file != self_file:
+            break
+        frame = frame.f_back
+
+    if frame is None:
+        raise RuntimeError(
+            "INV-24 violation: place_limit_order called with no external "
+            "caller frame. This should be impossible; investigate the call "
+            "chain."
+        )
+
+    if caller_file not in _INV24_ALLOWED_CALLER_ABS_PATHS:
+        # Render allowlist as repo-relative for the error message.
+        allowed_rel = sorted(
+            str(Path(p).relative_to(_INV24_REPO_ROOT))
+            for p in _INV24_ALLOWED_CALLER_ABS_PATHS
+        )
+        try:
+            caller_rel = str(Path(caller_file).relative_to(_INV24_REPO_ROOT))
+        except ValueError:
+            caller_rel = caller_file
+        raise RuntimeError(
+            f"INV-24 violation: place_limit_order called from {caller_rel}, "
+            f"which is not in the gateway allowlist. Allowed callers: "
+            f"{allowed_rel}. See architecture/invariants.yaml INV-24 + "
+            f"architecture/negative_constraints.yaml NC-16. To extend the "
+            f"allowlist, update BOTH _INV24_ALLOWED_CALLER_ABS_PATHS in "
+            f"src/data/polymarket_client.py AND the semgrep rule "
+            f"`zeus-place-limit-order-gateway-only` AND NC-16. Do not edit "
+            f"only one — they must stay in sync."
+        )
+
+
 class V2PreflightError(RuntimeError):
     """Raised when the V2 endpoint preflight check fails (INV-25).
 
@@ -33,6 +140,30 @@ class V2PreflightError(RuntimeError):
     unexpected response. Callers (executor._live_order) must treat this as a
     hard rejection — no place_limit_order call may proceed in the same cycle.
     """
+
+
+def _import_keychain_resolver():
+    """Import bin.keychain_resolver from the OpenClaw root, on demand.
+
+    Replaces a prior `subprocess.run(["python3", "-c", f"...{root!r}..."])`
+    code-string pattern (ultrareview25_remediation P1-7 +
+    repo_review_2026-05-01 SYNTHESIS K-E security finding §11). The
+    subprocess pattern was safe in practice (`repr()` neutralised the only
+    user-influenceable interpolation, the openclaw_root env var) but
+    fragile: any change to the keychain_resolver API forced a string-edit
+    at a distance, errors crossed a process boundary as opaque stderr,
+    and the eval-on-strings shape gave reviewers the wrong threat model.
+    In-process import gives proper Python tracebacks, no subprocess
+    overhead, and a normal threat model.
+    """
+    openclaw_root = os.environ.get(
+        "OPENCLAW_HOME", os.path.expanduser("~/.openclaw")
+    )
+    if openclaw_root not in sys.path:
+        sys.path.insert(0, openclaw_root)
+    # Module name on disk: bin/keychain_resolver.py
+    from bin.keychain_resolver import read_keychain  # type: ignore[import-not-found]
+    return read_keychain
 
 
 def _resolve_credentials() -> dict:
@@ -49,21 +180,15 @@ def _resolve_credentials() -> dict:
     construction time so api_creds always match the active signer.
     """
     try:
-        openclaw_root = os.environ.get("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
-        result = subprocess.run(
-            ["python3", "-c",
-             f"import json, sys; sys.path.insert(0, {openclaw_root!r}); "
-             "from bin.keychain_resolver import read_keychain; "
-             "pk = read_keychain('openclaw-metamask-private-key'); "
-             "fa = read_keychain('openclaw-polymarket-funder-address'); "
-             "print(json.dumps({'private_key': pk, 'funder_address': fa}))"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Keychain resolution failed: {result.stderr}")
-        creds = json.loads(result.stdout)
-        if "private_key" not in creds or "funder_address" not in creds:
-            raise RuntimeError("Missing private_key or funder_address from Keychain")
+        read_keychain = _import_keychain_resolver()
+        creds = {
+            "private_key": read_keychain("openclaw-metamask-private-key"),
+            "funder_address": read_keychain("openclaw-polymarket-funder-address"),
+        }
+        if not creds["private_key"] or not creds["funder_address"]:
+            raise RuntimeError(
+                "Missing private_key or funder_address from Keychain"
+            )
         return creds
     except Exception as e:
         raise RuntimeError(f"Cannot resolve Polymarket credentials: {e}") from e
@@ -269,6 +394,12 @@ class PolymarketClient:
 
         Returns: order result dict or None on failure
         """
+        # INV-24 / NC-16 runtime guard. See module-level
+        # _enforce_inv24_caller_allowlist for the full contract; raises
+        # RuntimeError on bypass attempt. Two-ring with semgrep
+        # `zeus-place-limit-order-gateway-only` (lint-time).
+        _enforce_inv24_caller_allowlist()
+
         if side not in {"BUY", "SELL"}:
             raise ValueError(f"place_limit_order requires side='BUY' or 'SELL', got {side!r}")
 
