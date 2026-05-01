@@ -25,18 +25,21 @@ Mid-session discovery: `ultrareview25-remediation-2026-05-01` has 6 commits NOT 
 
 ---
 
-## TL;DR — what's left (rev 2)
+## TL;DR — what's left (rev 3 — 2026-05-01 17:00)
 
-| Category | Status | Action |
-|---|---|---|
-| A1 hooks active | ✅ DONE (verified 2026-05-01 morning) | — |
-| A2 gitleaks installed | ✅ DONE (8.30.1) | — |
-| **B1 AGENTS.md DATA_DEGRADED** | 🟡 awaiting your ruling | Decide (a)/(b)/(c) per `AGENTS_MD_DATA_DEGRADED_clarification.md` |
-| **B2 invariant cite drift** | 🟢 fix already authored | Cherry-pick `4e89d00f` |
-| **B3 DEFAULT 'high' cleanup** | site #1 fix authored, site #4 false-alarm closed | Cherry-pick `21cff1ec` |
-| **B4 CI gate triage (120 failures)** | 🟡 schedule decision | Pick a 3-5 day slice |
-| **C1 launchd creds** | ❓ status unclear | See §C below — need your clarification |
-| **D1 F12 (INV-23↔NC-17 anchor)** | 🟢 fix already authored | Cherry-pick `7743f692` (also gives F5/F10) |
+| Category | Status |
+|---|---|
+| A1 hooks active | ✅ DONE |
+| A2 gitleaks installed | ✅ DONE |
+| **B1 AGENTS.md DATA_DEGRADED** | ✅ DONE — operator commit f10ff845 applied option (a) clarification |
+| **B2 invariant cite drift** | ✅ DONE — operator commit f10ff845 fixed all 6 cites + cleared KNOWN_BROKEN |
+| **B3 DEFAULT 'high' cleanup** | ✅ DONE — sites #1/#2/#3/#5 repaired via cherry-pick of 21cff1ec; site #4 closed-as-false-alarm (write-frozen ensemble_snapshots) |
+| **B4 CI gate triage** | 🟡 IN PROGRESS — Phase 1+2+1-D landed (149 → ~121 failures); Phase 3+4 in flight |
+| **C1 launchd creds** | ✅ DONE (POLYMARKET_API_KEY/SECRET/PASSPHRASE injected via PlistBuddy) |
+| **D1 F12 (INV-23↔NC-17 anchor)** | ✅ DONE — cherry-picked 7743f692 (also F5/F10 inv_prototype) |
+| **P2-1 contract source-field baseline** | ✅ DONE — scanner + test landed at `aecd6cf5` (13 fields locked across 5 files) |
+| **P2-3 FM-08 semgrep rule** | ✅ DONE via cherry-pick 4e89d00f (P3-A) |
+| **P3-pip-audit** | ✅ DONE — wired into pre-commit-secrets hook |
 
 **The cleanest single action that closes B2 + B3-site-1 + D1 + F5/F10 + F6 + F13/F17 in one shot**: cherry-pick the 6 commits below onto `live-prep-2026-05-01`. See §B-cherry-pick.
 

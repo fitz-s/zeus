@@ -3,6 +3,13 @@
 Verifies that calibrate_and_normalize() produces different results from
 predict_for_bin() when multiple bins are present (documenting the semantic
 difference), and that _build_all_bins correctly reconstructs full bin vectors.
+
+Phase 4 (B4 Cat G) 2026-05-01: `_build_all_bins` is now fail-fast on missing
+scan_authority / missing market_id / insufficient siblings — aligned with
+INV-19a DATA_DEGRADED-not-silent-fallback principles. Tests below were
+updated to either populate the new gates (autouse `_verified_scan_authority`
+fixture) or assert `pytest.raises(ValueError)` for tests that explicitly
+exercise the fail-fast contract.
 """
 
 import numpy as np
@@ -15,6 +22,21 @@ from src.calibration.platt import (
 )
 from src.engine.monitor_refresh import _build_all_bins
 from src.types import Bin
+
+
+@pytest.fixture(autouse=True)
+def _verified_scan_authority(monkeypatch):
+    """B4 Phase 4 Cat G: monitor_refresh._build_all_bins now requires
+    `get_last_scan_authority() == "VERIFIED"` (fail-fast on stale topology
+    per INV-19a DATA_DEGRADED-not-silent-fallback principles).
+    Patch globally so the topology-validation gate clears for tests that
+    exercise the substantive bin-construction logic; tests that exercise
+    the fail-fast contract itself override via `pytest.raises`.
+    """
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.get_last_scan_authority",
+        lambda: "VERIFIED",
+    )
 
 
 def _fitted_calibrator(seed: int = 42) -> ExtendedPlattCalibrator:
@@ -81,7 +103,11 @@ class TestCalibrationPathDivergence:
 class TestBuildAllBins:
     """Test _build_all_bins helper for reconstructing full bin vectors."""
 
-    def test_fallback_to_single_bin_when_no_market_id(self):
+    def test_raises_when_no_market_id(self):
+        # B4 Phase 4 Cat G: was `test_fallback_to_single_bin_when_no_market_id`
+        # — old behaviour was silent-fallback; new behaviour is fail-fast per
+        # INV-19a (don't silently degrade topology). Test now asserts the
+        # ValueError that monitor_refresh.py:124 raises.
         pos = MagicMock()
         pos.market_id = ""
         pos.bin_label = "50-51°F"
@@ -89,13 +115,13 @@ class TestBuildAllBins:
         city = MagicMock()
         city.settlement_unit = "F"
 
-        bins, idx = _build_all_bins(pos, city)
-        assert len(bins) == 1
-        assert idx == 0
-        assert bins[0].low == 50.0
-        assert bins[0].high == 51.0
+        with pytest.raises(ValueError, match=r"missing held market_id"):
+            _build_all_bins(pos, city)
 
-    def test_fallback_to_single_bin_when_no_siblings(self):
+    def test_raises_when_topology_incomplete(self):
+        # B4 Phase 4 Cat G: was `test_fallback_to_single_bin_when_no_siblings`
+        # — < 2 siblings now raises ValueError("topology incomplete") at
+        # monitor_refresh.py:131-133 instead of falling back to single bin.
         pos = MagicMock()
         pos.market_id = "cond_123"
         pos.bin_label = "50-51°F"
@@ -104,11 +130,12 @@ class TestBuildAllBins:
         city.settlement_unit = "F"
 
         with patch("src.engine.monitor_refresh.get_sibling_outcomes", return_value=[]):
-            bins, idx = _build_all_bins(pos, city)
-        assert len(bins) == 1
-        assert idx == 0
+            with pytest.raises(ValueError, match=r"topology incomplete"):
+                _build_all_bins(pos, city)
 
     def test_builds_full_vector_from_siblings(self):
+        # B4 Phase 4 Cat G: validate_bin_topology now requires leftmost
+        # shoulder (low=None / -inf) and rightmost shoulder. Add both shoulders.
         pos = MagicMock()
         pos.market_id = "cond_B"
         pos.bin_label = "50-51°F"
@@ -117,22 +144,25 @@ class TestBuildAllBins:
         city.settlement_unit = "F"
 
         siblings = [
+            {"title": "47°F or below", "market_id": "cond_LO", "range_low": None, "range_high": 47.0},
             {"title": "48-49°F", "market_id": "cond_A", "range_low": 48.0, "range_high": 49.0},
             {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
             {"title": "52-53°F", "market_id": "cond_C", "range_low": 52.0, "range_high": 53.0},
-            {"title": "54°F or above", "market_id": "cond_D", "range_low": 54.0, "range_high": None},
+            {"title": "54°F or above", "market_id": "cond_HI", "range_low": 54.0, "range_high": None},
         ]
         with patch("src.engine.monitor_refresh.get_sibling_outcomes", return_value=siblings):
             bins, idx = _build_all_bins(pos, city)
 
-        assert len(bins) == 4
-        assert idx == 1  # held bin is the second one
-        assert bins[0].low == 48.0
-        assert bins[1].low == 50.0
-        assert bins[1].high == 51.0
-        assert bins[3].high is None  # shoulder bin
+        assert len(bins) == 5
+        assert idx == 2  # held bin is the third (after lo shoulder + 48-49 bin)
+        assert bins[0].low is None  # left shoulder
+        assert bins[2].low == 50.0
+        assert bins[2].high == 51.0
+        assert bins[4].high is None  # right shoulder
 
-    def test_held_index_correct_for_first_bin(self):
+    def test_held_index_correct_for_first_real_bin(self):
+        # B4 Phase 4 Cat G: with shoulders required, "first bin" now means
+        # first NON-SHOULDER bin (idx=1, after the leftmost shoulder).
         pos = MagicMock()
         pos.market_id = "cond_A"
         pos.bin_label = "48-49°F"
@@ -141,15 +171,18 @@ class TestBuildAllBins:
         city.settlement_unit = "F"
 
         siblings = [
+            {"title": "47°F or below", "market_id": "cond_LO", "range_low": None, "range_high": 47.0},
             {"title": "48-49°F", "market_id": "cond_A", "range_low": 48.0, "range_high": 49.0},
-            {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
+            {"title": "50°F or above", "market_id": "cond_HI", "range_low": 50.0, "range_high": None},
         ]
         with patch("src.engine.monitor_refresh.get_sibling_outcomes", return_value=siblings):
             bins, idx = _build_all_bins(pos, city)
 
-        assert idx == 0
+        assert idx == 1  # held is second (post-shoulder)
 
     def test_skips_unparseable_siblings(self):
+        # B4 Phase 4 Cat G: include shoulders for topology validity. The
+        # unparseable entry (low=None AND high=None) is filtered at line 139-140.
         pos = MagicMock()
         pos.market_id = "cond_B"
         pos.bin_label = "50-51°F"
@@ -159,16 +192,23 @@ class TestBuildAllBins:
 
         siblings = [
             {"title": "unknown question", "market_id": "cond_X", "range_low": None, "range_high": None},
+            {"title": "49°F or below", "market_id": "cond_LO", "range_low": None, "range_high": 49.0},
             {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
+            {"title": "52°F or above", "market_id": "cond_HI", "range_low": 52.0, "range_high": None},
         ]
         with patch("src.engine.monitor_refresh.get_sibling_outcomes", return_value=siblings):
             bins, idx = _build_all_bins(pos, city)
 
-        assert len(bins) == 1
-        assert idx == 0
+        # Unparseable filtered, 3 valid bins remain (LO shoulder + 50-51 + HI shoulder)
+        assert len(bins) == 3
+        assert idx == 1  # 50-51 is second (post LO shoulder)
 
-    def test_fallback_when_held_market_id_not_in_siblings(self):
-        """S6 guard: if held market_id never matches a sibling, fall back to single bin."""
+    def test_raises_when_held_market_id_not_in_siblings(self):
+        # B4 Phase 4 Cat G: was `test_fallback_when_held_market_id_not_in_siblings`
+        # — old behaviour was silent fallback to single bin; new behaviour
+        # is fail-fast (monitor_refresh.py:152-155 raises). The "held not
+        # found" case is a real topology integrity signal, not something to
+        # silently degrade past.
         pos = MagicMock()
         pos.market_id = "cond_MISSING"
         pos.bin_label = "50-51°F"
@@ -177,17 +217,14 @@ class TestBuildAllBins:
         city.settlement_unit = "F"
 
         siblings = [
+            {"title": "47°F or below", "market_id": "cond_LO", "range_low": None, "range_high": 47.0},
             {"title": "48-49°F", "market_id": "cond_A", "range_low": 48.0, "range_high": 49.0},
             {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
+            {"title": "52°F or above", "market_id": "cond_HI", "range_low": 52.0, "range_high": None},
         ]
         with patch("src.engine.monitor_refresh.get_sibling_outcomes", return_value=siblings):
-            bins, idx = _build_all_bins(pos, city)
-
-        # Should fall back to single held bin since market_id never matched
-        assert len(bins) == 1
-        assert idx == 0
-        assert bins[0].low == 50.0
-        assert bins[0].high == 51.0
+            with pytest.raises(ValueError, match=r"held market_id .* not found"):
+                _build_all_bins(pos, city)
 
 
 class TestCalibrationParity:
@@ -289,10 +326,14 @@ class TestRefreshDay0CalBranches:
         return city
 
     def _siblings(self):
+        # B4 Phase 4 Cat G: include shoulders so validate_bin_topology passes
+        # (leftmost low=-inf, rightmost high=+inf required).
         return [
+            {"title": "47°F or below", "market_id": "cond_LO", "range_low": None, "range_high": 47.0},
             {"title": "48-49°F", "market_id": "cond_A", "range_low": 48.0, "range_high": 49.0},
             {"title": "50-51°F", "market_id": "cond_B", "range_low": 50.0, "range_high": 51.0},
             {"title": "52-53°F", "market_id": "cond_C", "range_low": 52.0, "range_high": 53.0},
+            {"title": "54°F or above", "market_id": "cond_HI", "range_low": 54.0, "range_high": None},
         ]
 
     @patch("src.engine.monitor_refresh.get_sibling_outcomes")
@@ -305,38 +346,34 @@ class TestRefreshDay0CalBranches:
         pos = self._make_position()
         city = self._make_city()
 
-        # build_all_bins should return 3 bins, held_idx=1
+        # build_all_bins should return 5 bins (with shoulders), held_idx=2
         bins, held_idx = _build_all_bins(pos, city)
-        assert len(bins) == 3
-        assert held_idx == 1
+        assert len(bins) == 5
+        assert held_idx == 2  # 50-51 is third (after LO shoulder + 48-49)
 
         # Simulate what the Day0 refresh does with cal=None:
-        p_raw_vector = np.array([0.25, 0.40, 0.35])
-        # cal=None path: p_cal_yes = float(p_raw_vector[held_idx])
+        p_raw_vector = np.array([0.05, 0.25, 0.40, 0.25, 0.05])
         p_cal_yes = float(p_raw_vector[held_idx])
         assert p_cal_yes == pytest.approx(0.40)
 
     @patch("src.engine.monitor_refresh.get_sibling_outcomes")
     @patch("src.engine.monitor_refresh.get_calibrator")
-    def test_day0_single_bin_uses_predict_for_bin(self, mock_get_cal, mock_siblings):
-        """Single-bin fallback uses predict_for_bin (not calibrate_and_normalize)."""
+    def test_day0_single_bin_path_raises_on_empty_siblings(self, mock_get_cal, mock_siblings):
+        """B4 Phase 4 Cat G: was `test_day0_single_bin_uses_predict_for_bin`
+        — exercised the old single-bin fallback path. New behaviour: empty
+        siblings → ValueError("topology incomplete"). The substantive
+        predict_for_bin coverage moved to TestCalibrationPathDivergence
+        (single_bin_paths_match_before_normalization). This test now
+        documents the fail-fast contract."""
         cal = _fitted_calibrator()
         mock_get_cal.return_value = (cal, "city_level")
-        mock_siblings.return_value = []  # No siblings → single bin fallback
+        mock_siblings.return_value = []  # No siblings now raises
 
         pos = self._make_position()
         city = self._make_city()
 
-        bins, held_idx = _build_all_bins(pos, city)
-        assert len(bins) == 1
-        assert held_idx == 0
-
-        # Single-bin + cal path: uses predict_for_bin
-        p_raw_value = 0.40
-        p_cal_yes = cal.predict_for_bin(p_raw_value, 0.0, bin_width=bins[0].width)
-        assert 0.0 < p_cal_yes < 1.0
-        # Verify it's NOT 1.0 (which calibrate_and_normalize would return for single bin)
-        assert p_cal_yes != pytest.approx(1.0, abs=0.01)
+        with pytest.raises(ValueError, match=r"topology incomplete"):
+            _build_all_bins(pos, city)
 
     @patch("src.engine.monitor_refresh.get_sibling_outcomes")
     @patch("src.engine.monitor_refresh.get_calibrator")
@@ -350,10 +387,10 @@ class TestRefreshDay0CalBranches:
         city = self._make_city()
 
         bins, held_idx = _build_all_bins(pos, city)
-        assert len(bins) == 3
-        assert held_idx == 1
+        assert len(bins) == 5  # 3 real + 2 shoulders
+        assert held_idx == 2
 
-        p_raw_vector = np.array([0.25, 0.40, 0.35])
+        p_raw_vector = np.array([0.05, 0.25, 0.40, 0.25, 0.05])
 
         # Multi-bin + cal path: calibrate_and_normalize
         p_cal_vector = calibrate_and_normalize(
