@@ -71,13 +71,20 @@ class INV:
     drift_findings: list[DriftFinding] = field(default_factory=list)
 
     def validate(self) -> list[DriftFinding]:
-        """Run lazy validation (test+schema). Returns NEW drift findings."""
-        new = []
+        """Run lazy validation (test+schema). Returns NEW drift findings.
+
+        Pure: must NOT mutate self.drift_findings. Repeated invocation must
+        return the same list (idempotent). Callers that want the union of
+        eager + lazy findings should explicitly concatenate, as
+        all_drift_findings does. Prior implementation (before ultrareview-25
+        F5/F10) appended to self.drift_findings on each call, causing
+        all_drift_findings() to double-count lazy findings on second invocation.
+        """
+        new: list[DriftFinding] = []
         for test_ref in self.enforcement.get("test", []):
             new.extend(_validate_test_reference(self.id, test_ref))
         for schema_ref in self.enforcement.get("schema", []):
             new.extend(_validate_schema_column_reference(self.id, schema_ref))
-        self.drift_findings.extend(new)
         return new
 
 
