@@ -1,6 +1,6 @@
 # Known Gaps — Venus Evolution Worklist
 
-**NOTE:** Closed entries moved to known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
+**NOTE:** Closed entries moved to docs/to-do-list/known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
 
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
@@ -10,7 +10,7 @@ STALE-UNVERIFIED, and residual-bearing MITIGATED gaps that still demand
 attention.
 
 **Antibody archive** (closed FIXED/CLOSED entries — immune-system record of
-what we made impossible): `docs/operations/known_gaps_archive.md`. Reference
+what we made impossible): `docs/to-do-list/known_gaps_archive.md`. Reference
 when a similar pattern resurfaces; do not re-open without proof the antibody
 failed.
 
@@ -972,7 +972,7 @@ finding.
 ## ANTI-RABBIT-HOLE: upstream-Polymarket scope limits (READ FIRST)
 
 No active remediation items remain in this section. The Polymarket LOW market
-series structural boundary is archived in `known_gaps_archive.md`.
+series structural boundary is archived in `docs/to-do-list/known_gaps_archive.md`.
 
 ---
 
@@ -996,7 +996,7 @@ series structural boundary is archived in `known_gaps_archive.md`.
 
 All entries antibody-closed (Bin.unit / SettlementSemantics.for_city / Platt
 bin-width-aware / astype(int) → SettlementSemantics.round_values, etc.). See
-`known_gaps_archive.md` → "CRITICAL: Instrument Model".
+`docs/to-do-list/known_gaps_archive.md` → "CRITICAL: Instrument Model".
 
 ---
 
@@ -1004,7 +1004,7 @@ bin-width-aware / astype(int) → SettlementSemantics.round_values, etc.). See
 
 Instrument-level antibodies all closed (MC count parity / CI-aware exit /
 hours_since_open / MODEL_DIVERGENCE_PANIC threshold). See
-`known_gaps_archive.md` → "CRITICAL: Exit/Entry Epistemic Asymmetry".
+`docs/to-do-list/known_gaps_archive.md` → "CRITICAL: Exit/Entry Epistemic Asymmetry".
 
 The structural relationship gap remains OPEN as **D4** under "MEDIUM-CRITICAL:
 Cross-Layer Epistemic Fragmentation" below.
@@ -1014,7 +1014,7 @@ Cross-Layer Epistemic Fragmentation" below.
 ## CRITICAL: Day0 Signal Quality
 
 All entries antibody-closed (continuous observation_weight / continuous
-post-peak sigma decay). See `known_gaps_archive.md` → "CRITICAL: Day0 Signal
+post-peak sigma decay). See `docs/to-do-list/known_gaps_archive.md` → "CRITICAL: Day0 Signal
 Quality".
 
 ---
@@ -1029,7 +1029,7 @@ Quality".
 
 (2 FIXED entries on persistence_anomaly + 2 CLOSED 2026-04-15 entries on
 alpha_overrides / harvester bias correction archived to
-`known_gaps_archive.md` → "MEDIUM: Data Confidence".)
+`docs/to-do-list/known_gaps_archive.md` → "MEDIUM: Data Confidence".)
 
 ---
 
@@ -1132,7 +1132,7 @@ cycle_runner._execute_monitoring_phase()
 **Proposed antibody:** Add an explicit schema/integrity check before day0 capture and fail closed with a structured error (plus a repair/migration path) instead of letting SQLite rootpage corruption surface mid-cycle.
 
 (3 closed entries on strategy_tracker JSON authority, Healthcheck assumptions,
-and Day0 stale probability waiver archived to `known_gaps_archive.md` →
+and Day0 stale probability waiver archived to `docs/to-do-list/known_gaps_archive.md` →
 "Tooling / Operator Health".)
 
 ---
@@ -1168,7 +1168,7 @@ and Day0 stale probability waiver archived to `known_gaps_archive.md` →
 
 (5 FIXED entries on settlement CI guard / buy-yes proxy / settlement won
 ambiguity / control-plane gate drift / LA Gamma Milan / Heartbeat cron RED
-suppression archived to `known_gaps_archive.md` → "2026-04-03 —
+suppression archived to `docs/to-do-list/known_gaps_archive.md` → "2026-04-03 —
 edge-reversal follow-up triage".)
 
 ---
@@ -1205,5 +1205,5 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 **Proposed antibody:** Entry and exit share the same `DecisionEvidence` contract type with symmetric statistical burden. Exit reversal requires bootstrap-grade evidence, not just 2 consecutive point-estimate checks.
 
 (D5 / D6 / Day0-canonical-event closed entries archived to
-`known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
+`docs/to-do-list/known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
 Fragmentation (D1–D6)".)
