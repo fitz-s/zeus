@@ -25,7 +25,6 @@ index, or archive catalog.
 | `known_gaps.md` | Active operational gap register; moved from docs root |
 | `current_data_state.md` | Active current-fact surface for audited data posture |
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
-| `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 
 Current-fact files must stay summary-only, receipt/evidence-backed,
@@ -87,7 +86,6 @@ make a surface default-read unless `current_state.md` routes it.
 | `docs/to-do-list/known_gaps_archive.md` | archive interface | Closed gap antibody archive; moved to to-do-list 2026-05-01 |
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
-| `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `open_work_items.md` | active support | Consolidated tail items from archived April 2026 task packets; genuine open work only |
 
