@@ -89,8 +89,9 @@ Escalated path:
 
 To override (operator emergency only):
   MERGE_AUDIT_EVIDENCE=OVERRIDE_<reason> <your git command>
-  (audit trail emitted to stderr; capture via shell redirect or terminal log.
-   TODO(ultrareview-25 F17 follow-up): durable OVERRIDE log -> drift table)
+  (audit trail emitted to stderr AND appended to .claude/logs/merge-overrides.log
+   for forensic inspection. Each entry: ISO8601 timestamp, branch, reason,
+   cwd, command line.)
 EOF
     exit 0
 fi
@@ -98,7 +99,24 @@ fi
 # Check evidence file exists (skip for OVERRIDE)
 case "${MERGE_AUDIT_EVIDENCE}" in
     OVERRIDE_*)
-        echo "[pre-merge-contamination-check] OVERRIDE: MERGE_AUDIT_EVIDENCE=$MERGE_AUDIT_EVIDENCE; logged" >&2
+        # F17 fix (ultrareview-25): the prior implementation only echoed to
+        # stderr while the docstring claimed durable logging — false claim.
+        # Now appends a forensic record to .claude/logs/merge-overrides.log.
+        # Failures to write the log do NOT block the override (the override
+        # is the operator's escape hatch); they emit a warning to stderr.
+        REPO_ROOT_FOR_LOG=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+        OVERRIDE_LOG_PATH="${REPO_ROOT_FOR_LOG}/.claude/logs/merge-overrides.log"
+        OVERRIDE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        OVERRIDE_REASON="${MERGE_AUDIT_EVIDENCE#OVERRIDE_}"
+        mkdir -p "$(dirname "$OVERRIDE_LOG_PATH")" 2>/dev/null
+        if printf '%s\tbranch=%s\treason=%s\tcwd=%s\tcommand=%s\n' \
+                "$OVERRIDE_TS" "$CURRENT_BRANCH" "$OVERRIDE_REASON" "$PWD" \
+                "$(printf '%s' "$COMMAND" | head -1 | tr '\t\n' '  ')" \
+                >> "$OVERRIDE_LOG_PATH" 2>/dev/null; then
+            echo "[pre-merge-contamination-check] OVERRIDE: MERGE_AUDIT_EVIDENCE=$MERGE_AUDIT_EVIDENCE; logged to ${OVERRIDE_LOG_PATH}" >&2
+        else
+            echo "[pre-merge-contamination-check] OVERRIDE: MERGE_AUDIT_EVIDENCE=$MERGE_AUDIT_EVIDENCE; WARNING — could not append to ${OVERRIDE_LOG_PATH} (permissions?); proceeding" >&2
+        fi
         exit 0
         ;;
 esac
@@ -109,20 +127,24 @@ if [ ! -f "$MERGE_AUDIT_EVIDENCE" ]; then
 fi
 
 # Check evidence file contains required fields. F13 fix (ultrareview-25):
-# anchor field detection at start-of-line (whitespace allowed, `#` rejected)
-# so a commented-out field cannot satisfy the existence check.
+# anchor field detection at start-of-line with NO leading whitespace, since
+# the worktree_merge_protocol schema is strictly flat (top-level keys only).
+# Rejects: commented-out lines (`# critic_verdict: ...`) AND YAML-nested
+# spoofs (`some_parent:\n  critic_verdict: APPROVE`). Both paths fail-closed
+# with a clear missing-field diagnostic.
 for FIELD in "critic_verdict:" "diff_scope:" "drift_keyword_scan:"; do
-    if ! grep -qE "^[[:space:]]*${FIELD}" "$MERGE_AUDIT_EVIDENCE"; then
-        echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE missing required field: $FIELD (commented-out lines do not satisfy this check)" >&2
+    if ! grep -qE "^${FIELD}" "$MERGE_AUDIT_EVIDENCE"; then
+        echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE missing required field: $FIELD (must appear at column 0 — neither commented-out nor YAML-nested lines satisfy this check)" >&2
         exit 2
     fi
 done
 
 # Check critic_verdict is APPROVE or REVISE (not BLOCK).
-# F13 fix (ultrareview-25): anchor critic_verdict to start-of-line (allowing
-# leading whitespace but rejecting `#` comment lines) so a commented hint
-# like `# critic_verdict: APPROVE` cannot spoof the actual field value.
-VERDICT=$(grep -E '^[[:space:]]*critic_verdict:' "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/.*critic_verdict:[[:space:]]*//;s/[[:space:]]*$//')
+# F13 fix (ultrareview-25): anchor critic_verdict at column 0 — no leading
+# whitespace allowed — since the evidence schema is flat (top-level keys
+# only). This rejects both commented spoofs (`# critic_verdict: ...`) AND
+# YAML-nested spoofs (`parent:\n  critic_verdict: ...`).
+VERDICT=$(grep -E '^critic_verdict:' "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/.*critic_verdict:[[:space:]]*//;s/[[:space:]]*$//')
 case "$VERDICT" in
     APPROVE|REVISE)
         echo "[pre-merge-contamination-check] PASS: $MERGE_AUDIT_EVIDENCE verdict=$VERDICT" >&2
