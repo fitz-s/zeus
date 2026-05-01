@@ -211,3 +211,53 @@ def test4c_strict_dominance_on_negative_constraint_typo():
         f"yaml_validates={yaml_validates_nc}. Prototype dominates iff "
         f"(True, False); got ({proto_catches_typo}, {yaml_validates_nc})."
     )
+
+
+# === ultrareview-25 F5+F10 antibody (validate() purity / idempotency) ===
+# Regression-pin the F5+F10 fix: validate() must NOT mutate self.drift_findings,
+# and all_drift_findings() must return the SAME list across repeated calls.
+# Prior implementation appended lazy findings to self.drift_findings on each
+# call, causing all_drift_findings() to double-count on the second call onwards.
+
+def test_validate_is_pure_does_not_mutate_self_drift_findings():
+    """F5+F10 antibody: validate() returns new findings without mutating
+    self.drift_findings. Calling it twice does not grow the persistent list."""
+    from architecture.inv_prototype import PROTOTYPED_INVS
+    inv_class = PROTOTYPED_INVS[0]
+    inv = inv_class.__inv__  # type: ignore[attr-defined]
+    drift_before = list(inv.drift_findings)
+    inv.validate()
+    inv.validate()
+    inv.validate()
+    drift_after = list(inv.drift_findings)
+    assert drift_before == drift_after, (
+        "F5+F10 regression: validate() mutated self.drift_findings. "
+        f"Length went from {len(drift_before)} to {len(drift_after)} after "
+        "three calls. validate() must be pure — return new findings without "
+        "side-effects. Failure surface: all_drift_findings() would double-count."
+    )
+
+
+def test_all_drift_findings_is_idempotent():
+    """F5+F10 antibody: all_drift_findings() must be idempotent. Repeated calls
+    return identical lists. Prior implementation grew the result on each call
+    because validate() side-effects accumulated."""
+    from architecture.inv_prototype import all_drift_findings
+    first = all_drift_findings()
+    second = all_drift_findings()
+    third = all_drift_findings()
+    assert len(first) == len(second) == len(third), (
+        "F5+F10 regression: all_drift_findings() returned different-length "
+        "results on repeated calls — "
+        f"first={len(first)}, second={len(second)}, third={len(third)}. "
+        "This breaks any caller (CI, pre-commit hook, agent prompts) that "
+        "summarises drift across runs."
+    )
+    # Identity-of-content check (not just length): findings should be
+    # semantically equal across calls.
+    first_keys = sorted((f.inv_id, f.channel, f.target, f.kind) for f in first)
+    second_keys = sorted((f.inv_id, f.channel, f.target, f.kind) for f in second)
+    assert first_keys == second_keys, (
+        "F5+F10 regression: all_drift_findings() returned different findings "
+        "across calls (lengths matched but content drifted)."
+    )

@@ -234,8 +234,15 @@ invariants:
     zones: [K2_runtime]
     statement: A degraded portfolio projection must never export authority="VERIFIED"; the export must use a distinct non-VERIFIED label.
     why: A degraded loader signals that DB authority was unreachable or the projection is non-canonical. Stamping that export as VERIFIED tells operator surfaces and downstream consumers that authority survived loss, which is false. Authority labels must reflect actual provenance, not load-success.
+    # ultrareview-25 F12: NC-17 was previously listed under enforced_by but
+    # mechanically does not enforce INV-23 — NC-17 governs ExecutionIntent
+    # decorative-capability labels (executor branches), whereas INV-23 governs
+    # portfolio-export authority labels (state/portfolio.py truth_authority_map).
+    # Both share a "no false certainty" theme but are mechanism-disjoint, so
+    # the enforced_by.negative_constraints cite was removed 2026-05-01 to keep
+    # that field reserved for actual mechanism enforcement. See commit 3b627eca
+    # for the original anchor and PLAN.md F12 for the cleanup rationale.
     enforced_by:
-      negative_constraints: [NC-17]
       tests:
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_truth_authority_map_does_not_collapse_degraded_to_verified
         - tests/test_p0_hardening.py::TestR1DegradedExportNeverVerified::test_save_portfolio_degraded_does_not_export_verified

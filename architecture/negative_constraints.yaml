@@ -108,7 +108,11 @@ constraints:
         - tests/test_p0_hardening.py::test_place_limit_order_gateway_only
   - id: NC-17
     statement: ExecutionIntent must not carry decorative capability labels (slice_policy, reprice_policy, liquidity_guard, or any future label) without an enforcing executor branch that exhibits real capability behavior. Logging-only branches do not count.
-    invariants: [INV-23]
+    # ultrareview-25 F12: INV-23 was previously listed under invariants but the
+    # mechanism is disjoint (NC-17 = ExecutionIntent capability labels;
+    # INV-23 = portfolio-export authority labels). They share a "no false
+    # certainty" theme only — the inert cross-reference was removed to keep
+    # this field reserved for actual mechanism enforcement.
     enforced_by:
       tests:
         - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_execution_intent_has_no_decorative_fields
