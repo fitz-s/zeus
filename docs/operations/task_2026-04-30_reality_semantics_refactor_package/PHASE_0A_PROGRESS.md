@@ -58,6 +58,23 @@ Additional completed slice: monitor quote/probability split.
 - no cycle sequencing, lifecycle grammar, DB schema, production data, config,
   venue, report cohort, or live side-effect surface was changed
 
+Additional completed slice: exit command market/token identity split.
+
+- addressed `review_apr_30.md` F-05 for the executor exit command path
+- `ExitOrderIntent` now carries explicit market/condition/question and YES/NO
+  token identity fields in addition to the selected held token
+- `execute_exit_order()` resolves the command journal `market_id` from explicit
+  exit intent identity or the immutable executable market snapshot, preferring
+  Gamma market identity and then condition/question identity before the
+  compatibility fallback
+- exit venue commands now persist condition/Gamma market lineage separately
+  from the sold token id, and the WS gap submit guard evaluates the market
+  lineage rather than the token id
+- focused executor regression coverage proves the persisted command
+  `market_id` is `gamma-test` while `token_id` remains the selected held token
+- no schema migration, lifecycle grammar, state projection, venue adapter,
+  production data, config, or live side-effect surface was changed
+
 Additional completed slice: runtime corrected live gate.
 
 - added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
@@ -169,6 +186,15 @@ Passing checks:
 - `python scripts/topology_doctor.py --planning-lock --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
 - `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover Phase I/J monitor quote/probability split closeout: topology admits runtime and Day0 safety tests; monitor_quote_refresh carries held-token executable bid/VWMP diagnostics; monitor_probability_refresh does not consume the just-refreshed executable quote; no cycle sequencing, no DB schema, no production data, no live venue side effects, no report cohort changes" --files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
+- `python -m pytest tests/test_executor.py::TestExecutor::test_create_exit_order_intent_carries_boundary_fields tests/test_executor.py::TestExecutor::test_execute_exit_order_places_sell_and_rounds_down -q` -> 2 passed
+- `python -m pytest tests/test_executor.py -q` -> 15 passed, 1 skipped
+- `python -m pytest tests/test_executor.py tests/test_executor_command_split.py tests/test_exit_safety.py tests/test_unknown_side_effect.py tests/test_collateral_ledger.py tests/test_runtime_guards.py -q` -> 300 passed, 1 skipped
+- `python -m compileall -q src/execution/executor.py tests/test_executor.py`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_executor.py --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/execution/executor.py tests/test_executor.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/execution/executor.py tests/test_executor.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-05 exit command identity split closeout: executor persists condition/gamma market_id separately from selected token_id using executable snapshot identity; no schema migration, no lifecycle grammar, no production data, no live venue side effects" --files src/execution/executor.py tests/test_executor.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
+- `git diff --check`
 
 Known adjacent failure observed outside the buy_no quote split:
 

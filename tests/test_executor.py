@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: R3 Z1 cutover guard audit; pre-existing executor behavior tests updated to opt out of CutoverGuard so they keep testing executor mechanics.
 """Tests for executor and portfolio."""
 
@@ -586,10 +586,18 @@ class TestExecutor:
             shares=12.345,
             current_price=0.46,
             best_bid=0.45,
+            market_id="gamma-market-1",
+            condition_id="condition-1",
+            yes_token_id="yes-token",
+            no_token_id="no-token",
         )
 
         assert intent.trade_id == "trade-1"
         assert intent.token_id == "yes-token"
+        assert intent.market_id == "gamma-market-1"
+        assert intent.condition_id == "condition-1"
+        assert intent.yes_token_id == "yes-token"
+        assert intent.no_token_id == "no-token"
         assert intent.shares == pytest.approx(12.345)
         assert intent.current_price == pytest.approx(0.46)
         assert intent.best_bid == pytest.approx(0.45)
@@ -597,6 +605,7 @@ class TestExecutor:
 
     def test_execute_exit_order_places_sell_and_rounds_down(self, monkeypatch):
         captured = {}
+        ws_markets = []
 
         class DummyClient:
             def __init__(self):
@@ -616,6 +625,11 @@ class TestExecutor:
                 return _final_submit_result(self.bound_envelope, order_id="sell-1")
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._assert_ws_gap_allows_submit",
+            lambda market_id=None: ws_markets.append(market_id)
+            or {"component": "ws_gap_guard", "allowed": True, "market_id": market_id or ""},
+        )
 
         result = execute_exit_order(
             create_exit_order_intent(
@@ -625,7 +639,8 @@ class TestExecutor:
                 current_price=0.50,
                 best_bid=0.49,
                 **_snapshot_kwargs("yes-token"),
-            )
+            ),
+            conn=_TEST_CONN,
         )
 
         assert result.status == "pending"
@@ -638,6 +653,14 @@ class TestExecutor:
             "side": "SELL",
             "order_type": "GTC",
         }
+        command = _TEST_CONN.execute(
+            "SELECT market_id, token_id FROM venue_commands WHERE position_id = ?",
+            ("trade-1",),
+        ).fetchone()
+        assert command["market_id"] == "gamma-test"
+        assert command["market_id"] != command["token_id"]
+        assert command["token_id"] == "yes-token"
+        assert ws_markets == ["gamma-test"]
 
     def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
         class DummyClient:
