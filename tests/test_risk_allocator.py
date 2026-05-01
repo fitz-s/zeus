@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
@@ -129,7 +129,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, token_id: str, snapshot_id: st
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
-            fee_details={},
+            fee_details={"fee_rate_fraction": 0.0},
             token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
             rfqe=None,
             neg_risk=False,
@@ -339,14 +339,25 @@ def test_live_entry_submit_uses_allocator_selected_FOK_for_shallow_book(monkeypa
 
     class DummyClient:
         def __init__(self):
-            pass
+            self.bound_envelope = None
 
         def v2_preflight(self):
             return None
 
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
         def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+            assert self.bound_envelope is not None
+            assert self.bound_envelope.order_type == order_type
             captured.update(token_id=token_id, price=price, size=size, side=side, order_type=order_type)
-            return {"orderID": "entry-order-1", "status": "OPEN"}
+            return {
+                "orderID": "entry-order-1",
+                "status": "OPEN",
+                "_venue_submission_envelope": self.bound_envelope.with_updates(
+                    order_id="entry-order-1",
+                ).to_dict(),
+            }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
     configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.HEALTHY))
@@ -382,11 +393,22 @@ def test_live_exit_submit_uses_allocator_selected_FOK_when_heartbeat_is_degraded
 
     class DummyClient:
         def __init__(self):
-            pass
+            self.bound_envelope = None
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
 
         def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+            assert self.bound_envelope is not None
+            assert self.bound_envelope.order_type == order_type
             captured.update(token_id=token_id, price=price, size=size, side=side, order_type=order_type)
-            return {"orderID": "exit-order-1", "status": "OPEN"}
+            return {
+                "orderID": "exit-order-1",
+                "status": "OPEN",
+                "_venue_submission_envelope": self.bound_envelope.with_updates(
+                    order_id="exit-order-1",
+                ).to_dict(),
+            }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
     configure_global_allocator(RiskAllocator(), _state(heartbeat_health=HeartbeatHealth.DEGRADED))
@@ -420,46 +442,71 @@ def test_live_exit_submit_uses_allocator_selected_FOK_when_heartbeat_is_degraded
 
 
 def test_polymarket_client_threads_selected_order_type_to_v2_adapter():
-    from types import SimpleNamespace
-
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.data.polymarket_client import PolymarketClient
-    from src.venue.polymarket_v2_adapter import PreflightResult
 
     captured: dict[str, object] = {}
-
-    class FakeEnvelope:
-        order_id = "ord-fok"
-
-        def to_dict(self):
-            return {"order_id": self.order_id}
+    envelope = VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id="cond-fok",
+        question_id="q-fok",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        selected_outcome_token_id="yes-token",
+        outcome_label="YES",
+        side="BUY",
+        price=Decimal("0.50"),
+        size=Decimal("10"),
+        order_type="FOK",
+        post_only=False,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        neg_risk=False,
+        fee_details={"fee_rate_fraction": 0.0},
+        canonical_pre_sign_payload_hash="a" * 64,
+        signed_order=None,
+        signed_order_hash=None,
+        raw_request_hash="b" * 64,
+        raw_response_json=None,
+        order_id=None,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at="2026-05-01T00:00:00+00:00",
+    )
 
     class FakeAdapter:
-        def preflight(self):
-            return PreflightResult(ok=True)
-
-        def submit_limit_order(self, **kwargs):
-            captured.update(kwargs)
+        def submit(self, bound_envelope):
+            captured["envelope"] = bound_envelope
             return SimpleNamespace(
                 status="accepted",
                 error_code=None,
                 error_message=None,
-                envelope=FakeEnvelope(),
+                envelope=bound_envelope.with_updates(order_id="ord-fok"),
             )
+
+        def submit_limit_order(self, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("bound submit must use the envelope path")
 
     client = PolymarketClient()
     client._v2_adapter = FakeAdapter()
+    client.bind_submission_envelope(envelope)
 
-    with pytest.warns(DeprecationWarning, match="compatibility wrapper"):
-        result = client.place_limit_order(
-            token_id="yes-token",
-            price=0.50,
-            size=10.0,
-            side="BUY",
-            order_type="FOK",
-        )
+    result = client.place_limit_order(
+        token_id="yes-token",
+        price=0.50,
+        size=10.0,
+        side="BUY",
+        order_type="FOK",
+    )
 
     assert result["orderID"] == "ord-fok"
-    assert captured["order_type"] == "FOK"
+    assert captured["envelope"].order_type == "FOK"
 
 
 @pytest.mark.parametrize(

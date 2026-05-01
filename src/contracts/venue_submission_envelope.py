@@ -89,6 +89,36 @@ class VenueSubmissionEnvelope:
     def with_updates(self, **changes: Any) -> "VenueSubmissionEnvelope":
         return replace(self, **changes)
 
+    @property
+    def compatibility_placeholder_reason(self) -> str:
+        reasons: list[str] = []
+        if self.condition_id.startswith("legacy:"):
+            reasons.append("legacy_condition_id")
+        if self.question_id == "legacy-compat":
+            reasons.append("legacy_question_id")
+        if self.yes_token_id == self.no_token_id:
+            reasons.append("collapsed_yes_no_token_identity")
+        return ",".join(reasons)
+
+    @property
+    def is_compatibility_placeholder(self) -> bool:
+        return bool(self.compatibility_placeholder_reason)
+
+    def assert_live_submit_bound(self) -> None:
+        """Fail closed unless the envelope is bound to real market identity."""
+
+        reason = self.compatibility_placeholder_reason
+        if reason:
+            raise ValueError(
+                "compatibility submission envelope cannot authorize live submit: "
+                f"{reason}"
+            )
+        expected_token = self.yes_token_id if self.outcome_label == "YES" else self.no_token_id
+        if self.selected_outcome_token_id != expected_token:
+            raise ValueError(
+                "selected_outcome_token_id does not match outcome_label token"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
