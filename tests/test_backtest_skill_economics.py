@@ -1,6 +1,9 @@
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: docs/operations/task_2026-04-27_backtest_first_principles_review/01_backtest_upgrade_design.md
+# Purpose: Guard backtest economics tombstone behavior and report/replay cohort gates.
+# Reuse: Run after backtest purpose, economics readiness, or report/replay cohort changes.
 """Antibodies for S4 (economics tombstone) and S2 (skill purpose enforcement).
 
 Verifies that:
@@ -23,6 +26,53 @@ from src.backtest.purpose import (
     SKILL_PARITY,
 )
 from src.backtest.skill import run_skill, _economics_fields_in_limitations
+from scripts.equity_curve import _single_exit_economics_cohort
+from scripts.profit_validation_replay import (
+    CORRECTED_ECONOMICS_COHORT,
+    LEGACY_DIAGNOSTIC_COHORT,
+    require_single_exit_economics_cohort,
+)
+
+
+def _corrected_exit_row(**overrides):
+    row = {
+        "pricing_semantics_version": CORRECTED_ECONOMICS_COHORT,
+        "corrected_executable_economics_eligible": True,
+        "entry_economics_authority": "avg_fill_price",
+        "fill_authority": "venue_confirmed_full",
+        "shares_filled": 10.0,
+        "filled_cost_basis_usd": 5.0,
+        "entry_cost_basis_hash": "a" * 64,
+        "execution_cost_basis_version": "cost_basis:test",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_profit_replay_hard_fails_mixed_pricing_semantics_cohorts():
+    legacy = {"entry_price": 0.5, "size_usd": 5.0}
+    corrected = _corrected_exit_row()
+
+    with pytest.raises(ValueError, match="mixed pricing semantics cohorts"):
+        require_single_exit_economics_cohort([legacy, corrected])
+
+
+def test_profit_replay_rejects_incomplete_corrected_economics_row():
+    incomplete = _corrected_exit_row(filled_cost_basis_usd=0.0)
+
+    with pytest.raises(ValueError, match="missing fill/cost-basis authority"):
+        require_single_exit_economics_cohort([incomplete])
+
+
+def test_equity_curve_reports_single_corrected_cohort():
+    cohort, counts = _single_exit_economics_cohort([
+        _corrected_exit_row(),
+        _corrected_exit_row(shares_filled=5.0, filled_cost_basis_usd=2.5),
+    ])
+
+    assert cohort == CORRECTED_ECONOMICS_COHORT
+    assert counts == {CORRECTED_ECONOMICS_COHORT: 2}
+    assert require_single_exit_economics_cohort([]) == LEGACY_DIAGNOSTIC_COHORT
 
 
 def test_economics_tombstone_raises():

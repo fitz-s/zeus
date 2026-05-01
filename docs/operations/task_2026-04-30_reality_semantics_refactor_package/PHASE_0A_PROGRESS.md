@@ -416,6 +416,39 @@ Known verification gap:
   after roughly one minute. Focused F-09 runtime cases and the related command
   recovery/provenance/harvester suites passed.
 
+## 2026-05-01 Packet 4 - F-10 Report/Replay Cohort Gates
+
+Implemented the report/replay gate through the admitted script surfaces only.
+No `src/backtest/**` code, schema apply, production DB mutation, live venue side
+effect, source-routing change, or strategy-promotion action was performed.
+Topology classifies this as T4; the user provided explicit code-packet go, the
+apply guard is "dry-run tests only, no live/prod/schema action", and rollback is
+a clean git revert.
+
+Architecture outcome:
+
+- `profit_validation_replay.py` now classifies recent-exit rows into one
+  economics cohort before replay. It hard-fails mixed legacy/corrected cohorts
+  and rejects corrected rows missing fill/cost-basis authority.
+- Corrected replay rows use filled notional and average fill price instead of
+  `entry_price`/`size_usd`; legacy rows remain diagnostic and may use the old
+  fallback path.
+- `equity_curve.py` hard-fails mixed pricing-semantics cohorts and emits
+  cohort metadata plus an explicit `promotion_grade` boolean.
+- `tests/test_backtest_skill_economics.py` now locks the mixed-cohort and
+  incomplete-corrected-row failure modes.
+
+Verification:
+
+- `python3 -m pytest tests/test_backtest_skill_economics.py::test_profit_replay_hard_fails_mixed_pricing_semantics_cohorts tests/test_backtest_skill_economics.py::test_profit_replay_rejects_incomplete_corrected_economics_row tests/test_backtest_skill_economics.py::test_equity_curve_reports_single_corrected_cohort -q` -> 3 passed
+- `python3 -m pytest tests/test_backtest_skill_economics.py -q` -> 16 passed
+- `python3 -m compileall -q scripts/profit_validation_replay.py scripts/equity_curve.py tests/test_backtest_skill_economics.py`
+- `python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-10 report and replay cohort hard gates closeout: profit_validation_replay and equity_curve hard-fail mixed corrected/legacy economics cohorts using recent_exits pricing semantics/fill authority fields; no src/backtest edit, no schema apply, no production DB mutation, no live venue side effects; explicit operator-go for code packet only, dry-run tests only, rollback is git revert" --files scripts/profit_validation_replay.py scripts/equity_curve.py tests/test_backtest_skill_economics.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted T4 with operator-go/dry-run/apply-guard/rollback requirements
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_backtest_skill_economics.py scripts/profit_validation_replay.py scripts/equity_curve.py --json` -> ok
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files scripts/profit_validation_replay.py scripts/equity_curve.py tests/test_backtest_skill_economics.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files scripts/profit_validation_replay.py scripts/equity_curve.py tests/test_backtest_skill_economics.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `git diff --check -- scripts/profit_validation_replay.py scripts/equity_curve.py tests/test_backtest_skill_economics.py`
+
 ## Not Completed
 
 This slice does not implement runtime rewiring. Legacy executor limit

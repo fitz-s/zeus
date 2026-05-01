@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Purpose: Replay recent exits as a diagnostic-only shadow attribution report.
+# Reuse: Run after report/replay cohort gate or exit-economics field changes.
+
 import json
 import logging
 import sqlite3
@@ -18,7 +23,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db import get_trade_connection_with_world as get_connection
-from src.state.portfolio import load_portfolio, Position
+from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    load_portfolio,
+    Position,
+)
 from src.config import state_path
 from src.contracts.edge_context import EdgeContext
 from src.contracts.semantic_types import EntryMethod
@@ -26,6 +41,78 @@ from src.execution.exit_triggers import evaluate_exit_triggers
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+LEGACY_DIAGNOSTIC_COHORT = "legacy_diagnostic"
+CORRECTED_ECONOMICS_COHORT = CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+_FILL_GRADE_AUTHORITIES = frozenset({
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+})
+_ENTRY_GRADE_AUTHORITIES = frozenset({
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+})
+
+
+def _positive_number(value) -> bool:
+    try:
+        return float(value or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_corrected_exit_record(exit_record: dict) -> bool:
+    return (
+        exit_record.get("pricing_semantics_version")
+        == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+        or exit_record.get("corrected_executable_economics_eligible") is True
+    )
+
+
+def _corrected_exit_record_ready(exit_record: dict) -> bool:
+    return (
+        exit_record.get("entry_economics_authority") in _ENTRY_GRADE_AUTHORITIES
+        and exit_record.get("fill_authority") in _FILL_GRADE_AUTHORITIES
+        and _positive_number(exit_record.get("shares_filled"))
+        and _positive_number(exit_record.get("filled_cost_basis_usd"))
+        and (
+            bool(exit_record.get("entry_cost_basis_hash"))
+            or bool(exit_record.get("execution_cost_basis_version"))
+        )
+    )
+
+
+def exit_economics_cohort(exit_record: dict) -> str:
+    if not _is_corrected_exit_record(exit_record):
+        return LEGACY_DIAGNOSTIC_COHORT
+    if not _corrected_exit_record_ready(exit_record):
+        raise ValueError(
+            "corrected exit row is missing fill/cost-basis authority fields"
+        )
+    return CORRECTED_ECONOMICS_COHORT
+
+
+def require_single_exit_economics_cohort(exit_records: list[dict]) -> str:
+    cohorts = {exit_economics_cohort(row) for row in exit_records}
+    if len(cohorts) > 1:
+        raise ValueError(
+            "mixed pricing semantics cohorts are forbidden in profit replay: "
+            f"{sorted(cohorts)}"
+        )
+    return next(iter(cohorts), LEGACY_DIAGNOSTIC_COHORT)
+
+
+def _corrected_entry_economics(exit_record: dict) -> tuple[float, float] | None:
+    if exit_economics_cohort(exit_record) != CORRECTED_ECONOMICS_COHORT:
+        return None
+    shares = float(exit_record["shares_filled"])
+    filled_cost = float(exit_record["filled_cost_basis_usd"])
+    avg_fill = float(exit_record.get("entry_price_avg_fill") or 0.0)
+    entry_price = avg_fill if avg_fill > 0 else filled_cost / shares
+    return entry_price, filled_cost
+
 
 def run_profit_validation_replay():
     """Phase 3.1: Validate new Phase 2 semantic boundaries using historical trades."""
@@ -38,6 +125,7 @@ def run_profit_validation_replay():
 
     portfolio = load_portfolio()
     conn = get_connection()
+    economics_cohort = require_single_exit_economics_cohort(portfolio.recent_exits)
     
     logger.info(f"Loaded {len(portfolio.recent_exits)} recent exits for historical simulation.")
     
@@ -55,6 +143,7 @@ def run_profit_validation_replay():
         
         "gross_delta_all_analyzed": 0.0,
         "gross_delta_high_confidence_only": 0.0,
+        "economics_cohort": economics_cohort,
     }
     
     for exit_record in portfolio.recent_exits:
@@ -86,8 +175,12 @@ def run_profit_validation_replay():
         stats["tick_covered"] += 1
         
         # 3-tier field recovery: recent_exits (new) → trade_decisions DB → skip
-        real_entry_price = exit_record.get("entry_price")
-        real_size = exit_record.get("size_usd")
+        corrected_economics = _corrected_entry_economics(exit_record)
+        if corrected_economics is not None:
+            real_entry_price, real_size = corrected_economics
+        else:
+            real_entry_price = exit_record.get("entry_price")
+            real_size = exit_record.get("size_usd")
         real_ci_width = exit_record.get("entry_ci_width")
         real_prob = exit_record.get("p_posterior")
         real_method = exit_record.get("entry_method")
@@ -100,7 +193,11 @@ def run_profit_validation_replay():
         # entry_ci_width=0.0 is valid (means no CI band), entry_method can default.
         if all(v not in (None, "") for v in [real_entry_price, real_size, real_prob]) and real_entry_price > 0 and real_size > 0:
             is_high_confidence = True
-            field_source = "recent_exits"
+            field_source = (
+                "recent_exits_corrected_fill"
+                if corrected_economics is not None
+                else "recent_exits"
+            )
             real_ci_width = real_ci_width if real_ci_width is not None else 0.0
             real_method = real_method or "ens_member_counting"
             stats["high_confidence_analyzed"] += 1
@@ -245,6 +342,7 @@ def run_profit_validation_replay():
     logger.info(f"V2 Early-Cuts Triggered: {stats['v2_early_cut_losses']}")
     logger.info(f"Gross Advantage vs V1 Path (All): ${stats['gross_delta_all_analyzed']:.2f}")
     logger.info(f"Gross Advantage vs V1 Path (High Conf): ${stats['gross_delta_high_confidence_only']:.2f}")
+    logger.info(f"Economics Cohort: {stats['economics_cohort']}")
 
     # Generate Report File
     report_path = PROJECT_ROOT / "docs" / "reports" / "shadow_replay_report.md"
@@ -258,6 +356,7 @@ def run_profit_validation_replay():
             f.write(f"- High Confidence Analyzed: {stats['high_confidence_analyzed']}\n")
             f.write(f"- Low Confidence Reconstructed: {stats['low_confidence_reconstructed']}\n")
             f.write(f"- Fully Skipped Missing Attributes: {stats['fully_skipped']}\n")
+            f.write(f"- Economics Cohort: {stats['economics_cohort']}\n")
             f.write(f"\n## Metrics of Decision Output\n")
             f.write(f"- V1 False-Stops Nullified (Position recovered): {stats['v1_false_stops']}\n")
             f.write(f"- V2 Pre-emptive Loss Mitigations (Cut ahead of bleed): {stats['v2_early_cut_losses']}\n")
