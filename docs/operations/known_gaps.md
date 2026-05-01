@@ -1207,3 +1207,18 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 (D5 / D6 / Day0-canonical-event closed entries archived to
 `docs/to-do-list/known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
 Fragmentation (D1–D6)".)
+
+---
+
+## Deferred items (from open_work_items.md, consolidated 2026-05-01)
+
+### [DEFERRED] Two-System Independence Phase 4
+
+Revisit due ~2026-06-26 (8 weeks from Phase 3 completion 2026-05-01).
+Divergent strategy restart-policy needs may require a process split — escalate
+to architect when the window opens.
+
+### [LOW] Backfill script unification
+
+18 `scripts/backfill_*.py` scripts remain ad-hoc. No live trading impact.
+Scope a unification package when convenient.

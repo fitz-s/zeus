@@ -87,7 +87,6 @@ make a surface default-read unless `current_state.md` routes it.
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
-| `open_work_items.md` | active support | Consolidated tail items from archived April 2026 task packets; genuine open work only |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
