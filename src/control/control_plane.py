@@ -7,7 +7,7 @@ Narrow-by-intent: each command does exactly one thing.
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from src.config import state_path
@@ -19,6 +19,14 @@ from src.state.db import (
     query_control_override_state,
     upsert_control_override,
 )
+
+# Live-blockers 2026-05-01: auto-pause overrides default to a 15-minute
+# expiry so a single transient API/DB failure cannot permanently lock out
+# entries. If the underlying issue persists, the next cycle will re-pause;
+# if it was transient, entries auto-resume after the window. Operator
+# overrides (issued_by="control_plane") are unaffected — they pass an
+# explicit ``effective_until`` (or ``None`` for indefinite).
+AUTO_PAUSE_DEFAULT_EXPIRY_SECONDS = 15 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +141,7 @@ def _auto_pause_tombstone_path():
 
 def _clear_auto_pause_tombstone() -> None:
     """Clear the fail-closed tombstone after an explicit operator resume."""
+    import os
     try:
         os.remove(_auto_pause_tombstone_path())
     except FileNotFoundError:
@@ -142,30 +151,112 @@ def _clear_auto_pause_tombstone() -> None:
 
 
 
-def pause_entries(reason_code: str) -> None:
+AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
+
+
+def _has_active_auto_pause_override(
+    conn,
+    *,
+    reason_code: str,
+    now_iso: str,
+) -> bool:
+    """Return True iff the auto-pause override is already active for this reason.
+
+    Idempotency guard: when ``pause_entries`` fires three times in ~100ms (the
+    triplet pattern observed in production logs), the second and third calls
+    should not insert duplicate history rows. The check is keyed on
+    (override_id, issued_by="system_auto_pause", reason, effective_until > now).
+    Any failure to query is treated as "not active" so we still write — better
+    to over-record than to silently lose a pause.
+    """
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT issued_by, reason, value, effective_until
+            FROM control_overrides
+            WHERE override_id = ?
+            """,
+            (AUTO_PAUSE_OVERRIDE_ID,),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    try:
+        issued_by = row["issued_by"]
+        existing_reason = row["reason"]
+        value = row["value"]
+        effective_until = row["effective_until"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if str(issued_by or "") != "system_auto_pause":
+        return False
+    if str(existing_reason or "") != reason_code:
+        return False
+    if str(value or "").strip().lower() not in {"true", "1", "yes"}:
+        return False
+    if effective_until is None:
+        return True
+    return str(effective_until) > now_iso
+
+
+def pause_entries(
+    reason_code: str,
+    *,
+    effective_until: str | None = None,
+    issued_by: str = "system_auto_pause",
+) -> None:
     """Auto-pause entries after an unhandled exception in the entry path.
 
     Sets entries_paused and records the machine-readable reason_code in
     _control_state, then emits an alert. Also persists to DB so the pause
-    survives a daemon restart. Operator must explicitly resume to re-enable.
+    survives a daemon restart.
+
+    Live-blockers 2026-05-01:
+    - When ``effective_until`` is omitted AND ``issued_by`` is the auto-pause
+      writer, default to ``now + AUTO_PAUSE_DEFAULT_EXPIRY_SECONDS`` so the
+      pause auto-resumes after the window if the issue was transient. The
+      next cycle will re-pause (and re-arm the streak) if the failure
+      persists. Manual operator pauses (``issued_by="control_plane"``) are
+      indefinite by default — caller passes ``effective_until`` explicitly.
+    - Idempotent on (override_id, reason_code, currently active): if the
+      same auto-pause is already active in the DB we skip the duplicate
+      history insert and just refresh in-memory state.
     """
     _control_state["entries_paused"] = True
-    _control_state["entries_pause_source"] = "auto_exception"
+    _control_state["entries_pause_source"] = "auto_exception" if issued_by == "system_auto_pause" else "manual_command"
     _control_state["entries_pause_reason"] = reason_code
     alert_auto_pause(reason_code)
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    if effective_until is None and issued_by == "system_auto_pause":
+        effective_until = (
+            now + timedelta(seconds=AUTO_PAUSE_DEFAULT_EXPIRY_SECONDS)
+        ).isoformat()
     # Persist so a daemon restart does not silently lose the pause.
     try:
         conn = get_world_connection()
+        if _has_active_auto_pause_override(conn, reason_code=reason_code, now_iso=now_iso):
+            logger.debug(
+                "pause_entries idempotent skip — override already active for reason=%s",
+                reason_code,
+            )
+            conn.commit()
+            conn.close()
+            return
         upsert_control_override(
             conn,
-            override_id="control_plane:global:entries_paused",
+            override_id=AUTO_PAUSE_OVERRIDE_ID,
             target_type="global",
             target_key="entries",
             action_type="gate",
             value="true",
-            issued_by="system_auto_pause",
-            issued_at=datetime.now(timezone.utc).isoformat(),
+            issued_by=issued_by,
+            issued_at=now_iso,
             reason=reason_code,
+            effective_until=effective_until,
             precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
         )
         conn.commit()
