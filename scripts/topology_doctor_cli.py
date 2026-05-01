@@ -189,8 +189,24 @@ def _print_route_card(card: dict[str, Any]) -> None:
     if not card:
         return
     print("route_card:")
-    for key in ("schema_version", "admission_status", "risk_tier", "next_action"):
+    for key in (
+        "schema_version",
+        "admission_status",
+        "risk_tier",
+        "dominant_driver",
+        "persistence_target",
+        "merge_conflict_scan",
+        "next_action",
+        "suggested_next_command",
+    ):
+        if card.get(key) is None:
+            continue
         print(f"- {key}: {card.get(key)}")
+    if card.get("merge_evidence_required"):
+        evidence = card["merge_evidence_required"]
+        print(f"- merge_evidence_required: {evidence.get('required')}")
+        if evidence.get("reason"):
+            print(f"  reason: {evidence.get('reason')}")
     if card.get("admitted_files"):
         print("- admitted_files:")
         for path in card["admitted_files"]:
@@ -212,6 +228,20 @@ def _print_route_card(card: dict[str, Any]) -> None:
         print("- expansion_hints:")
         for hint in card["expansion_hints"]:
             print(f"  - {hint}")
+    if card.get("why_not_admitted"):
+        print("- why_not_admitted:")
+        for reason in card["why_not_admitted"]:
+            print(f"  - {reason}")
+    if card.get("blocked_file_reasons"):
+        print("- blocked_file_reasons:")
+        for path, reasons in card["blocked_file_reasons"].items():
+            print(f"  {path}:")
+            for reason in reasons:
+                print(f"    - {reason}")
+    if card.get("provenance_notes"):
+        print("- provenance_notes:")
+        for note in card["provenance_notes"]:
+            print(f"  - {note}")
 
 
 def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:

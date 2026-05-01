@@ -532,6 +532,14 @@ files:
     downstream:
     - src/execution/executor.py
     - src/engine/cycle_runner.py
+  src/control/freshness_gate.py:
+    zone: K1_governance
+    authority_role: runtime_freshness_guard
+    why: Evaluates boot and mid-run runtime freshness so stale source inputs fail closed before evaluation or live-side work.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/engine/cycle_runner.py
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard

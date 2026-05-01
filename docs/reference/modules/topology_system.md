@@ -32,7 +32,14 @@ Topology has five interacting layers:
 - Machine manifests should stay compact; module books carry explanation.
 - Global health drift must remain visible even when a scoped route is clear.
 - Agent-runtime output should reduce decisions, not add ceremony: route cards
-  summarize admission, risk tier, next action, and gate budget before appendices.
+  summarize admission, risk tier, dominant driver, next action, safe next files,
+  and gate budget before appendices.
+- Route cards are typed runtime decision packets, not prose summaries. When a
+  route is not admitted, expose `why_not_admitted` and
+  `suggested_next_command`; when artifact lifecycle matters, expose
+  `persistence_target`; when merge protocol matters, expose
+  `merge_evidence_required`; when manifest/path provenance matters, expose
+  `provenance_notes`.
 - Operation-end feedback should create a positive loop without becoming a new
   gate: agents capture context recovery, Zeus improvement insights, and
   topology helped/blocked notes in the final response or an already-required
