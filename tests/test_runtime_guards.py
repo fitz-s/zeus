@@ -370,6 +370,43 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
     assert edge_ctx.p_posterior == pytest.approx(0.63)
 
 
+def test_refresh_position_support_topology_stale_blocks_exit_probability(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+
+    def _stale_refresh(pos, *, conn, city, target_d):
+        pos.applied_validations = ["day0_observation", "fresh_ens_fetch", "support_topology_stale"]
+        return pos.p_posterior, pos, False
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _stale_refresh)
+
+    pos = _position(
+        state="day0_window",
+        entry_method="ens_member_counting",
+        selected_method="ens_member_counting",
+        entry_price=0.44,
+        p_posterior=0.58,
+        last_monitor_prob=0.41,
+        edge=0.14,
+        entry_ci_width=0.02,
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(
+        None,
+        _MonitorQuoteSplitClob(bid=0.40, ask=0.50, bid_size=100.0, ask_size=100.0),
+        pos,
+    )
+
+    assert pos.last_monitor_prob == pytest.approx(0.41)
+    assert pos.last_monitor_prob_is_fresh is False
+    assert "support_topology_stale" in pos.applied_validations
+    assert not np.isfinite(edge_ctx.p_posterior)
+    assert not np.isfinite(edge_ctx.forward_edge)
+    assert not np.isfinite(edge_ctx.confidence_band_lower)
+
+
 def _edge() -> BinEdge:
     return BinEdge(
         bin=Bin(low=39, high=40, label="39-40°F", unit="F"),
@@ -383,6 +420,7 @@ def _edge() -> BinEdge:
         entry_price=0.35,
         p_value=0.02,
         vwmp=0.35,
+        support_index=0,
     )
 
 
@@ -3648,6 +3686,165 @@ def test_monitor_ens_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "alpha_posterior" in applied
 
 
+def test_monitor_ens_refresh_marks_stale_when_support_topology_unavailable(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="61-62°F",
+        unit="F",
+        market_id="m-center",
+        direction="buy_yes",
+        p_posterior=0.37,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: {
+            "members_hourly": np.ones((51, 24)),
+            "times": ["2026-04-01T00:00:00Z"] * 24,
+            "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+            "forecast_source_role": "monitor_fallback",
+            "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+            "n_members": 51,
+        },
+    )
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+
+    class DummyEnsembleSignal:
+        member_maxes = np.ones(51)
+        member_extrema = np.ones(51)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(monitor_refresh, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("support topology incomplete")),
+    )
+
+    posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=None,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert "support_topology_stale" in applied
+    assert "forecast_source_id:openmeteo_ensemble_ecmwf_ifs025" in applied
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+
+
+def test_monitor_ens_refresh_marks_stale_when_support_topology_authority_stale(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="61-62°F",
+        unit="F",
+        market_id="m-center",
+        direction="buy_yes",
+        p_posterior=0.37,
+        entered_at=None,
+        target_date="2026-04-01",
+        entry_model_agreement="AGREE",
+        selected_method="ens_member_counting",
+        entry_method="ens_member_counting",
+    )
+    city = types.SimpleNamespace(
+        name="NYC",
+        lat=40.7772,
+        timezone="America/New_York",
+        cluster="NYC",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KLGA",
+    )
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "fetch_ensemble",
+        lambda *args, **kwargs: {
+            "members_hourly": np.ones((51, 24)),
+            "times": ["2026-04-01T00:00:00Z"] * 24,
+            "fetch_time": datetime(2026, 4, 1, 12, tzinfo=timezone.utc),
+            "source_id": "openmeteo_ensemble_ecmwf_ifs025",
+            "forecast_source_role": "monitor_fallback",
+            "degradation_level": "DEGRADED_FORECAST_FALLBACK",
+            "n_members": 51,
+        },
+    )
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+    monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
+
+    class DummyEnsembleSignal:
+        member_maxes = np.ones(51)
+        member_extrema = np.ones(51)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(monitor_refresh, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(monitor_refresh, "get_last_scan_authority", lambda: "STALE")
+    monkeypatch.setattr(
+        monitor_refresh,
+        "get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": "m-low",
+                "title": "Will the high temperature in NYC be 60°F or below?",
+                "range_low": None,
+                "range_high": 60,
+            },
+            {
+                "market_id": "m-center",
+                "title": "Will the high temperature in NYC be 61-62°F?",
+                "range_low": 61,
+                "range_high": 62,
+            },
+            {
+                "market_id": "m-high",
+                "title": "Will the high temperature in NYC be 63°F or higher?",
+                "range_low": 63,
+                "range_high": None,
+            },
+        ],
+    )
+
+    posterior, applied = monitor_refresh._refresh_ens_member_counting(
+        position=position,
+        current_p_market=0.50,
+        conn=None,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert posterior == pytest.approx(position.p_posterior)
+    assert "support_topology_stale" in applied
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+
+
 def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     from src.engine import monitor_refresh
 
@@ -6094,6 +6291,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
             entry_price=0.35,
             p_value=0.02,
             vwmp=0.35,
+            support_index=0,
         ),
         BinEdge(
             bin=Bin(low=41, high=None, label="41°F or higher", unit="F"),
@@ -6107,6 +6305,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
             entry_price=0.45,
             p_value=0.03,
             vwmp=0.45,
+            support_index=1,
         ),
     ]
 
@@ -6265,6 +6464,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
         entry_price=0.35,
         p_value=0.02,
         vwmp=0.35,
+        support_index=0,
     )
 
     class DummyAnalysis:
@@ -7286,6 +7486,87 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     assert legacy_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
     assert legacy_row["authority"] == "VERIFIED"
     assert legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
+
+
+def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
+    ens = type(
+        "DummyEns",
+        (),
+        {
+            "member_extrema": np.array([40.0, 41.0, 42.0]),
+            "spread_float": lambda self: 1.25,
+            "is_bimodal": lambda self: False,
+            "temperature_metric": HIGH_LOCALDAY_MAX,
+        },
+    )()
+    ens_result = {
+        "issue_time": None,
+        "first_valid_time": datetime(2026, 1, 14, 5, 0, tzinfo=timezone.utc),
+        "fetch_time": fetch_time,
+        "model": "ecmwf_ifs025",
+    }
+    snapshot_id = evaluator_module._store_ens_snapshot(
+        conn,
+        NYC,
+        "2026-01-15",
+        ens,
+        ens_result,
+    )
+    topology = {
+        "schema_version": 1,
+        "topology_status": "complete",
+        "unit": "F",
+        "support_count": 3,
+        "executable_count": 2,
+        "executable_hypothesis_count": 2,
+        "executable_mask": [False, True, True],
+        "skipped_support_indexes": [0],
+        "market_fusion_status_by_support_index": [
+            {"support_index": 0, "status": "disabled_non_executable"},
+            {"support_index": 1, "status": "pending_executable_quote"},
+            {"support_index": 2, "status": "pending_executable_quote"},
+        ],
+        "requires_atomic_topology": True,
+        "support": [
+            {"support_index": 0, "label": "60°F or below", "executable": False},
+            {"support_index": 1, "label": "61-62°F", "executable": True},
+            {"support_index": 2, "label": "63°F or higher", "executable": True},
+        ],
+    }
+
+    assert evaluator_module._store_snapshot_p_raw(
+        conn,
+        snapshot_id,
+        np.array([0.2, 0.3, 0.5]),
+        p_raw_topology=topology,
+    )
+    row = conn.execute(
+        """
+        SELECT p_raw_json, provenance_json
+        FROM ensemble_snapshots_v2
+        WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    legacy_row = conn.execute(
+        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = ?",
+        (snapshot_id,),
+    ).fetchone()
+    conn.close()
+
+    assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["writer"] == "evaluator._store_ens_snapshot"
+    assert provenance["p_raw_topology"]["executable_mask"] == [False, True, True]
+    assert provenance["p_raw_topology"]["skipped_support_indexes"] == [0]
+    assert provenance["p_raw_topology"]["executable_hypothesis_count"] == 2
+    assert len(provenance["p_raw_topology"]["market_fusion_status_by_support_index"]) == 3
+    assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
 
 def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):

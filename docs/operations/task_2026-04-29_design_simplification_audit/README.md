@@ -37,6 +37,9 @@ packet still does not authorize live entries.
 - `probability_execution_split_spec.md`: critic-approved sequencing spec for
   separating market-prior probability, executable token cost, trade hypothesis
   economics, and reporting cohorts; evidence only, not live authorization.
+- `missing_shoulder_support_layer_plan.md`: revised plan for separating
+  contract support topology from executable weather-bin surfaces; evidence
+  only, not live authorization.
 
 ## Audit Method
 

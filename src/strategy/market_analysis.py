@@ -146,6 +146,7 @@ class MarketAnalysis:
         market_complete: bool = True,
         p_market_no: np.ndarray | None = None,
         buy_no_quote_available: np.ndarray | None = None,
+        executable_mask: np.ndarray | None = None,
         posterior_mode: PosteriorMode = MODEL_ONLY_POSTERIOR_MODE,
         market_prior: MarketPriorDistribution | None = None,
         allow_legacy_quote_prior: bool = False,
@@ -166,6 +167,12 @@ class MarketAnalysis:
             "buy_no_quote_available",
             buy_no_quote_available,
             expected_bins,
+        )
+        executable_arr = _optional_bool_vector("executable_mask", executable_mask, expected_bins)
+        self.executable_mask = (
+            np.ones(expected_bins, dtype=bool)
+            if executable_arr is None
+            else executable_arr
         )
         self.market_complete = market_complete
         self._alpha = alpha
@@ -256,10 +263,17 @@ class MarketAnalysis:
         if self.buy_no_quote_available is None:
             return False
         if bin_idx is None:
-            return bool(np.any(self.buy_no_quote_available))
+            return bool(np.any(self.buy_no_quote_available & self.executable_mask))
         if bin_idx < 0 or bin_idx >= len(self.bins):
             raise IndexError(f"bin_idx out of range: {bin_idx}")
+        if not self.is_executable_bin(bin_idx):
+            return False
         return bool(self.buy_no_quote_available[bin_idx])
+
+    def is_executable_bin(self, bin_idx: int) -> bool:
+        if bin_idx < 0 or bin_idx >= len(self.bins):
+            raise IndexError(f"bin_idx out of range: {bin_idx}")
+        return bool(self.executable_mask[bin_idx])
 
     def buy_no_market_price(self, bin_idx: int) -> float:
         """Return executable NO-side entry/VWMP price for one bin."""
@@ -298,12 +312,14 @@ class MarketAnalysis:
         edges = []
 
         for i, b in enumerate(self.bins):
+            if not self.is_executable_bin(i):
+                continue
             # Buy YES direction: edge = p_posterior - p_market
             edge_yes = float(self.p_posterior[i] - self.p_market[i])
             if edge_yes > 0:
                 ci_lo, ci_hi, p_val = self._bootstrap_bin(i, n_bootstrap)
                 if ci_lo > 0:
-                    edges.append(BinEdge(
+                    edge = BinEdge(
                         bin=b,
                         direction="buy_yes",
                         edge=edge_yes,
@@ -316,7 +332,9 @@ class MarketAnalysis:
                         p_value=p_val,
                         vwmp=float(self.p_market[i]),
                         forward_edge=edge_yes,
-                    ))
+                        support_index=i,
+                    )
+                    edges.append(edge)
 
             # Buy NO direction: payoff probability is complement; executable
             # entry price must come from the native NO side when available.
@@ -329,7 +347,7 @@ class MarketAnalysis:
                 if edge_no > 0:
                     ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
                     if ci_lo > 0:
-                        edges.append(BinEdge(
+                        edge = BinEdge(
                             bin=b,
                             direction="buy_no",
                             edge=edge_no,
@@ -342,7 +360,9 @@ class MarketAnalysis:
                             p_value=p_val,
                             vwmp=p_market_no,
                             forward_edge=edge_no,
-                        ))
+                            support_index=i,
+                        )
+                        edges.append(edge)
 
         return edges
 
@@ -378,6 +398,8 @@ class MarketAnalysis:
         """
         if self.p_market is None:
             raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
+        if not self.is_executable_bin(bin_idx):
+            raise ValueError(f"buy_yes bootstrap requires executable support index {bin_idx}")
         cache_key = ("yes", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]

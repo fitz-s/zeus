@@ -49,6 +49,16 @@ def _buy_no_market_price_for_bin(analysis: Any, idx: int) -> float:
     return 1.0 - float(analysis.p_market[idx])
 
 
+def _is_executable_bin(analysis: Any, idx: int) -> bool:
+    predicate = getattr(analysis, "is_executable_bin", None)
+    if callable(predicate):
+        return bool(predicate(idx))
+    mask = getattr(analysis, "executable_mask", None)
+    if mask is not None:
+        return bool(mask[idx])
+    return True
+
+
 def scan_full_hypothesis_family(
     analysis: Any,
     *,
@@ -63,6 +73,8 @@ def scan_full_hypothesis_family(
     if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
     for idx, bin_obj in enumerate(analysis.bins):
+        if not _is_executable_bin(analysis, idx):
+            continue
         label = _label_for_bin(bin_obj)
 
         edge_yes = float(analysis.p_posterior[idx] - analysis.p_market[idx])
