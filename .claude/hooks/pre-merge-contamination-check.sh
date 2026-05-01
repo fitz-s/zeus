@@ -32,7 +32,7 @@ fi
 # heredoc (e.g. commit message body) mentions merge/pull/etc as text.
 # Trade-off: chained `git status && git merge X` on a single line where the
 # FIRST git command is non-merge will NOT block (rare edge case).
-FIRST_GIT=$(printf '%s' "$COMMAND" | head -1 | grep -oE 'git[[:space:]]+[a-z-]+' | head -1)
+FIRST_GIT=$(printf '%s' "$COMMAND" | head -1 | grep -oE 'git[[:space:]]+[a-z-]+' | head -1 || true)
 case "$FIRST_GIT" in
     "git merge"|"git pull"|"git cherry-pick"|"git rebase"|"git am")
         IS_MERGE=1
