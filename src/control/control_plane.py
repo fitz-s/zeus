@@ -51,6 +51,8 @@ COMMANDS = {
     "request_status",               # Force status_summary write
     "set_strategy_gate",            # Enable/disable individual strategies
     "acknowledge_quarantine_clear", # Explicit operator intent before ignore/non-resurrection
+    "pause_source",                 # Ingest: skip ticks for a named source until cleared
+    "resume_source",                # Ingest: clear pause_source for a named source
 }
 
 
@@ -435,6 +437,18 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             if not _extract_quarantine_token_id(cmd):
                 return False, "missing_token_id"
             return True, ""
+        if name == "pause_source":
+            source_id = str(cmd.get("source") or "")
+            if not source_id:
+                return False, "missing_source"
+            set_pause_source(source_id, paused=True)
+            return True, f"source={source_id} paused"
+        if name == "resume_source":
+            source_id = str(cmd.get("source") or "")
+            if not source_id:
+                return False, "missing_source"
+            set_pause_source(source_id, paused=False)
+            return True, f"source={source_id} resumed"
         return True, ""
     finally:
         if conn is not None:
@@ -600,3 +614,52 @@ def build_quarantine_clear_command(*, token_id: str, condition_id: str = "", not
     if note:
         command["note"] = note
     return command
+
+
+# ---------------------------------------------------------------------------
+# Ingest-side pause_source helpers (design §4.5a, Phase 3)
+# ---------------------------------------------------------------------------
+
+_PAUSE_SOURCE_KEY = "paused_sources"
+
+
+def set_pause_source(source_id: str, paused: bool) -> None:
+    """Write a pause_source / resume_source directive to state/control_plane.json.
+
+    The ingest daemon reads this on each tick via read_ingest_control_state()
+    and skips ticks for a paused source until cleared.
+    """
+    import json
+    import os
+
+    path = CONTROL_PATH
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        data = {}
+
+    paused_sources = data.get(_PAUSE_SOURCE_KEY) or {}
+    if paused:
+        paused_sources[source_id] = True
+    else:
+        paused_sources.pop(source_id, None)
+
+    data[_PAUSE_SOURCE_KEY] = paused_sources
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+    logger.info("set_pause_source: source_id=%s paused=%s", source_id, paused)
+
+
+def read_ingest_control_state() -> dict:
+    """Read control_plane.json and return ingest-relevant directives.
+
+    Returns a dict with key 'paused_sources': set[str] — source IDs
+    currently paused by an operator directive.
+    """
+    data = _load_control_payload()
+    raw = data.get(_PAUSE_SOURCE_KEY) or {}
+    paused: set[str] = {k for k, v in raw.items() if bool(v)}
+    return {"paused_sources": paused}
