@@ -328,3 +328,57 @@ Once Batch 1 + Batch 2 archive completes (D4 resolved), trim
 Visible non-default packet evidence"` list to only the 2 active
 packets and redirect historical entries to this registry. Tracked as
 D5 in `docs/to-do-list/zeus_operations_archive_deferrals_2026-04-24.md`.
+
+---
+
+## Batch 3 — 2026-05-01 workspace cleanup
+
+**Source**: `docs/operations/_archive/` (a git-tracked intermediate staging
+dir created 2026-04-29). Entire contents physically moved to
+`docs/archives/packets/` and removed from git tracking 2026-05-01.
+
+**Packets archived (40 entries)**:
+
+- `task_2026-04-13_remaining_repair_backlog.md` — TIGGE GRIB + source-attestation residual
+- `task_2026-04-19_execution_state_truth_upgrade/` — execution state truth P1/P2 (never implemented)
+- `task_2026-04-23_graph_rendering_integration/` — graph rendering integration
+- `task_2026-04-23_midstream_remediation/` — midstream remediation W1–W5
+- `task_2026-04-25_p2_packet_runtime/` — packet runtime P2
+- `task_2026-04-26_b4_physical_bounds/` — physical bounds antibody
+- `task_2026-04-26_b5_dst_antibody/` — DST antibody
+- `task_2026-04-26_execution_state_truth_p0_hardening/` — execution state P0
+- `task_2026-04-26_execution_state_truth_p1_command_bus/` — command bus
+- `task_2026-04-26_full_data_midstream_fix_plan/` — data midstream fix plan
+- `task_2026-04-26_g10_helper_extraction/` — G10 helper extraction
+- `task_2026-04-26_g10_ingest_scaffold/` — G10 ingest scaffold
+- `task_2026-04-26_g10_nice_to_have_batch/` — G10 nice-to-have
+- `task_2026-04-26_g6_live_safe_strategies/` — G6 live-safe strategies
+- `task_2026-04-26_git_state_cleanup/` — git state cleanup
+- `task_2026-04-26_live_readiness_completion/` — live readiness completion (G1)
+- `task_2026-04-26_polymarket_clob_v2_migration/` — CLOB V2 migration (R3 Z0–Z4, U1)
+- `task_2026-04-26_u1_hk_floor_antibody/` — HK floor antibody
+- `task_2026-04-26_ultimate_plan/` — R3 ultimate plan (primary R3 plan source)
+- `task_2026-04-27_backtest_first_principles_review/` — backtest first-principles review
+- `task_2026-04-27_harness_debate/` — harness debate
+- `task_2026-04-28_contamination_remediation/` — contamination remediation
+- `task_2026-04-28_f11_forecast_issue_time/` — F11 forecast issue time (23,466 rows backfilled)
+- `task_2026-04-28_obs_provenance_preflight/` — observation provenance preflight
+- `task_2026-04-28_settlements_low_backfill/` — settlements LOW backfill (48 rows)
+- `task_2026-04-28_settlements_physical_quantity_migration/` — physical quantity migration
+- `task_2026-04-28_tigge_training_preflight/` — TIGGE training preflight
+- `task_2026-04-28_weighted_platt_precision_weight_rfc/` — weighted Platt RFC (draft only)
+- `task_2026-04-28_wu_observations_empty_provenance_triage/` — WU empty provenance triage
+- `task_2026-04-29_design_simplification_audit/` — design simplification audit
+- `task_2026-04-29_topology_graph_runtime_upgrade/` — topology graph runtime upgrade
+- `task_2026-04-29_topology_profile_resolver_stability/` — topology profile resolver stability
+- `task_2026-04-30_merge_protocol_conflict_first/` — merge protocol (conflict-first)
+- `task_2026-04-30_reality_semantics_refactor_package/` — reality semantics refactor (superseded; pricing semantics cutover landed in main)
+- `task_2026-04-30_source_auto_conversion/` — source auto-conversion (landed in main)
+- `task_2026-04-30_source_contract_merge/` — source contract merge (landed in main)
+- `task_2026-04-30_two_system_independence/` — two-system independence Phases 1–3 (landed)
+- `zeus_topology_system_deep_evaluation_package_2026-04-24/` — topology deep evaluation
+- `zeus_world_data_forensic_audit_package_2026-04-23/` — world data forensic audit
+- `runtime_artifact_inventory.md` — runtime artifact inventory snapshot (stale)
+
+**Batch 3 total**: 40 entries. `docs/operations/_archive/` directory removed
+from git tracking; contents consultable from `docs/archives/packets/`.
