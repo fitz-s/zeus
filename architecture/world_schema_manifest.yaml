@@ -41,13 +41,27 @@ tables:
     semantic: >
       Legacy daily observation table. New reads prefer observation_instants_v2.
       Trading reads via world_view.observations accessor (falls back to this).
+      Stores high/low temperature pairs per (city, target_date, source).
     required_columns:
       - city
       - target_date
-      - max_temp
-      - min_temp
+      - high_temp
+      - low_temp
     optional_columns:
       - source
+      - unit
+      - station_id
+      - fetched_at
+      - raw_value
+      - raw_unit
+      - target_unit
+      - value_type
+      - fetch_utc
+      - local_time
+      - timezone
+      - season
+      - month
+      - authority
       - id
 
   observation_instants:
@@ -89,10 +103,17 @@ tables:
       Daily sunrise/sunset times per city. Used by diurnal curve calculations.
     required_columns:
       - city
-      - date
+      - target_date
     optional_columns:
       - sunrise_utc
       - sunset_utc
+      - sunrise_local
+      - sunset_local
+      - timezone
+      - lat
+      - lon
+      - utc_offset_minutes
+      - dst_active
       - id
 
   data_coverage:
@@ -134,15 +155,23 @@ tables:
 
   forecast_skill:
     semantic: >
-      Per-city Brier/log-loss skill scores for ECMWF ensemble. Used by trading
-      evaluator to assess forecast quality.
+      Per-(city, target_date, source) forecast error records. Used by replay
+      lane to compute Brier/log-loss summaries and by trading evaluator to
+      assess forecast quality. The 'error' column holds signed error
+      (forecast - actual); Brier-class summaries are computed downstream
+      from these rows rather than stored.
     required_columns:
       - city
-      - brier
+      - target_date
+      - source
+      - error
     optional_columns:
-      - log_loss
-      - n_samples
-      - fitted_at
+      - lead_days
+      - forecast_temp
+      - actual_temp
+      - temp_unit
+      - season
+      - available_at
       - id
 
   model_bias:
