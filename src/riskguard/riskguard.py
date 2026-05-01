@@ -21,6 +21,7 @@ from src.riskguard.metrics import (
     evaluate_brier,
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
+from src.runtime import bankroll_provider
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
@@ -178,13 +179,29 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
         return None
     if not isinstance(details, dict):
         return None
-    initial_bankroll = _coerce_finite_float(details.get("initial_bankroll"))
-    total_pnl = _coerce_finite_float(details.get("total_pnl"))
-    effective_bankroll = _coerce_finite_float(details.get("effective_bankroll"))
-    if initial_bankroll is None or total_pnl is None or effective_bankroll is None:
+
+    # P0-A cutover-day guard (followup_design.md §6.2, §7 hazard #3):
+    # Pre-cutover risk_state rows have `effective_bankroll = $150 + total_pnl`
+    # (config-constant fiction). After cutover, `effective_bankroll` is the real
+    # on-chain wallet (~$199). Without this guard, the first 24h after cutover
+    # would compute a fake ~$49 trailing loss = false RED → force_exit_review.
+    # Only rows tagged `bankroll_truth_source="polymarket_wallet"` are eligible
+    # references. Old rows (no field, or any other value) are filtered out.
+    if str(details.get("bankroll_truth_source") or "") != "polymarket_wallet":
         return None
-    expected_equity = round(initial_bankroll + total_pnl, 2)
-    if abs(expected_equity - effective_bankroll) > TRAILING_LOSS_ROW_TOLERANCE_USD:
+
+    initial_bankroll = _coerce_finite_float(details.get("initial_bankroll"))
+    effective_bankroll = _coerce_finite_float(details.get("effective_bankroll"))
+    if initial_bankroll is None or effective_bankroll is None:
+        return None
+
+    # Definition A (followup_design.md §2.1): post-cutover effective_bankroll
+    # equals initial_bankroll (= wallet_balance_usd) — no PnL math added in.
+    # `total_pnl` may still be present in details_json for analytics, but it is
+    # NOT the equity formula. Keep the legacy tolerance check on
+    # (initial_bankroll == effective_bankroll) so a malformed row is rejected.
+    total_pnl = _coerce_finite_float(details.get("total_pnl")) or 0.0
+    if abs(initial_bankroll - effective_bankroll) > TRAILING_LOSS_ROW_TOLERANCE_USD:
         return None
     return {
         "row_id": int(row["id"]),
@@ -700,6 +717,45 @@ def tick() -> RiskLevel:
 
     thresholds = settings["riskguard"]
     portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
+
+    # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
+    # use the on-chain wallet, NOT the config constant routed through
+    # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
+    # cache exists, fail-closed at DATA_DEGRADED rather than silently fall
+    # back to the $150 fiction.
+    bankroll_of_record = bankroll_provider.current()
+    if bankroll_of_record is None:
+        now_ts = datetime.now(timezone.utc).isoformat()
+        risk_conn.execute(
+            """
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+            VALUES (?, NULL, NULL, NULL, ?, ?, 0)
+            """,
+            (
+                RiskLevel.DATA_DEGRADED.value,
+                json.dumps({
+                    "status": "bankroll_provider_unavailable",
+                    "bankroll_truth": {
+                        "source": "polymarket_wallet",
+                        "value_usd": None,
+                        "fetched_at": None,
+                        "staleness_seconds": None,
+                        "cached": False,
+                        "reason": "wallet query failed and no fresh cache",
+                    },
+                }),
+                now_ts,
+            ),
+        )
+        risk_conn.commit()
+        zeus_conn.close()
+        risk_conn.close()
+        logger.error(
+            "RiskGuard tick fail-closed: bankroll_provider unavailable (no fresh cache)",
+        )
+        return RiskLevel.DATA_DEGRADED
+
+    current_bankroll_usd = float(bankroll_of_record.value_usd)
     current_env = get_mode()
 
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
@@ -828,13 +884,19 @@ def tick() -> RiskLevel:
 
     total_pnl = total_realized_pnl + total_unrealized_pnl
 
-    current_total_value = round(portfolio.initial_bankroll + total_pnl, 2)
+    # P0-A correction (followup_design.md §2.1, §7 Definition A):
+    # current_equity = wallet_balance_usd ONLY. Do NOT add total_pnl — realized
+    # PnL is already in the on-chain wallet (cash-settled exits move balance);
+    # adding it again double-counts. Unrealized PnL is paper-only and already
+    # excluded from equity by definition. Was: $150 + total_pnl (fictional).
+    # Now: wallet (real, no math).
+    current_total_value = round(current_bankroll_usd, 2)
     daily_loss_snapshot = _trailing_loss_snapshot(
         risk_conn,
         now=now,
         lookback=timedelta(hours=24),
         current_equity=current_total_value,
-        initial_bankroll=float(portfolio.initial_bankroll),
+        initial_bankroll=current_bankroll_usd,
         threshold_pct=float(thresholds["max_daily_loss_pct"]),
     )
     weekly_loss_snapshot = _trailing_loss_snapshot(
@@ -842,7 +904,7 @@ def tick() -> RiskLevel:
         now=now,
         lookback=timedelta(days=7),
         current_equity=current_total_value,
-        initial_bankroll=float(portfolio.initial_bankroll),
+        initial_bankroll=current_bankroll_usd,
         threshold_pct=float(thresholds["max_weekly_loss_pct"]),
     )
     daily_loss = daily_loss_snapshot["loss"]
@@ -882,7 +944,24 @@ def tick() -> RiskLevel:
             "weekly_loss_source": weekly_loss_snapshot["source"],
             "daily_loss_reference": daily_loss_snapshot["reference"],
             "weekly_loss_reference": weekly_loss_snapshot["reference"],
-            "initial_bankroll": round(portfolio.initial_bankroll, 2),
+            # P0-A: this field is now the on-chain wallet snapshot used as
+            # equity base for trailing-loss math (architect memo §7), NOT the
+            # config-constant fiction the legacy field name implies.
+            "initial_bankroll": round(current_bankroll_usd, 2),
+            # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
+            # this provenance marker tells `_trailing_loss_reference` to skip
+            # pre-cutover rows whose `effective_bankroll` was the $150 fiction.
+            # New rows after this code lands carry "polymarket_wallet"; old rows
+            # have no `bankroll_truth_source` field at all → filtered out.
+            "bankroll_truth_source": "polymarket_wallet",
+            "bankroll_truth": {
+                "value_usd": round(current_bankroll_usd, 2),
+                "source": bankroll_of_record.source,
+                "authority": bankroll_of_record.authority,
+                "fetched_at": bankroll_of_record.fetched_at,
+                "staleness_seconds": round(float(bankroll_of_record.staleness_seconds), 3),
+                "cached": bool(bankroll_of_record.cached),
+            },
             "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
             "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
             "realized_pnl": round(total_realized_pnl, 2),
@@ -1040,8 +1119,24 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     thresholds = settings["riskguard"]
     settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
 
-    current_equity = float(portfolio.bankroll)
-    initial_bankroll = float(portfolio.initial_bankroll)
+    # P0-A second callsite (followup_design.md §2.4, §7 hazard #2):
+    # tick_with_portfolio is the graceful-degradation entry used by callers
+    # that have already loaded a portfolio. Trailing-loss math here was
+    # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
+    # rewire as tick(): on-chain wallet for both equity AND threshold base,
+    # no PnL math added. Fail-closed at DATA_DEGRADED if wallet unreachable.
+    bankroll_of_record = bankroll_provider.current()
+    if bankroll_of_record is None:
+        logger.error(
+            "RiskGuard tick_with_portfolio fail-closed: bankroll_provider unavailable",
+        )
+        zeus_conn.close()
+        risk_conn.close()
+        return RiskLevel.DATA_DEGRADED
+
+    current_bankroll_usd = float(bankroll_of_record.value_usd)
+    current_equity = current_bankroll_usd
+    initial_bankroll = current_bankroll_usd
 
     daily_loss_snapshot = _trailing_loss_snapshot(
         risk_conn,
