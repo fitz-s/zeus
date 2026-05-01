@@ -82,7 +82,7 @@ def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season: None,
+        lambda conn, *, temperature_metric, cluster, season, data_version=None: None,
     )
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
@@ -114,7 +114,7 @@ def test_v2_hit_does_not_log_fallback_warning(monkeypatch, caplog):
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season: _populated_legacy_model(),
+        lambda conn, *, temperature_metric, cluster, season, data_version=None: _populated_legacy_model(),
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -137,7 +137,7 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season: None,
+        lambda conn, *, temperature_metric, cluster, season, data_version=None: None,
     )
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
@@ -174,7 +174,7 @@ def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season: None,
+        lambda conn, *, temperature_metric, cluster, season, data_version=None: None,
     )
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
@@ -206,7 +206,7 @@ def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season: None,
+        lambda conn, *, temperature_metric, cluster, season, data_version=None: None,
     )
     legacy_calls: list[str] = []
     def _record_legacy(conn, bk):

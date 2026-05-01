@@ -790,11 +790,15 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.DATA_DEGRADED
-        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        # Per df5ce642 (RiskGuard cold-start: empty/stale → GREEN): the
+        # cold-start `insufficient_history` case is not a data-integrity
+        # failure — there's no history yet, so no loss can have occurred.
+        # Level is GREEN with explicit `bootstrap_no_history:...` status.
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "degraded:insufficient_history"
-        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
+        assert details["daily_loss_status"] == "bootstrap_no_history:insufficient_history"
+        assert details["daily_loss_level"] == RiskLevel.GREEN.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -860,11 +864,13 @@ class TestRiskGuardTrailingLossSemantics:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.DATA_DEGRADED
-        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        # Per df5ce642: cold-start `no_reference_row` → GREEN with
+        # `bootstrap_no_history:...` status (no history yet means no loss).
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
         assert details["daily_loss"] == pytest.approx(0.0)
-        assert details["daily_loss_status"] == "degraded:no_reference_row"
-        assert details["daily_loss_level"] == RiskLevel.DATA_DEGRADED.value
+        assert details["daily_loss_status"] == "bootstrap_no_history:no_reference_row"
+        assert details["daily_loss_level"] == RiskLevel.GREEN.value
         assert details["daily_loss_source"] == "no_trustworthy_reference_row"
         assert details["daily_loss_reference"] is None
 
@@ -910,7 +916,10 @@ class TestRiskGuardTrailingLossSemantics:
         details = json.loads(row["details_json"])
 
         assert details["daily_loss"] == pytest.approx(2.0)
-        assert details["daily_loss_status"] == "stale_reference"
+        # Per df5ce642 (cold-start follow-up): out-of-window stale row →
+        # `bootstrap_stale_reference` (not bare `stale_reference`) so
+        # observability distinguishes "history but stale" from fresh deploy.
+        assert details["daily_loss_status"] == "bootstrap_stale_reference"
         assert details["daily_loss_source"] == "risk_state_history"
         assert details["daily_loss_reference"]["row_id"] == stale_reference_id
 

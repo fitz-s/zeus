@@ -101,7 +101,7 @@ def _ensure_snapshot(conn, *, token_id: str) -> dict:
                 sports_start_at=None,
                 min_tick_size=Decimal("0.01"),
                 min_order_size=Decimal("0.01"),
-                fee_details={},
+                fee_details={"fee_rate_bps": 0},  # Minimal fee_details so executable_snapshot_gate clears; tests exercise venue-error matrix, not snapshot validation.
                 token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
                 rfqe=None,
                 neg_risk=False,
