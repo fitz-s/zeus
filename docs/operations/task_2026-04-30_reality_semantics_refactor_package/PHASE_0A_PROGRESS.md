@@ -20,6 +20,26 @@ Additional completed slice: buy_no exit quote split.
 - no lifecycle, state, config, schema, venue, or live side-effect surface was
   changed in this slice
 
+Additional completed slice: state-owned buy_no exit quote split.
+
+- expanded the pricing-semantics topology profile narrowly to admit
+  `src/state/portfolio.py` plus `tests/test_hold_value_exit_costs.py` for the
+  Phase I/J state-owned exit quote split
+- `Position._buy_no_exit()` now accepts held-token `best_bid` explicitly and
+  uses it for buy_no EV sell value, fee/time cost, and correlation-crowding
+  cost inputs
+- `current_market_price` remains the probability/forward-edge input; it is no
+  longer reused as executable sell proceeds inside the state-owned buy_no exit
+  gate
+- direct state tests prove both directions: high `current_market_price` cannot
+  force an exit when held-token `best_bid` is uneconomic, and low
+  `current_market_price` cannot block an exit when held-token `best_bid` beats
+  hold value
+- missing held-token `best_bid` now fails closed for both Day0 and consecutive
+  buy_no reversal EV gates instead of bypassing executable-quote authority
+- no lifecycle grammar, projection, reconciliation, DB write path, schema,
+  config, venue, or live side-effect surface was changed
+
 Additional completed slice: runtime corrected live gate.
 
 - added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
@@ -105,6 +125,18 @@ Passing checks:
 - `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_runtime_guards.py --json`
 - `python scripts/topology_doctor.py --planning-lock --changed-files src/execution/exit_triggers.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/execution/exit_triggers.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_routes_to_refactor_profile tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_admits_state_owned_exit_quote_split` -> 3 passed
+- `python scripts/digest_profiles_export.py --check`
+- `python scripts/topology_doctor.py --schema`
+- `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover Phase I state-owned buy_no exit quote split: Position._buy_no_exit should use held-token best_bid/exit quote instead of current_market_price probability proxy in EV gate; tests only; no schema, no lifecycle grammar, no DB write path, no live side effects" --files src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
+- `python -m pytest tests/test_hold_value_exit_costs.py::TestPortfolioExitIntegration::test_buy_no_edge_exit_requires_best_bid_for_ev_gate tests/test_hold_value_exit_costs.py::TestPortfolioExitIntegration::test_buy_no_day0_exit_requires_best_bid_for_ev_gate tests/test_hold_value_exit_costs.py -q` -> 40 passed
+- `python -m pytest tests/test_hold_value_exit_costs.py tests/test_live_safety_invariants.py tests/test_day0_exit_gate.py tests/test_runtime_guards.py tests/test_churn_defense.py tests/test_lifecycle.py tests/test_entry_exit_symmetry.py tests/test_instrument_invariants.py -q` -> 362 passed, 3 skipped
+- `python -m compileall -q src/state/portfolio.py tests/test_hold_value_exit_costs.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_hold_value_exit_costs.py tests/test_digest_profile_matching.py --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover Phase I state-owned buy_no exit quote split closeout after critic blocker fix: Position._buy_no_exit fails closed without held-token best_bid and uses best_bid for buy_no EV gate; no schema, no lifecycle grammar, no DB write path, no live side effects" --files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
+- `git diff --check`
 
 Known adjacent failure observed outside the buy_no quote split:
 
@@ -119,6 +151,14 @@ Review gates:
 - critic pass for commit `d07d944`: PASS on default-off corrected live gate,
   fail-closed shadow handling, no config promotion, no cycle_runner injection,
   and no live/prod side effects
+- critic pass for state-owned buy_no exit quote split: PASS with no findings;
+  confirmed `_buy_no_exit()` uses held-token `best_bid` for EV sell value,
+  cost inputs, and correlation-crowding, fails closed when `best_bid` is
+  missing, and does not widen lifecycle/schema/live/prod scope
+- verifier pass for state-owned buy_no exit quote split: PASS; confirmed only
+  the six intended files changed, `git diff --check` was clean, quote-split and
+  missing-quote tests are meaningful, topology admission remains narrow, and
+  commit can proceed
 
 ## Not Completed
 

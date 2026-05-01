@@ -1,6 +1,9 @@
 # Created: 2026-04-24
-# Last reused/audited: 2026-04-24
+# Last reused/audited: 2026-05-01
+# Lifecycle: created=2026-04-24; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Authority basis: T6.4 HoldValue fee + time cost wiring into exit-decision seam (midstream fix plan 2026-04-23)
+# Purpose: Lock HoldValue exit-cost wiring and buy_no held-token quote separation.
+# Reuse: Run when portfolio exit EV gates, held-token sell quote handling, or hold-value cost accounting changes.
 """Tests for T6.4 — HoldValue.compute_with_exit_costs factory + exit-path
 fee/time cost integration under feature_flags.HOLD_VALUE_EXIT_COSTS.
 
@@ -244,11 +247,85 @@ class TestPortfolioExitIntegration:
                 forward_edge=-0.05,
                 current_p_posterior=0.85,
                 current_market_price=0.80,
+                best_bid=0.80,
                 hours_to_settlement=48.0,
                 day0_active=False,
                 applied=[],
             )
         assert "hold_value_exit_costs_enabled" not in decision.applied_validations
+
+    def test_buy_no_exit_ev_gate_uses_best_bid_not_current_market_price(self):
+        """A high probability/market scalar must not become buy_no sell proceeds."""
+        pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.60,
+                current_market_price=0.95,
+                best_bid=0.20,
+                hours_to_settlement=48.0,
+                day0_active=False,
+                applied=[],
+            )
+
+        assert decision.should_exit is False
+
+    def test_buy_no_exit_ev_gate_allows_best_bid_despite_low_current_market_price(self):
+        """A real held-token bid can authorize exit even when market scalar is low."""
+        pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.60,
+                current_market_price=0.05,
+                best_bid=0.70,
+                hours_to_settlement=48.0,
+                day0_active=False,
+                applied=[],
+            )
+
+        assert decision.should_exit is True
+        assert decision.trigger == "BUY_NO_EDGE_EXIT"
+
+    def test_buy_no_edge_exit_requires_best_bid_for_ev_gate(self):
+        """Consecutive buy_no reversal must not bypass held-token quote authority."""
+        pos = self._make_position("buy_no")
+        pos.neg_edge_count = 2
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.05,
+                current_p_posterior=0.60,
+                current_market_price=0.95,
+                best_bid=None,
+                hours_to_settlement=48.0,
+                day0_active=False,
+                applied=[],
+            )
+
+        assert decision.should_exit is False
+        assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+        assert "best_bid_unavailable" in decision.applied_validations
+
+    def test_buy_no_day0_exit_requires_best_bid_for_ev_gate(self):
+        """Day0 buy_no reversal also fails closed without held-token quote."""
+        pos = self._make_position("buy_no")
+        with patch("src.state.portfolio.hold_value_exit_costs_enabled", return_value=False):
+            decision = pos._buy_no_exit(
+                forward_edge=-0.10,
+                current_p_posterior=0.60,
+                current_market_price=0.95,
+                best_bid=None,
+                hours_to_settlement=12.0,
+                day0_active=True,
+                applied=[],
+            )
+
+        assert decision.should_exit is False
+        assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
+        assert "day0_observation_gate" in decision.applied_validations
+        assert "best_bid_unavailable" in decision.applied_validations
 
     def test_flag_on_buy_no_exit_records_cost_awareness(self):
         """T6.4 contract-consistency fix: _buy_no_exit now goes through
@@ -260,6 +337,7 @@ class TestPortfolioExitIntegration:
                 forward_edge=-0.05,
                 current_p_posterior=0.85,
                 current_market_price=0.80,
+                best_bid=0.80,
                 hours_to_settlement=48.0,
                 day0_active=False,
                 applied=[],
@@ -297,6 +375,7 @@ class TestPortfolioExitIntegration:
                 forward_edge=-0.10,
                 current_p_posterior=0.85,
                 current_market_price=0.80,
+                best_bid=0.80,
                 hours_to_settlement=12.0,
                 day0_active=True,
                 applied=[],
@@ -337,6 +416,7 @@ class TestPortfolioExitIntegration:
                 forward_edge=-0.10,
                 current_p_posterior=0.85,
                 current_market_price=1.0,
+                best_bid=1.0,
                 hours_to_settlement=12.0,
                 day0_active=True,
                 applied=[],
@@ -457,6 +537,7 @@ class TestConNyxPostEditHardening:
                 forward_edge=-0.05,
                 current_p_posterior=0.85,
                 current_market_price=0.80,
+                best_bid=0.80,
                 hours_to_settlement=None,
                 day0_active=False,
                 applied=[],
