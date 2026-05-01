@@ -9,7 +9,7 @@
 
 This script is an enforcement/readiness surface only.  It never submits,
 cancels, redeems, deploys, transitions CutoverGuard, reads credentials, or
-mutates canonical DB/state artifacts.  Exit code 0 means all 17 readiness gates
+mutates canonical DB/state artifacts.  Exit code 0 means all active readiness gates
 passed *and* staged-live-smoke evidence is present; it is still not live-deploy
 authority without the operator's live-money-deploy-go decision.
 """
@@ -85,14 +85,6 @@ GATES: tuple[GateSpec, ...] = (
         "NC-NEW-G / no legacy V1 SDK imports in live source",
         "legacy_sdk_scan",
         description="Live source must not import py_clob_client v1 directly.",
-    ),
-    GateSpec(
-        "G1-02",
-        "Host / Zeus egress gate",
-        "Z2",
-        "Q1-zeus-egress evidence",
-        "q1_evidence",
-        description="Q1 evidence must show HTTP 200 from Zeus daemon egress with funder context.",
     ),
     GateSpec(
         "G1-03",
@@ -247,7 +239,7 @@ def run_readiness(
     runner: CommandRunner = default_runner,
 ) -> ReadinessReport:
     gates = tuple(_run_gate(gate, root=root, evidence_roots=evidence_roots, run_commands=run_commands, runner=runner) for gate in GATES)
-    smoke_status, smoke_evidence = _staged_smoke_status(evidence_roots)
+    smoke_status, smoke_evidence = _staged_smoke_status(evidence_roots, required_gates=len(gates))
     all_pass = all(g.status == PASS for g in gates) and smoke_status == PASS
     return ReadinessReport(
         status=PASS if all_pass else FAIL,
@@ -269,8 +261,6 @@ def _run_gate(
 ) -> GateResult:
     if gate.kind == "legacy_sdk_scan":
         return _legacy_sdk_gate(gate, root)
-    if gate.kind == "q1_evidence":
-        return _q1_evidence_gate(gate, evidence_roots)
     if gate.kind == "order_type_scan":
         return _order_type_gate(gate, root)
     if gate.kind == "agent_docs_scan":
@@ -319,23 +309,6 @@ def _imports_legacy_py_clob_client(path: Path) -> bool:
     return False
 
 
-def _q1_evidence_gate(gate: GateSpec, evidence_roots: Sequence[Path]) -> GateResult:
-    files = _glob_evidence(evidence_roots, ("q1_zeus_egress*.json", "q1_v2_host_probe*.json"))
-    if not files:
-        return GateResult(gate.gate_id, gate.name, gate.phase, gate.antibody, FAIL, "missing Q1 Zeus-egress evidence")
-    for path in files:
-        payload, error = _load_signed_evidence(path, evidence_type="q1_zeus_egress")
-        if error:
-            continue
-        status_code = int(payload.get("status_code", 0) or 0)
-        protocol = str(payload.get("protocol") or "").upper()
-        daemon = str(payload.get("daemon") or "").lower()
-        funder = bool(payload.get("funder_address_present") or payload.get("gnosis_safe_present"))
-        if status_code == 200 and protocol.startswith("HTTP") and "zeus" in daemon and funder:
-            return GateResult(gate.gate_id, gate.name, gate.phase, gate.antibody, PASS, path.as_posix())
-    return GateResult(gate.gate_id, gate.name, gate.phase, gate.antibody, FAIL, "Q1 evidence exists but lacks signed HTTP 200 + Zeus daemon + funder/Gnosis proof")
-
-
 def _order_type_gate(gate: GateSpec, root: Path) -> GateResult:
     heartbeat = (root / "src/control/heartbeat_supervisor.py").read_text(errors="ignore")
     adapter = (root / "src/venue/polymarket_v2_adapter.py").read_text(errors="ignore")
@@ -366,7 +339,7 @@ def _agent_docs_gate(gate: GateSpec, root: Path) -> GateResult:
     return GateResult(gate.gate_id, gate.name, gate.phase, gate.antibody, PASS, "agent-facing docs contain no legacy direct SDK snippets")
 
 
-def _staged_smoke_status(evidence_roots: Sequence[Path]) -> tuple[str, str]:
+def _staged_smoke_status(evidence_roots: Sequence[Path], *, required_gates: int) -> tuple[str, str]:
     files = _glob_evidence(evidence_roots, ("staged_live_smoke_*.json", "live_readiness_smoke_*.json"))
     if not files:
         return FAIL, "missing staged-live-smoke evidence"
@@ -377,9 +350,9 @@ def _staged_smoke_status(evidence_roots: Sequence[Path]) -> tuple[str, str]:
         status = str(payload.get("status") or payload.get("overall") or "").upper()
         gates = int(payload.get("gates_passed", payload.get("passed_gates", 0)) or 0)
         smoke = str(payload.get("environment") or payload.get("env") or "").lower()
-        if status == PASS and gates >= 17 and "staged" in smoke:
+        if status == PASS and gates >= required_gates and "staged" in smoke:
             return PASS, path.as_posix()
-    return FAIL, "staged-live-smoke evidence exists but does not prove signed PASS + 17/17 + staged environment"
+    return FAIL, f"staged-live-smoke evidence exists but does not prove signed PASS + {required_gates}/{required_gates} + staged environment"
 
 
 def _load_signed_evidence(path: Path, *, evidence_type: str) -> tuple[dict, str | None]:

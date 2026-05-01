@@ -421,7 +421,7 @@ scripts:
     class: enforcement
     module_owner: scripts
     packet: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
-    reason: "R3 G1 live-readiness orchestrator; runs 17 explicit PASS/FAIL gates and fails closed when staged-smoke/operator evidence is absent."
+    reason: "R3 G1 live-readiness orchestrator; runs 16 active explicit PASS/FAIL gates and fails closed when staged-smoke/operator evidence is absent."
     canonical_command: "python3 scripts/live_readiness_check.py"
     read_targets: [repo, docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence, docs/operations/task_2026-04-26_ultimate_plan/r3/evidence]
     write_targets: [stdout]

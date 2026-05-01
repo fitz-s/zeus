@@ -108,7 +108,7 @@ Pulled in from R2 §4 deferred Dominance Roadmap per user mandate "live trade an
 
 ### G phase — Live readiness gates (1 card, 14h)
 
-- **G1** 17 CI gates + staged-live-smoke (14h, medium risk, critic-opus + operator) — Single command (`scripts/live_readiness_check.py`) runs all 17 gates: V2 SDK / Host / Heartbeat / pUSD / Sell-token / Snapshot / Provenance / Order-type / Unknown / Matched-not-final / User-channel / Cancel-replace / Cutover-wipe / Crash / Paper-live-parity / Strategy-benchmark / Agent-docs. Each gate maps to a specific R3 antibody. INV-NEW-S: LIVE deploy requires 17/17 PASS + ≥1 staged-live-smoke environment passing the same.
+- **G1** 16 active CI gates + staged-live-smoke (14h, medium risk, critic-opus + operator) — Single command (`scripts/live_readiness_check.py`) runs all active gates: V2 SDK / Heartbeat / pUSD / Sell-token / Snapshot / Provenance / Order-type / Unknown / Matched-not-final / User-channel / Cancel-replace / Cutover-wipe / Crash / Paper-live-parity / Strategy-benchmark / Agent-docs. Each gate maps to a specific R3 antibody. INV-NEW-S: LIVE deploy requires 16/16 active PASS + ≥1 staged-live-smoke environment passing the same.
 
 ---
 
@@ -145,7 +145,7 @@ Pulled in from R2 §4 deferred Dominance Roadmap per user mandate "live trade an
 | INV-NEW-P | F2 | Calibration param promotion to live REQUIRES frozen-replay PASS |
 | INV-NEW-Q | A1 | No strategy promoted to live without StrategyBenchmarkSuite.promotion_decision() returning PROMOTE |
 | INV-NEW-R | A2 | Kill switch trips on (reconcile_finding_count > N) OR (heartbeat_lost) OR (ws_gap_seconds > M) OR (unknown_side_effect_count > K) |
-| INV-NEW-S | G1 | LIVE deployment requires 17/17 G1 gate PASS + ≥1 staged-live-smoke environment passing same |
+| INV-NEW-S | G1 | LIVE deployment requires 16/16 active G1 gate PASS + ≥1 staged-live-smoke environment passing same |
 
 ---
 
@@ -217,7 +217,7 @@ Outcomes: forecast source registry + calibration retrain wiring + local-payload 
 **Wave E** — Dominance (~52h, A phase): A1 → A2.
 Outcomes: StrategyBenchmarkSuite + RiskAllocator + PortfolioGovernor.
 
-**Wave F** — Live readiness + cutover (~14h + operator time, G phase): G1 → operator runs `scripts/live_readiness_check.py` → if 17/17 PASS, operator dispatches CutoverGuard transition `PRE_CUTOVER_FREEZE → CUTOVER_DOWNTIME → POST_CUTOVER_RECONCILE → LIVE_ENABLED`.
+**Wave F** — Live readiness + cutover (~14h + operator time, G phase): G1 → operator runs `scripts/live_readiness_check.py` → if 16/16 active gates PASS and staged smoke is green, operator dispatches CutoverGuard transition `PRE_CUTOVER_FREEZE → CUTOVER_DOWNTIME → POST_CUTOVER_RECONCILE → LIVE_ENABLED`.
 Outcomes: Zeus is live.
 
 **Total wall-clock estimate**: 312h engineering + operator gate time. With 2-3 engineers in parallel and operator-decision turnaround ~1-3 days per gate, **realistic delivery: 5-8 weeks**.

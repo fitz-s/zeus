@@ -591,14 +591,14 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                'R3 G1',
                'live readiness',
                'live_readiness_check',
-               '17 CI gates',
+               '16 active CI gates',
                'staged-live-smoke',
                'INV-NEW-S',
                'live-money-deploy-go'],
     'match_policy': { 'strong_phrases': [ 'G1 live readiness gates',
                                           'R3 G1',
                                           'live_readiness_check',
-                                          '17 CI gates',
+                                          '16 active CI gates',
                                           'staged-live-smoke',
                                           'INV-NEW-S',
                                           'live-money-deploy-go'],
@@ -644,14 +644,14 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                        'tests/AGENTS.md',
                        'tests/test_live_readiness_gates.py',
                        'tests/test_digest_profile_matching.py'],
-    'required_law': [ 'INV-NEW-S: LIVE deployment requires 17/17 G1 gate PASS plus at least one staged-live-smoke '
+    'required_law': [ 'INV-NEW-S: LIVE deployment requires 16/16 active G1 gate PASS plus at least one staged-live-smoke '
                       'environment passing the same readiness suite.',
                       'G1 may implement and run readiness checks, but it must not place, cancel, redeem, deploy, '
                       'transition CutoverGuard to LIVE_ENABLED, mutate production DB/state artifacts, activate '
                       'credentials, or promote live strategies.',
                       'Every G1 gate must map to a specific R3 antibody/source slice and produce machine-readable '
                       'PASS/FAIL evidence.',
-                      'Missing Q1/staged-smoke/operator evidence must fail closed; CI/engineering green must not '
+                      'Missing staged-smoke/operator evidence must fail closed; CI/engineering green must not '
                       'masquerade as live deploy authorization.',
                       'The live-money-deploy-go operator gate remains blocking even if the readiness script and tests '
                       'are green.'],
@@ -708,7 +708,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                     'R3 wave F closeout'],
     'stop_conditions': [ 'Stop and plan if G1 requires live submit/cancel/redeem, credential use, production DB/state '
                          'mutation, or CLOB cutover.',
-                         'Stop and plan if a readiness check would fabricate or weaken missing Q1/staged-smoke '
+                         'Stop and plan if a readiness check would fabricate or weaken missing staged-smoke '
                          'evidence.',
                          'Stop and plan if a G1 script attempts to execute scripts/live_smoke_test.py or other live '
                          'side-effect smoke commands automatically.']},

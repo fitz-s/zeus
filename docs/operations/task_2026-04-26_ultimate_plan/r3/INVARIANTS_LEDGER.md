@@ -65,7 +65,7 @@ When the PR merges (CI green):
 | INV-NEW-P | F2 | Calibration param promotion to live REQUIRES frozen-replay PASS | tests/test_calibration_retrain.py::test_frozen_replay_failure_blocks_promotion | — | — | PENDING |
 | INV-NEW-Q | A1 | No strategy promoted to live without StrategyBenchmarkSuite.promotion_decision() = PROMOTE | tests/test_strategy_benchmark.py::test_promotion_blocked_unless_replay_paper_shadow_all_pass | — | — | PENDING |
 | INV-NEW-R | A2 | Kill switch trips on threshold breach (configurable) | tests/test_risk_allocator.py::test_kill_switch_blocks_all_submits | — | — | PENDING |
-| INV-NEW-S | G1 | LIVE deploy requires 17/17 G1 gate PASS + ≥1 staged-live-smoke environment | scripts/live_readiness_check.py exit code 0 | — | — | PENDING |
+| INV-NEW-S | G1 | LIVE deploy requires 16/16 active G1 gate PASS + ≥1 staged-live-smoke environment | scripts/live_readiness_check.py exit code 0 | — | — | PENDING |
 
 ## Auto-appender CI hook
 
