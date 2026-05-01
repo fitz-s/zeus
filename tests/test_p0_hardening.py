@@ -438,7 +438,7 @@ class TestR2V2PreflightBlocksPlacement:
                 sports_start_at=None,
                 min_tick_size=Decimal("0.01"),
                 min_order_size=Decimal("0.01"),
-                fee_details={},
+                fee_details={"fee_rate_bps": 0},  # B4 Phase 4 Cat B3: minimal fee_details so executable_snapshot_gate clears (test exercises V2-preflight seam, not snapshot validation).
                 token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
                 rfqe=None,
                 neg_risk=False,
@@ -500,6 +500,16 @@ class TestR2V2PreflightBlocksPlacement:
         stack.enter_context(patch("src.execution.executor._assert_ws_gap_allows_submit", return_value=None))
         stack.enter_context(patch("src.execution.executor._assert_collateral_allows_buy", return_value=None))
         stack.enter_context(patch("src.execution.executor._reserve_collateral_for_buy", return_value=None))
+        # B4 Phase 4 Cat B3 (2026-05-01): _entry_decision_source_component is
+        # a separate INTEGRITY gate that fires before V2 preflight. These
+        # tests target the V2-preflight seam specifically; bypass the
+        # decision-source-integrity gate by patching the component to return
+        # an allowed capability stub (matches the "allowed by default"
+        # shape the original tests assumed before the integrity gate landed).
+        stack.enter_context(patch(
+            "src.execution.executor._entry_decision_source_component",
+            return_value={"capability": "decision_source_integrity", "allowed": True},
+        ))
         return stack
 
     def test_v2_preflight_blocks_placement(self, _mem_conn):
@@ -630,20 +640,35 @@ class TestR3RuntimePostureBlocksEntry:
     cycle context is too entangled for a narrow micro-slice.
     """
 
-    def test_posture_no_new_entries_is_not_normal(self):
-        """read_runtime_posture returns NO_NEW_ENTRIES for a branch not in the YAML
-        (falls back to default_posture)."""
+    def test_posture_returns_default_for_unmapped_branch(self):
+        """B4 Phase 4 (was test_posture_no_new_entries_is_not_normal): the
+        YAML's default_posture was operator-changed to NORMAL during live-prep
+        (`architecture/runtime_posture.yaml`). The substantive contract this
+        test exercises is that the posture loader DOES return the YAML's
+        default for an unmapped branch — irrespective of the specific
+        default value. Reading the YAML directly to determine ground truth
+        keeps this test forward-compatible with operator posture changes.
+        """
+        import yaml as _yaml
+        from pathlib import Path
         from src.runtime.posture import read_runtime_posture, _clear_cache
+
+        # Read ground-truth default from the YAML the loader will read
+        repo_root = Path(__file__).resolve().parents[1]
+        yaml_path = repo_root / "architecture/runtime_posture.yaml"
+        loaded = _yaml.safe_load(yaml_path.read_text())
+        expected_default = loaded.get("default_posture")
+        assert expected_default is not None, "default_posture missing from runtime_posture.yaml"
 
         _clear_cache()
         with patch("src.runtime.posture._resolve_current_branch", return_value="nonexistent-branch-xyz"):
             result = read_runtime_posture()
         _clear_cache()
 
-        # default_posture in the YAML is NO_NEW_ENTRIES; any branch not in
-        # the branches dict falls back to it.
-        assert result == "NO_NEW_ENTRIES"
-        assert result != "NORMAL"
+        assert result == expected_default, (
+            f"Loader returned {result!r}; YAML default_posture is {expected_default!r}. "
+            "If they diverge, the loader is no longer honoring the YAML default."
+        )
 
     def test_posture_normal_returns_normal(self):
         """When monkeypatched to return NORMAL, read_runtime_posture propagates it."""
@@ -658,31 +683,32 @@ class TestR3RuntimePostureBlocksEntry:
         assert result == "NORMAL"
 
     def test_cycle_runner_posture_gate_blocks_with_reason(self, monkeypatch):
-        """Integration: when read_runtime_posture returns NO_NEW_ENTRIES,
+        """Integration: when read_runtime_posture returns a non-NORMAL value,
         entries_blocked_reason must contain 'posture'.
 
-        This is a structural smoke test — we confirm the posture gate in
-        cycle_runner.py sets entries_blocked_reason before the risk-level check.
-        We exercise the gate expression directly rather than running a full
-        cycle, since constructing a full cycle fixture is out of scope.
+        B4 Phase 4 (2026-05-01): the YAML's default_posture was operator-
+        changed to NORMAL during live-prep. To still exercise the gate
+        contract (non-NORMAL posture → block reason set), this test
+        directly patches `read_runtime_posture` to return NO_NEW_ENTRIES
+        — the gate-mechanics-being-tested are independent of which YAML
+        branches map to which postures.
         """
-        # Simulate the gate logic extracted from cycle_runner.py
-        # This mirrors the exact code path added in this slice.
+        from src.runtime import posture as posture_mod
+
+        # Simulate the gate logic extracted from cycle_runner.py.
         _posture_blocked_reason = None
         try:
-            from src.runtime.posture import _clear_cache
-            _clear_cache()
-            with patch("src.runtime.posture._resolve_current_branch", return_value="nonexistent-xyz"):
-                from src.runtime.posture import read_runtime_posture
-                _current_posture = read_runtime_posture()
-            _clear_cache()
+            posture_mod._clear_cache()
+            with patch.object(posture_mod, "read_runtime_posture", return_value="NO_NEW_ENTRIES"):
+                _current_posture = posture_mod.read_runtime_posture()
+            posture_mod._clear_cache()
             if _current_posture != "NORMAL":
                 _posture_blocked_reason = f"posture={_current_posture}"
         except Exception:
             _posture_blocked_reason = "posture=NO_NEW_ENTRIES"
 
         assert _posture_blocked_reason is not None, (
-            "Posture gate should have set a block reason for NO_NEW_ENTRIES"
+            "Posture gate should have set a block reason for non-NORMAL posture"
         )
         assert "posture" in _posture_blocked_reason, (
             f"entries_blocked_reason must contain 'posture', got {_posture_blocked_reason!r}"
