@@ -2429,6 +2429,96 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
     ]
 
 
+def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
+    conn = get_connection(tmp_path / "live-binary-buy-no-flag.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-binary-buy-no-flag",
+        "slug": "slug-binary-buy-no-flag",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39°F or lower", "range_low": None, "range_high": 39, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
+            {"title": "40°F or higher", "range_low": 40, "range_high": None, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+        ],
+    }
+    buy_no_edge = replace(
+        _edge(),
+        bin=Bin(low=None, high=39, label="39°F or lower", unit="F"),
+        direction="buy_no",
+        p_market=0.35,
+        entry_price=0.35,
+        vwmp=0.35,
+        p_posterior=0.62,
+        edge=0.27,
+        forward_edge=0.27,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=buy_no_edge,
+        tokens={"market_id": "m0", "token_id": "yes0", "no_token_id": "no0"},
+        size_usd=5.0,
+        decision_id="d-binary-buy-no-live-disabled",
+        selected_method="ens_member_counting",
+        applied_validations=["native_buy_no_quote_available"],
+        decision_snapshot_id="model-snap-binary-buy-no",
+        edge_source="shoulder_sell",
+        strategy_key="shoulder_sell",
+        settlement_semantics_json='{"measurement_unit":"F"}',
+        epistemic_context_json='{"decision_time_utc":"2026-04-01T00:00:00Z"}',
+        edge_context_json='{"forward_edge":0.27}',
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "shoulder_sell",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not submit")),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not execute")),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    ]
+
+
 def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_path):
     from dataclasses import replace
 

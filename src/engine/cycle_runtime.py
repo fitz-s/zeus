@@ -2104,7 +2104,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         str(env or "").strip().lower() == "live"
                         and d.edge is not None
                         and d.edge.direction == "buy_no"
-                        and len(parseable_labels) > 2
                     ):
                         from src.engine.evaluator import native_multibin_buy_no_live_enabled
 

@@ -75,6 +75,24 @@ Additional completed slice: exit command market/token identity split.
 - no schema migration, lifecycle grammar, state projection, venue adapter,
   production data, config, or live side-effect surface was changed
 
+Additional completed slice: buy_no complement fallback authority split.
+
+- addressed `review_apr_30.md` F-07 for strategy/evaluator/runtime buy_no
+  pricing authority
+- `MarketAnalysis.supports_buy_no_edges()` now requires native NO-token quote
+  availability for executable buy_no edges; binary `1 - YES` complement is
+  retained only as `buy_no_complement_diagnostic_price()`
+- evaluator native-NO probing now follows the buy_no quote-evidence authority
+  rule rather than the old multibin-only shortcut; the legacy feature flag name
+  remains unchanged for config compatibility
+- live runtime buy_no submissions now require the native buy_no live feature
+  flag for binary as well as multibin candidates
+- tests prove binary complement cannot feed executable buy_no price/bootstrap,
+  native NO quote availability does feed executable buy_no price, and binary
+  live buy_no is blocked before submit when the native live flag is off
+- no schema migration, venue adapter, production data, config, settlement, or
+  live side-effect surface was changed
+
 Additional completed slice: runtime corrected live gate.
 
 - added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
@@ -195,10 +213,19 @@ Passing checks:
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/execution/executor.py tests/test_executor.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
 - `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-05 exit command identity split closeout: executor persists condition/gamma market_id separately from selected token_id using executable snapshot identity; no schema migration, no lifecycle grammar, no production data, no live venue side effects" --files src/execution/executor.py tests/test_executor.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
 - `git diff --check`
+- `python -m pytest tests/test_market_analysis.py::TestComputePosterior::test_tail_alpha_scale_applies_to_buy_no_bootstrap_ci tests/test_market_analysis.py::TestMarketAnalysis::test_binary_buy_no_complement_is_diagnostic_not_executable tests/test_market_analysis.py::TestMarketAnalysis::test_buy_no_uses_native_no_quote_when_available tests/test_runtime_guards.py::test_live_binary_buy_no_requires_native_live_feature_flag tests/test_runtime_guards.py::test_live_multibin_buy_no_requires_live_feature_flag -q` -> 5 passed
+- `python -m pytest tests/test_market_analysis.py tests/test_runtime_guards.py -q` -> 230 passed
+- `python -m pytest tests/test_fdr.py::TestSelectionFamilySubstrate::test_native_multibin_buy_no_flags_are_strict_boolean tests/test_fdr.py::TestSelectionFamilySubstrate::test_native_multibin_buy_no_live_requires_shadow tests/test_runtime_guards.py::test_live_multibin_buy_no_requires_live_feature_flag tests/test_runtime_guards.py::test_live_binary_buy_no_requires_native_live_feature_flag tests/test_runtime_guards.py::test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no tests/test_market_analysis.py -q` -> 50 passed
+- `python -m compileall -q src/strategy/market_analysis.py src/engine/evaluator.py src/engine/cycle_runtime.py tests/test_market_analysis.py tests/test_runtime_guards.py`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_market_analysis.py tests/test_runtime_guards.py --json`
+- `python scripts/topology_doctor.py --planning-lock --changed-files src/strategy/market_analysis.py src/engine/evaluator.py src/engine/cycle_runtime.py tests/test_market_analysis.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/strategy/market_analysis.py src/engine/evaluator.py src/engine/cycle_runtime.py tests/test_market_analysis.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-07 buy-no complement fallback authority closeout: complement p_market is diagnostic prior only; live buy-no requires native NO quote and native NO executable snapshot evidence; no production data, no schema migration, no live venue side effects" --files src/strategy/market_analysis.py src/engine/evaluator.py src/engine/cycle_runtime.py tests/test_market_analysis.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
 
 Known adjacent failure observed outside the buy_no quote split:
 
 - `python -m pytest tests/test_runtime_guards.py tests/test_churn_defense.py tests/test_lifecycle.py tests/test_entry_exit_symmetry.py tests/test_pre_live_integration.py tests/test_instrument_invariants.py -q` -> 1 failed in `tests/test_pre_live_integration.py::test_full_monitoring_pipeline`; this exercises buy_yes monitoring pipeline dirtiness and was not changed by the buy_no exit quote split
+- `python -m pytest tests/test_market_analysis.py tests/test_runtime_guards.py tests/test_fdr.py -q` -> 3 failed in `tests/test_fdr.py` because legacy `FakeDay0Signal.p_vector()` fixtures do not accept the current `n_mc=` keyword; the focused FDR feature-flag subset above passed
 
 Review gates:
 
