@@ -188,8 +188,8 @@ This protocol exists because of the 2026-04-28 contamination event: a
 parallel session merged 9 commits into `plan-pre5` without enough conflict
 surface inspection; 6 drift items resulted, including 815k mislabeled
 production rows. The antibody is conflict-first escalation, not making every
-clean merge pay a critic tax. See
-`docs/operations/task_2026-04-28_contamination_remediation/`.
+clean merge pay a critic tax. (Evidence archived at
+`docs/operations/_archive/task_2026-04-28_contamination_remediation/`.)
 
 ## 3. Navigation & Task Routing
 
