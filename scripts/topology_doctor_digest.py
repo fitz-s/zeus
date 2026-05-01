@@ -744,6 +744,20 @@ def _operation_vector_resolution(
         "new_evidence",
         "new_findings",
     }
+    source_canary_task_hint = any(
+        phrase in task_l
+        for phrase in (
+            "source canary",
+            "canary",
+            "provider hot-swap",
+            "hot-swap",
+            "source readiness",
+            "source recovery",
+            "source-change",
+            "source change",
+            "station/source policy",
+        )
+    )
 
     candidate_ids: list[str] = []
     if operation_stage == "plan" or artifact_target == "plan_packet":
@@ -751,7 +765,7 @@ def _operation_vector_resolution(
     if operation_stage == "closeout" and (feedback_artifact_target or feedback_task_hint):
         candidate_ids.append("direct operation feedback capsule")
     if "source_behavior" in mutation_surfaces and (
-        mutation_source == "cli" or "src/control/freshness_gate.py" in requested
+        mutation_source == "cli" or source_canary_task_hint
     ):
         candidate_ids.append("source canary readiness hot-swap")
     if "evaluator_behavior" in mutation_surfaces and mutation_source == "cli":
@@ -775,6 +789,11 @@ def _operation_vector_resolution(
             )
             for path in requested
         )
+    ):
+        candidate_ids.append("topology graph agent runtime upgrade")
+    if "runtime_hooks" in mutation_surfaces and any(
+        path in {".claude/hooks/pre-merge-contamination-check.sh", ".claude/settings.json"}
+        for path in requested
     ):
         candidate_ids.append("topology graph agent runtime upgrade")
 

@@ -4612,6 +4612,21 @@ def test_operation_vector_selects_source_canary_without_canonical_phrase():
     assert card["dominant_driver"] == "source_canary_readiness_hot_swap"
 
 
+def test_operation_vector_does_not_admit_unrelated_freshness_gate_work_as_canary():
+    digest = topology_doctor.build_digest(
+        "refactor freshness gate logging",
+        ["src/control/freshness_gate.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["profile_selection"]["selected_by"] != "operation_vector"
+    assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] != "source_canary_readiness_hot_swap"
+
+
 def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
     digest = topology_doctor.build_digest(
         "harden pre-merge hook fail-closed behavior",
@@ -4624,7 +4639,11 @@ def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
     assert card["operation_vector"]["operation_stage"] == "edit"
     assert "runtime_hooks" in card["operation_vector"]["mutation_surfaces"]
     assert card["merge_evidence_required"]["required"] is False
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
     assert card["dominant_driver"] != "merge_conflict_first"
+    assert card["suggested_next_command"] is None
 
 
 def test_operation_vector_guides_broad_fix_package_to_planning_packet():
