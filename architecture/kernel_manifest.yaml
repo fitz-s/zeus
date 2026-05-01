@@ -105,7 +105,7 @@ machine_gate_inputs:
     - architecture/negative_constraints.yaml
     - architecture/maturity_model.yaml
   schema:
-    - migrations/2026_04_02_architecture_kernel.sql
+    - architecture/2026_04_02_architecture_kernel.sql
   ast_rules:
     - architecture/ast_rules/semgrep_zeus.yml
   scripts:
