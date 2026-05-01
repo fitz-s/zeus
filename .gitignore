@@ -182,6 +182,10 @@ config/*credentials*.json
 config/reality_contracts/*.local.*
 config/reality_contracts/*.private.*
 
+# Computed model parameters — derived from proprietary data, local-only.
+config/city_correlation_matrix.json
+config/city_monthly_bounds.json
+
 # When runtime supports example + local overlay:
 # config/settings.json
 # !config/settings.example.json
