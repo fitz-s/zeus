@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-03-26; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Audited GRIB→ensemble_snapshots_v2 ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -45,6 +45,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     validate_members_unit,
 )
 from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
+from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.state.canonical_write import commit_then_export
 from src.state.db import get_world_connection
 from src.state.schema.v2_schema import apply_v2_schema
@@ -148,10 +149,25 @@ def ingest_json_file(
 ) -> str:
     """Ingest one extracted JSON file into ensemble_snapshots_v2. Returns status string."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Could not parse %s: %s", path, exc)
         return "parse_error"
+
+    # TiggeSnapshotPayload.from_json_dict is the ONLY way to read extracted JSONs.
+    # Fail-closed: missing required fields or malformed causality raises ProvenanceViolation.
+    try:
+        snapshot = TiggeSnapshotPayload.from_json_dict(raw)
+    except ProvenanceViolation as exc:
+        logger.error(
+            "ingest_json_file provenance_violation: path=%s error=%s",
+            path,
+            exc,
+        )
+        return "contract_rejected: PROVENANCE_VIOLATION"
+
+    # Use the validated dataclass's dict for downstream processing.
+    payload = snapshot.to_json_dict()
 
     data_version = str(payload.get("data_version", ""))
     # NC-12: guard must fire before INSERT
