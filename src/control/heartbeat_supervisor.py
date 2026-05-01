@@ -11,7 +11,6 @@ import asyncio
 import inspect
 import logging
 import os
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -104,7 +103,17 @@ class HeartbeatSupervisor:
             raise ValueError("cadence_seconds must be positive")
         self._adapter = adapter
         self._cadence_seconds = int(cadence_seconds)
-        self._heartbeat_id = uuid.uuid4().hex
+        # Polymarket CLOB v2 heartbeat protocol: client must NOT mint its own ID.
+        # First post sends the empty string; the server creates a session and
+        # returns its assigned `heartbeat_id`. Each subsequent successful post
+        # rotates the canonical ID to a new value, which the client must echo
+        # on the next tick. Probed against clob.polymarket.com 2026-05-01:
+        #     POST {heartbeat_id:""}              -> {heartbeat_id:"A"}
+        #     POST {heartbeat_id:"A"}             -> {heartbeat_id:"B"}    # rotates
+        #     POST {heartbeat_id:"<bogus>"}       -> 400 Invalid Heartbeat ID
+        # On any 4xx we restart the chain with "" rather than minting a UUID
+        # (the previous bug — a fresh UUID never matches the server record).
+        self._heartbeat_id: str = ""
         self._health = HeartbeatHealth.STARTING
         self._last_success_at: Optional[datetime] = None
         self._consecutive_failures = 0
@@ -128,7 +137,13 @@ class HeartbeatSupervisor:
         self._running = False
 
     async def run_once(self) -> HeartbeatStatus:
-        """Post one heartbeat and update health state."""
+        """Post one heartbeat and update health state.
+
+        Implements the Polymarket chain-token heartbeat protocol — see the
+        comment in __init__. Each successful post returns the next canonical
+        `heartbeat_id` which we capture for the following tick; any failure
+        resets to `""` so the next tick starts a fresh chain.
+        """
 
         try:
             if self._adapter is None:
@@ -138,8 +153,16 @@ class HeartbeatSupervisor:
                 ack = await ack
             if getattr(ack, "ok", True) is False:
                 raise RuntimeError("heartbeat ack returned ok=False")
+            next_id = ""
+            raw = getattr(ack, "raw", None)
+            if isinstance(raw, dict):
+                next_id = str(raw.get("heartbeat_id") or "")
+            if not next_id:
+                raise RuntimeError("heartbeat ack missing heartbeat_id")
+            self._heartbeat_id = next_id
             self.record_success()
         except Exception as exc:  # fail closed, surface through status/tombstone
+            self._heartbeat_id = ""  # reset chain so next tick re-registers
             self.record_failure(exc)
         return self.status()
 
