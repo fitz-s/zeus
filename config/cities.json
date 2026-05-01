@@ -900,14 +900,14 @@
         "paris"
       ],
       "noaa": null,
-      "lat": 49.0097,
-      "lon": 2.5479,
-      "wu_station": "LFPG",
-      "wu_pws": "IMITRY1",
-      "meteostat_station": "07157",
-      "airport_name": "Paris-Charles de Gaulle Airport",
+      "lat": 48.969398,
+      "lon": 2.44139,
+      "wu_station": "LFPB",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Paris-Le Bourget Airport",
       "country_code": "FR",
-      "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
+      "settlement_source": "https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB",
       "timezone": "Europe/Paris",
       "cluster": "Paris",
       "unit": "C",
@@ -1259,6 +1259,31 @@
     }
   ],
   "_changelog": [
+    {
+      "timestamp": "2026-05-01T00:00:00+00:00",
+      "city": "Paris",
+      "field": "wu_station / settlement_source / airport_name / lat / lon / wu_pws / meteostat_station",
+      "old": {
+        "wu_station": "LFPG",
+        "airport_name": "Paris-Charles de Gaulle Airport",
+        "settlement_source": "https://www.wunderground.com/history/daily/fr/paris/LFPG",
+        "lat": 49.0097,
+        "lon": 2.5479,
+        "wu_pws": "IMITRY1",
+        "meteostat_station": "07157"
+      },
+      "new": {
+        "wu_station": "LFPB",
+        "airport_name": "Paris-Le Bourget Airport",
+        "settlement_source": "https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB",
+        "lat": 48.969398,
+        "lon": 2.44139,
+        "wu_pws": null,
+        "meteostat_station": null
+      },
+      "discovered_via": "Polymarket gamma-api daily-temperature tag — 2 active Paris events (highest+lowest May 1 2026) + 22 child markets all name 'Paris-Le Bourget Airport Station' and resolutionSource https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB. Today's smoke discovery rejected 6 Paris markets with MISMATCH(LFPB!=LFPG). Closed Feb 2026 events still LFPG; transition window per known_gaps.md is 2026-04-18 -> 2026-04-19 for HIGH.",
+      "confirmed_by": "gamma-api fetch 2026-05-01 + cities.json audit + architecture/paris_station_resolution_2026-05-01.yaml + scripts/source_contract_auto_convert.py STATIC_WU_STATION_METADATA seed for LFPB coords"
+    },
     {
       "timestamp": "2026-04-15T10:05:56.725814+00:00",
       "city": "Tel Aviv",

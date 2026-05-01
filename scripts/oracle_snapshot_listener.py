@@ -68,7 +68,7 @@ CITY_STATIONS: dict[str, tuple[str, str]] = {
     "Buenos Aires": ("SAEZ", "AR"), "Mexico City": ("MMMX", "MX"),
     "Sao Paulo": ("SBGR", "BR"), "Toronto": ("CYYZ", "CA"),
     # Europe
-    "London": ("EGLC", "GB"), "Paris": ("LFPG", "FR"),
+    "London": ("EGLC", "GB"), "Paris": ("LFPB", "FR"),
     "Munich": ("EDDM", "DE"), "Madrid": ("LEMD", "ES"),
     "Milan": ("LIMC", "IT"), "Warsaw": ("EPWA", "PL"),
     "Amsterdam": ("EHAM", "NL"), "Helsinki": ("EFHK", "FI"),

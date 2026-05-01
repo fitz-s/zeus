@@ -1,0 +1,163 @@
+schema_version: 1
+paris_station_lfpb_canonical:
+  rationale: |
+    Operator decision 2026-05-01: Paris Polymarket settlement station is LFPB
+    (Paris-Le Bourget Airport), not LFPG (Charles de Gaulle). Both stations
+    sit in the Paris metro area but they are PHYSICALLY DIFFERENT weather
+    sites with materially different temperatures (LFPB is north-east of
+    Paris; LFPG is the larger CDG complex farther north-east). Polymarket
+    has migrated Paris settlement from LFPG to LFPB and Zeus's config must
+    follow the contract, not the inverse.
+
+    Primary-source evidence (captured 2026-05-01):
+
+    1) Gamma API event lowest-temperature-in-paris-on-may-1-2026
+       (tag_id=103040 daily-temperature, closed=false).
+       event.description and all 11 child market descriptions name
+       "Paris-Le Bourget Airport Station" and resolutionSource =
+       https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB
+       Snapshot: docs/operations/task_2026-05-01_paris_station_resolution/
+                 evidence/gamma_paris_active_2026-05-01.json
+
+    2) Gamma API event highest-temperature-in-paris-on-may-1-2026
+       Same description and same resolutionSource (LFPB). 22 child markets
+       in total across the 2 active events; 22 of 22 name LFPB. None name
+       LFPG. Snapshot in same evidence file.
+
+    3) Today's smoke discovery rejected 6 Paris weather markets with
+       station_id 'LFPB' != configured 'LFPG' reason=MISMATCH and
+       sources=['https://www.wunderground.com/history/daily/fr/
+       bonneuil-en-france/LFPB']. The market scanner already knew the
+       contract said LFPB; only cities.json was lagging.
+
+    4) Historical consistency check (closed events tag_id=103040):
+       6 closed Paris HIGH events for Feb 18-23 2026 still carry LFPG in
+       their descriptions. The transition window (per known_gaps.md
+       OPEN P1 entry) puts HIGH transition between 2026-04-18 (LFPG) and
+       2026-04-19 (LFPB). Active May markets are uniformly LFPB. There
+       is no current Polymarket-side ambiguity; the migration has
+       completed for both HIGH and LOW.
+
+    Predecessor pattern: Tel Aviv (cities.json _changelog 2026-04-15) and
+    Taipei (cities.json _changelog 2026-04-15) both show Polymarket can
+    move a city's settlement station mid-history; Zeus's response is to
+    update cities.json and quarantine the wrong-station legacy training
+    rows, not to invent a station alias. Same shape applies here.
+
+  signed_by: Fitz (via Paris LFPB/LFPG resolution agent 2026-05-01)
+  signed_at: 2026-05-01T00:00Z
+  decision:
+    canonical_station: LFPB
+    canonical_settlement_source: https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB
+    canonical_airport_name: Paris-Le Bourget Airport
+    canonical_lat: 48.969398
+    canonical_lon: 2.44139
+    coord_source: static_seed:https://airportguide.com/airport/info/LBG (also referenced in scripts/source_contract_auto_convert.py STATIC_WU_STATION_METADATA)
+
+  config_change:
+    file: config/cities.json
+    city: Paris
+    fields_updated:
+      wu_station: LFPG -> LFPB
+      airport_name: Paris-Charles de Gaulle Airport -> Paris-Le Bourget Airport
+      settlement_source: .../paris/LFPG -> .../bonneuil-en-france/LFPB
+      lat: 49.0097 -> 48.969398
+      lon: 2.5479 -> 2.44139
+      meteostat_station: 07157 -> null  # 07157 is the LFPG WMO id; LFPB WMO id not seeded
+      wu_pws: IMITRY1 -> null  # PWS was bound to LFPG geometry; clear until reseeded
+    diurnal_amplitude_c: unchanged (7.0); historical seasonal-average noise approximation reasonable for either Paris-area airport at the cluster level.
+
+  legacy_data_disposition:
+    rule: downgrade_paris_lfpg_observations_and_settlements_to_QUARANTINED
+    rationale: |
+      839 observations rows (city='Paris', station_id='LFPG',
+      source='wu_icao_history', authority='VERIFIED', dates 2024-01-01..
+      2026-04-19) were ingested under LFPG. They are physically valid
+      LFPG measurements and must NOT be deleted (audit + provenance), but
+      they are wrong-station for the Polymarket settlement contract that
+      now points at LFPB. Mixing LFPG history with new LFPB ingest into
+      the same Platt cluster would contaminate calibration. Downgrade to
+      QUARANTINED so:
+        * rebuild_calibration_pairs_v2._fetch_verified_observation skips
+          them (predicate keys on authority='VERIFIED').
+        * harvester _lookup_settlement_obs (when authority filter is
+          tightened per known_gaps OPEN P1) skips them.
+        * row data + provenance preserved for audit.
+      56 settlements rows (city='Paris', writer=p_e_reconstruction_2026-04-23,
+      authority=VERIFIED, dates 2026-02-18..2026-04-15) plus the 5
+      already-QUARANTINED rows (2026-04-23..2026-04-27) all derive from
+      the same LFPG obs spine (obs_id linkage verified). Downgrade the
+      VERIFIED 56 to QUARANTINED with quarantine_reason
+      'paris_lfpg_legacy_pre_lfpb_migration'. The 8 platt_models_v2 rows
+      (Paris cluster, 4 seasons x HIGH/LOW) trained on LFPG-derived pairs
+      should be marked authority=QUARANTINED on the same row predicate
+      until rebuilt against LFPB data.
+
+      This mirrors the hko_canonical antibody (preflight_overrides_2026-04-28)
+      which downgraded 821 HK observations from VERIFIED -> QUARANTINED
+      for the same reason: contract identity was wrong even though the
+      raw measurement was authentic.
+
+    row_predicates:
+      observations:
+        where: "city='Paris' AND station_id='LFPG' AND source='wu_icao_history' AND authority='VERIFIED'"
+        estimated_count: 839
+        new_authority: QUARANTINED
+        quarantine_reason: paris_lfpg_legacy_pre_lfpb_migration
+      settlements:
+        where: "city='Paris' AND authority='VERIFIED' AND json_extract(provenance_json,'$.obs_source')='wu_icao_history'"
+        estimated_count: 56
+        new_authority: QUARANTINED
+        quarantine_reason: paris_lfpg_legacy_pre_lfpb_migration
+      platt_models_v2:
+        where: "cluster='Paris' AND authority='VERIFIED'"
+        estimated_count: 8
+        new_authority: QUARANTINED
+        quarantine_reason: paris_lfpg_legacy_pre_lfpb_migration
+
+  effect:
+    - 6 Paris source-contract MISMATCH rejections per cycle resolve once
+      cities.json carries LFPB.
+    - Paris re-becomes a tradable city after a fresh LFPB backfill (~90
+      days) lands in observations and a fresh Platt refit lands in
+      platt_models_v2 with cluster='Paris', authority='VERIFIED'.
+    - Until the backfill+refit lands, Paris remains a known-degraded
+      city (no VERIFIED LFPB obs -> no VERIFIED Paris pairs -> calibration
+      Level 4 -> evaluator should fail closed per the calibration-maturity
+      antibody).
+    - The 5 already-QUARANTINED Apr 23-27 LOW settlements remain
+      QUARANTINED; their station identity issue is upstream-blocked
+      (LOW market history starts 2026-04-15 per fatal_misreads), not
+      this packet's scope.
+
+  rfc_questions_answered:
+    paris_station_routing: "LFPB only — LFPG retired as Paris settlement station."
+
+  apply_steps_required_post_decision:
+    - 1_config_update: Edit config/cities.json Paris entry per config_change above.
+    - 2_hardcode_audit: Replace LFPG hardcodes in
+        src/data/meteostat_bulk_client.py:94 (LFPG WMO mapping; remove or
+          replace with LFPB once LFPB WMO id is verified)
+        scripts/oracle_snapshot_listener.py:71 (oracle shadow station map;
+          must follow cities.json or read from it dynamically)
+      Document each hardcode that intentionally stays as legacy (e.g.,
+      historical evidence packets in docs/archives/ MUST stay as LFPG —
+      they record what happened, not what is current).
+    - 3_apply_legacy_quarantine: Run a row-level UPDATE that downgrades
+      observations/settlements/platt_models_v2 per row_predicates above.
+      Snapshot DB first to state/zeus-world.db.pre-paris-lfpb-migration-2026-05-01.
+    - 4_backfill_lfpb: Invoke scripts/backfill_wu_daily_all.py for Paris
+      with start_date = today-90, end_date = today-2 (WU history publishes
+      with ~2-day lag). Confirm rows write station_id='LFPB',
+      source='wu_icao_history', authority='VERIFIED'.
+    - 5_refit_platt: Run scripts/rebuild_calibration_pairs_v2.py and
+      scripts/refit_platt_v2.py for the Paris cluster (HIGH and LOW,
+      DJF/MAM/JJA/SON). Confirm new platt_models_v2 rows land with
+      cluster='Paris', authority='VERIFIED'.
+    - 6_verify: Re-run the smoke / source-contract probe; confirm Paris
+      events emit no station MISMATCH and the 22 active May markets are
+      candidates again.
+    - 7_close: Once steps 1-6 land, mark this YAML as APPLIED and close
+      the known_gaps.md OPEN P1 Paris entry.
+
+  apply_status: PLANNED  # this YAML records the decision; runtime apply is the operator's call.

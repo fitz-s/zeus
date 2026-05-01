@@ -91,7 +91,14 @@ ICAO_TO_WMO: dict[str, str] = {
     "LEMD": "08221",  # Madrid
     "LIMC": "16066",  # Milan (Malpensa)
     "EDDM": "10866",  # Munich
-    "LFPG": "07157",  # Paris (CDG)
+    # Paris LFPB (Le Bourget) WMO id intentionally not seeded — Meteostat
+    # bulk fallback for Paris is disabled until a verified LFPB WMO id is
+    # added (Polymarket migrated Paris settlement LFPG -> LFPB on
+    # 2026-05-01; see architecture/paris_station_resolution_2026-05-01.yaml
+    # and config/cities.json _changelog 2026-05-01 entry). LFPG (07157) is
+    # the wrong-station mapping and is removed; tier_resolver will skip
+    # the meteostat_bulk fallback for Paris while the entry is absent,
+    # which is the safe behavior until LFPB is verified upstream.
     "EPWA": "12375",  # Warsaw (Chopin)
     # Asia ----------------------------------------------------------
     "ZBAA": "54511",  # Beijing

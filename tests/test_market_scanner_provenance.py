@@ -452,6 +452,41 @@ class TestB017MarketSnapshotProvenance:
 class TestSourceContractGate:
     """Gamma resolutionSource must match the configured settlement contract."""
 
+    @pytest.fixture(autouse=True)
+    def _pre_migration_paris(self, monkeypatch):
+        # Many tests in this class assert pre-migration drift behavior:
+        # cities.json has Paris=LFPG and the live Gamma market resolves on
+        # LFPB, so the parser/auto-converter must alert/quarantine.
+        # After the 2026-05-01 LFPG -> LFPB migration cities.json carries
+        # LFPB and those drift assertions no longer fire. Swap the live
+        # Paris entry for its pre-migration LFPG fixture so the
+        # drift-detection logic stays asserted independently of config
+        # state. See architecture/paris_station_resolution_2026-05-01.yaml.
+        from src import config as runtime_config
+        from src.config import City
+
+        live = list(runtime_config.runtime_cities())
+        pre_migration_paris = City(
+            name="Paris",
+            lat=49.0097,
+            lon=2.5479,
+            timezone="Europe/Paris",
+            settlement_unit="C",
+            cluster="Paris",
+            wu_station="LFPG",
+            aliases=("Paris",),
+            slug_names=("paris",),
+            airport_name="Paris-Charles de Gaulle Airport",
+            settlement_source="https://www.wunderground.com/history/daily/fr/paris/LFPG",
+            country_code="FR",
+        )
+        swapped = [
+            pre_migration_paris if c.name == "Paris" else c for c in live
+        ]
+        monkeypatch.setattr(
+            ms.runtime_config, "runtime_cities", lambda: swapped
+        )
+
     def test_matching_wu_station_carries_source_contract(self):
         event = _gamma_temperature_event()
 
@@ -535,6 +570,12 @@ class TestSourceContractGate:
         assert ms.get_current_yes_price("cond-low-closed") is None
 
     def test_paris_lfpb_is_rejected_while_configured_lfpg(self):
+        # Pre-migration regression guard: when cities.json points Paris at
+        # LFPG and the live Gamma market resolves on LFPB, the parser MUST
+        # reject the event with a station MISMATCH. The class-level
+        # `_pre_migration_paris` autouse fixture installs the pre-migration
+        # LFPG Paris City so this assertion stays valid after the 2026-05-01
+        # cities.json migration. See architecture/paris_station_resolution_2026-05-01.yaml.
         event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
             slug="highest-temperature-in-paris-on-april-29-2026",
@@ -1141,6 +1182,12 @@ class TestSourceContractGate:
         ] == "UNSUPPORTED"
 
     def test_auto_convert_plans_paris_same_provider_station_change(self, tmp_path):
+        # Pre-migration regression guard: the auto-conversion planner MUST
+        # detect the LFPG -> LFPB transition when cities.json still points
+        # Paris at LFPG. The class-level `_pre_migration_paris` autouse
+        # fixture installs the pre-migration LFPG Paris City so this
+        # assertion stays valid after the 2026-05-01 cities.json migration.
+        # See architecture/paris_station_resolution_2026-05-01.yaml.
         from scripts import source_contract_auto_convert as auto
         from scripts.watch_source_contract import analyze_events
 
@@ -1531,7 +1578,22 @@ class TestSourceContractGate:
             )
         )
         config_path = tmp_path / "cities.json"
-        config_path.write_text(auto.DEFAULT_CITY_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        # Pre-migration regression guard: swap live Paris (LFPB after the
+        # 2026-05-01 migration) back to its LFPG state so the apply path's
+        # pre-condition check (config station == LFPG before transition)
+        # passes. See architecture/paris_station_resolution_2026-05-01.yaml.
+        _live_config = json.loads(auto.DEFAULT_CITY_CONFIG_PATH.read_text(encoding="utf-8"))
+        for _row in _live_config["cities"]:
+            if _row["name"] == "Paris":
+                _row["wu_station"] = "LFPG"
+                _row["airport_name"] = "Paris-Charles de Gaulle Airport"
+                _row["settlement_source"] = "https://www.wunderground.com/history/daily/fr/paris/LFPG"
+                _row["lat"] = 49.0097
+                _row["lon"] = 2.5479
+                _row["wu_pws"] = "IMITRY1"
+                _row["meteostat_station"] = "07157"
+                break
+        config_path.write_text(json.dumps(_live_config, indent=2), encoding="utf-8")
         source_validity_path = tmp_path / "current_source_validity.md"
         source_validity_path.write_text("# Current Source Validity\n", encoding="utf-8")
         db_path = tmp_path / "zeus-world.db"
@@ -1658,7 +1720,23 @@ class TestSourceContractGate:
             )
         )
         config_path = tmp_path / "cities.json"
-        original_config = auto.DEFAULT_CITY_CONFIG_PATH.read_bytes()
+        # Pre-migration regression guard: swap live Paris (LFPB after the
+        # 2026-05-01 migration) back to its LFPG state so the apply path's
+        # pre-condition check passes; rollback assertion below compares
+        # against this synthetic pre-migration config bytes.
+        # See architecture/paris_station_resolution_2026-05-01.yaml.
+        _live_config = json.loads(auto.DEFAULT_CITY_CONFIG_PATH.read_text(encoding="utf-8"))
+        for _row in _live_config["cities"]:
+            if _row["name"] == "Paris":
+                _row["wu_station"] = "LFPG"
+                _row["airport_name"] = "Paris-Charles de Gaulle Airport"
+                _row["settlement_source"] = "https://www.wunderground.com/history/daily/fr/paris/LFPG"
+                _row["lat"] = 49.0097
+                _row["lon"] = 2.5479
+                _row["wu_pws"] = "IMITRY1"
+                _row["meteostat_station"] = "07157"
+                break
+        original_config = json.dumps(_live_config, indent=2).encode("utf-8")
         config_path.write_bytes(original_config)
         source_validity_path = tmp_path / "current_source_validity.md"
         original_source_validity = b"# Current Source Validity\n"
