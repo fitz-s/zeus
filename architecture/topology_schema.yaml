@@ -171,6 +171,8 @@ agent_runtime_contract:
     - hard_stops
     - claims
     - expansion_hints
+    - operation_vector
+    - operation_vector_sources
     - dominant_driver
     - why_not_admitted
     - suggested_next_command

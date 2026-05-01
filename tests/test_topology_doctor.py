@@ -188,6 +188,32 @@ def test_navigation_changed_files_aliases_files_instead_of_empty_route():
     assert payload["route_card"]["admitted_files"] == ["scripts/topology_doctor_cli.py"]
 
 
+def test_navigation_cli_accepts_operation_vector_fields():
+    args = [
+        "--navigation",
+        "--route-card-only",
+        "--json",
+        "--task",
+        "done",
+        "--write-intent",
+        "read_only",
+        "--operation-stage",
+        "closeout",
+        "--artifact-target",
+        "final_response",
+    ]
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(args)
+
+    payload = json.loads(buffer.getvalue())
+    assert exit_code == 0
+    assert payload["route_card"]["operation_vector"]["operation_stage"] == "closeout"
+    assert payload["route_card"]["operation_vector"]["artifact_target"] == "final_response"
+    assert payload["route_card"]["persistence_target"] == "final_response"
+
+
 def test_cli_json_parity_for_context_pack_command():
     args = [
         "context-pack",
@@ -4537,6 +4563,8 @@ def test_runtime_route_card_contract_matches_schema():
     assert card["task_class"] == "agent_runtime"
     assert card["write_intent"] == "edit"
     assert card["expansion_hints"]
+    assert card["operation_vector"]["operation_stage"]
+    assert card["operation_vector_sources"]
 
 
 def test_runtime_claims_appear_in_route_card_and_digest_inputs():
@@ -4566,6 +4594,108 @@ def test_runtime_route_card_explains_generic_source_canary_probe():
     assert "source canary readiness hot-swap" in card["suggested_next_command"]
     assert "src/control/freshness_gate.py" in card["safe_next_files"]
     assert card["merge_evidence_required"]["required"] is False
+
+
+def test_operation_vector_selects_source_canary_without_canonical_phrase():
+    digest = topology_doctor.build_digest(
+        "source canary recovery",
+        ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] == "source_canary_readiness_hot_swap"
+
+
+def test_operation_vector_requires_explicit_surface_for_high_fanout_evaluator_profile():
+    soft = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+    )
+    routed = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+        mutation_surfaces=["evaluator_behavior"],
+    )
+
+    assert soft["profile"] == "generic"
+    assert soft["admission"]["status"] == "advisory_only"
+    assert routed["profile"] == "evaluator script import bridge"
+    assert routed["admission"]["status"] == "admitted"
+    assert routed["profile_selection"]["selected_by"] == "operation_vector"
+
+
+def test_operation_vector_typed_closeout_routes_feedback_without_alias():
+    digest = topology_doctor.build_digest(
+        "done",
+        [],
+        write_intent="read_only",
+        operation_stage="closeout",
+        artifact_target="final_response",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert card["operation_vector"]["operation_stage"] == "closeout"
+    assert card["operation_vector"]["artifact_target"] == "final_response"
+    assert card["persistence_target"] == "final_response"
+    assert card["suggested_next_command"] is None
+
+
+def test_operation_vector_does_not_turn_plain_receipt_closeout_into_feedback():
+    digest = topology_doctor.build_digest(
+        "write packet closeout receipt",
+        ["docs/operations/task_2026-05-01_plain/receipt.json"],
+        write_intent="edit",
+        operation_stage="closeout",
+        artifact_target="receipt",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] != "direct operation feedback capsule"
+    assert digest["profile_selection"]["selected_by"] != "operation_vector"
+    assert card["operation_vector"]["artifact_target"] == "receipt"
+
+
+def test_operation_vector_redirects_feedback_evidence_file_to_final_response():
+    digest = topology_doctor.build_digest(
+        "operation feedback capsule",
+        ["evidence.md"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert card["operation_vector"]["artifact_target"] == "new_evidence"
+    assert card["persistence_target"] == "new_evidence"
+    assert "--artifact-target final_response" in card["suggested_next_command"]
+
+
+def test_operation_vector_high_risk_merge_conflict_requires_critic_evidence():
+    digest = topology_doctor.build_digest(
+        "broad schema lifecycle DB control live conflict semantic ambiguity",
+        [
+            "src/state/chain_reconciliation.py",
+            "src/control/heartbeat_supervisor.py",
+            "src/execution/exchange_reconcile.py",
+        ],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["operation_stage"] == "merge"
+    assert card["merge_conflict_scan"] == "high_risk_conflict"
+    assert card["merge_evidence_required"]["required"] is True
+    assert card["dominant_driver"] == "merge_conflict_first"
+    assert "--merge-state high_risk_conflict" in card["suggested_next_command"]
 
 
 def test_runtime_route_card_surfaces_script_manifest_provenance_for_bridge():
