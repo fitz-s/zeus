@@ -187,7 +187,10 @@ def _fetch_registered_ingest_ensemble(
             return _clone_result(cached)
 
     lead_hours = tuple(range(0, max(1, int(forecast_days)) * 24))
-    ingest = ingest_class()
+    try:
+        ingest = ingest_class(city=city)
+    except TypeError:
+        ingest = ingest_class()
     bundle = ingest.fetch(fetch_time, lead_hours)
     parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time, role=role)
     parsed["forecast_days"] = int(forecast_days)
