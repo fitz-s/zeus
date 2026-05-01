@@ -12,7 +12,7 @@ import math
 import os
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 
 from src.config import get_mode
@@ -136,6 +136,23 @@ def _select_final_submit_order_type(conn, snapshot_id: str, deps) -> str:
     return str(_select_risk_allocator_order_type(conn, snapshot_id))
 
 
+def _quantize_submit_shares(direction: str, shares: Decimal) -> Decimal:
+    if shares <= Decimal("0"):
+        raise ValueError("submitted_shares must be positive")
+    quantum = Decimal("0.01")
+    rounding = ROUND_CEILING if direction.startswith("buy_") else ROUND_FLOOR
+    quantized = (shares / quantum).to_integral_value(rounding=rounding) * quantum
+    if quantized <= Decimal("0"):
+        raise ValueError("submitted_shares rounded to zero")
+    return quantized
+
+
+def _expected_gross_notional(cost_basis) -> Decimal:
+    if cost_basis.requested_size_kind == "shares":
+        return cost_basis.requested_size_value * cost_basis.expected_fill_price_before_fee
+    return cost_basis.requested_size_value
+
+
 def _attach_corrected_pricing_authority(
     *,
     decision,
@@ -212,7 +229,53 @@ def _attach_corrected_pricing_authority(
             "sweep_unfilled_size_value": _decimal_payload(sweep.unfilled_size_value),
         }
 
-    if is_marketable:
+    immediate_order_type = str(order_type or "").strip().upper()
+    final_unsupported_reason = ""
+    if is_marketable and immediate_order_type in {"FOK", "FAK"}:
+        submitted_shares = _quantize_submit_shares(direction, sweep.filled_shares)
+        sweep = simulate_clob_sweep(
+            snapshot=snapshot,
+            direction=direction,
+            requested_size_kind="shares",
+            requested_size_value=submitted_shares,
+            limit_price=candidate_limit,
+        )
+        if sweep.average_price is None:
+            raise ValueError("corrected pricing final sweep produced no executable fill")
+        candidate_expected_fill = sweep.average_price
+        depth_status = sweep.depth_status
+        sweep_payload.update(
+            {
+                "sweep_depth_status": sweep.depth_status,
+                "sweep_book_side": sweep.book_side,
+                "sweep_levels_consumed": sweep.levels_consumed,
+                "sweep_filled_shares": _decimal_payload(sweep.filled_shares),
+                "sweep_gross_notional": _decimal_payload(sweep.gross_notional),
+                "sweep_average_price": _decimal_payload(sweep.average_price),
+                "sweep_worst_price": (
+                    None
+                    if sweep.worst_price is None
+                    else _decimal_payload(sweep.worst_price)
+                ),
+                "sweep_unfilled_size_value": _decimal_payload(
+                    sweep.unfilled_size_value
+                ),
+            }
+        )
+        cost_basis = ExecutableCostBasis.from_snapshot_sweep(
+            snapshot=snapshot,
+            direction=direction,
+            order_policy="limit_may_take_conservative",
+            requested_size_kind="shares",
+            requested_size_value=submitted_shares,
+            final_limit_price=candidate_limit,
+            fee_adjusted_execution_price=None,
+        )
+        sweep_payload["sweep_submitted_shares"] = _decimal_payload(submitted_shares)
+    elif is_marketable:
+        final_unsupported_reason = (
+            "MARKETABLE_FINAL_INTENT_REQUIRES_IMMEDIATE_ORDER_TYPE"
+        )
         cost_basis = ExecutableCostBasis.from_snapshot_sweep(
             snapshot=snapshot,
             direction=direction,
@@ -245,11 +308,11 @@ def _attach_corrected_pricing_authority(
         cost_basis=cost_basis,
     )
     final_intent = None
-    if is_marketable:
+    if is_marketable and not final_unsupported_reason:
         final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
             hypothesis=hypothesis,
             cost_basis=cost_basis,
-            order_type=order_type,
+            order_type=immediate_order_type,
             post_only=False,
             cancel_after=cancel_after,
             max_slippage_bps=Decimal("200"),
@@ -268,7 +331,11 @@ def _attach_corrected_pricing_authority(
         "field_semantics": (
             "final_execution_intent_submit_authority"
             if final_intent is not None
-            else "passive_limit_requires_maker_only_support"
+            else (
+                "marketable_limit_requires_immediate_order_type"
+                if final_unsupported_reason
+                else "passive_limit_requires_maker_only_support"
+            )
         ),
         "selected_token_id": cost_basis.selected_token_id,
         "direction": cost_basis.direction,
@@ -279,7 +346,7 @@ def _attach_corrected_pricing_authority(
         "hypothesis_id": hypothesis.fdr_hypothesis_id,
         "final_execution_intent_id": None if final_intent is None else final_intent.hypothesis_id,
         "order_policy": cost_basis.order_policy,
-        "order_type": order_type if final_intent is None else final_intent.order_type,
+        "order_type": immediate_order_type if final_intent is None else final_intent.order_type,
         "cancel_after": (
             None
             if final_intent is None or final_intent.cancel_after is None
@@ -299,7 +366,14 @@ def _attach_corrected_pricing_authority(
         "candidate_fee_adjusted_execution_price": _decimal_payload(
             cost_basis.fee_adjusted_execution_price
         ),
-        "candidate_size_usd": _decimal_payload(cost_basis.requested_size_value),
+        "candidate_size_kind": cost_basis.requested_size_kind,
+        "candidate_size_value": _decimal_payload(cost_basis.requested_size_value),
+        "candidate_size_usd": _decimal_payload(_expected_gross_notional(cost_basis)),
+        "candidate_submitted_shares": (
+            None
+            if final_intent is None
+            else _decimal_payload(final_intent.submitted_shares)
+        ),
         "fee_rate": _decimal_payload(cost_basis.worst_case_fee_rate),
         "neg_risk": cost_basis.neg_risk,
         "posterior_distribution_id": hypothesis.posterior_distribution_id,
@@ -309,7 +383,10 @@ def _attach_corrected_pricing_authority(
         "submit_path": None,
     }
     if final_intent is None:
-        payload["unsupported_reason"] = "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+        payload["unsupported_reason"] = (
+            final_unsupported_reason
+            or "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+        )
     payload.update(sweep_payload)
     tokens["corrected_pricing_shadow"] = payload
     decision.tokens = tokens
@@ -490,6 +567,14 @@ def _reprice_decision_from_executable_snapshot(
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
     )
+    if (
+        isinstance(corrected_pricing_shadow, dict)
+        and corrected_pricing_shadow.get("live_submit_authority") is True
+    ):
+        corrected_candidate_size = float(
+            Decimal(str(corrected_pricing_shadow["candidate_size_usd"]))
+        )
+        repriced_size = corrected_candidate_size
     tokens = dict(getattr(decision, "tokens", {}) or {})
 
     decision.edge = replace(

@@ -829,17 +829,12 @@ def _entry_buy_submit_shares(target_size_usd: float, limit_price: float) -> floa
 
 
 def _final_intent_submit_shares(intent: FinalExecutionIntent) -> float:
-    """Adapt immutable final sizing to the legacy entry executor contract."""
+    """Return the frozen venue share quantity from the final intent."""
 
-    if intent.size_kind == "notional_usd":
-        return _entry_buy_submit_shares(
-            float(intent.size_value),
-            float(intent.final_limit_price),
-        )
-    raise ValueError(
-        "execute_final_intent requires notional_usd sizing until the entry "
-        f"executor can submit frozen share quantities; got {intent.size_kind!r}"
-    )
+    submitted_shares = float(intent.submitted_shares)
+    if submitted_shares <= 0.0:
+        raise ValueError("FinalExecutionIntent submitted_shares must be positive")
+    return submitted_shares
 
 
 def _final_intent_target_size_usd(intent: FinalExecutionIntent, shares: float) -> float:

@@ -1247,6 +1247,7 @@ def test_final_execution_intent_carries_cost_basis_fields_without_recompute_inpu
     intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
         hypothesis=hypothesis,
         cost_basis=cost_basis,
+        order_type="FOK",
     )
 
     assert intent.hypothesis_id == hypothesis.fdr_hypothesis_id
@@ -1258,6 +1259,7 @@ def test_final_execution_intent_carries_cost_basis_fields_without_recompute_inpu
     assert intent.final_limit_price == Decimal("0.50")
     assert intent.expected_fill_price_before_fee == Decimal("0.50")
     assert intent.fee_adjusted_execution_price == Decimal("0.5075")
+    assert intent.submitted_shares == Decimal("10")
     assert intent.neg_risk is True
     intent.assert_no_recompute_inputs()
     intent.assert_submit_ready()
@@ -1285,6 +1287,7 @@ def test_final_execution_intent_enforces_adverse_slippage_budget_for_buys_and_se
             direction="sell_yes",
             size_kind="shares",
             size_value=Decimal("10"),
+            submitted_shares=Decimal("10"),
             final_limit_price=Decimal("0.48"),
             expected_fill_price_before_fee=Decimal("0.50"),
             fee_adjusted_execution_price=Decimal("0.4925"),
@@ -1315,6 +1318,7 @@ def test_final_execution_intent_recomputes_fee_adjusted_price_at_boundary():
             direction=cost_basis.direction,
             size_kind=cost_basis.requested_size_kind,
             size_value=cost_basis.requested_size_value,
+            submitted_shares=Decimal("10"),
             final_limit_price=cost_basis.final_limit_price,
             expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
             fee_adjusted_execution_price=Decimal("0.50"),
@@ -1358,6 +1362,7 @@ def test_final_execution_intent_requires_cost_basis_hash():
             direction=cost_basis.direction,
             size_kind=cost_basis.requested_size_kind,
             size_value=cost_basis.requested_size_value,
+            submitted_shares=Decimal("10"),
             final_limit_price=cost_basis.final_limit_price,
             expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
             fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,
@@ -1383,6 +1388,7 @@ def test_final_execution_intent_requires_cost_basis_hash():
             direction=cost_basis.direction,
             size_kind=cost_basis.requested_size_kind,
             size_value=cost_basis.requested_size_value,
+            submitted_shares=Decimal("10"),
             final_limit_price=cost_basis.final_limit_price,
             expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
             fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,

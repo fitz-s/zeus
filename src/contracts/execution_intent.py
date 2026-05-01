@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from src.contracts.semantic_types import Direction
@@ -186,6 +186,28 @@ def _assert_min_order_satisfied(
         raise ValueError(
             f"size {shares} shares is below min_order_size {min_order_size}"
         )
+
+
+def _quantize_submit_shares(direction: ExecutionDirection, shares: Decimal) -> Decimal:
+    if shares <= Decimal("0"):
+        raise ValueError("submitted_shares must be positive")
+    quantum = Decimal("0.01")
+    rounding = ROUND_CEILING if direction.startswith("buy_") else ROUND_FLOOR
+    quantized = (shares / quantum).to_integral_value(rounding=rounding) * quantum
+    if quantized <= Decimal("0"):
+        raise ValueError("submitted_shares rounded to zero")
+    return quantized
+
+
+def _submitted_shares_from_cost_basis(cost_basis: "ExecutableCostBasis") -> Decimal:
+    if cost_basis.requested_size_kind == "shares":
+        raw_shares = cost_basis.requested_size_value
+    else:
+        raw_shares = (
+            cost_basis.requested_size_value
+            / cost_basis.expected_fill_price_before_fee
+        )
+    return _quantize_submit_shares(cost_basis.direction, raw_shares)
 
 
 def _fee_adjusted_price(
@@ -1149,6 +1171,7 @@ class FinalExecutionIntent:
     direction: ExecutionDirection
     size_kind: OrderSizeKind
     size_value: Decimal
+    submitted_shares: Decimal
     final_limit_price: Decimal
     expected_fill_price_before_fee: Decimal
     fee_adjusted_execution_price: Decimal
@@ -1202,6 +1225,7 @@ class FinalExecutionIntent:
             direction=cost_basis.direction,
             size_kind=cost_basis.requested_size_kind,
             size_value=cost_basis.requested_size_value,
+            submitted_shares=_submitted_shares_from_cost_basis(cost_basis),
             final_limit_price=cost_basis.final_limit_price,
             expected_fill_price_before_fee=cost_basis.expected_fill_price_before_fee,
             fee_adjusted_execution_price=cost_basis.fee_adjusted_execution_price,
@@ -1227,6 +1251,7 @@ class FinalExecutionIntent:
     def __post_init__(self) -> None:
         for field_name in (
             "size_value",
+            "submitted_shares",
             "final_limit_price",
             "expected_fill_price_before_fee",
             "fee_adjusted_execution_price",
@@ -1317,6 +1342,8 @@ class FinalExecutionIntent:
         _require_unit_interval_closed(self.fee_rate, "fee_rate")
         if self.max_slippage_bps < Decimal("0"):
             raise ValueError("max_slippage_bps must be non-negative")
+        if self.submitted_shares <= Decimal("0"):
+            raise ValueError("submitted_shares must be positive")
         adverse_slippage = _adverse_slippage_bps(
             direction=self.direction,
             reference_price=self.expected_fill_price_before_fee,
@@ -1328,6 +1355,24 @@ class FinalExecutionIntent:
                 f"adverse_slippage_bps={adverse_slippage} "
                 f"max_slippage_bps={self.max_slippage_bps}"
             )
+        if (
+            self.order_policy == "limit_may_take_conservative"
+            and self.order_type not in {"FOK", "FAK"}
+        ):
+            raise ValueError(
+                "marketable final execution intent requires FOK/FAK order_type"
+            )
+        if self.size_kind == "shares" and self.submitted_shares != self.size_value:
+            raise ValueError("submitted_shares must match share-sized final intent")
+        if self.size_kind == "notional_usd":
+            expected_submitted_shares = _quantize_submit_shares(
+                self.direction,
+                self.size_value / self.expected_fill_price_before_fee,
+            )
+            if self.submitted_shares != expected_submitted_shares:
+                raise ValueError(
+                    "submitted_shares must match expected-fill notional sizing"
+                )
         _assert_tick_aligned(self.final_limit_price, self.tick_size)
         _assert_min_order_satisfied(
             size_kind=self.size_kind,
@@ -1335,3 +1380,8 @@ class FinalExecutionIntent:
             final_limit_price=self.final_limit_price,
             min_order_size=self.min_order_size,
         )
+        if self.submitted_shares < self.min_order_size:
+            raise ValueError(
+                f"submitted_shares {self.submitted_shares} is below "
+                f"min_order_size {self.min_order_size}"
+            )
