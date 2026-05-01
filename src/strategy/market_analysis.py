@@ -248,12 +248,9 @@ class MarketAnalysis:
     def supports_buy_no_edges(self, bin_idx: int | None = None) -> bool:
         """Return whether local NO-side economics are executable for this market.
 
-        Binary markets may use complement semantics. Multi-bin weather families
-        require native NO-token market prices per selected child; `1 - YES` is
-        not an executable multi-bin NO entry price.
+        Buy-NO entries require native NO-token market prices per selected child;
+        `1 - YES` is a diagnostic complement, not executable entry authority.
         """
-        if len(self.bins) <= 2:
-            return True
         if self.p_market_no is None:
             return False
         if self.buy_no_quote_available is None:
@@ -268,13 +265,19 @@ class MarketAnalysis:
         """Return executable NO-side entry/VWMP price for one bin."""
         if not self.supports_buy_no_edges(bin_idx):
             raise ValueError(f"buy_no is not executable for bin index {bin_idx}")
-        if len(self.bins) <= 2 and self.p_market_no is None:
-            if self.p_market is None:
-                raise ValueError("binary buy_no complement requires YES-side market price")
-            return 1.0 - float(self.p_market[bin_idx])
         if self.p_market_no is None:
             raise ValueError("native NO market prices are unavailable")
         return float(self.p_market_no[bin_idx])
+
+    def buy_no_complement_diagnostic_price(self, bin_idx: int) -> float:
+        """Return binary complement as a non-executable diagnostic only."""
+        if bin_idx < 0 or bin_idx >= len(self.bins):
+            raise IndexError(f"bin_idx out of range: {bin_idx}")
+        if len(self.bins) > 2:
+            raise ValueError("buy_no complement diagnostic is only defined for binary markets")
+        if self.p_market is None:
+            raise ValueError("binary buy_no complement diagnostic requires YES-side market price")
+        return 1.0 - float(self.p_market[bin_idx])
 
     def find_edges(
         self, n_bootstrap: int | None = None
