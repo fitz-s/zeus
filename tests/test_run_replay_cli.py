@@ -52,9 +52,9 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (31, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -102,9 +102,9 @@ def test_counterfactual_replay_does_not_auto_enable_snapshot_only_reference(tmp_
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (32, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -213,10 +213,10 @@ def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_pat
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (51, 'Dallas', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
                 '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0,
-                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1')
+                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -374,10 +374,10 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (41, 'Paris', '2026-04-04', '2026-04-03T00:00:00Z', '2026-04-04T00:00:00Z',
                 '2026-04-03T08:00:00Z', '2026-04-03T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -458,10 +458,10 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (51, 'Paris', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
                 '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -527,10 +527,10 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (61, 'Paris', '2026-04-06', '2026-04-05T00:00:00Z', '2026-04-06T00:00:00Z',
                 '2026-04-05T08:00:00Z', '2026-04-05T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -618,10 +618,10 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES (71, 'Paris', '2026-04-07', '2026-04-06T00:00:00Z', '2026-04-07T00:00:00Z',
                 '2026-04-06T08:00:00Z', '2026-04-06T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
@@ -710,14 +710,14 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version, temperature_metric)
         VALUES
         (81, 'Paris', '2026-04-08', '2026-04-07T00:00:00Z', '2026-04-08T00:00:00Z',
          '2026-04-07T08:00:00Z', '2026-04-07T08:05:00Z', 24.0, '[12.0, 13.0]',
-         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1'),
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high'),
         (82, 'Paris', '2026-04-09', '2026-04-08T00:00:00Z', '2026-04-09T00:00:00Z',
          '2026-04-08T08:00:00Z', '2026-04-08T08:05:00Z', 24.0, '[12.0, 13.0]',
-         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1')
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
         """
     )
     conn.execute(
