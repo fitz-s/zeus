@@ -89,3 +89,40 @@ echo '{"state":"BLOCKED","transitions":[{"from":"LIVE_ENABLED","to":"BLOCKED","b
 ```
 
 `BLOCKED` state blocks every action surface (entry/exit/cancel/redemption) immediately on next gate check.
+
+## User-channel WS env vars needed (currently missing)
+
+**Symptom (every cycle, today)**: `ws_user_channel.gap_reason='not_configured'`. The daemon never starts the authenticated user-channel WebSocket because `PolymarketUserChannelIngestor.from_env(...)` is gated on `ZEUS_USER_CHANNEL_WS_ENABLED=1` and that flag is absent from `~/Library/LaunchAgents/com.zeus.live-trading.plist`.
+
+**Inventory of env vars consumed by the user-channel boot path** (`src/main.py::_start_user_channel_ingestor_if_enabled` + `src/ingest/polymarket_user_channel.py::WSAuth.from_env`):
+
+| # | Var | Purpose | Currently in plist? |
+|---|---|---|---|
+| 1 | `ZEUS_USER_CHANNEL_WS_ENABLED` | Master toggle (`1`/`true`/`yes`/`on`). When absent, the boot path skips quietly and the WS guard reports `not_configured`. | **Missing** |
+| 2 | `POLYMARKET_USER_WS_CONDITION_IDS` | Comma-separated list of condition IDs to subscribe to. Empty triggers `condition_ids_missing` gap (intentional fail-closed). | **Missing** |
+| 3 | `POLYMARKET_API_KEY` | L2 API key for user-channel auth (`WSAuth.from_env`). | Present |
+| 4 | `POLYMARKET_API_SECRET` | L2 API secret. | Present |
+| 5 | `POLYMARKET_API_PASSPHRASE` | L2 API passphrase. | Present |
+
+**Action required before the daemon can leave `reduce_only=True`**: add `ZEUS_USER_CHANNEL_WS_ENABLED=1` and `POLYMARKET_USER_WS_CONDITION_IDS="<comma-separated condition ids>"` to the live-trading plist under `EnvironmentVariables`, then `launchctl unload && launchctl load` the plist. The boot warning now lists every missing var on each cold start so operators don't have to re-derive this list.
+
+```bash
+# After flipping the plist:
+/usr/libexec/PlistBuddy -c \
+  "Add :EnvironmentVariables:ZEUS_USER_CHANNEL_WS_ENABLED string 1" \
+  ~/Library/LaunchAgents/com.zeus.live-trading.plist
+/usr/libexec/PlistBuddy -c \
+  "Add :EnvironmentVariables:POLYMARKET_USER_WS_CONDITION_IDS string '<id1>,<id2>,...'" \
+  ~/Library/LaunchAgents/com.zeus.live-trading.plist
+```
+
+This is documentation-only — Fix 2 in this session adds the boot-time WARNING log line that names the missing vars; the actual plist edit is operator territory.
+
+## Auto-pause hardening (2026-05-01)
+
+Auto-pause used to write `effective_until=NULL`, which is permanent. A single transient `ValueError` would lock entries forever until the operator manually expired the override. Fix shipped 2026-05-01:
+
+- Auto-pause overrides now default to `now + 15min` expiry. If the issue is transient, entries auto-resume after 15 min; if it persists, the next failure re-pauses (and the streak counter re-arms).
+- A streak counter at `state/auto_pause_streak.json` requires 3 consecutive same-reason failures within a 5-min window before `pause_entries` is called. Single-cycle hiccups log a WARNING but do not pause.
+- `pause_entries(...)` is idempotent on the same active reason — duplicate inserts within the same active window are skipped.
+- Operator helper `scripts/expire_auto_pause.sh` clears the override + tombstone + streak file in one shot, without re-running the full `arm_live_mode.sh` flow.

@@ -188,6 +188,15 @@ _user_channel_ingestor = None
 _user_channel_thread = None
 
 
+USER_CHANNEL_REQUIRED_ENV_VARS = (
+    "ZEUS_USER_CHANNEL_WS_ENABLED",
+    "POLYMARKET_USER_WS_CONDITION_IDS",
+    "POLYMARKET_API_KEY",
+    "POLYMARKET_API_SECRET",
+    "POLYMARKET_API_PASSPHRASE",
+)
+
+
 def _start_user_channel_ingestor_if_enabled() -> None:
     """Start M3 Polymarket user-channel ingest in a daemon thread when enabled.
 
@@ -195,9 +204,26 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
     condition IDs plus L2 API credentials. If enabled but misconfigured, the
     WS guard records an auth/config gap so new submits fail closed.
+
+    Live-blockers 2026-05-01: when the WS is NOT enabled (or required env
+    vars are missing) we now emit a single CLEAR WARNING line listing every
+    missing var. Today the silent skip leaves operators with the cryptic
+    ``ws_user_channel.gap_reason='not_configured'`` symptom and no surface
+    explanation of which env vars to add to the launchd plist before the
+    daemon can leave reduce_only mode.
     """
     global _user_channel_ingestor, _user_channel_thread
-    if os.environ.get("ZEUS_USER_CHANNEL_WS_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+    enabled_raw = os.environ.get("ZEUS_USER_CHANNEL_WS_ENABLED", "0").strip().lower()
+    if enabled_raw not in {"1", "true", "yes", "on"}:
+        missing = [
+            name for name in USER_CHANNEL_REQUIRED_ENV_VARS
+            if not (os.environ.get(name) or "").strip()
+        ]
+        logger.warning(
+            "user-channel WS not configured: missing env vars %s; "
+            "daemon stays in reduce_only=True mode",
+            missing,
+        )
         return
     if _user_channel_thread is not None and _user_channel_thread.is_alive():
         return
