@@ -2767,6 +2767,7 @@ digest_profiles:
       - "tests/test_market_analysis.py"
       - "tests/test_executor.py"
       - "tests/test_runtime_guards.py"
+      - "tests/test_live_safety_invariants.py"
       - "tests/test_hold_value_exit_costs.py"
       - "tests/test_digest_profile_matching.py"
     required_law:
@@ -2775,6 +2776,7 @@ digest_profiles:
       - "Corrected Kelly/FDR must consume executable, fee/tick/slippage-aware native-side economics from a selected snapshot/cost-basis lineage."
       - "Corrected executor submission consumes immutable FinalExecutionIntent and must not recompute limit from posterior, VWMP, or market prior."
       - "State-owned exit decisions must consume held-token executable sell quote/proceeds for EV gates; monitor probability vectors and p_market fields are not sell-quote authority."
+      - "Monitor probability refresh must not consume the just-refreshed held-token executable quote; Day0 best bid remains an exit/market surface, not posterior input."
       - "Legacy compatibility remains non-promotion-grade until corrected monitor, exit, persistence, reporting, shadow/canary, and operator-go evidence exist."
       - "This profile does not authorize live venue submission, production DB mutation, schema migration apply, source-routing changes, or live strategy promotion."
     allowed_files:
@@ -2805,6 +2807,7 @@ digest_profiles:
       - "tests/test_market_analysis.py"
       - "tests/test_executor.py"
       - "tests/test_runtime_guards.py"
+      - "tests/test_live_safety_invariants.py"
       - "tests/test_hold_value_exit_costs.py"
       - "tests/test_digest_profile_matching.py"
     forbidden_files:
@@ -2826,7 +2829,7 @@ digest_profiles:
     gates:
       - "pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_routes_to_refactor_profile tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope"
       - "pytest -q -p no:cacheprovider tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py"
-      - "pytest -q -p no:cacheprovider tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_market_analysis.py tests/test_executor.py tests/test_runtime_guards.py tests/test_hold_value_exit_costs.py"
+      - "pytest -q -p no:cacheprovider tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py tests/test_market_analysis.py tests/test_executor.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_hold_value_exit_costs.py"
       - "python3 scripts/digest_profiles_export.py --check"
       - "python3 scripts/topology_doctor.py --schema"
       - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md"

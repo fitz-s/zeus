@@ -5,7 +5,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 """
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
@@ -57,6 +57,19 @@ _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
+
+
+@dataclass(frozen=True)
+class HeldTokenMonitorQuote:
+    """Held-token executable quote surface for monitor/exit economics."""
+
+    token_id: str
+    best_bid: float
+    best_ask: float
+    bid_size: float
+    ask_size: float
+    diagnostic_market_price: float
+    source_timestamp: str
 
 
 def _model_only_native_posterior(p_native: float) -> float:
@@ -350,6 +363,59 @@ def _fetch_day0_observation(city: Position | object, target_d: date):
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTokenMonitorQuote | None:
+    """Refresh held-token executable quote without feeding posterior belief."""
+
+    tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+    if not tid:
+        return None
+
+    try:
+        bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
+        bid_f = float(bid)
+        ask_f = float(ask)
+        bid_sz_f = float(bid_sz)
+        ask_sz_f = float(ask_sz)
+        diagnostic_market_price = (
+            bid_f
+            if pos.state == "day0_window"
+            else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
+        )
+        source_timestamp = datetime.now(timezone.utc).isoformat()
+
+        try:
+            # Injection Point 7: Data completeness - record microstructure snapshot.
+            from src.state.db import log_microstructure
+
+            log_microstructure(
+                conn,
+                token_id=tid,
+                city=pos.city,
+                target_date=pos.target_date,
+                range_label=pos.bin_label,
+                price=float(diagnostic_market_price),
+                volume=float(bid_sz_f + ask_sz_f),
+                bid=float(bid_f),
+                ask=float(ask_f),
+                spread=round(float(ask_f - bid_f), 4) if ask_f >= bid_f else 0.0,
+                source_timestamp=source_timestamp,
+            )
+        except Exception as exc:
+            logger.debug("Microstructure log failed for %s: %s", pos.trade_id, exc)
+        return HeldTokenMonitorQuote(
+            token_id=tid,
+            best_bid=bid_f,
+            best_ask=ask_f,
+            bid_size=bid_sz_f,
+            ask_size=ask_sz_f,
+            diagnostic_market_price=diagnostic_market_price,
+            source_timestamp=source_timestamp,
+        )
+    except Exception as e:
+        logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
+        return None
 
 
 def _refresh_day0_observation(
@@ -899,6 +965,43 @@ def _detect_whale_toxicity_from_orderbook(
     return None
 
 
+def monitor_probability_refresh(
+    pos: Position,
+    *,
+    conn,
+    city,
+    target_d,
+) -> tuple[float, Position, bool | None]:
+    """Refresh held-side posterior without consuming the held-token quote."""
+
+    registry = {
+        EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
+        EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
+    }
+    refresh_pos = pos
+    if pos.state == "day0_window" and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
+        refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+    setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
+
+    # recompute_native_probability still carries a legacy current_p_market
+    # parameter for dispatch compatibility. Do not pass the just-refreshed
+    # executable quote through this seam.
+    probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+    current_p_posterior = recompute_native_probability(
+        refresh_pos,
+        current_p_market=probability_reference_price,
+        registry=registry,
+        conn=conn,
+        city=city,
+        target_d=target_d,
+    )
+    return (
+        current_p_posterior,
+        refresh_pos,
+        getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None),
+    )
+
+
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
     """Fetch fresh market price and recompute P_posterior for a held position.
 
@@ -924,63 +1027,27 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
 
-    # 1. Refresh market price
+    # 1. Refresh held-token quote
     market_refreshed = False
-    tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-    if tid:
-        try:
-            bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
-            pos.last_monitor_best_bid = float(bid)
-            pos.last_monitor_best_ask = float(ask)
-            if pos.state == "day0_window":
-                current_p_market = bid
-            else:
-                current_p_market = vwmp(bid, ask, bid_sz, ask_sz)
-            market_refreshed = True
-
-            # Injection Point 7: Data completeness - record microstructure snapshot
-            from src.state.db import log_microstructure
-
-            log_microstructure(
-                conn,
-                token_id=tid,
-                city=pos.city,
-                target_date=pos.target_date,
-                range_label=pos.bin_label,
-                price=float(current_p_market),
-                volume=float(bid_sz + ask_sz),
-                bid=float(bid),
-                ask=float(ask),
-                spread=round(float(ask - bid), 4) if ask >= bid else 0.0,
-                source_timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-        except Exception as e:
-            logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
-
-    if market_refreshed:
+    quote = monitor_quote_refresh(conn, clob, pos)
+    if quote is not None:
+        pos.last_monitor_best_bid = quote.best_bid
+        pos.last_monitor_best_ask = quote.best_ask
+        current_p_market = quote.diagnostic_market_price
+        market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
-        pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
+        pos.last_monitor_at = quote.source_timestamp
 
-    # 2. Recompute P_posterior from fresh ENS
+    # 2. Recompute P_posterior from fresh ENS/Day0 evidence
     city = cities_by_name.get(pos.city)
     if city is None:
         raise ValueError(f"Unknown city {pos.city} for trade {pos.trade_id}")
 
     try:
         target_d = date.fromisoformat(pos.target_date)
-        registry = {
-            EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
-            EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
-        }
-        refresh_pos = pos
-        if pos.state == "day0_window" and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-            refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
-        setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
-        current_p_posterior = recompute_native_probability(
-            refresh_pos,
-            current_p_market=current_p_market,
-            registry=registry,
+        current_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
+            pos,
             conn=conn,
             city=city,
             target_d=target_d,
@@ -991,7 +1058,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
         if _bootstrap_ctx is not None:
             setattr(pos, "_bootstrap_context", _bootstrap_ctx)
-        prob_refresh_is_fresh = getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
         # Persist monitor state on Position
         pos.last_monitor_prob = current_p_posterior

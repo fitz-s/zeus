@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-03-31; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -1413,7 +1413,7 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
 
 
 def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
-    """Day0 terminal-phase pricing should use realizable sell-side liquidity."""
+    """Day0 quote surface uses bid while posterior dispatch stays quote-free."""
     from src.engine import monitor_refresh
     from src.contracts import EntryMethod
 
@@ -1433,7 +1433,7 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
             assert token_id == "tok_yes_001"
             return 0.37, 0.55, 100.0, 200.0
 
-    monkeypatch.setattr(monitor_refresh, "log_microstructure", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
 
     observed_markets = []
 
@@ -1447,13 +1447,14 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
 
     edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
 
-    assert observed_markets == [0.37]
+    assert observed_markets == [pytest.approx(pos.entry_price)]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
     assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
     assert pos.last_monitor_market_price == pytest.approx(0.37)
     assert pos.last_monitor_best_bid == pytest.approx(0.37)
     assert pos.last_monitor_best_ask == pytest.approx(0.55)
     assert edge_ctx.p_market[0] == pytest.approx(0.37)
+    assert observed_markets[0] != pytest.approx(edge_ctx.p_market[0])
 
 
 def test_day0_refresh_fallback_keeps_probability_stale(monkeypatch):

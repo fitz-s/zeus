@@ -340,6 +340,25 @@ def test_pricing_semantics_authority_cutover_admits_state_owned_exit_quote_split
     assert "tests/test_hold_value_exit_costs.py" in digest["admission"]["admitted_files"]
 
 
+def test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_tests():
+    digest = build_digest(
+        "pricing semantics authority cutover Phase I monitor probability quote split "
+        "Day0 best_bid remains exit surface not posterior input",
+        [
+            "src/engine/monitor_refresh.py",
+            "tests/test_runtime_guards.py",
+            "tests/test_live_safety_invariants.py",
+            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
+        ],
+    )
+
+    assert digest["profile"] == "pricing semantics authority cutover"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/monitor_refresh.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_runtime_guards.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_live_safety_invariants.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase5_economics_readiness_routes_to_phase5_profile():
     digest = build_digest(
         "Phase 5 promotion-grade economics staged live DSA-19 economics "

@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -371,6 +371,84 @@ def test_buy_no_exit_ev_gate_allows_sell_when_best_bid_beats_hold_value():
 
     assert signal is not None
     assert signal.trigger == "BUY_NO_EDGE_EXIT"
+
+
+class _MonitorQuoteSplitClob:
+    def __init__(self, *, bid: float, ask: float, bid_size: float, ask_size: float):
+        self.bid = bid
+        self.ask = ask
+        self.bid_size = bid_size
+        self.ask_size = ask_size
+
+    def get_best_bid_ask(self, token_id):
+        assert token_id == "yes123"
+        return self.bid, self.ask, self.bid_size, self.ask_size
+
+
+def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeypatch, tmp_path):
+    from src.engine import monitor_refresh
+
+    conn = get_connection(tmp_path / "monitor-quote-split.db")
+    init_schema(conn)
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+
+    dispatched_market_inputs: list[float] = []
+
+    def _recompute(position, current_p_market, registry, **context):
+        dispatched_market_inputs.append(float(current_p_market))
+        return 0.63
+
+    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
+
+    tight_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
+    wide_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
+
+    tight_ctx = monitor_refresh.refresh_position(
+        conn,
+        _MonitorQuoteSplitClob(bid=0.40, ask=0.50, bid_size=100.0, ask_size=100.0),
+        tight_quote_pos,
+    )
+    wide_ctx = monitor_refresh.refresh_position(
+        conn,
+        _MonitorQuoteSplitClob(bid=0.20, ask=0.80, bid_size=10.0, ask_size=90.0),
+        wide_quote_pos,
+    )
+
+    assert dispatched_market_inputs == pytest.approx([0.44, 0.44])
+    assert tight_ctx.p_posterior == pytest.approx(wide_ctx.p_posterior)
+    assert tight_ctx.p_posterior == pytest.approx(0.63)
+    assert tight_ctx.p_market[0] != pytest.approx(wide_ctx.p_market[0])
+    assert tight_quote_pos.last_monitor_best_bid == pytest.approx(0.40)
+    assert wide_quote_pos.last_monitor_best_bid == pytest.approx(0.20)
+
+
+def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
+    from src.engine import monitor_refresh
+
+    def _raise_log_failure(*args, **kwargs):
+        raise RuntimeError("microstructure log unavailable")
+
+    monkeypatch.setattr("src.state.db.log_microstructure", _raise_log_failure)
+    monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "recompute_native_probability",
+        lambda position, current_p_market, registry, **context: 0.63,
+    )
+
+    pos = _position(entry_price=0.44, p_posterior=0.58)
+    edge_ctx = monitor_refresh.refresh_position(
+        None,
+        _MonitorQuoteSplitClob(bid=0.40, ask=0.50, bid_size=100.0, ask_size=100.0),
+        pos,
+    )
+
+    assert pos.last_monitor_best_bid == pytest.approx(0.40)
+    assert pos.last_monitor_best_ask == pytest.approx(0.50)
+    assert pos.last_monitor_market_price == pytest.approx(0.45)
+    assert edge_ctx.p_market[0] == pytest.approx(0.45)
+    assert edge_ctx.p_posterior == pytest.approx(0.63)
 
 
 def _stub_full_family_scan(monkeypatch) -> None:

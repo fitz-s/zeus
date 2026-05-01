@@ -40,6 +40,24 @@ Additional completed slice: state-owned buy_no exit quote split.
 - no lifecycle grammar, projection, reconciliation, DB write path, schema,
   config, venue, or live side-effect surface was changed
 
+Additional completed slice: monitor quote/probability split.
+
+- expanded the pricing-semantics topology profile narrowly to admit
+  `tests/test_live_safety_invariants.py` as the adjacent Day0 safety assertion
+  surface for monitor quote/probability split work
+- `monitor_quote_refresh()` now owns held-token executable quote refresh,
+  microstructure logging, best bid/ask capture, and diagnostic VWMP/Day0 bid
+  pricing
+- `monitor_probability_refresh()` now owns posterior recompute dispatch and
+  does not consume the just-refreshed held-token executable quote through the
+  legacy `current_p_market` compatibility parameter
+- runtime guard tests prove a held-token quote change can alter the monitor
+  market/exit price surface while posterior dispatch remains quote-free
+- Day0 safety tests prove Day0 best bid remains the market/exit surface while
+  the posterior dispatch seam no longer consumes that bid as posterior input
+- no cycle sequencing, lifecycle grammar, DB schema, production data, config,
+  venue, report cohort, or live side-effect surface was changed
+
 Additional completed slice: runtime corrected live gate.
 
 - added default-off `CORRECTED_PRICING_LIVE_ENABLED` runtime gate in
@@ -137,6 +155,20 @@ Passing checks:
 - `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
 - `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover Phase I state-owned buy_no exit quote split closeout after critic blocker fix: Position._buy_no_exit fails closed without held-token best_bid and uses best_bid for buy_no EV gate; no schema, no lifecycle grammar, no DB write path, no live side effects" --files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/state/portfolio.py tests/test_hold_value_exit_costs.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
 - `git diff --check`
+- `python -m pytest tests/test_runtime_guards.py::test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch -q` -> initially failed with quote-derived VWMP entering posterior dispatch; passed after split
+- `python -m pytest tests/test_runtime_guards.py::test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch tests/test_runtime_guards.py::test_monitor_quote_refresh_survives_microstructure_log_failure tests/test_live_safety_invariants.py::test_day0_window_live_refresh_uses_best_bid_not_vwmp -q` -> 3 passed
+- `python -m pytest tests/test_runtime_guards.py::test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch tests/test_runtime_guards.py::test_monitor_quote_refresh_survives_microstructure_log_failure tests/test_runtime_guards.py::test_monitor_ens_refresh_records_forecast_fallback_provenance tests/test_runtime_guards.py::test_day0_monitor_refresh_records_forecast_fallback_provenance tests/test_runtime_guards.py::test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector tests/test_runtime_guards.py::test_buy_no_exit_ev_gate_allows_sell_when_best_bid_beats_hold_value -q` -> 6 passed
+- `python -m pytest tests/test_runtime_guards.py -q` -> 184 passed
+- `python -m pytest tests/test_live_safety_invariants.py::test_day0_window_live_refresh_uses_best_bid_not_vwmp tests/test_runtime_guards.py::test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch -q` -> 2 passed
+- `python -m pytest tests/test_runtime_guards.py tests/test_day0_exit_gate.py tests/test_phase9c_gate_f_prep.py tests/test_live_safety_invariants.py tests/test_churn_defense.py tests/test_lifecycle.py tests/test_entry_exit_symmetry.py tests/test_instrument_invariants.py -q` -> 343 passed, 3 skipped
+- `python -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_routes_to_refactor_profile tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_admits_state_owned_exit_quote_split tests/test_digest_profile_matching.py::test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_tests` -> 4 passed
+- `python scripts/digest_profiles_export.py --check`
+- `python scripts/topology_doctor.py --schema`
+- `python scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_digest_profile_matching.py --json`
+- `python -m compileall -q src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_digest_profile_matching.py architecture/digest_profiles.py`
+- `python scripts/topology_doctor.py --planning-lock --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover Phase I/J monitor quote/probability split closeout: topology admits runtime and Day0 safety tests; monitor_quote_refresh carries held-token executable bid/VWMP diagnostics; monitor_probability_refresh does not consume the just-refreshed executable quote; no cycle sequencing, no DB schema, no production data, no live venue side effects, no report cohort changes" --files architecture/topology.yaml architecture/digest_profiles.py tests/test_digest_profile_matching.py src/engine/monitor_refresh.py tests/test_runtime_guards.py tests/test_live_safety_invariants.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
 
 Known adjacent failure observed outside the buy_no quote split:
 
@@ -158,6 +190,14 @@ Review gates:
 - verifier pass for state-owned buy_no exit quote split: PASS; confirmed only
   the six intended files changed, `git diff --check` was clean, quote-split and
   missing-quote tests are meaningful, topology admission remains narrow, and
+  commit can proceed
+- critic pass for monitor quote/probability split: PASS with no findings;
+  confirmed source/test/topology/docs-only changes, no live/prod side effects,
+  T4 operator-go remains a blocker only for live/prod action, and commit can
+  proceed
+- verifier pass for monitor quote/probability split: PASS; confirmed the seven
+  intended files changed, quote refresh and probability refresh are separated,
+  Day0 bid remains the market/exit surface, topology expansion is narrow, and
   commit can proceed
 
 ## Not Completed
