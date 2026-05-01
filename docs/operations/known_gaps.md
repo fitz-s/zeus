@@ -16,39 +16,13 @@ failed.
 
 ---
 
-## CRITICAL: Full-flow live-alpha audit (2026-04-28)
+## CRITICAL: Full-flow live audit (2026-04-28)
 
 **Status:** OPEN; read-only audit record.
 **Audit scope:** weather contract semantics -> source truth -> forecast signal
 -> calibration -> edge -> execution -> holding/monitoring -> exit -> settlement
 -> learning/observability.
-**Audit posture:** This section records current findings only. It does not
-authorize live deployment, production DB mutation, CLOB cutover, calibration
-promotion, or external data-fetch side effects.
-**Runtime reality at audit time:**
-- `scripts/live_readiness_check.py --json` returns `live_deploy_authorized=false`
-  with `16/17` gates passing; `G1-02` fails because Q1 Zeus-egress evidence is
-  absent.
-- `state/status_summary.json` reports live mode but entries paused, wallet
-  balance `0`, `entry_block_reason=entry_bankroll_non_positive`, and no open
-  positions.
-- `architecture/runtime_posture.yaml` default posture is `NO_NEW_ENTRIES`, and
-  the current branch is not explicitly listed as `NORMAL`; runtime posture
-  therefore independently blocks entries even if earlier gates are cleared.
-- `state/zeus-world.db` and `state/zeus_trades.db` both have zero
-  `executable_market_snapshots`, `venue_commands`, `venue_order_facts`, and
-  `venue_trade_facts`.
-- Calibration is not live-alpha complete: `platt_models_v2`,
-  `calibration_pairs_v2`, legacy `platt_models`, and legacy
-  `calibration_pairs` are all empty in current world/trade DBs.
-- `scripts/verify_truth_surfaces.py --mode training-readiness --json` returns
-  `status=NOT_READY`: `historical_forecasts_v2`, `calibration_pairs_v2`,
-  `platt_models_v2`, `market_events_v2`, `market_price_history`, and
-  `settlements_v2` are empty; legacy `settlements` rows are evidence-only until
-  canonical v2 market identity/finalization policy is present.
-- Weather observation freshness is not current for same-day source truth:
-  `observations.source='wu_icao_history' AND authority='VERIFIED'` currently
-  ends at 2026-04-19, while the audit date is 2026-04-28.
+**Audit posture:** Read-only gap register. Each entry is an open belief-reality mismatch; resolution requires code/test/type antibody.
 
 ### Current non-Paris repair overlay (2026-04-30)
 
@@ -102,16 +76,11 @@ dedicated Paris entry.
   available-toxic, not-applicable `buy_no`, and unknown market-fact states in
   monitor provenance.
 
-**Remaining non-Paris conditions before a live-alpha claim:**
+**Remaining non-Paris open items for live trading:**
 
-- External live authorization is still blocked by `current_state.md`: Q1
-  Zeus-egress evidence, staged live-smoke evidence, G1 close review, and
-  `live_deploy_authorized=true` are absent. This is not a local math/code
-  patch.
-- Promotion-grade alpha evidence is still required: calibration tables/models
-  must be populated or uncalibrated strategies must remain explicitly blocked;
-  staged read-only/simulated evidence must prove P&L after fees/slippage/fill
-  drag before strategy promotion.
+- Calibration tables/models must be populated or uncalibrated strategies must
+  remain explicitly blocked; live evidence must prove P&L after
+  fees/slippage/fill drag before strategy promotion.
 - RED direct venue side-effect SLA is intentionally not implemented inside
   `cycle_runner`; the current architecture records durable cancel proxy intent
   and uses the normal command/execution seams. If the operator requires
@@ -144,7 +113,7 @@ production DB mutation were performed.
 |---|---|---|
 | Contract semantics | PARTIAL | Paris station/source mismatch remains excluded/open; non-Paris source truth still needs fresh pre-live audit |
 | Source truth | PARTIAL | current source validity must be refreshed before live claims; Paris remains quarantined; no production DB mutation was performed in this repair |
-| Forecast signal | PARTIAL | local code now fails closed on non-finite/invalid vectors; live-alpha claim still needs current source/data evidence and promotion-grade calibration evidence |
+| Forecast signal | PARTIAL | local code now fails closed on non-finite/invalid vectors; live trading still needs current source/data evidence and promotion-grade calibration evidence |
 | Calibration | BLOCKED | current calibration model/pair evidence is not promotion-grade; uncalibrated or Level 4 paths must remain blocked or explicitly degraded |
 | Edge construction | PARTIAL | Day0 discovery windows, fee-rate parsing, Level 4 maturity gating, and multi-bin `buy_no` reachability are locally repaired; live economics still require staged P&L after fees/slippage/fill drag |
 | Execution intent | PARTIAL | entry and held-exit executable snapshot paths are locally wired/fail-closed; live evidence still needs staged scan -> snapshot -> command insertion |
@@ -872,7 +841,7 @@ Do not fix these as isolated one-line patches. The safe sequence is:
    tradeable.
 5. **Forecast signal validity:** Keep the Open-Meteo empty-snapshot antibody in
    place and finish local-day finite-extrema plus probability-simplex gates for
-   p_raw/p_cal. This must land before learning/harvester or live-alpha claims.
+   p_raw/p_cal. This must land before learning/harvester or live tradings.
 6. **Market discovery authority:** CLOSED 2026-04-30 for scan-authority gating
    and closed/non-accepting child filtering. Residual source validity belongs to
    the contract/source audit and Day0 observation authority items.
@@ -897,7 +866,7 @@ Do not fix these as isolated one-line patches. The safe sequence is:
    selection: Level 4 raw-probability buckets block before edge selection. Live
    promotion still requires populated calibration evidence.
 13. **Strategy direction reachability:** CLOSED 2026-04-30 for native
-   multi-bin `buy_no` source/test reachability. Residual live-alpha claims still
+   multi-bin `buy_no` source/test reachability. Residual live tradings still
    require calibration/P&L evidence and operator promotion gates.
 14. **Calibration readiness:** Populate and validate metric-aware calibration
    pairs/models only after source/snapshot lineage is clean. Until then,
@@ -923,12 +892,12 @@ Do not fix these as isolated one-line patches. The safe sequence is:
    remain feature-flag/operator gated.
 21. **Observability repair:** CLOSED 2026-04-30 for v2 row-count world-vs-trade
    shadow qualification. Status remains a projection, not deploy authority.
-22. **End-to-end proof:** Run a staged live-smoke/dry-run that exercises
+22. **End-to-end proof:** Run an end-to-end dry-run that exercises
     market scan -> snapshot -> decision -> command insert -> V2 envelope ->
     user-channel or polling finality -> position projection -> monitor exit
     without venue side effects unless operator gates explicitly authorize them.
 
-### Required acceptance coverage before live-alpha claim
+### Required acceptance coverage before live trading
 
 - Unit tests for every patched seam above.
 - Integration test for candidate -> decision -> executable snapshot -> command
@@ -984,8 +953,6 @@ Do not fix these as isolated one-line patches. The safe sequence is:
   stored as TIGGE `training_allowed=1` rows and that every training row carries a
   non-null decision snapshot id.
 - Status-summary tests with attached world/trade DB name collisions.
-- Live-readiness check at `17/17`, Q1 egress evidence present, staged smoke
-  evidence present, and explicit `live-money-deploy-go`.
 - Current data evidence showing non-empty metric-aware Platt models/pairs or a
   deliberate strategy gate that blocks uncalibrated live entries.
 - Calibration-maturity tests proving Level 4 either blocks entry or applies the

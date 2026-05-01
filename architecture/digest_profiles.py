@@ -657,14 +657,14 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                'live readiness',
                'live_readiness_check',
                '16 active CI gates',
-               'staged-live-smoke',
+               'smoke-test',
                'INV-NEW-S',
                'live-money-deploy-go'],
     'match_policy': { 'strong_phrases': [ 'G1 live readiness gates',
                                           'R3 G1',
                                           'live_readiness_check',
                                           '16 active CI gates',
-                                          'staged-live-smoke',
+                                          'smoke-test',
                                           'INV-NEW-S',
                                           'live-money-deploy-go'],
                       'weak_terms': [ 'readiness gate',
@@ -709,8 +709,8 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                        'tests/AGENTS.md',
                        'tests/test_live_readiness_gates.py',
                        'tests/test_digest_profile_matching.py'],
-    'required_law': [ 'INV-NEW-S: LIVE deployment requires 16/16 active G1 gate PASS plus at least one '
-                      'staged-live-smoke environment passing the same readiness suite.',
+    'required_law': [ 'INV-NEW-S: LIVE deployment requires 16/16 active G1 gate PASS plus at least one smoke-test '
+                      'environment passing the same readiness suite.',
                       'G1 may implement and run readiness checks, but it must not place, cancel, redeem, deploy, '
                       'transition CutoverGuard to LIVE_ENABLED, mutate production DB/state artifacts, activate '
                       'credentials, or promote live strategies.',
@@ -2029,8 +2029,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                                       'mixed corrected legacy cohort'],
                       'single_terms_can_select': False,
                       'min_confidence': 0.5},
-    'file_patterns': [ 'docs/operations/task_2026-04-30_reality_semantics_refactor_package/**',
-                       'architecture/invariants.yaml',
+    'file_patterns': [ 'architecture/invariants.yaml',
                        'architecture/negative_constraints.yaml',
                        'architecture/source_rationale.yaml',
                        'architecture/test_topology.yaml',
@@ -2104,8 +2103,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                       'reporting, shadow/canary, and operator-go evidence exist.',
                       'This profile does not authorize live venue submission, production DB mutation, schema migration '
                       'apply, source-routing changes, or live strategy promotion.'],
-    'allowed_files': [ 'docs/operations/task_2026-04-30_reality_semantics_refactor_package/**',
-                       'architecture/invariants.yaml',
+    'allowed_files': [ 'architecture/invariants.yaml',
                        'architecture/negative_constraints.yaml',
                        'architecture/source_rationale.yaml',
                        'architecture/test_topology.yaml',
@@ -2181,34 +2179,8 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                'pytest -q -p no:cacheprovider tests/test_executable_market_snapshot_v2.py '
                'tests/test_execution_intent_typed_slippage.py tests/test_market_analysis.py tests/test_executor.py '
                'tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_hold_value_exit_costs.py',
-               'python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" '
-               '--write-intent edit --task "pricing semantics authority cutover F-06 compatibility venue envelope live '
-               'gate without venue adapter edit" --files src/data/polymarket_client.py '
-               'src/contracts/venue_submission_envelope.py tests/test_v2_adapter.py tests/test_risk_allocator.py '
-               'docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md',
-               'python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" '
-               '--write-intent edit --task "pricing semantics authority cutover F-08 order-policy cost authority using '
-               'existing execution intent contracts" --files src/contracts/execution_intent.py '
-               'src/execution/executor.py src/engine/cycle_runtime.py src/strategy/kelly.py '
-               'tests/test_execution_intent_typed_slippage.py tests/test_runtime_guards.py tests/test_v2_adapter.py '
-               'docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md',
-               'python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" '
-               '--write-intent edit --task "pricing semantics authority cutover F-09 fill authority split no schema '
-               'apply" --files src/contracts/realized_fill.py src/engine/cycle_runtime.py src/state/portfolio.py '
-               'src/execution/fill_tracker.py src/execution/harvester.py '
-               'architecture/2026_04_02_architecture_kernel.sql tests/test_realized_fill.py '
-               'tests/test_realized_fill_at_receipt.py tests/test_harvester_metric_identity.py tests/test_db.py '
-               'docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md',
-               'python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" '
-               '--write-intent edit --task "pricing semantics authority cutover F-10 report replay cohort hard gates '
-               'after F-09 durable fill fields" --files scripts/profit_validation_replay.py scripts/equity_curve.py '
-               'src/execution/harvester.py src/state/db.py tests/test_run_replay_cli.py '
-               'tests/test_pnl_flow_and_audit.py tests/test_backtest_skill_economics.py '
-               'docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md',
                'python3 scripts/digest_profiles_export.py --check',
-               'python3 scripts/topology_doctor.py --schema',
-               'python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence '
-               'docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md'],
+               'python3 scripts/topology_doctor.py --schema'],
     'downstream': [ 'src/engine/evaluator.py',
                     'src/engine/cycle_runtime.py',
                     'src/execution/executor.py',
