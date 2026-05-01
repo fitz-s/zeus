@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,8 +35,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import watch_source_contract  # noqa: E402
-from src.calibration.manager import season_from_date  # noqa: E402
 from src.config import CONFIG_DIR, load_cities, state_path  # noqa: E402
+from src.contracts.season import season_from_date  # noqa: E402
 from src.data import market_scanner as ms  # noqa: E402
 
 
@@ -118,6 +119,61 @@ def _sorted_unique(values: list[Any] | tuple[Any, ...]) -> list[str]:
         if value is not None and str(value).strip()
     }
     return sorted(normalized)
+
+
+def _slug_token(value: Any, *, fallback: str = "unknown") -> str:
+    token = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return token or fallback
+
+
+def _source_change_git_workspace(
+    *,
+    run_id: str,
+    city: str,
+    source_contract: dict[str, Any],
+    date_scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Build deterministic git isolation metadata for one source-change batch."""
+    run_token = _slug_token(run_id)
+    city_token = _slug_token(city, fallback="city")
+    from_token = _slug_token(
+        "-".join(source_contract.get("from_station_ids") or [])
+        or "-".join(source_contract.get("from_source_families") or []),
+        fallback="from-unknown",
+    )
+    to_token = _slug_token(
+        "-".join(source_contract.get("to_station_ids") or [])
+        or "-".join(source_contract.get("to_source_families") or []),
+        fallback="to-unknown",
+    )
+    first_date = _slug_token(date_scope.get("affected_market_start"), fallback="unknown-date")
+    branch_name = f"source-contract/{first_date}-{city_token}-{from_token}-to-{to_token}-{run_token}"
+    worktree_name = f"zeus-{branch_name.replace('/', '-')}"
+    worktree_path = ROOT.parent / worktree_name
+    create_command = [
+        "git",
+        "-C",
+        str(ROOT),
+        "worktree",
+        "add",
+        "-b",
+        branch_name,
+        str(worktree_path),
+        "HEAD",
+    ]
+    return {
+        "required": True,
+        "status": "exists" if worktree_path.exists() else "missing",
+        "branch_name": branch_name,
+        "worktree_path": str(worktree_path),
+        "base_ref": "HEAD",
+        "create_command": create_command,
+        "protocol": [
+            "Create or reuse this source-change-specific worktree before any apply step.",
+            "Do not run source conversion apply from the stable cron repo once this worktree is assigned.",
+            "Commit/review the source-change diff on this branch; future source changes must get a new branch/worktree.",
+        ],
+    }
 
 
 def _alert_events_by_city(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -290,10 +346,19 @@ def _evidence_root_path(run_id: str, city: str, *, base: Path | None = None) -> 
     return base / run_id / slug
 
 
-def _workspace_locator(run_id: str, city: str) -> dict[str, Any]:
+def _workspace_locator(
+    run_id: str,
+    city: str,
+    *,
+    source_change_git: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     evidence_root = _evidence_root(run_id, city)
+    source_change_git = source_change_git or {}
     return {
         "repo_root": str(ROOT),
+        "source_change_git": source_change_git,
+        "required_worktree": source_change_git.get("worktree_path"),
+        "required_branch": source_change_git.get("branch_name"),
         "primary_runtime_artifacts": [
             {
                 "id": "latest_receipt",
@@ -416,11 +481,19 @@ def _workspace_locator(run_id: str, city: str) -> dict[str, Any]:
     }
 
 
-def _safe_execution_contract(run_id: str, city: str) -> dict[str, Any]:
+def _safe_execution_contract(
+    run_id: str,
+    city: str,
+    *,
+    source_change_git: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     evidence_root = _evidence_root(run_id, city)
+    source_change_git = source_change_git or {}
     return {
         "command_policy": "exact_allowed_command_only",
-        "cwd_required": str(ROOT),
+        "stable_controller_cwd": str(ROOT),
+        "apply_cwd_required": source_change_git.get("worktree_path") or str(ROOT),
+        "source_change_branch_required": source_change_git.get("branch_name"),
         "cron_lock_path": str(DEFAULT_LOCK_PATH),
         "allowed_write_globs_current_phase": [
             "state/source_contract_quarantine.json",
@@ -451,9 +524,10 @@ def _safe_execution_contract(run_id: str, city: str) -> dict[str, Any]:
             "git clean",
         ],
         "preflight_before_running_allowed_command": [
+            "If source_change_branch_required is present, create/use that worktree before apply-oriented commands.",
             "Confirm command exactly matches one step_protocol.allowed_command.",
             "Confirm no forbidden_command_tokens appear in the command.",
-            "Run from cwd_required.",
+            "Run apply-oriented commands from apply_cwd_required.",
             "Write stdout/stderr or generated manifest path into evidence_manifest before advancing.",
         ],
         "stop_and_report_if": [
@@ -512,11 +586,26 @@ def _mini_step_protocol(
     threshold_blockers: list[str],
     runtime_gaps: list[str],
     command_plan: list[dict[str, Any]],
+    source_change_git: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     evidence = _evidence_manifest(run_id, city)
     dry_run_by_id = {step["id"]: step for step in command_plan}
     blocked_by_gap = bool(runtime_gaps)
-    return [
+    source_change_git = source_change_git or {}
+    steps = [
+        {
+            "id": "prepare_source_change_worktree",
+            "status": "pending" if auto_confirmed else "blocked",
+            "allowed_actor": "mini_or_cron_can_run_exact_command",
+            "allowed_command": source_change_git.get("create_command"),
+            "evidence_key": "source_change_git",
+            "expected_artifact": source_change_git.get("worktree_path"),
+            "stop_if": [
+                "branch/worktree path does not match source_change_git",
+                "worktree already exists but is not on the expected branch",
+                "git command exits non-zero for any reason other than already-existing reviewed worktree",
+            ],
+        },
         {
             "id": "detect_and_quarantine",
             "status": "done" if auto_confirmed or threshold_blockers else "noop",
@@ -590,6 +679,7 @@ def _mini_step_protocol(
             "stop_if": ["any release evidence ref missing", "post-conversion source watch still alerts"],
         },
     ]
+    return steps
 
 
 def _mini_execution_packet(
@@ -600,6 +690,7 @@ def _mini_execution_packet(
     threshold_blockers: list[str],
     runtime_gaps: list[str],
     command_plan: list[dict[str, Any]],
+    source_change_git: dict[str, Any] | None,
 ) -> dict[str, Any]:
     can_complete = auto_confirmed and not threshold_blockers and not runtime_gaps
     missing = list(threshold_blockers) + list(runtime_gaps)
@@ -610,6 +701,7 @@ def _mini_execution_packet(
         "missing_capabilities_or_blockers": missing,
         "allowed_actions": [
             "Read this receipt and linked evidence artifacts.",
+            "Create or reuse the exact source_change_git branch/worktree before apply-oriented commands.",
             "Prefer the execute_apply_controller step when present; it runs the full deterministic workflow.",
             "Run only commands listed under step_protocol.allowed_command.",
             "Write a report summarizing status, blockers, next deterministic capability, and receipt path.",
@@ -620,11 +712,21 @@ def _mini_execution_packet(
             "Do not hand-edit config/cities.json; only the deterministic controller may write it under --execute-apply --force.",
             "Do not mutate production DB truth except through the exact scoped commands in this receipt after DB backup succeeds.",
             "Do not run --apply, --no-dry-run, or --force commands unless they exactly match a step_protocol.allowed_command.",
+            "Do not run conversion apply from the stable cron repo when source_change_git requires an isolated worktree.",
             "Do not release source quarantine while any evidence_manifest item is missing.",
         ],
         "evidence_manifest": _evidence_manifest(run_id, city),
-        "workspace_locator": _workspace_locator(run_id, city),
-        "safe_execution_contract": _safe_execution_contract(run_id, city),
+        "source_change_git": source_change_git or {},
+        "workspace_locator": _workspace_locator(
+            run_id,
+            city,
+            source_change_git=source_change_git,
+        ),
+        "safe_execution_contract": _safe_execution_contract(
+            run_id,
+            city,
+            source_change_git=source_change_git,
+        ),
         "step_protocol": _mini_step_protocol(
             run_id=run_id,
             city=city,
@@ -632,6 +734,7 @@ def _mini_execution_packet(
             threshold_blockers=threshold_blockers,
             runtime_gaps=runtime_gaps,
             command_plan=command_plan,
+            source_change_git=source_change_git,
         ),
         "report_template": {
             "city": city,
@@ -969,6 +1072,12 @@ def build_candidates(report: dict[str, Any], policy: RuntimePolicy, *, run_id: s
             auto_confirmed=auto_confirmed,
         )
         command_plan = _command_plan(city, metrics, date_scope) if auto_confirmed else []
+        source_change_git = _source_change_git_workspace(
+            run_id=run_id,
+            city=city,
+            source_contract=summary,
+            date_scope=date_scope,
+        )
         mini_packet = _mini_execution_packet(
             run_id=run_id,
             city=city,
@@ -976,11 +1085,13 @@ def build_candidates(report: dict[str, Any], policy: RuntimePolicy, *, run_id: s
             threshold_blockers=threshold_blockers,
             runtime_gaps=runtime_gaps,
             command_plan=command_plan,
+            source_change_git=source_change_git,
         )
         candidates.append(
             {
                 "city": city,
                 "transition_branch": branch,
+                "source_change_git": source_change_git,
                 "confirmation_status": "auto_confirmed" if auto_confirmed else "manual_review_required",
                 "release_ready": False,
                 "alert_event_count": len(events),
@@ -1549,7 +1660,82 @@ def stamp_runtime_invocation(receipt: dict[str, Any], args: argparse.Namespace) 
                 threshold_blockers=list(candidate.get("threshold_blockers") or []),
                 runtime_gaps=list(candidate.get("runtime_gaps_before_apply") or []),
                 command_plan=command_plan,
+                source_change_git=candidate.get("source_change_git"),
             )
+
+
+def init_source_change_worktrees(receipt: dict[str, Any]) -> list[dict[str, Any]]:
+    """Create missing per-source-change git worktrees from receipt metadata."""
+    actions: list[dict[str, Any]] = []
+    for candidate in receipt.get("candidates") or []:
+        source_change_git = candidate.get("source_change_git") or {}
+        if not source_change_git.get("required"):
+            continue
+        branch = str(source_change_git.get("branch_name") or "")
+        worktree_value = str(source_change_git.get("worktree_path") or "")
+        worktree = Path(worktree_value)
+        command = [str(part) for part in source_change_git.get("create_command") or []]
+        action = {
+            "city": candidate.get("city"),
+            "branch_name": branch,
+            "worktree_path": str(worktree),
+            "command": command,
+            "status": "pending",
+        }
+        if not branch or not command or not worktree_value:
+            action["status"] = "failed"
+            action["error"] = "missing source_change_git branch/worktree/command"
+            actions.append(action)
+            continue
+        if worktree.exists():
+            current_branch = subprocess.run(
+                ["git", "-C", str(worktree), "branch", "--show-current"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            observed_branch = current_branch.stdout.strip()
+            action["observed_branch"] = observed_branch
+            if current_branch.returncode == 0 and observed_branch == branch:
+                action["status"] = "exists"
+                source_change_git["status"] = "exists"
+            else:
+                action["status"] = "failed"
+                action["error"] = (
+                    "worktree exists but expected branch was not observed: "
+                    f"expected={branch!r} observed={observed_branch!r}"
+                )
+            actions.append(action)
+            continue
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        action.update(
+            {
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[-4000:],
+                "stderr": completed.stderr[-4000:],
+            }
+        )
+        if completed.returncode == 0:
+            action["status"] = "created"
+            source_change_git["status"] = "exists"
+        else:
+            action["status"] = "failed"
+            action["error"] = "git worktree creation failed"
+        actions.append(action)
+    receipt["source_change_worktree_actions"] = actions
+    if any(action.get("status") == "failed" for action in actions):
+        receipt["status"] = "failed"
+        receipt["next_actions"] = [
+            "Source-change worktree creation failed; do not run apply steps.",
+            "Inspect source_change_worktree_actions and fix branch/worktree state before rerunning.",
+        ]
+    return actions
 
 
 def _add_fixture_and_quarantine_args(
@@ -1946,11 +2132,14 @@ def render_mini_report(receipt: dict[str, Any]) -> str:
         mini = candidate.get("mini_llm_execution") or {}
         report = mini.get("report_template") or {}
         dates = candidate.get("date_scope") or {}
+        source_change_git = candidate.get("source_change_git") or {}
         lines.extend(
             [
                 f"## {candidate.get('city')}",
                 "",
                 f"- branch: `{candidate.get('transition_branch')}`",
+                f"- source_change_branch: `{source_change_git.get('branch_name')}`",
+                f"- source_change_worktree: `{source_change_git.get('worktree_path')}`",
                 f"- confirmation: `{candidate.get('confirmation_status')}`",
                 f"- can_complete_remaining_conversion: `{report.get('can_complete_remaining_conversion')}`",
                 f"- keep_quarantine_active: `{report.get('source_quarantine_should_remain_active')}`",
@@ -1968,6 +2157,12 @@ def render_mini_report(receipt: dict[str, Any]) -> str:
         else:
             lines.append("- none")
         lines.extend(["", "### Allowed Commands", ""])
+        if source_change_git.get("create_command"):
+            lines.append(
+                "- `"
+                + " ".join(str(part) for part in source_change_git["create_command"])
+                + "`"
+            )
         commands = [
             step.get("allowed_command")
             for step in mini.get("step_protocol", [])
@@ -2175,6 +2370,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--write-mini-report", action="store_true", help="Write a deterministic mini-model execution report")
     parser.add_argument("--mini-report-path", type=Path, help="Override mini execution report path")
     parser.add_argument(
+        "--init-source-change-worktrees",
+        action="store_true",
+        help="Create missing per-candidate git worktrees/branches from source_change_git metadata.",
+    )
+    parser.add_argument(
         "--execute-apply",
         action="store_true",
         help="Execute deterministic same-provider WU conversion steps after receipt planning.",
@@ -2302,6 +2502,8 @@ def main(argv: list[str] | None = None) -> int:
                         quarantine_actions=quarantine_actions,
                     )
                     stamp_runtime_invocation(receipt, args)
+                    if args.init_source_change_worktrees and receipt.get("candidates"):
+                        init_source_change_worktrees(receipt)
                     if args.execute_apply and receipt.get("status") == "planned":
                         receipt = execute_apply(
                             receipt,
