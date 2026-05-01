@@ -1601,6 +1601,11 @@ def _route_card_expansion_hints(admission_status: str, risk_tier: str) -> list[s
             "inspect admission.decision_basis before changing files",
             "do not edit until requested files are admitted",
         ]
+    if admission_status == "advisory_only":
+        return [
+            "treat requested files as orientation context, not edit permission",
+            "pass typed intent or narrow task wording before editing",
+        ]
     if risk_tier == "T0":
         return [
             "stay in read-only orientation unless the user asks for edits",
