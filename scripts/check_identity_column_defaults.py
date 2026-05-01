@@ -75,19 +75,18 @@ _GUARDED_IDENTITY_COLUMNS: dict[str, str] = {
 # When the operator repairs a site and removes the DEFAULT, also remove
 # the matching entry from this baseline so the gate becomes stricter.
 _BASELINE_KNOWN_DEFAULTS: frozenset[tuple[str, str]] = frozenset({
-    # Kernel SQL site #1 (~:129): position_current table. DEFAULT retained;
-    # removing it requires INSERT-side discipline in test helpers (separate scope).
-    ("temperature_metric", "architecture/2026_04_02_architecture_kernel.sql"),
-
+    # Site #1 (kernel SQL ~:129) REPAIRED via cherry-pick of 21cff1ec
+    # (ultrareview-25 P2a) on 2026-05-01. Removed from baseline.
+    #
     # Sites #3 + #4 in src/state/db.py:
-    #   #3 (~:1559) position_current ALTER — DEFAULT retained; same INSERT-side
-    #      discipline gap as site #1 (the ALTER is dead code for fresh DBs).
-    #   #4 (~:1581) ensemble_snapshots ALTER — no row_count guard; deferred
-    #      pending backfill decision (see P1_2_DEFAULT_HIGH_REPAIR.md §Site #4).
-    # Site #2 (init_schema ensemble_snapshots ~:515) and site #5 (data_version ~:513)
-    # repaired 2026-05-01. Note: proposal misidentified sites #1/#2 as
-    # `selection_family_fact`; the actual tables are position_current and
-    # ensemble_snapshots respectively.
+    #   #3 (~:1559) position_current ALTER — DEFAULT retained; INSERT-side
+    #      discipline guards; ALTER is dead code for fresh DBs.
+    #   #4 (~:1581) ensemble_snapshots ALTER — table is write-frozen
+    #      (zero runtime writers per operator review 2026-05-01); legacy
+    #      rows are genuinely high-track per pre-HIGH/LOW-duality history.
+    #      Closed as false-alarm in P1_2_DEFAULT_HIGH_REPAIR.md §Site #4.
+    # Site #2 (init_schema ensemble_snapshots ~:515) and site #5 (data_version
+    # ~:513) repaired 2026-05-01.
     ("temperature_metric", "src/state/db.py"),
 })
 
@@ -97,7 +96,9 @@ _BASELINE_KNOWN_DEFAULTS: frozenset[tuple[str, str]] = frozenset({
 # data_version) repaired. Sites #1 (kernel), #3, #4 (all position_current or
 # deferred) remain — total 3 temperature_metric occurrences across 2 files.
 _BASELINE_OCCURRENCE_COUNTS: dict[tuple[str, str], int] = {
-    ("temperature_metric", "architecture/2026_04_02_architecture_kernel.sql"): 1,
+    # Kernel SQL count repaired via 21cff1ec cherry-pick. Only db.py
+    # remains: 2 occurrences (lines 1559 + 1581) per the operator-cleared
+    # design rationale documented in _BASELINE_KNOWN_DEFAULTS above.
     ("temperature_metric", "src/state/db.py"): 2,
 }
 
