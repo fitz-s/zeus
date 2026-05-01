@@ -108,6 +108,17 @@ def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
             ci_bound=0.05,
         ),
     )
+    # B4 Phase 5 (2026-05-01): bypass the oracle-evidence gate. The gate reads
+    # data/oracle_error_rates.json and rejects when last_date > decision_time.
+    # In these unit tests target_date and decision_time are arbitrary fixture
+    # noise; the oracle file is shipped with last_date=2026-04-14 (NYC) which
+    # makes any decision_time before that day fail the gate. Tests target the
+    # signal-quality / FDR / risk seams, not the oracle freshness contract.
+    monkeypatch.setattr(
+        evaluator_module,
+        "_oracle_evidence_rejection_reason",
+        lambda *args, **kwargs: None,
+    )
 
 
 def _insert_source_correct_harvester_obs(
@@ -199,9 +210,16 @@ def _stub_full_family_scan(monkeypatch) -> None:
         for i, edge in enumerate(analysis.find_edges(n_bootstrap=kwargs.get("n_bootstrap", 0))):
             edge.selected_method = getattr(edge, "selected_method", selected_method)
             assert edge.selected_method
+            # B4 Phase 5 (2026-05-01): match production behavior — hypothesis index
+            # mirrors the bin's support_index in analysis.bins, not the enumeration
+            # index of edges that crossed the > 0 threshold. Mismatch surfaces as
+            # FDR_SELECTION_UNEXECUTABLE because _filter_executable_selected_edges
+            # checks (edge.support_index, direction) keys.
+            edge_support_index = getattr(edge, "support_index", None)
+            hypothesis_index = int(edge_support_index) if edge_support_index is not None else i
             hypotheses.append(
                 FullFamilyHypothesis(
-                    index=i,
+                    index=hypothesis_index,
                     range_label=edge.bin.label,
                     direction=edge.direction,
                     edge=edge.edge,
@@ -433,13 +451,15 @@ def _insert_snapshot(
     *,
     issue_time: str = "2026-03-30T00:00:00Z",
     data_version: str = "live_v1",
+    temperature_metric: str = "high",
 ) -> str:
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
+         data_version, temperature_metric)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             city,
@@ -455,11 +475,48 @@ def _insert_snapshot(
             0,
             "ecmwf_ifs025",
             data_version,
+            temperature_metric,
         ),
     )
     row = conn.execute("SELECT last_insert_rowid() AS snapshot_id").fetchone()
     conn.commit()
     return str(row["snapshot_id"])
+
+
+def _make_ens_result_with_evidence(
+    *, model: str | None = None, target_date: str = "2026-04-03",
+) -> dict:
+    """Build an ens_result dict satisfying the executable-entry forecast-evidence
+    contract (`src/engine/evaluator.py:_entry_forecast_evidence_errors`).
+
+    B4 Phase 5 (2026-05-01): the entry path now requires source_id,
+    degradation_level, forecast_source_role, authority_tier, raw_payload_hash,
+    plus ordered timestamps (issue ≤ available ≤ fetch). Lambdas that returned
+    only members_hourly/times/issue_time/fetch_time/model now fail SIGNAL_QUALITY.
+
+    Time invariants enforced by `_entry_forecast_evidence_errors`:
+      issue_time ≤ fetch_time
+      issue_time ≤ available_at
+      available_at ≤ fetch_time
+      issue_time / fetch_time / available_at ≤ decision_time (now)
+    """
+    return {
+        "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
+        "times": [
+            datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat()
+            for hour in range(48)
+        ],
+        "issue_time": "2026-04-02T00:00:00+00:00",
+        "available_at": "2026-04-02T07:55:00+00:00",
+        "fetch_time": "2026-04-02T08:00:00+00:00",
+        "valid_time": f"{target_date}T12:00:00+00:00",
+        "model": model or "ecmwf_ifs025",
+        "source_id": "ecmwf_ifs025",
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "raw_payload_hash": "a" * 64,
+    }
 
 
 def _lookup_nested(data: dict, dotted_path: str):
@@ -1900,6 +1957,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -1917,16 +1975,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [
-                datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat()
-                for hour in range(48)
-            ],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -1957,6 +2006,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
             max_city_pct=0.20,
             min_order_usd=1.0,
         ),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
 
     assert decisions[0].should_trade is True
@@ -2046,6 +2096,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2063,13 +2114,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2112,6 +2157,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
             max_city_pct=0.20,
             min_order_usd=1.0,
         ),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
 
     assert decisions[0].should_trade is True
@@ -2171,6 +2217,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2188,13 +2235,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2230,6 +2271,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
             max_city_pct=0.20,
             min_order_usd=1.0,
         ),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
 
     assert decisions[0].should_trade is False
@@ -2292,6 +2334,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2309,13 +2352,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2358,6 +2395,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
             max_city_pct=0.20,
             min_order_usd=1.0,
         ),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
 
     assert decisions[0].should_trade is True
@@ -2421,6 +2459,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2438,13 +2477,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2484,6 +2517,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
             max_city_pct=0.20,
             min_order_usd=1.0,
         ),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
 
     assert called["policy"] is True
@@ -2565,6 +2599,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2582,13 +2617,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": now.isoformat(),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2699,6 +2728,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2716,13 +2746,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": now.isoformat(),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2821,6 +2845,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
@@ -2838,13 +2863,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=8, model=None: {
-            "members_hourly": np.ones(((31 if model == "gfs025" else 51), 48)) * 40.0,
-            "times": [datetime(2026, 4, 3, hour % 24, 0, tzinfo=timezone.utc).isoformat() for hour in range(48)],
-            "issue_time": datetime.now(timezone.utc),
-            "fetch_time": datetime.now(timezone.utc),
-            "model": model or "ecmwf_ifs025",
-        },
+        lambda city, forecast_days=8, model=None, **kwargs: _make_ens_result_with_evidence(model=model),
     )
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
@@ -2866,6 +2885,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
         portfolio=PortfolioState(bankroll=150.0),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
     )
     conn.close()
 
@@ -3268,6 +3288,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
                 entry_price=0.35,
                 p_value=0.02,
                 vwmp=0.35,
+                support_index=1,
             ),
             tokens={"market_id": "m1", "token_id": "yes123", "no_token_id": "no456"},
             size_usd=5.0,
