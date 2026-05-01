@@ -102,8 +102,9 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   ultrareview25_remediation P1-3+ (is_authoritative + requires_human_review predicates — 5 tests): 236 → 241 (+5)
 #   Cherry-pick 7743f692 (ultrareview-25 P3-B): F5/F10 inv_prototype idempotency antibodies — 2 tests: 241 → 243 (+2)
 #   ultrareview25_remediation P2 (dynamic-SQL per-file baseline gate — 2 tests): 243 → 245 (+2)
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py"
-BASELINE_PASSED=245
+#   ultrareview25_remediation P2-1 (contract source-field per-file baseline — 2 tests): 245 → 247 (+2)
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py tests/test_contract_source_fields_baseline.py"
+BASELINE_PASSED=247
 BASELINE_SKIPPED=22
 
 if [ ! -x "$PYTEST_BIN" ]; then
