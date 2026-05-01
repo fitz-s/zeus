@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import hashlib
 import uuid
@@ -530,6 +531,72 @@ def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, 
     raise last_exc
 
 
+# Created: 2026-05-01
+def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None = None) -> int:
+    """Upsert scanned market events into market_events_v2.
+
+    Uses INSERT OR IGNORE so repeated scans are idempotent — existing rows
+    keyed on (market_slug, condition_id) are never overwritten.
+
+    Returns the count of newly inserted rows (ignored rows not counted).
+    Fails silently on DB errors: logs a warning and returns 0 so that market
+    scanning is never blocked by persistence failures.
+    """
+    if not results:
+        return 0
+
+    from src.state.db import ZEUS_WORLD_DB_PATH  # local import to avoid circular dependency
+
+    resolved_path = Path(db_path) if db_path is not None else ZEUS_WORLD_DB_PATH
+    inserted = 0
+    try:
+        conn = sqlite3.connect(str(resolved_path), timeout=30)
+        try:
+            for event in results:
+                market_slug = event.get("slug", "")
+                city_obj = event.get("city")
+                city_name = city_obj.name if city_obj is not None else ""
+                target_date = str(event.get("target_date", ""))
+                temperature_metric = event.get("temperature_metric", "")
+                created_at = event.get("created_at")
+                for outcome in event.get("outcomes", []):
+                    condition_id = outcome.get("condition_id", "")
+                    token_id = outcome.get("token_id", "")
+                    range_label = outcome.get("title", "")
+                    range_low = outcome.get("range_low")
+                    range_high = outcome.get("range_high")
+                    cursor = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO market_events_v2
+                            (market_slug, city, target_date, temperature_metric,
+                             condition_id, token_id, range_label, range_low,
+                             range_high, outcome, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            market_slug,
+                            city_name,
+                            target_date,
+                            temperature_metric,
+                            condition_id,
+                            token_id,
+                            range_label,
+                            range_low,
+                            range_high,
+                            range_label,
+                            created_at,
+                        ),
+                    )
+                    inserted += cursor.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("market_events_v2 persistence failed (non-fatal): %s", exc)
+        return 0
+    return inserted
+
+
 def find_weather_markets(
     min_hours_to_resolution: float = 6.0,
 ) -> list[dict]:
@@ -572,6 +639,7 @@ def find_weather_markets(
             results.append(parsed)
 
     logger.info("Found %d active weather markets", len(results))
+    _persist_market_events_to_db(results)
     return results
 
 
