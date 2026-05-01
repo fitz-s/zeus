@@ -744,8 +744,34 @@ def _reconcile_admission(
     normalized_intent = intent.replace("_", "-").replace(" ", "-")
     read_only = normalized_intent in {"read-only", "readonly", "none"}
 
-    # 1. Ambiguity short-circuits.
+    # 1. Ambiguity short-circuits. File-only high-fanout ambiguity is a
+    # soft routing uncertainty: it must not admit edits, but it also should
+    # not look like a topology failure. Strong phrase ties and invalid typed
+    # intents remain hard ambiguous states.
     if resolution.get("ambiguous"):
+        selected_by = resolution.get("selected_by", "fallback")
+        forbidden_hits = [f for f in requested if _matches_any(f, list(_GENERIC_FORBIDDEN_FILES))]
+        if selected_by == "high_fanout_file_only" and not forbidden_hits:
+            return {
+                "status": "advisory_only",
+                "profile_id": "generic",
+                "confidence": resolution.get("confidence", 0.0),
+                "admitted_files": [],
+                "profile_suggested_files": [],
+                "out_of_scope_files": list(requested),
+                "forbidden_hits": [],
+                "companion_required": [],
+                "decision_basis": {
+                    "task_phrases": [],
+                    "file_globs": _decision_globs(resolution),
+                    "negative_hits": [],
+                    "selected_by": selected_by,
+                    "candidates": resolution.get("candidates", []),
+                    "why": resolution.get("why", []) + [
+                        "soft ambiguity: high-fanout file-only evidence cannot select a profile or admit edits"
+                    ],
+                },
+            }
         return {
             "status": "ambiguous",
             "profile_id": None,
