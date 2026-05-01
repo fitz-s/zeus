@@ -103,8 +103,11 @@ bounded impact summary without pretending every file is source.
 - When wording is ambiguous, provide typed operation facts instead of inventing
   another phrase: `--operation-stage closeout --artifact-target final_response`
   for a direct feedback capsule, `--operation-stage merge --merge-state clean`
-  for clean merge closeout, or `--mutation-surface source_behavior` for a
-  source-control edit with admitted files.
+  for clean merge closeout, `--operation-stage plan --artifact-target plan_packet`
+  for a planning packet, or `--mutation-surface source_behavior` for a
+  source-control edit with admitted files. Do not let "pre-merge hook" wording
+  trigger merge-conflict escalation; that is runtime-hook work unless an actual
+  merge conflict is present.
 - Use `python3 scripts/topology_doctor.py runtime ...` when a caller needs the
   composed agent-runtime packet: route card, optional semantic boot, optional
   role context, claims, dispatch guidance, gate budget, and artifact-treatment
@@ -118,6 +121,10 @@ bounded impact summary without pretending every file is source.
   annoyance from repeatable routing friction. Repeatable friction should become
   a focused test, manifest repair, or reference-doc adjustment; one-off notes
   stay in the closeout capsule.
+- For broad fix packages, topology should treat listed implementation files as
+  read-only impact context, guide the agent to one `operation planning packet`,
+  and then require separate admitted routes for each structural decision slice.
+  This keeps planning helpful without authorizing a mixed edit batch.
 - For direct feedback tasks, prefer
   `--intent "direct operation feedback capsule"` with no files for final
   response only, or with an already-required packet `work_log.md`/`receipt.json`

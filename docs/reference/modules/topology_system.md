@@ -87,6 +87,10 @@ Topology has five interacting layers:
   "回收 context", and topology-experience closeout tasks. No-file invocations
   are final-response only; packet `work_log.md`/`receipt.json` writes are
   admitted only when that packet already consumes them.
+- Use the `operation planning packet` route when a real runtime task starts as
+  a broad fix/remediation package. The implementation files are impact context,
+  not edit permission; the packet should split K structural decisions and each
+  slice must come back through its own route.
 
 ## Agent runtime posture
 
@@ -101,6 +105,10 @@ Topology is most useful when it behaves like a runtime contract:
 - Impact/context output should use the owner manifest for the file class:
   `source_rationale` for `src/**`, script manifest for `scripts/**`, docs
   registry or operations router for `docs/**`, and test topology for `tests/**`.
+- Route-card `structural_decision_hints` is advisory UX for broad planning
+  tasks. It should identify decision surfaces such as runtime hooks, static
+  rules, architecture policy, and DB schema semantics without turning them into
+  immediate edit authorization.
 - Every completed operation should leave one compact feedback capsule. The
   capsule is not authority and not a standalone artifact requirement; it is the
   runtime's mechanism for harvesting useful lessons without forcing unrelated
