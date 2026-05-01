@@ -597,6 +597,45 @@ def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None
     return inserted
 
 
+def _dedupe_condition_ids(values) -> list[str]:
+    """Order-preserving dedupe of condition_id strings.
+
+    Drops empty/None entries (a non-executable child market may carry an empty
+    condition_id; we must not subscribe to it).
+    """
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def extract_executable_condition_ids(events: list[dict]) -> list[str]:
+    """Flatten + dedupe executable condition_ids across a list of event dicts.
+
+    Used by ``src/main.py::_start_user_channel_ingestor_if_enabled`` to derive
+    the user-channel WS subscription set from the live scanner output instead
+    of a hardcoded ``POLYMARKET_USER_WS_CONDITION_IDS`` plist value
+    (operator directive 2026-05-01: "任何硬编码bankroll都是一次严重的结构性失误";
+    same shape applies to hardcoded condition_id lists, which drift from
+    on-chain truth as markets rotate).
+    """
+    all_ids: list[str] = []
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        all_ids.extend(event.get("condition_ids") or [])
+    return _dedupe_condition_ids(all_ids)
+
+
 def find_weather_markets(
     min_hours_to_resolution: float = 6.0,
 ) -> list[dict]:
@@ -959,6 +998,16 @@ def _parse_event(
         except (ValueError, TypeError):
             pass
 
+    # 2026-05-01: surface the deduped list of executable condition_ids on the
+    # event dict so callers (e.g. user-channel WS auto-derive in src/main.py)
+    # can subscribe to exactly the markets the scanner has accepted, without
+    # re-walking outcomes / re-applying the executable-mask. Non-executable
+    # children are excluded — they cannot accept orders and the WS server
+    # will reject the subscription.
+    executable_condition_ids = _dedupe_condition_ids(
+        outcome.get("condition_id")
+        for outcome in support_topology.executable_outcomes
+    )
     return {
         "event_id": event.get("id") or event.get("slug"),
         "slug": event.get("slug", ""),
@@ -969,6 +1018,7 @@ def _parse_event(
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         "outcomes": outcomes,
+        "condition_ids": executable_condition_ids,
         "support_topology": {
             "topology_status": support_topology.topology_status,
             "support_child_count": len(support_topology.support_outcomes),
