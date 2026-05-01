@@ -126,3 +126,41 @@ Auto-pause used to write `effective_until=NULL`, which is permanent. A single tr
 - A streak counter at `state/auto_pause_streak.json` requires 3 consecutive same-reason failures within a 5-min window before `pause_entries` is called. Single-cycle hiccups log a WARNING but do not pause.
 - `pause_entries(...)` is idempotent on the same active reason — duplicate inserts within the same active window are skipped.
 - Operator helper `scripts/expire_auto_pause.sh` clears the override + tombstone + streak file in one shot, without re-running the full `arm_live_mode.sh` flow.
+
+## User-channel WS auto-derive (post-2026-05-01)
+
+The hardcoded `POLYMARKET_USER_WS_CONDITION_IDS` plist value is a structural failure mode (operator directive 2026-05-01: "任何硬编码bankroll都是一次严重的结构性失误" — same shape applies to hardcoded condition_id lists; markets rotate daily and the plist drifts from on-chain truth). The fix is to derive the subscription set from the canonical market scanner so the daemon subscribes to exactly the markets it can trade.
+
+### Three env vars
+
+| # | Var | Purpose | Set by `arm_live_mode.sh`? |
+|---|---|---|---|
+| 1 | `ZEUS_USER_CHANNEL_WS_ENABLED` | Master toggle. Required for any user-channel WS path. Without it, boot logs `user-channel WS not configured: missing env vars [...]` and stays `reduce_only=True`. | Yes — `=1` in both `com.zeus.live-trading.plist` and `com.zeus.data-ingest.plist`. |
+| 2 | `ZEUS_USER_CHANNEL_WS_AUTO_DERIVE` | Auto-derive switch. When `=1` AND `POLYMARKET_USER_WS_CONDITION_IDS` is empty, the daemon calls `src.data.market_scanner.find_weather_markets()` at boot and subscribes to the executable condition_ids it returns. | Yes — `=1` in both plists. |
+| 3 | `POLYMARKET_USER_WS_CONDITION_IDS` | Operator override. When non-empty, the value (comma-separated condition IDs) wins over auto-derive — used for pinning a static list during testing or surgical recovery. | No — left empty so auto-derive owns the list. Operator can `PlistBuddy Add` it for a hand-picked override. |
+
+### Auto-derive vs operator-pinned
+
+- **Auto-derive (default after `arm_live_mode.sh`)**: subscription set is a snapshot taken at daemon boot. Markets opening AFTER boot won't be subscribed until the next daemon restart. A future packet may add a periodic re-subscription; out of scope here.
+- **Operator-pinned**: set `POLYMARKET_USER_WS_CONDITION_IDS="<id1>,<id2>,..."` in the plist. The boot path detects the non-empty value and skips the scanner call entirely; auto-derive becomes a no-op.
+
+### Operator action
+
+Just run `bash scripts/arm_live_mode.sh`. The script now sets all three toggles needed (`ZEUS_HARVESTER_LIVE_ENABLED`, `ZEUS_USER_CHANNEL_WS_ENABLED`, `ZEUS_USER_CHANNEL_WS_AUTO_DERIVE`) for both daemon plists. Idempotent like the rest of the flow.
+
+### Boot output: expected lines
+
+When auto-derive succeeds:
+
+```
+INFO  user-channel WS auto-derive yielded N condition_ids (POLYMARKET_USER_WS_CONDITION_IDS empty, ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1)
+INFO  M3 user-channel ingestor started for N condition_ids (auto_derived=True)
+```
+
+When auto-derive yields 0 markets (gamma down, all weather events filtered, etc.):
+
+```
+WARN  user-channel WS auto-derive yielded 0 condition_ids; daemon stays in reduce_only=True mode. Markets may be empty or the gamma query failed; check src.data.market_scanner.
+```
+
+The empty case does NOT crash the daemon — the WS guard records `condition_ids_missing` and live submits stay fail-closed until the next boot picks up real markets.
