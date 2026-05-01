@@ -193,9 +193,9 @@ def test_r2_canonical_rebuild_refuses_unaudited_with_nonzero_status():
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at,
             fetch_time, lead_hours, members_json, model_version, data_version,
-            authority
+            authority, temperature_metric
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "NYC",
@@ -209,6 +209,7 @@ def test_r2_canonical_rebuild_refuses_unaudited_with_nonzero_status():
             "ecmwf_tigge",
             "tigge_step024_v1_test",
             "VERIFIED",
+            "high",  # B4 Phase 3: temperature_metric defaulted to 'high'
         ),
     )
 
@@ -275,9 +276,9 @@ def test_r2_canonical_rebuild_refuses_partial_live_replacement():
             INSERT INTO ensemble_snapshots (
                 city, target_date, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version, data_version,
-                authority
+                authority, temperature_metric
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "NYC",
@@ -291,6 +292,7 @@ def test_r2_canonical_rebuild_refuses_partial_live_replacement():
                 "ecmwf_tigge",
                 f"canonical-test-{day}",
                 "VERIFIED",
+                "high",  # B4 Phase 3: temperature_metric defaulted to 'high'
             ),
         )
     conn.execute(
