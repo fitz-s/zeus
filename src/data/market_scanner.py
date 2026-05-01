@@ -29,6 +29,8 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
 )
 from src.state.snapshot_repo import insert_snapshot
+from src.types import Bin
+from src.types.market import BinTopologyError, validate_bin_topology
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,19 @@ class SourceContractCheck:
             "configured_source_family": self.configured_source_family,
             "configured_station_id": self.configured_station_id,
         }
+
+
+@dataclass(frozen=True)
+class MarketSupportTopology:
+    """Complete settlement support plus aligned executable child metadata."""
+
+    support_bins: list[Bin]
+    executable_mask: tuple[bool, ...]
+    token_payload_by_support_index: dict[int, dict]
+    support_outcomes: list[dict]
+    executable_outcomes: list[dict]
+    topology_status: str
+    provenance: dict
 
 # Temperature keywords for event matching
 TEMP_KEYWORDS = {"temperature", "highest temp", "°f", "°c", "fahrenheit", "celsius"}
@@ -570,7 +585,12 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     for event in events:
         for outcome in _extract_outcomes(event):
             if outcome.get("market_id") == market_id:
-                return float(outcome["price"])
+                if not outcome.get("executable"):
+                    return None
+                price = outcome.get("price")
+                if price is None:
+                    return None
+                return float(price)
     return None
 
 
@@ -822,9 +842,20 @@ def _parse_event(
     else:
         hours_to_resolution = None
 
-    # Extract bin structure from markets
-    outcomes = _extract_outcomes(event)
-    if not outcomes:
+    # Extract complete contract support from all Gamma child markets. The
+    # executable subset is preserved as an aligned mask, not used as topology.
+    try:
+        support_topology = build_market_support_topology(event, unit=city.settlement_unit)
+    except (BinTopologyError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Rejecting Gamma market with invalid support topology: city=%s event=%s reason=%s",
+            city.name,
+            event.get("id") or event.get("slug"),
+            exc,
+        )
+        return None
+    outcomes = support_topology.support_outcomes
+    if not outcomes or not support_topology.executable_outcomes:
         return None
 
     metric_surfaces = [
@@ -866,6 +897,19 @@ def _parse_event(
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         "outcomes": outcomes,
+        "support_topology": {
+            "topology_status": support_topology.topology_status,
+            "support_child_count": len(support_topology.support_outcomes),
+            "executable_child_count": len(support_topology.executable_outcomes),
+            "executable_mask": list(support_topology.executable_mask),
+            "token_payload_by_support_index": support_topology.token_payload_by_support_index,
+            "support_labels": [b.label for b in support_topology.support_bins],
+            "support_bounds": [
+                {"low": b.low, "high": b.high, "unit": b.unit}
+                for b in support_topology.support_bins
+            ],
+            "provenance": support_topology.provenance,
+        },
         "resolution_source": source_contract.resolution_sources[0]
         if source_contract.resolution_sources
         else "",
@@ -1199,14 +1243,19 @@ def _parse_target_date(event: dict, city: Optional["City"] = None) -> Optional[s
 
 
 def _extract_outcomes(event: dict) -> list[dict]:
-    """Extract bin outcomes from event markets."""
+    """Extract all parseable bin outcomes from event markets.
+
+    Contract support and executable surface are deliberately separate here.
+    Closed/non-accepting child markets can still define the settlement
+    partition, but they cannot provide executable token payloads downstream.
+    """
     outcomes = []
     markets = event.get("markets", [])
 
     for market in markets:
-        if not _market_child_is_tradable(market):
-            continue
         question = market.get("question", "")
+        range_low, range_high = _parse_temp_range(question)
+        child_is_tradable = _market_child_is_tradable(market)
 
         # Parse token IDs — may be JSON string or list
         clob_tokens = market.get("clobTokenIds", "[]")
@@ -1214,12 +1263,11 @@ def _extract_outcomes(event: dict) -> list[dict]:
             try:
                 clob_tokens = json.loads(clob_tokens)
             except (json.JSONDecodeError, TypeError):
-                continue
-        if not clob_tokens or len(clob_tokens) < 2:
-            continue
+                clob_tokens = []
 
-        yes_token = clob_tokens[0]
-        no_token = clob_tokens[1]
+        yes_token = clob_tokens[0] if len(clob_tokens) >= 1 else ""
+        no_token = clob_tokens[1] if len(clob_tokens) >= 2 else ""
+        token_map_valid = bool(yes_token and no_token)
 
         # K1/#43: Validate token→outcome label mapping instead of assuming
         # positional order.  Polymarket markets carry an "outcomes" list
@@ -1238,8 +1286,10 @@ def _extract_outcomes(event: dict) -> list[dict]:
                 yes_token, no_token = no_token, yes_token
                 _labels_swapped = True
             elif label_0 != "yes" or label_1 != "no":
-                # Unrecognised outcome labels — skip this market.
-                continue
+                # Unrecognised outcome labels — support may still parse, but
+                # executable token routing is not proven.
+                token_map_valid = False
+                _labels_swapped = False
             else:
                 _labels_swapped = False
         else:
@@ -1253,22 +1303,32 @@ def _extract_outcomes(event: dict) -> list[dict]:
             except (json.JSONDecodeError, TypeError):
                 logger.warning("outcomePrices parse failed for market %s, skipping",
                                market.get("questionID", "?"))
-                continue
+                prices = []
         if len(prices) < 2:
             logger.warning("outcomePrices has < 2 elements for market %s, skipping",
                            market.get("questionID", "?"))
-            continue
-        yes_price = float(prices[0])
-        no_price = float(prices[1])
-        if _labels_swapped:
-            yes_price, no_price = no_price, yes_price
-
-        # Parse range from question text
-        range_low, range_high = _parse_temp_range(question)
+            yes_price = None
+            no_price = None
+        else:
+            try:
+                yes_price = float(prices[0])
+                no_price = float(prices[1])
+            except (TypeError, ValueError):
+                yes_price = None
+                no_price = None
+            if _labels_swapped:
+                yes_price, no_price = no_price, yes_price
 
         condition_id = str(market.get("conditionId") or market.get("condition_id") or market.get("id", "") or "")
         question_id = str(market.get("questionID") or market.get("question_id") or "")
         gamma_market_id = str(market.get("id") or condition_id)
+        executable = bool(
+            child_is_tradable
+            and token_map_valid
+            and condition_id
+            and yes_token
+            and no_token
+        )
 
         outcomes.append({
             "title": question,
@@ -1282,6 +1342,7 @@ def _extract_outcomes(event: dict) -> list[dict]:
             "condition_id": condition_id,
             "question_id": question_id,
             "gamma_market_id": gamma_market_id,
+            "executable": executable,
             "active": _boolish_market_field(market, "active", "isActive"),
             "closed": _boolish_market_field(market, "closed", "isClosed"),
             "accepting_orders": _boolish_market_field(market, "acceptingOrders", "accepting_orders"),
@@ -1318,6 +1379,7 @@ def _extract_outcomes(event: dict) -> list[dict]:
                 "clobTokenIds": clob_tokens,
                 "outcomes": outcome_labels,
                 "labels_swapped": _labels_swapped,
+                "token_map_valid": token_map_valid,
             },
             "raw_gamma_payload_hash": _sha256_json(market),
             "gamma_market_raw": market,
@@ -1326,31 +1388,67 @@ def _extract_outcomes(event: dict) -> list[dict]:
     return outcomes
 
 
+def build_market_support_topology(event: dict, *, unit: str) -> MarketSupportTopology:
+    """Build the complete contract support topology for a Gamma event."""
+
+    support_outcomes: list[dict] = []
+    support_bins: list[Bin] = []
+    executable_mask: list[bool] = []
+    token_payload_by_support_index: dict[int, dict] = {}
+
+    for outcome in _extract_outcomes(event):
+        low, high = outcome.get("range_low"), outcome.get("range_high")
+        if low is None and high is None:
+            continue
+        support_index = len(support_bins)
+        support_outcome = dict(outcome)
+        support_outcome["support_index"] = support_index
+        support_outcomes.append(support_outcome)
+        support_bins.append(Bin(low=low, high=high, label=outcome["title"], unit=unit))
+        executable = bool(outcome.get("executable"))
+        executable_mask.append(executable)
+        if executable:
+            token_payload_by_support_index[support_index] = {
+                "token_id": outcome["token_id"],
+                "no_token_id": outcome["no_token_id"],
+                "market_id": outcome["market_id"],
+                "condition_id": outcome.get("condition_id") or outcome.get("market_id"),
+                "question_id": outcome.get("question_id", ""),
+            }
+
+    validate_bin_topology(support_bins)
+    executable_outcomes = [
+        outcome for outcome, executable in zip(support_outcomes, executable_mask) if executable
+    ]
+    return MarketSupportTopology(
+        support_bins=support_bins,
+        executable_mask=tuple(executable_mask),
+        token_payload_by_support_index=token_payload_by_support_index,
+        support_outcomes=support_outcomes,
+        executable_outcomes=executable_outcomes,
+        topology_status="complete",
+        provenance={
+            "event_id": event.get("id") or event.get("slug"),
+            "support_child_count": len(support_outcomes),
+            "executable_child_count": len(executable_outcomes),
+        },
+    )
+
+
 def _market_child_is_tradable(market: dict) -> bool:
     """Return whether a Gamma child market is currently tradable.
 
     Gamma can return open parent events with closed or non-accepting children.
-    Missing flags are treated as unknown for legacy payload compatibility; only
-    explicit non-tradable values are filtered.
+    Executability is an explicit child-market fact: missing active/orderbook/
+    accepting flags are unknown, not tradable.
     """
 
     closed = _boolish_market_field(market, "closed", "isClosed")
-    if closed is True:
-        return False
-
     active = _boolish_market_field(market, "active", "isActive")
-    if active is False:
-        return False
-
     accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
-    if accepting is False:
-        return False
-
     orderbook = _boolish_market_field(market, "enableOrderBook", "enable_orderbook", "orderbookEnabled")
-    if orderbook is False:
-        return False
 
-    return True
+    return closed is False and active is True and accepting is True and orderbook is True
 
 
 def _boolish_market_field(market: dict, *names: str) -> bool | None:
