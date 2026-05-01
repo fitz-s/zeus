@@ -26,10 +26,30 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+)
 from src.state.truth_files import current_mode, read_mode_truth_json
 
 
 OUT = PROJECT_ROOT / "equity_curve.png"
+LEGACY_DIAGNOSTIC_COHORT = "legacy_diagnostic"
+_FILL_GRADE_AUTHORITIES = frozenset({
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+})
+_ENTRY_GRADE_AUTHORITIES = frozenset({
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+})
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -39,6 +59,49 @@ def _parse_ts(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _positive_number(value) -> bool:
+    try:
+        return float(value or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _exit_economics_cohort(row: dict) -> str:
+    corrected = (
+        row.get("pricing_semantics_version")
+        == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+        or row.get("corrected_executable_economics_eligible") is True
+    )
+    if not corrected:
+        return LEGACY_DIAGNOSTIC_COHORT
+    ready = (
+        row.get("entry_economics_authority") in _ENTRY_GRADE_AUTHORITIES
+        and row.get("fill_authority") in _FILL_GRADE_AUTHORITIES
+        and _positive_number(row.get("shares_filled"))
+        and _positive_number(row.get("filled_cost_basis_usd"))
+        and (
+            bool(row.get("entry_cost_basis_hash"))
+            or bool(row.get("execution_cost_basis_version"))
+        )
+    )
+    if not ready:
+        raise ValueError("corrected equity row is missing fill/cost-basis authority")
+    return CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+
+
+def _single_exit_economics_cohort(rows: list[dict]) -> tuple[str, dict[str, int]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        cohort = _exit_economics_cohort(row)
+        counts[cohort] = counts.get(cohort, 0) + 1
+    if len(counts) > 1:
+        raise ValueError(
+            "mixed pricing semantics cohorts are forbidden in equity curve: "
+            f"{sorted(counts)}"
+        )
+    return next(iter(counts), LEGACY_DIAGNOSTIC_COHORT), counts
 
 
 def build_equity_curve(mode: str) -> dict:
@@ -58,6 +121,7 @@ def build_equity_curve(mode: str) -> dict:
         ],
         key=lambda row: row.get("exited_at", ""),
     )
+    economics_cohort, economics_cohort_counts = _single_exit_economics_cohort(recent_exits)
     timestamps = [
         dt for dt in (
             _parse_ts(row.get("entered_at")) for row in portfolio.get("positions", [])
@@ -101,6 +165,9 @@ def build_equity_curve(mode: str) -> dict:
         "tracker_truth": tracker_truth,
         "output_path": str(OUT) if plt is not None else None,
         "n_realized_events": len(recent_exits),
+        "economics_cohort": economics_cohort,
+        "economics_cohort_counts": economics_cohort_counts,
+        "promotion_grade": economics_cohort == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
         "matplotlib_available": plt is not None,
     }
     if plt is None:
