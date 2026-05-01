@@ -32,6 +32,7 @@ SEVERITY_RANK = {
     "ALERT": 2,
     "DATA_UNAVAILABLE": 3,
 }
+COMPACT_SCHEMA_VERSION = 1
 
 SOURCE_STATUS_SEVERITY = {
     "MATCH": "OK",
@@ -202,6 +203,86 @@ def analyze_events(
         "summary": summary,
         "events": results,
         "next_actions": _next_actions(status, results),
+    }
+
+
+def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
+    contract = event.get("source_contract") or {}
+    return {
+        "city": event.get("city"),
+        "target_date": event.get("target_date"),
+        "temperature_metric": event.get("temperature_metric"),
+        "severity": event.get("severity"),
+        "event_id": event.get("event_id"),
+        "slug": event.get("slug"),
+        "title": event.get("title"),
+        "source_contract": {
+            "status": contract.get("status"),
+            "reason": contract.get("reason"),
+            "configured_source_family": contract.get("configured_source_family"),
+            "configured_station_id": contract.get("configured_station_id"),
+            "observed_source_family": contract.get("source_family"),
+            "observed_station_id": contract.get("station_id"),
+            "resolution_sources": list(contract.get("resolution_sources") or []),
+        },
+    }
+
+
+def build_compact_alert_report(
+    report: dict[str, Any],
+    *,
+    report_only: bool,
+) -> dict[str, Any]:
+    """Return a small, model-safe source audit report.
+
+    Cron delivery hands this to small models so they never have to infer the
+    affected cities from a long full event list or a truncated raw JSON tail.
+    """
+    alert_events = [
+        _compact_event(event)
+        for event in report.get("events", [])
+        if event.get("severity") == "ALERT"
+    ]
+    warn_events = [
+        _compact_event(event)
+        for event in report.get("events", [])
+        if event.get("severity") == "WARN"
+    ]
+    affected_cities = sorted(
+        {
+            str(event.get("city"))
+            for event in alert_events
+            if event.get("city")
+        }
+    )
+    quarantine_actions = list(report.get("quarantine_actions") or [])
+    return {
+        "schema_version": COMPACT_SCHEMA_VERSION,
+        "status": report.get("status"),
+        "authority": report.get("authority"),
+        "checked_at_utc": report.get("checked_at_utc"),
+        "event_count": report.get("event_count"),
+        "checked_event_count": report.get("checked_event_count"),
+        "skipped_non_temperature": report.get("skipped_non_temperature"),
+        "skipped_unconfigured": report.get("skipped_unconfigured"),
+        "summary": report.get("summary"),
+        "alert_event_count": len(alert_events),
+        "warn_event_count": len(warn_events),
+        "affected_cities": affected_cities,
+        "alert_events": alert_events,
+        "warn_events": warn_events,
+        "quarantine": {
+            "report_only": bool(report_only),
+            "written": bool(quarantine_actions),
+            "actions": quarantine_actions,
+            "mode": "read_only_no_write" if report_only else "write_on_alert",
+        },
+        "model_reporting_contract": [
+            "Only alert_events are ALERT-affected market subjects.",
+            "Do not infer affected cities from summary counts, event ordering, or truncated tail text.",
+            "Rows absent from alert_events must not be reported as source-change ALERTs.",
+        ],
+        "next_actions": report.get("next_actions") or [],
     }
 
 
@@ -487,6 +568,40 @@ def render_text(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_compact_alert_text(report: dict[str, Any]) -> str:
+    lines = [
+        (
+            "source-contract-alert-summary "
+            f"status={report.get('status')} authority={report.get('authority')} "
+            f"alerts={report.get('alert_event_count')} "
+            f"affected_cities={report.get('affected_cities')}"
+        )
+    ]
+    quarantine = report.get("quarantine") or {}
+    lines.append(
+        "quarantine: "
+        f"mode={quarantine.get('mode')} written={quarantine.get('written')}"
+    )
+    for event in report.get("alert_events", []):
+        contract = event.get("source_contract") or {}
+        lines.append(
+            (
+                f"- ALERT {event.get('city')} "
+                f"{event.get('target_date') or '<unknown-date>'} "
+                f"{event.get('temperature_metric') or '<unknown-metric>'}: "
+                f"{contract.get('status')} {contract.get('reason')} "
+                f"configured={contract.get('configured_source_family')}/"
+                f"{contract.get('configured_station_id')} observed="
+                f"{contract.get('observed_source_family')}/"
+                f"{contract.get('observed_station_id')} "
+                f"sources={contract.get('resolution_sources')}"
+            )
+        )
+    for rule in report.get("model_reporting_contract", []):
+        lines.append(f"contract: {rule}")
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--city", help="Limit checks to one configured city name")
@@ -497,6 +612,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fixture", type=Path, help="Read Gamma events from JSON fixture")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
+    parser.add_argument(
+        "--compact-alerts",
+        action="store_true",
+        help="Emit a small model-safe report containing only WARN/ALERT rows and audit counts",
+    )
     parser.add_argument(
         "--report-only",
         action="store_true",
@@ -603,7 +723,20 @@ def main(argv: list[str] | None = None) -> int:
                 "next_actions": ["Do not rely on source monitor output until Gamma fetch recovers."],
                 "quarantine_actions": [],
             }
-            print(json.dumps(report, indent=2, sort_keys=True) if args.json else render_text(report))
+            output_report = (
+                build_compact_alert_report(report, report_only=args.report_only)
+                if args.compact_alerts
+                else report
+            )
+            print(
+                json.dumps(output_report, indent=2, sort_keys=True)
+                if args.json
+                else (
+                    render_compact_alert_text(output_report)
+                    if args.compact_alerts
+                    else render_text(output_report)
+                )
+            )
             return exit_code_for_report(report, fail_on=args.fail_on)
 
     report = analyze_events(
@@ -617,7 +750,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.report_only
         else apply_source_quarantines(report, quarantine_path=args.quarantine_path)
     )
-    print(json.dumps(report, indent=2, sort_keys=True) if args.json else render_text(report))
+    output_report = (
+        build_compact_alert_report(report, report_only=args.report_only)
+        if args.compact_alerts
+        else report
+    )
+    print(
+        json.dumps(output_report, indent=2, sort_keys=True)
+        if args.json
+        else (
+            render_compact_alert_text(output_report)
+            if args.compact_alerts
+            else render_text(output_report)
+        )
+    )
     return exit_code_for_report(report, fail_on=args.fail_on)
 
 
