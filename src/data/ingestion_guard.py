@@ -28,6 +28,11 @@ Unit-consistency runs FIRST so mislabelled rows are caught before numeric
 bounds checks, which would otherwise pass nonsensical values silently.
 
 Part of K1-B packet. See .omc/plans/k1-freeze.md section 6.
+
+Phase 2 (2026-04-30): ProvenanceGuard added. Every NEW write to world DB
+tables must carry source, authority, data_version, provenance_json. Legacy
+rows missing these fields are tolerated at READ time (tagged legacy_v0/
+UNVERIFIED per design §SC-3); WRITES must always supply full provenance.
 """
 
 from __future__ import annotations
@@ -562,3 +567,121 @@ class IngestionGuard:
         self.check_collection_timing(city, fetch_utc, target_date, peak_hour)
         # Layer 5 — DST boundary
         self.check_dst_boundary(city, local_time)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: ProvenanceGuard — write-time provenance contract (§2.4 + §6 #9)
+# ---------------------------------------------------------------------------
+
+_VALID_AUTHORITIES = frozenset({"VERIFIED", "UNVERIFIED", "QUARANTINED"})
+
+_REQUIRED_PROVENANCE_KEYS = frozenset({"request_url", "fetched_at", "parser_version"})
+
+# Legacy tolerance: rows missing provenance are tagged at READ time only.
+# This sentinel is returned by apply_legacy_read_tolerance() for absent fields.
+LEGACY_V0_DATA_VERSION = "legacy_v0"
+LEGACY_V0_AUTHORITY = "UNVERIFIED"
+
+
+class ProvenanceViolation(ValueError):
+    """Raised by ProvenanceGuard when a new write lacks required provenance fields.
+
+    Write-time: every NEW row must carry source, authority, data_version,
+    provenance_json with required keys.
+    Read-time: absent fields are tolerated by treat-as-legacy_v0 (SC-3 backward compat).
+    """
+
+
+class ProvenanceGuard:
+    """Write-time provenance contract enforcement.
+
+    Every new write to world DB tables must carry:
+      - source: non-empty string (e.g. "wu_icao", "ecmwf_open_data")
+      - authority: one of VERIFIED | UNVERIFIED | QUARANTINED
+      - data_version: non-empty string
+      - provenance_json: dict with at least {request_url, fetched_at, parser_version}
+
+    Backward compat (SC-3): legacy rows with absent provenance are handled
+    at READ time via apply_legacy_read_tolerance() — this class does NOT block reads.
+
+    Usage::
+
+        guard = ProvenanceGuard()
+        guard.validate_write(
+            source="wu_icao",
+            authority="VERIFIED",
+            data_version="wu_daily_v2",
+            provenance_json={
+                "request_url": "https://...",
+                "fetched_at": "2026-04-30T12:00:00Z",
+                "parser_version": "wu_daily_v2.1",
+            },
+        )
+    """
+
+    def validate_write(
+        self,
+        *,
+        source: str,
+        authority: str,
+        data_version: str,
+        provenance_json: dict,
+    ) -> None:
+        """Validate provenance fields for a new write. Raises ProvenanceViolation on failure.
+
+        Parameters
+        ----------
+        source:
+            Non-empty string identifying the upstream data source.
+        authority:
+            One of "VERIFIED", "UNVERIFIED", "QUARANTINED".
+        data_version:
+            Non-empty string versioning the ingestion schema/parser.
+        provenance_json:
+            Dict with at minimum keys: request_url, fetched_at, parser_version.
+        """
+        errors: list[str] = []
+
+        if not isinstance(source, str) or not source.strip():
+            errors.append("source must be a non-empty string")
+
+        if authority not in _VALID_AUTHORITIES:
+            errors.append(
+                f"authority={authority!r} must be one of {sorted(_VALID_AUTHORITIES)}"
+            )
+
+        if not data_version or not isinstance(data_version, str):
+            errors.append("data_version must be a non-empty string")
+
+        if not isinstance(provenance_json, dict):
+            errors.append("provenance_json must be a dict")
+        else:
+            missing_keys = _REQUIRED_PROVENANCE_KEYS - set(provenance_json.keys())
+            if missing_keys:
+                errors.append(
+                    f"provenance_json missing required keys: {sorted(missing_keys)}"
+                )
+
+        if errors:
+            raise ProvenanceViolation(
+                "ProvenanceGuard write validation failed:\n"
+                + "\n".join(f"  - {e}" for e in errors)
+            )
+
+    @staticmethod
+    def apply_legacy_read_tolerance(row: dict) -> dict:
+        """Apply SC-3 backward-compat tolerance to a row dict read from the DB.
+
+        Rows where source/authority/data_version/provenance_json are absent (NULL)
+        are tagged with legacy_v0 sentinel values. The row dict is updated in-place
+        and returned.
+
+        This is a READ-ONLY operation — it must never be called at write time.
+        """
+        if not row.get("data_version"):
+            row["data_version"] = LEGACY_V0_DATA_VERSION
+        if not row.get("authority"):
+            row["authority"] = LEGACY_V0_AUTHORITY
+        if not row.get("source"):
+            row["source"] = "unknown_legacy"
+        return row
