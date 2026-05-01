@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     order_id TEXT,
     order_status TEXT,
     updated_at TEXT NOT NULL,
-    temperature_metric TEXT NOT NULL DEFAULT 'high' CHECK (temperature_metric IN ('high', 'low'))
+    temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low'))
 );
 
 CREATE TABLE IF NOT EXISTS strategy_health (

@@ -158,7 +158,26 @@ The 2026-05-01 alignment with the new topology system surfaced that `topology gr
 
 **Verification**: `pytest -k pricing_semantics_authority_cutover` was 3 passed / 7 failed → now 10 passed / 0 failed.
 
-### P2a / P2b / P3 (queued)
+### P2a: APPLIED 2026-05-01 — INV-14 silent-default removal
+
+**Status**: APPLIED on branch `ultrareview25-remediation-2026-05-01`.
+
+**Root cause**: `architecture/2026_04_02_architecture_kernel.sql:129` had `temperature_metric TEXT NOT NULL DEFAULT 'high' CHECK (...)`. The `DEFAULT 'high'` silently filled the identity column when callers omitted it, undermining INV-14's "every temperature-market family row must EXPLICITLY carry temperature_metric" requirement. Production code (`src/state/projection.py:6-31` `CANONICAL_POSITION_CURRENT_COLUMNS`) was already explicit, but **28 test INSERT sites** relied on the silent default.
+
+**Fix**:
+1. Removed `DEFAULT 'high'` from kernel SQL (NOT NULL + CHECK retained).
+2. Updated 28 test INSERT sites across 12 files to explicitly include `temperature_metric` in the column list and `'high'` in VALUES (semantically correct: all 28 sites carry high-side bin labels like `'39-40°F'`). 20 literal-only sites migrated by Python script; 8 placeholder/mixed sites updated manually.
+3. Added 2 antibody regression tests in `tests/test_canonical_position_current_schema_alignment.py`:
+   - `test_inv14_position_current_rejects_insert_missing_temperature_metric`: schema must error on INSERT-without-temperature_metric (was silently filled before).
+   - `test_inv14_kernel_sql_temperature_metric_has_no_default_clause`: regex-pins the SQL declaration to forbid future `DEFAULT '<any>'` re-introduction.
+
+**Gate evidence**:
+- Pre-commit hook test set (14 files): 218 passed / 22 skipped (≥ baseline 217).
+- All 12 modified test files: 543 passed / 17 failed (16 pre-existing in `test_pnl_flow_and_audit.py::test_inv_*`, 1 pre-existing flaky in `test_runtime_guards.py::test_main_registers_only_policy_owned_ecmwf_open_data_jobs`); **zero new regressions** introduced by P2a (verified via stash+rerun on HEAD).
+- Antibody tests: 5/5 passed.
+- topology admission: `pricing semantics authority cutover` admitted SQL file; planning-lock check ok.
+
+### P2b / P3 (queued)
 
 | Packet | Decision | Files | Risk Tier | Topology task wording |
 |---|---|---|---|---|

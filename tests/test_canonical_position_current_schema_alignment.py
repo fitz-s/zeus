@@ -118,3 +118,64 @@ def test_canonical_constants_match_kernel_sql_position_current_columns() -> None
         "constant — the two must stay aligned for the canonical write path "
         "to function."
     )
+
+
+# === ultrareview-25 P2a antibody (INV-14 silent-default removal) ===
+# Pin the schema invariant that INSERT INTO position_current MUST explicitly
+# supply temperature_metric. The prior `DEFAULT 'high'` was a defense-in-depth
+# bypass that silently filled the identity column when callers forgot it,
+# violating INV-14. This test fails LOUDLY if a future migration or
+# refactor re-introduces a silent default for this column.
+
+def test_inv14_position_current_rejects_insert_missing_temperature_metric(tmp_path) -> None:
+    """F18 antibody: schema must reject INSERT INTO position_current that
+    omits temperature_metric — no silent DEFAULT fill of an identity column."""
+    import sqlite3
+    db_path = tmp_path / "antibody.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(KERNEL_SQL.read_text())
+
+    # Caller forgets temperature_metric — schema must error, not silently fill.
+    try:
+        conn.execute(
+            """
+            INSERT INTO position_current (position_id, phase, updated_at)
+            VALUES ('antibody-pos-1', 'active', '2026-05-01T00:00:00Z')
+            """
+        )
+        conn.commit()
+        raised = False
+    except sqlite3.IntegrityError:
+        raised = True
+    finally:
+        conn.close()
+    assert raised, (
+        "INV-14 antibody regression: INSERT INTO position_current without "
+        "temperature_metric was accepted. Schema must enforce explicit "
+        "carrying of the identity column (NOT NULL, no DEFAULT). "
+        "Re-check architecture/2026_04_02_architecture_kernel.sql line ~129."
+    )
+
+
+def test_inv14_kernel_sql_temperature_metric_has_no_default_clause() -> None:
+    """F18 antibody: regex-pin the SQL declaration. NOT NULL + CHECK must stay;
+    DEFAULT '<any>' must NOT be present on the temperature_metric column."""
+    sql_text = KERNEL_SQL.read_text()
+    create_block = _extract_create_table_position_current(sql_text)
+    # Find the temperature_metric column declaration
+    m = re.search(
+        r"^\s*temperature_metric\s+TEXT[^\n]*$",
+        create_block,
+        re.MULTILINE,
+    )
+    assert m, "temperature_metric column declaration not found in kernel SQL"
+    decl = m.group(0)
+    assert "NOT NULL" in decl, (
+        "INV-14 regression: temperature_metric must be NOT NULL — found: "
+        + decl.strip()
+    )
+    assert "DEFAULT" not in decl.upper(), (
+        "INV-14 silent-default antibody regression: temperature_metric "
+        "must NOT have a DEFAULT clause (defense-in-depth bypass would "
+        "silently fill the identity column). Found: " + decl.strip()
+    )

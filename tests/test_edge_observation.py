@@ -99,9 +99,9 @@ def _insert_settled(
         INSERT OR IGNORE INTO position_current
             (position_id, phase, strategy_key, updated_at, city, target_date,
              bin_label, direction, market_id, edge_source, size_usd, shares,
-             cost_basis_usd, entry_price, unit)
+             cost_basis_usd, entry_price, unit, temperature_metric)
         VALUES (?, 'settled', ?, ?, 'TestCity', '2026-04-15', '39-40°F',
-                'buy_yes', 'm-test', '', 10.0, 100, 10.0, 0.5, 'F')
+                'buy_yes', 'm-test', '', 10.0, 100, 10.0, 0.5, 'F', 'high')
         """,
         (position_id, strategy, settled_at),
     )

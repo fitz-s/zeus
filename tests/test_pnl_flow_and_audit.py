@@ -312,8 +312,8 @@ def _insert_position_current_row(
             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
-            chain_state, order_id, order_status, updated_at
-        ) VALUES (?, ?, ?, 'm-test', ?, 'NYC', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?)
+            chain_state, order_id, order_status, updated_at, temperature_metric
+        ) VALUES (?, ?, ?, 'm-test', ?, 'NYC', '2026-04-01', ?, ?, 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, '', ?, '', '', ?, '', '', ?, 'high')
         """,
         (
             position_id,
@@ -3104,11 +3104,11 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     conn.execute("""
         INSERT INTO position_current
         (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
-         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit, temperature_metric)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, ("rt-settle-auth", "economically_closed", "center_buy",
            "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
-           "m6", "center_buy", 10.0, 25.0, 10.0, 0.40, "F"))
+           "m6", "center_buy", 10.0, 25.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,
@@ -3714,11 +3714,11 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     conn.execute("""
         INSERT INTO position_current
         (position_id, phase, strategy_key, updated_at, city, target_date, bin_label, direction,
-         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         market_id, edge_source, size_usd, shares, cost_basis_usd, entry_price, unit, temperature_metric)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, ("trade-durable-preferred", "economically_closed", "center_buy",
            "2026-04-01T23:00:00+00:00", "NYC", "2026-04-01", "39-40°F", "buy_yes",
-           "m1", "center_buy", 10.0, 10.0, 10.0, 0.40, "F"))
+           "m1", "center_buy", 10.0, 10.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
         (event_id, position_id, event_version, sequence_no, event_type,
