@@ -5,7 +5,9 @@
 
 import pytest
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import redirect_stdout
 from io import StringIO
 
@@ -4671,6 +4673,79 @@ def test_operation_vector_does_not_misread_explanation_as_plan():
     assert card["operation_vector"]["operation_stage"] == "edit"
     assert card["operation_vector_sources"]["operation_stage"] == "side_effect"
     assert card["dominant_driver"] != "planning_package_split"
+
+
+def test_claude_pre_merge_hook_ignores_non_git_bash_without_empty_error():
+    payload = json.dumps({"tool_input": {"command": "rg topology scripts"}})
+    result = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-merge-contamination-check.sh")],
+        input=payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_claude_pre_commit_hook_detects_multi_space_git_commit_not_plumbing():
+    payload = json.dumps({"tool_input": {"command": "git   commit -m test"}})
+    env = {**os.environ, "COMMIT_INVARIANT_TEST_SKIP": "1"}
+
+    result = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-commit-invariant-test.sh")],
+        input=payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "SKIPPED" in result.stderr
+
+    plumbing_payload = json.dumps({"tool_input": {"command": "git commit-tree abc123"}})
+    plumbing = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-commit-invariant-test.sh")],
+        input=plumbing_payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert plumbing.returncode == 0
+    assert plumbing.stderr == ""
+
+
+def test_operation_vector_admits_runtime_governance_profile_boundary():
+    files = [
+        ".claude/CLAUDE.md",
+        ".claude/hooks/pre-commit-invariant-test.sh",
+        ".claude/hooks/pre-edit-architecture.sh",
+        ".claude/hooks/pre-merge-contamination-check.sh",
+        ".claude/settings.json",
+        ".gitignore",
+        "architecture/kernel_manifest.yaml",
+        "architecture/inv_prototype.py",
+        "architecture/ast_rules/semgrep_zeus.yml",
+        "architecture/ast_rules/forbidden_patterns.md",
+        "scripts/check_kernel_manifests.py",
+    ]
+    digest = topology_doctor.build_digest(
+        "harden git hook fail-closed protocol and governance static rule registry",
+        files,
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert digest["admission"]["out_of_scope_files"] == []
 
 
 def test_operation_vector_guides_broad_fix_package_to_planning_packet():
