@@ -874,6 +874,51 @@ digest_profiles:
       - "Do not leave anonymous one-off probes in scripts/."
       - "Do not add a new script when an existing long_lived script can be extended."
       - "Do not let diagnostic/report scripts write canonical DB truth."
+  - id: "source canary readiness hot-swap"
+    match_policy:
+      strong_phrases:
+        - "source freshness provider hot-swap"
+        - "provider hot-swap"
+        - "Paris canary readiness"
+        - "canary readiness"
+      negative_phrases:
+        - "touch live execution"
+        - "modify live execution"
+        - "live placement"
+        - "production DB"
+        - "CLOB order"
+      single_terms_can_select: false
+      min_confidence: 0.45
+    required_law:
+      - "Canary source hot-swap readiness is city-scoped runtime gating, not live execution authorization."
+      - "Freshness changes may gate evaluation/monitor paths but must not place orders or mutate live execution surfaces."
+      - "Config/source provenance must remain explicit; do not infer a durable source promotion from a canary-only route."
+    allowed_files:
+      - "src/control/freshness_gate.py"
+      - "src/engine/cycle_runner.py"
+      - "src/engine/monitor_refresh.py"
+      - "architecture/source_rationale.yaml"
+      - "tests/test_runtime_guards.py"
+      - "tests/test_topology_doctor.py"
+    forbidden_files:
+      - "src/execution/**"
+      - "src/state/**"
+      - "state/*.db"
+      - "config/cities.json"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "python3 -m py_compile src/control/freshness_gate.py src/engine/cycle_runner.py tests/test_runtime_guards.py"
+      - "pytest -q tests/test_runtime_guards.py"
+      - "pytest -q tests/test_digest_profile_matching.py -k source_canary"
+    downstream:
+      - "src/engine/evaluator.py"
+      - "src/engine/monitor_refresh.py"
+      - "src/execution/executor.py"
+    stop_conditions:
+      - "Stop before touching src/execution/** or live order placement paths."
+      - "Stop before promoting a source globally; canary readiness is not source authority."
+      - "Stop before editing city config or canonical data without a source-validity route."
   - id: "refresh source current fact"
     match_policy:
       strong_phrases:
@@ -1207,6 +1252,46 @@ digest_profiles:
       - "Stop before creating .omx/context or standalone handoff/evidence/findings files for this capsule."
       - "Stop before turning an improvement insight into implementation without a new admitted route."
       - "Stop if the capsule needs to alter current_state.md or authority docs."
+  - id: "docs navigation cleanup"
+    match_policy:
+      strong_phrases:
+        - "docs navigation cleanup"
+        - "dead navigation"
+        - "stale operations packet reference"
+        - "remove dead operations packet navigation"
+      negative_phrases:
+        - "settlement semantics change"
+        - "replay logic change"
+        - "production DB"
+        - "live execution"
+      single_terms_can_select: false
+      min_confidence: 0.45
+    required_law:
+      - "Docs navigation cleanup changes path visibility, not trading semantics."
+      - "Preserve settlement/replay history wording unless the task explicitly routes a semantic reference edit."
+      - "Broken packet links should resolve to active, archived, missing, or unregistered path status."
+    allowed_files:
+      - "docs/operations/current_state.md"
+      - "docs/operations/AGENTS.md"
+      - "docs/archive_registry.md"
+      - "tests/test_topology_doctor.py"
+      - "tests/test_digest_profile_matching.py"
+    forbidden_files:
+      - "src/**"
+      - "state/*.db"
+      - "docs/authority/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "python3 scripts/topology_doctor.py --docs"
+      - "pytest -q tests/test_digest_profile_matching.py -k docs_navigation_cleanup"
+    downstream:
+      - "docs/operations/AGENTS.md"
+      - "docs/archive_registry.md"
+    stop_conditions:
+      - "Stop before changing settlement/replay semantic claims."
+      - "Stop before treating archive bodies as default context."
+      - "Stop before creating packet evidence for a navigation-only cleanup."
   - id: "topology graph agent runtime upgrade"
     match_policy:
       strong_phrases:
@@ -6401,6 +6486,42 @@ digest_profiles:
     reference_reads:
       - "docs/reference/modules/control.md"
       - "docs/reference/zeus_execution_lifecycle_reference.md"
+  - id: "evaluator script import bridge"
+    match_policy:
+      strong_phrases:
+        - "evaluator script import bridge"
+        - "bridge evaluator import from script"
+        - "downstream evaluator import"
+      negative_phrases:
+        - "live placement"
+        - "production DB"
+        - "CLOB order"
+      single_terms_can_select: false
+      min_confidence: 0.45
+    required_law:
+      - "Evaluator import bridge work may change evaluator-side imports but does not authorize script execution."
+      - "Script lifecycle/provenance must be surfaced from architecture/script_manifest.yaml before touching scripts."
+      - "Deprecated or fail-closed scripts stay blocked unless a separate script cleanup route admits them."
+    allowed_files:
+      - "src/engine/evaluator.py"
+      - "tests/test_topology_doctor.py"
+      - "tests/test_digest_profile_matching.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/state/**"
+      - "src/execution/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+    gates:
+      - "python3 -m py_compile src/engine/evaluator.py tests/test_digest_profile_matching.py"
+      - "pytest -q tests/test_digest_profile_matching.py -k evaluator_script_import_bridge"
+    downstream:
+      - "scripts/rebuild_calibration_pairs_v2.py"
+      - "architecture/script_manifest.yaml"
+    stop_conditions:
+      - "Stop before running or editing a script without the add-or-change-script route."
+      - "Stop before using a deprecated/fail-closed script as active runtime support."
+      - "Stop before modifying execution or state surfaces."
   - id: "modify pipeline logic"
     match:
       - "evaluator"
