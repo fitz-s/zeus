@@ -1973,6 +1973,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                        'tests/test_market_analysis.py',
                        'tests/test_executor.py',
                        'tests/test_runtime_guards.py',
+                       'tests/test_live_safety_invariants.py',
                        'tests/test_hold_value_exit_costs.py',
                        'tests/test_digest_profile_matching.py'],
     'required_law': [ 'Probability, market-prior estimator, executable quote/cost/proceeds, submitted limit, fill, and '
@@ -1985,6 +1986,8 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                       'limit from posterior, VWMP, or market prior.',
                       'State-owned exit decisions must consume held-token executable sell quote/proceeds for EV gates; '
                       'monitor probability vectors and p_market fields are not sell-quote authority.',
+                      'Monitor probability refresh must not consume the just-refreshed held-token executable quote; '
+                      'Day0 best bid remains an exit/market surface, not posterior input.',
                       'Legacy compatibility remains non-promotion-grade until corrected monitor, exit, persistence, '
                       'reporting, shadow/canary, and operator-go evidence exist.',
                       'This profile does not authorize live venue submission, production DB mutation, schema migration '
@@ -2016,6 +2019,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                        'tests/test_market_analysis.py',
                        'tests/test_executor.py',
                        'tests/test_runtime_guards.py',
+                       'tests/test_live_safety_invariants.py',
                        'tests/test_hold_value_exit_costs.py',
                        'tests/test_digest_profile_matching.py'],
     'forbidden_files': [ 'state/*.db',
@@ -2039,7 +2043,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                'pytest -q -p no:cacheprovider tests/test_no_bare_float_seams.py tests/test_architecture_contracts.py',
                'pytest -q -p no:cacheprovider tests/test_executable_market_snapshot_v2.py '
                'tests/test_execution_intent_typed_slippage.py tests/test_market_analysis.py tests/test_executor.py '
-               'tests/test_runtime_guards.py tests/test_hold_value_exit_costs.py',
+               'tests/test_runtime_guards.py tests/test_live_safety_invariants.py tests/test_hold_value_exit_costs.py',
                'python3 scripts/digest_profiles_export.py --check',
                'python3 scripts/topology_doctor.py --schema',
                'python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence '
