@@ -34,7 +34,11 @@ Topology has five interacting layers:
 - Agent-runtime output should reduce decisions, not add ceremony: route cards
   summarize admission, risk tier, dominant driver, next action, safe next files,
   and gate budget before appendices.
-- Route cards are typed runtime decision packets, not prose summaries. When a
+- Route cards are typed runtime decision packets, not prose summaries. Their
+  core is an operation vector compiled from finite facts: operation stage,
+  mutation surface, side effect, authority surfaces, artifact target, merge
+  state, and claims. Natural language may provide hints, but files, manifests,
+  typed CLI fields, and merge facts are the durable routing inputs. When a
   route is not admitted, expose `why_not_admitted` and
   `suggested_next_command`; when artifact lifecycle matters, expose
   `persistence_target`; when merge protocol matters, expose
@@ -59,6 +63,11 @@ Topology has five interacting layers:
 - Start with `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`.
 - Prefer typed `--intent`, `--task-class`, and `--write-intent` when free-text
   routing could collide with live-money or R3 profiles.
+- Prefer operation-vector fields over inventing new natural-language aliases:
+  `--operation-stage`, `--mutation-surface`, `--side-effect`,
+  `--artifact-target`, and `--merge-state`. These fields are optional because
+  topology infers them from files and manifests, but they are the correct way to
+  disambiguate runtime facts when wording is noisy.
 - Use `--route-card-only` for first-screen orientation and `--claim` only when
   the completion statement depends on a specific gate such as graph impact,
   repo health, packet closeout, semantic boot, or live authorization.

@@ -686,6 +686,138 @@ def _resolve_typed_intent(intent: str | None, topology: dict[str, Any]) -> dict[
     }
 
 
+def _profile_by_id(topology: dict[str, Any], profile_id: str) -> dict[str, Any] | None:
+    for profile in topology.get("digest_profiles", []) or []:
+        if profile.get("id") == profile_id:
+            return profile
+    return None
+
+
+def _requested_within_profile(profile: dict[str, Any], requested: list[str]) -> bool:
+    if not requested:
+        return True
+    allowed = list(profile.get("allowed_files", []) or [])
+    forbidden = list(profile.get("forbidden_files", []) or []) + list(_GENERIC_FORBIDDEN_FILES)
+    return all(_matches_any(path, allowed) and not _matches_any(path, forbidden) for path in requested)
+
+
+def _operation_vector_resolution(
+    operation_payload: dict[str, Any],
+    requested: list[str],
+    topology: dict[str, Any],
+    task: str = "",
+) -> dict[str, Any] | None:
+    """Select a profile from finite operation facts, not wording aliases.
+
+    This is deliberately conservative: it only selects when the operation
+    vector and requested files point at one canonical route. Free text can
+    still suggest profiles, but it is not the authority for these cases.
+    """
+    vector = operation_payload.get("vector") or {}
+    field_sources = operation_payload.get("field_sources") or {}
+    mutation_surfaces = set(vector.get("mutation_surfaces") or [])
+    operation_stage = str(vector.get("operation_stage") or "")
+    artifact_target = str(vector.get("artifact_target") or "none")
+    mutation_source = str(field_sources.get("mutation_surfaces") or "")
+    task_l = task.lower()
+    feedback_task_hint = any(
+        phrase in task_l
+        for phrase in (
+            "direct operation feedback capsule",
+            "operation feedback capsule",
+            "feedback capsule",
+            "context recycling",
+            "context recovery",
+            "topology usage note",
+            "topology helped/blocked",
+            "topology helped blocked",
+            "topology experience",
+            "回收 context",
+            "回收context",
+            "使用体验",
+            "拓扑使用体验",
+        )
+    )
+    feedback_artifact_target = artifact_target in {
+        "final_response",
+        "runtime_scratch",
+        "new_evidence",
+        "new_findings",
+    }
+
+    candidate_ids: list[str] = []
+    if operation_stage == "closeout" and (feedback_artifact_target or feedback_task_hint):
+        candidate_ids.append("direct operation feedback capsule")
+    if "source_behavior" in mutation_surfaces and (
+        mutation_source == "cli" or "src/control/freshness_gate.py" in requested
+    ):
+        candidate_ids.append("source canary readiness hot-swap")
+    if "evaluator_behavior" in mutation_surfaces and mutation_source == "cli":
+        candidate_ids.append("evaluator script import bridge")
+    if (
+        mutation_surfaces == {"docs"}
+        and mutation_source == "cli"
+        and any(path.startswith("docs/operations/") for path in requested)
+    ):
+        candidate_ids.append("docs navigation cleanup")
+    if (
+        "runtime_tooling" in mutation_surfaces
+        and mutation_source == "cli"
+        and any(
+            path.startswith(
+                (
+                    "scripts/topology_doctor",
+                    "architecture/topology",
+                    "docs/reference/modules/topology",
+                )
+            )
+            for path in requested
+        )
+    ):
+        candidate_ids.append("topology graph agent runtime upgrade")
+
+    matches: list[dict[str, Any]] = []
+    for profile_id in dict.fromkeys(candidate_ids):
+        profile = _profile_by_id(topology, profile_id)
+        if profile and _requested_within_profile(profile, requested):
+            matches.append(profile)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return {
+            "profile_id": None,
+            "selected_by": "operation_vector_conflict",
+            "confidence": 0.0,
+            "candidates": [str(profile.get("id")) for profile in matches],
+            "ambiguous": True,
+            "strong_hits": [],
+            "file_hits": [],
+            "semantic_file_hits": [],
+            "companion_file_hits": [],
+            "shared_file_hits": [],
+            "evidence_class": "operation_vector_conflict",
+            "negative_hits": [],
+            "why": ["operation vector maps to multiple admitted profiles; split the operation"],
+        }
+    profile_id = str(matches[0]["id"])
+    return {
+        "profile_id": profile_id,
+        "selected_by": "operation_vector",
+        "confidence": 1.0,
+        "candidates": [profile_id],
+        "ambiguous": False,
+        "strong_hits": [],
+        "file_hits": list(requested),
+        "semantic_file_hits": list(requested),
+        "companion_file_hits": [],
+        "shared_file_hits": [],
+        "evidence_class": "operation_vector",
+        "negative_hits": [],
+        "why": [f"selected by operation vector: {profile_id}"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Admission reconciler
 # ---------------------------------------------------------------------------
@@ -1034,6 +1166,11 @@ def build_digest(
     task_class: str | None = None,
     write_intent: str | None = None,
     claims: list[str] | None = None,
+    operation_stage: str | None = None,
+    mutation_surfaces: list[str] | None = None,
+    side_effect: str | None = None,
+    artifact_target: str | None = None,
+    merge_state: str | None = None,
 ) -> dict[str, Any]:
     topology = api.load_topology()
     # Normalize at the kernel boundary: drop None/empty/whitespace, strip
@@ -1043,8 +1180,29 @@ def build_digest(
     requested = _normalize_paths(files)
 
     evidence = _collect_evidence(topology, task, requested)
+    preliminary_operation_vector = (
+        api.build_operation_vector(
+            task=task,
+            files=requested,
+            profile="generic",
+            write_intent=write_intent,
+            claims=claims,
+            operation_stage=operation_stage,
+            mutation_surfaces=mutation_surfaces,
+            side_effect=side_effect,
+            artifact_target=artifact_target,
+            merge_state=merge_state,
+        )
+        if hasattr(api, "build_operation_vector")
+        else {}
+    )
     typed_resolution = _resolve_typed_intent(intent, topology)
-    resolution = typed_resolution or _resolve_profile(evidence, topology)
+    operation_resolution = (
+        None
+        if typed_resolution
+        else _operation_vector_resolution(preliminary_operation_vector, requested, topology, task=task)
+    )
+    resolution = typed_resolution or operation_resolution or _resolve_profile(evidence, topology)
 
     selected = None
     if resolution["profile_id"]:
@@ -1091,6 +1249,22 @@ def build_digest(
         requested
         or [path for path in profile_suggested if isinstance(path, str) and path.startswith("src/")]
     )
+    operation_vector = (
+        api.build_operation_vector(
+            task=task,
+            files=requested,
+            profile=str(selected.get("id", "generic")),
+            write_intent=write_intent,
+            claims=claims,
+            operation_stage=operation_stage,
+            mutation_surfaces=mutation_surfaces,
+            side_effect=side_effect,
+            artifact_target=artifact_target,
+            merge_state=merge_state,
+        )
+        if hasattr(api, "build_operation_vector")
+        else {}
+    )
 
     payload: dict[str, Any] = {
         "task": task,
@@ -1108,7 +1282,13 @@ def build_digest(
             "write_intent": write_intent,
             "claims": api.normalize_runtime_claims(claims),
             "intent_selected": bool(typed_resolution and typed_resolution.get("profile_id")),
+            "operation_stage": operation_stage,
+            "mutation_surfaces": list(mutation_surfaces or []),
+            "side_effect": side_effect,
+            "artifact_target": artifact_target,
+            "merge_state": merge_state,
         },
+        "operation_vector": operation_vector,
         # --- legacy advisory mirrors (do not load-bear write authorization) ---
         "required_law": list(selected.get("required_law", []) or []),
         "allowed_files": profile_suggested,
