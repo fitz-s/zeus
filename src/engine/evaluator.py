@@ -1145,7 +1145,7 @@ def _selected_edge_keys_from_full_family(
     hypotheses: list[FullFamilyHypothesis],
     *,
     decision_snapshot_id: str,
-) -> set[tuple[str, str]]:
+) -> set[tuple[int, str]]:
     if not hypotheses:
         return set()
     cycle_mode = candidate.discovery_mode or "unknown"
@@ -1176,13 +1176,14 @@ def _selected_edge_keys_from_full_family(
                 "p_value": hypothesis.p_value,
                 "tested": True,
                 "passed_prefilter": hypothesis.passed_prefilter,
+                "support_index": int(hypothesis.index),
                 "range_label": hypothesis.range_label,
                 "direction": hypothesis.direction,
             }
         )
     selected_rows = apply_familywise_fdr(rows, q=DEFAULT_FDR_ALPHA)
     return {
-        (str(row["range_label"]), str(row["direction"]))
+        (int(row["support_index"]), str(row["direction"]))
         for row in selected_rows
         if bool(row.get("selected_post_fdr")) and bool(row.get("passed_prefilter"))
     }
@@ -1190,16 +1191,24 @@ def _selected_edge_keys_from_full_family(
 
 def _filter_executable_selected_edges(
     edges: list[BinEdge],
-    selected_edge_keys: set[tuple[str, str]],
+    selected_edge_keys: set[tuple[int, str]],
 ) -> list[BinEdge]:
-    edge_keys = {(edge.bin.label, edge.direction) for edge in edges}
+    edge_keys = {
+        (int(edge.support_index), edge.direction)
+        for edge in edges
+        if edge.support_index is not None
+    }
     missing = selected_edge_keys - edge_keys
     if missing:
-        missing_s = ", ".join(f"{label}/{direction}" for label, direction in sorted(missing))
+        missing_s = ", ".join(
+            f"support_index={support_index}/{direction}"
+            for support_index, direction in sorted(missing)
+        )
         raise ValueError(f"FDR_SELECTED_EDGE_UNEXECUTABLE:{missing_s}")
     return [
         edge for edge in edges
-        if (edge.bin.label, edge.direction) in selected_edge_keys
+        if edge.support_index is not None
+        and (int(edge.support_index), edge.direction) in selected_edge_keys
     ]
 
 
@@ -1318,33 +1327,69 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "observation_quality_gate"],
             )]
 
-    # Build bins — skip unparseable (both boundaries None)
+    # Build the complete support vector first. Closed/non-accepting shoulder
+    # children still define p_raw topology; only executable children get token
+    # payloads for quote and order paths.
     bins = []
     token_map = {}
+    executable_mask_values: list[bool] = []
+    support_outcomes: list[dict] = []
     for o in outcomes:
-        low, high = o["range_low"], o["range_high"]
+        low, high = o.get("range_low"), o.get("range_high")
         if low is None and high is None:
             continue
+        support_index = len(bins)
+        declared_support_index = o.get("support_index")
+        if declared_support_index is not None:
+            try:
+                declared_support_index = int(declared_support_index)
+            except (TypeError, ValueError):
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="MARKET_FILTER",
+                    rejection_reasons=[f"invalid support_index for {o.get('title', '')!r}"],
+                    selected_method=selected_method,
+                    applied_validations=["market_filter", "support_topology"],
+                )]
+            if declared_support_index != support_index:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="MARKET_FILTER",
+                    rejection_reasons=[
+                        f"support_index mismatch for {o.get('title', '')!r}: "
+                        f"declared {declared_support_index}, expected {support_index}"
+                    ],
+                    selected_method=selected_method,
+                    applied_validations=["market_filter", "support_topology"],
+                )]
+
         bins.append(Bin(low=low, high=high, label=o["title"], unit=city.settlement_unit))
-        token_payload = {
-            "token_id": o["token_id"],
-            "no_token_id": o["no_token_id"],
-            "market_id": o["market_id"],
-        }
-        executable_snapshot_id = o.get("executable_snapshot_id") or o.get("snapshot_id")
-        if executable_snapshot_id:
-            token_payload["executable_snapshot_id"] = str(executable_snapshot_id)
-        executable_tick = o.get("executable_snapshot_min_tick_size", o.get("min_tick_size"))
-        if executable_tick is not None:
-            token_payload["executable_snapshot_min_tick_size"] = executable_tick
-        executable_min_order = o.get("executable_snapshot_min_order_size", o.get("min_order_size"))
-        if executable_min_order is not None:
-            token_payload["executable_snapshot_min_order_size"] = executable_min_order
-        if "executable_snapshot_neg_risk" in o:
-            token_payload["executable_snapshot_neg_risk"] = o["executable_snapshot_neg_risk"]
-        elif "neg_risk" in o:
-            token_payload["executable_snapshot_neg_risk"] = o["neg_risk"]
-        token_map[len(bins) - 1] = token_payload
+        support_outcomes.append(o)
+        executable = bool(o.get("executable", True))
+        executable = executable and bool(o.get("token_id")) and bool(o.get("no_token_id")) and bool(o.get("market_id"))
+        executable_mask_values.append(executable)
+        if executable:
+            token_payload = {
+                "token_id": o["token_id"],
+                "no_token_id": o["no_token_id"],
+                "market_id": o["market_id"],
+            }
+            executable_snapshot_id = o.get("executable_snapshot_id") or o.get("snapshot_id")
+            if executable_snapshot_id:
+                token_payload["executable_snapshot_id"] = str(executable_snapshot_id)
+            executable_tick = o.get("executable_snapshot_min_tick_size", o.get("min_tick_size"))
+            if executable_tick is not None:
+                token_payload["executable_snapshot_min_tick_size"] = executable_tick
+            executable_min_order = o.get("executable_snapshot_min_order_size", o.get("min_order_size"))
+            if executable_min_order is not None:
+                token_payload["executable_snapshot_min_order_size"] = executable_min_order
+            if "executable_snapshot_neg_risk" in o:
+                token_payload["executable_snapshot_neg_risk"] = o["executable_snapshot_neg_risk"]
+            elif "neg_risk" in o:
+                token_payload["executable_snapshot_neg_risk"] = o["neg_risk"]
+            token_map[support_index] = token_payload
 
     if len(bins) < 3:
         return [EdgeDecision(
@@ -1367,6 +1412,58 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=["validate_bin_topology"],
         )]
+    executable_mask = np.asarray(executable_mask_values, dtype=bool)
+    executable_count = int(np.count_nonzero(executable_mask))
+    if executable_count < 1:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="MARKET_FILTER",
+            rejection_reasons=["support topology has no executable bins"],
+            selected_method=selected_method,
+            applied_validations=["market_filter", "support_topology"],
+        )]
+    p_raw_topology = {
+        "schema_version": 1,
+        "topology_status": "complete",
+        "unit": city.settlement_unit,
+        "support_count": len(bins),
+        "executable_count": executable_count,
+        "executable_hypothesis_count": executable_count,
+        "executable_mask": [bool(v) for v in executable_mask],
+        "skipped_support_indexes": [
+            idx for idx, is_executable in enumerate(executable_mask) if not bool(is_executable)
+        ],
+        "market_fusion_status_by_support_index": [
+            {
+                "support_index": idx,
+                "status": "pending_executable_quote"
+                if bool(executable_mask[idx])
+                else "disabled_non_executable",
+            }
+            for idx in range(len(bins))
+        ],
+        "requires_atomic_topology": bool(np.any(~executable_mask)),
+        "support": [
+            {
+                "support_index": idx,
+                "label": b.label,
+                "low": b.low,
+                "high": b.high,
+                "unit": b.unit,
+                "executable": bool(executable_mask[idx]),
+                "market_id": str(support_outcomes[idx].get("market_id") or ""),
+                "condition_id": str(
+                    support_outcomes[idx].get("condition_id")
+                    or support_outcomes[idx].get("market_id")
+                    or ""
+                ),
+                "question_id": str(support_outcomes[idx].get("question_id") or ""),
+                "gamma_market_id": str(support_outcomes[idx].get("gamma_market_id") or ""),
+            }
+            for idx, b in enumerate(bins)
+        ],
+    }
 
     target_d = date.fromisoformat(target_date)
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone))
@@ -1733,7 +1830,13 @@ def evaluate_candidate(
             p_raw=p_raw,
         )]
 
-    p_raw_persisted = _store_snapshot_p_raw(conn, snapshot_id, p_raw, bias_corrected=ens.bias_corrected)
+    p_raw_persisted = _store_snapshot_p_raw(
+        conn,
+        snapshot_id,
+        p_raw,
+        bias_corrected=ens.bias_corrected,
+        p_raw_topology=p_raw_topology,
+    )
     if p_raw_persisted is False:
         return [EdgeDecision(
             False,
@@ -1880,7 +1983,6 @@ def evaluate_candidate(
     p_market_no = np.zeros(len(bins))
     buy_no_quote_available = np.zeros(len(bins), dtype=bool)
     market_is_complete = True
-    mapped_outcomes = 0
     try:
         # The legacy flag name says "multibin", but the authority rule is now
         # broader: every executable buy_no needs native NO-token quote evidence.
@@ -1900,11 +2002,24 @@ def evaluate_candidate(
         )]
     native_no_quote_unavailable_labels: list[str] = []
     for i, o in enumerate(outcomes):
-        if o["range_low"] is None and o["range_high"] is None:
+        if o.get("range_low") is None and o.get("range_high") is None:
             continue
-        idx = next((j for j, b in enumerate(bins) if b.label == o["title"]), None)
+        raw_support_index = o.get("support_index")
+        if raw_support_index is not None:
+            try:
+                idx = int(raw_support_index)
+            except (TypeError, ValueError):
+                market_is_complete = False
+                continue
+            if idx < 0 or idx >= len(bins):
+                market_is_complete = False
+                continue
+        else:
+            idx = next((j for j, b in enumerate(bins) if b.label == o["title"]), None)
         if idx is None:
             market_is_complete = False
+            continue
+        if not bool(executable_mask[idx]):
             continue
         try:
             bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(o["token_id"])
@@ -2168,7 +2283,12 @@ def evaluate_candidate(
 
     # Edge detection
     # Flag missing mapped outcomes against the declared family topology
-    if sum(1 for p in p_market if p > 0.0) < len(bins):
+    mapped_executable_outcomes = sum(
+        1
+        for idx, is_executable in enumerate(executable_mask)
+        if bool(is_executable) and p_market[idx] > 0.0
+    )
+    if mapped_executable_outcomes < executable_count:
         market_is_complete = False
 
     analysis = MarketAnalysis(
@@ -2177,6 +2297,7 @@ def evaluate_candidate(
         p_market=p_market,
         p_market_no=p_market_no if probe_native_no_quotes else None,
         buy_no_quote_available=buy_no_quote_available if probe_native_no_quotes else None,
+        executable_mask=executable_mask,
         alpha=alpha,
         bins=bins,
         member_maxes=analysis_member_extrema,
@@ -2349,9 +2470,33 @@ def evaluate_candidate(
 
     decisions = []
     for edge in filtered:
-        bin_idx = bins.index(edge.bin)
-        tokens = token_map[bin_idx]
         decision_validations = list(entry_validations)
+        if edge.support_index is None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="FDR_SELECTION_UNEXECUTABLE",
+                rejection_reasons=["selected edge is missing canonical support_index"],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "support_topology"],
+                decision_snapshot_id=snapshot_id,
+            ))
+            continue
+        bin_idx = int(edge.support_index)
+        if bin_idx < 0 or bin_idx >= len(bins) or bin_idx not in token_map or not bool(executable_mask[bin_idx]):
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="FDR_SELECTION_UNEXECUTABLE",
+                rejection_reasons=[f"selected support index {bin_idx} has no executable token payload"],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "support_topology"],
+                decision_snapshot_id=snapshot_id,
+            ))
+            continue
+        tokens = token_map[bin_idx]
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
         ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
@@ -3138,7 +3283,14 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         return ""
 
 
-def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_corrected: bool = False) -> bool:
+def _store_snapshot_p_raw(
+    conn,
+    snapshot_id: str,
+    p_raw: np.ndarray,
+    *,
+    bias_corrected: bool = False,
+    p_raw_topology: dict | None = None,
+) -> bool:
     """Persist the decision-time p_raw vector and bias_corrected flag onto the snapshot row."""
 
     if not snapshot_id:
@@ -3148,16 +3300,50 @@ def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_cor
 
     try:
         p_raw_json = json.dumps(p_raw.tolist())
+        topology_payload = None
+        if p_raw_topology is not None:
+            topology_payload = json.loads(json.dumps(p_raw_topology, sort_keys=True))
+            expected_count = int(len(p_raw))
+            topology_support_count = topology_payload.get("support_count")
+            if topology_support_count != expected_count:
+                raise ValueError(
+                    "p_raw_topology support_count does not match p_raw cardinality: "
+                    f"{topology_support_count} != {expected_count}"
+                )
+            for key in (
+                "executable_mask",
+                "support",
+                "market_fusion_status_by_support_index",
+            ):
+                value = topology_payload.get(key)
+                if not isinstance(value, list) or len(value) != expected_count:
+                    raise ValueError(
+                        f"p_raw_topology {key} cardinality does not match p_raw: "
+                        f"{len(value) if isinstance(value, list) else 'missing'} != {expected_count}"
+                    )
+            executable_hypothesis_count = topology_payload.get("executable_hypothesis_count")
+            if executable_hypothesis_count != int(
+                sum(1 for is_executable in topology_payload["executable_mask"] if bool(is_executable))
+            ):
+                raise ValueError(
+                    "p_raw_topology executable_hypothesis_count does not match executable_mask"
+                )
         snapshots_table = _ensemble_snapshots_table(conn)
         v2_table = _ensemble_snapshots_v2_table(conn)
         if v2_table:
             v2_row = conn.execute(f"""
                 SELECT city, target_date, issue_time, valid_time, available_at,
-                       fetch_time, model_version, data_version, temperature_metric
+                       fetch_time, model_version, data_version, temperature_metric,
+                       provenance_json
                 FROM {v2_table}
                 WHERE snapshot_id = ?
             """, (snapshot_id,)).fetchone()
             if v2_row is None:
+                if topology_payload and bool(topology_payload.get("requires_atomic_topology")):
+                    raise ValueError(
+                        "canonical p_raw_topology persistence requires ensemble_snapshots_v2 "
+                        f"for partial-executable support snapshot_id {snapshot_id}"
+                    )
                 result = conn.execute(
                     f"UPDATE {snapshots_table} SET p_raw_json = ?, bias_corrected = ? WHERE snapshot_id = ?",
                     (p_raw_json, int(bias_corrected), snapshot_id),
@@ -3169,10 +3355,24 @@ def _store_snapshot_p_raw(conn, snapshot_id: str, p_raw: np.ndarray, *, bias_cor
                     )
                 conn.commit()
                 return True
-            result = conn.execute(
-                f"UPDATE {v2_table} SET p_raw_json = ? WHERE snapshot_id = ?",
-                (p_raw_json, snapshot_id),
-            )
+            if topology_payload is not None:
+                try:
+                    provenance = json.loads(v2_row["provenance_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    provenance = {}
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                provenance["p_raw_topology"] = topology_payload
+                provenance_json = json.dumps(provenance, sort_keys=True)
+                result = conn.execute(
+                    f"UPDATE {v2_table} SET p_raw_json = ?, provenance_json = ? WHERE snapshot_id = ?",
+                    (p_raw_json, provenance_json, snapshot_id),
+                )
+            else:
+                result = conn.execute(
+                    f"UPDATE {v2_table} SET p_raw_json = ? WHERE snapshot_id = ?",
+                    (p_raw_json, snapshot_id),
+                )
             if result.rowcount != 1:
                 raise ValueError(
                     "canonical ensemble_snapshots_v2 p_raw update affected "

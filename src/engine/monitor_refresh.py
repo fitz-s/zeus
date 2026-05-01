@@ -48,6 +48,7 @@ from src.strategy.market_fusion import (
     vwmp,
 )
 from src.types import Bin
+from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
 
@@ -110,19 +111,26 @@ def _build_all_bins(position: Position, city) -> tuple[list, int]:
 
     S6: Uses sibling outcomes from market scanner to reconstruct the
     complete bin set, matching the entry path's calibrate_and_normalize().
-    Falls back to single held bin if siblings are unavailable.
+    Missing or invalid support is a stale refresh, not a license to
+    recalibrate against a single held bin.
 
     Returns (all_bins, held_bin_index).
     """
     held_low, held_high = _parse_temp_range(position.bin_label)
-    held_bin = Bin(low=held_low, high=held_high, label=position.bin_label, unit=position.unit)
+    if held_low is None and held_high is None:
+        raise ValueError(f"held bin label is not parseable: {position.bin_label!r}")
 
     if not position.market_id:
-        return [held_bin], 0
+        raise ValueError("support topology unavailable: missing held market_id")
 
     siblings = get_sibling_outcomes(position.market_id)
+    scan_authority = str(get_last_scan_authority()).upper()
+    if scan_authority != "VERIFIED":
+        raise ValueError(f"support topology stale: market_scan_authority={scan_authority}")
     if len(siblings) < 2:
-        return [held_bin], 0
+        raise ValueError(
+            f"support topology incomplete: found {len(siblings)} sibling outcomes"
+        )
 
     all_bins = []
     held_idx = 0
@@ -139,15 +147,17 @@ def _build_all_bins(position: Position, city) -> tuple[list, int]:
         all_bins.append(b)
 
     if not all_bins:
-        return [held_bin], 0
+        raise ValueError("support topology has no parseable sibling bins")
 
-    # Guard: if held market_id was never matched, fall back to single bin
     matched = any(o.get("market_id") == position.market_id for o in siblings
                   if not (o.get("range_low") is None and o.get("range_high") is None))
     if not matched:
-        logger.warning("S6: held market_id %s not found in siblings, falling back to single bin",
-                       position.market_id)
-        return [held_bin], 0
+        raise ValueError(f"held market_id {position.market_id!r} not found in support topology")
+
+    try:
+        validate_bin_topology(all_bins)
+    except BinTopologyError as exc:
+        raise ValueError(f"support topology invalid: {exc}") from exc
 
     return all_bins, held_idx
 
@@ -212,8 +222,17 @@ def _refresh_ens_member_counting(
         return position.p_posterior, ["fresh_ens_fetch"]
 
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry).
-    # Fall back to single-bin predict_for_bin if sibling outcomes unavailable.
-    all_bins, held_idx = _build_all_bins(position, city)
+    try:
+        all_bins, held_idx = _build_all_bins(position, city)
+    except ValueError as exc:
+        logger.warning("Monitor support topology unavailable for %s: %s", position.market_id, exc)
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "support_topology_stale",
+            str(exc),
+        ]
 
     p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
 
@@ -563,7 +582,18 @@ def _refresh_day0_observation(
         precision=semantics.precision,
     ))
     # S6: Build full bin vector for calibrate_and_normalize (same path as entry)
-    all_bins, held_idx = _build_all_bins(position, city)
+    try:
+        all_bins, held_idx = _build_all_bins(position, city)
+    except ValueError as exc:
+        logger.warning("Day0 monitor support topology unavailable for %s: %s", position.market_id, exc)
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "support_topology_stale",
+            str(exc),
+        ]
 
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
@@ -1015,6 +1045,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         else pos.entry_price
     )
     current_p_posterior = pos.p_posterior
+    support_topology_stale = False
 
     if pos.direction not in {"buy_yes", "buy_no"}:
         logger.warning("Skipping refresh for %s: unknown direction %r", pos.trade_id, pos.direction)
@@ -1060,9 +1091,16 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             setattr(pos, "_bootstrap_context", _bootstrap_ctx)
 
         # Persist monitor state on Position
-        pos.last_monitor_prob = current_p_posterior
         pos.last_monitor_prob_is_fresh = True if prob_refresh_is_fresh is None else bool(prob_refresh_is_fresh)
-        pos.last_monitor_edge = current_p_posterior - current_p_market
+        support_topology_stale = (
+            not pos.last_monitor_prob_is_fresh
+            and "support_topology_stale" in pos.applied_validations
+        )
+        if support_topology_stale:
+            current_p_posterior = float("nan")
+        else:
+            pos.last_monitor_prob = current_p_posterior
+            pos.last_monitor_edge = current_p_posterior - current_p_market
         if not market_refreshed:
             pos.last_monitor_market_price = current_p_market
 
@@ -1122,14 +1160,19 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     ci_lower = current_forward_edge - _entry_ci_half
     ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
-    if bootstrap_ctx is None or len(bootstrap_ctx.get("bins", []) if bootstrap_ctx else []) <= 1:
+    if support_topology_stale:
+        ci_lower = float("nan")
+        ci_upper = float("nan")
+    elif bootstrap_ctx is None or len(bootstrap_ctx.get("bins", []) if bootstrap_ctx else []) <= 1:
         logger.debug(
             "P3.2 fallback: no _bootstrap_context; using stale entry_ci_width "
             "for trade=%s entry_ci_width=%.6f",
             getattr(pos, "trade_id", "?"),
             getattr(pos, "entry_ci_width", 0.0),
         )
-    if bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
+    if support_topology_stale:
+        pass
+    elif bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
             from src.strategy.market_analysis import MarketAnalysis
             held_idx = bootstrap_ctx["held_idx"]
