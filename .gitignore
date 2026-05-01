@@ -94,13 +94,12 @@ nohup.out
 
 # ----------------------------------------------------------------------
 # Runtime-local Zeus state
-# Keep assumptions.json (config seed), README, .gitkeep, and audit
-# hash sidecars. Everything else is live runtime / telemetry.
+# Keep README, .gitkeep, and audit hash sidecars only.
+# assumptions.json (trading config) and all runtime snapshots are local-only.
 # ----------------------------------------------------------------------
 /state/*
 !/state/.gitkeep
 !/state/README.md
-!/state/assumptions.json
 !/state/*.sha256
 !/state/*.md5
 
@@ -152,10 +151,10 @@ raw/**/*.h5
 !/data/README.md
 !/data/*.example.json
 
-# Optional: remove full corpus from public surface.
-# /data/oracle_error_rates.json
-# /data/pm_settlement_truth.json
-# /data/pm_settlements_full.json
+# Collected data corpus — local-only, not for public surface.
+/data/oracle_error_rates.json
+/data/pm_settlement_truth.json
+/data/pm_settlements_full.json
 
 # ----------------------------------------------------------------------
 # Agent / local tool state
