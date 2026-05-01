@@ -3,6 +3,10 @@
 # Last reused/audited: 2026-05-01
 # Authority basis: operator directive 2026-05-01
 #                  "把所有flag都切换成live模式，但是我们不启动live deamon就好"
+#                  + WS auto-derive directive 2026-05-01
+#                  ("任何硬编码bankroll都是一次严重的结构性失误" — same shape
+#                  applies to hardcoded condition_id lists; auto-derivation
+#                  from src.data.market_scanner is the structural fix).
 #
 # Arm Zeus for live trading. Idempotent. Does NOT load daemons —
 # operator runs `launchctl load …` separately when ready to fire.
@@ -12,6 +16,13 @@
 #      This is the DR-33-A safety flag; without it,
 #      harvester_truth_writer is a no-op and every settlement is
 #      `quarantine_reason=no_observation_for_target_date`.
+#   1b. Inject `ZEUS_USER_CHANNEL_WS_ENABLED=1` and
+#      `ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1` into both daemon plists.
+#      Master toggle + auto-derive switch for the M3 Polymarket user-channel
+#      WebSocket. With both set, the daemon derives the subscription set
+#      from the live market scanner instead of a hardcoded plist value.
+#      Operator can still pin a static list via
+#      `POLYMARKET_USER_WS_CONDITION_IDS=…`; the env var, when present, wins.
 #   2. Write `state/cutover_guard.json` with state=LIVE_ENABLED.
 #      `gate_for_intent(IntentKind.ENTRY)` returns allow_submit=True
 #      only in this state. Default (file absent) = NORMAL = blocked.
@@ -43,26 +54,37 @@ NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 cd "$ZEUS_DIR"
 
-# ---- 1) Inject ZEUS_HARVESTER_LIVE_ENABLED=1 into both plists ----
+# ---- 1) Inject env-var flags into both plists ----
+# Parametrized so we can flip more than one toggle without copy/paste.
 inject_flag() {
   local plist="$1"
-  local key=":EnvironmentVariables:ZEUS_HARVESTER_LIVE_ENABLED"
+  local var_name="$2"
+  local var_value="${3:-1}"
+  local key=":EnvironmentVariables:${var_name}"
   if [[ ! -f "$plist" ]]; then
     echo "WARN: $plist missing — skipping"
     return 0
   fi
   if /usr/libexec/PlistBuddy -c "Print $key" "$plist" >/dev/null 2>&1; then
-    /usr/libexec/PlistBuddy -c "Set $key 1" "$plist"
-    echo "  set    $plist :: ZEUS_HARVESTER_LIVE_ENABLED=1"
+    /usr/libexec/PlistBuddy -c "Set $key $var_value" "$plist"
+    echo "  set    $plist :: ${var_name}=${var_value}"
   else
-    /usr/libexec/PlistBuddy -c "Add $key string 1" "$plist"
-    echo "  added  $plist :: ZEUS_HARVESTER_LIVE_ENABLED=1"
+    /usr/libexec/PlistBuddy -c "Add $key string $var_value" "$plist"
+    echo "  added  $plist :: ${var_name}=${var_value}"
   fi
 }
 
 echo "[arm_live_mode] step 1/3 — plist env vars"
-inject_flag "$LAUNCHAGENTS/com.zeus.live-trading.plist"
-inject_flag "$LAUNCHAGENTS/com.zeus.data-ingest.plist"
+for plist in \
+    "$LAUNCHAGENTS/com.zeus.live-trading.plist" \
+    "$LAUNCHAGENTS/com.zeus.data-ingest.plist"; do
+  inject_flag "$plist" "ZEUS_HARVESTER_LIVE_ENABLED" "1"
+  # User-channel WS auto-derive (2026-05-01): master toggle + auto-derive
+  # switch. Without these, the daemon never starts the user-channel WS and
+  # ws_user_channel.gap_reason='not_configured' blocks live submits.
+  inject_flag "$plist" "ZEUS_USER_CHANNEL_WS_ENABLED" "1"
+  inject_flag "$plist" "ZEUS_USER_CHANNEL_WS_AUTO_DERIVE" "1"
+done
 
 # ---- 2) Write state/cutover_guard.json = LIVE_ENABLED ----
 echo "[arm_live_mode] step 2/3 — cutover_guard.json"

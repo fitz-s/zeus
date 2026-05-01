@@ -2050,6 +2050,71 @@ class TestSourceContractGate:
         assert "_error" not in report
 
 
+class TestExecutableConditionIdsForUserChannelWS:
+    """2026-05-01: scanner output exposes executable condition_ids for WS auto-derive.
+
+    These tests pin the cross-module invariant that the user-channel WS boot
+    path reads in ``src/main.py::_auto_derive_user_channel_condition_ids``:
+
+      "Every event dict returned by ``find_weather_markets`` carries a
+       ``condition_ids`` list of the executable child markets, deduped, in
+       discovery order. Non-executable children are excluded. The
+       ``extract_executable_condition_ids`` helper flattens the per-event
+       lists with another pass of dedupe so the resulting subscription set
+       matches one-to-one against on-chain reality."
+    """
+
+    def test_event_dict_includes_executable_condition_ids(self, monkeypatch):
+        event = _gamma_temperature_event()
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        # Helper builds 3 executable children: cond-low, cond-center, cond1.
+        assert parsed["condition_ids"] == ["cond-low", "cond-center", "cond1"]
+        # No duplicates within a single event's list.
+        assert len(parsed["condition_ids"]) == len(set(parsed["condition_ids"]))
+
+    def test_extract_executable_condition_ids_flattens_and_dedupes(self):
+        events = [
+            {"condition_ids": ["0xa", "0xb"]},
+            {"condition_ids": ["0xb", "0xc"]},  # duplicate across events
+            {"condition_ids": []},  # empty event still tolerated
+            {"condition_ids": ["", None, "0xd"]},  # empty / None entries filtered
+        ]
+        result = ms.extract_executable_condition_ids(events)
+        assert result == ["0xa", "0xb", "0xc", "0xd"]
+
+    def test_extract_handles_missing_condition_ids_field(self):
+        # Tolerate event dicts without the field (legacy callers / stub markets).
+        result = ms.extract_executable_condition_ids([{}, {"condition_ids": ["0xz"]}])
+        assert result == ["0xz"]
+
+    def test_find_weather_markets_surfaces_condition_ids_end_to_end(
+        self, monkeypatch
+    ):
+        event = _gamma_temperature_event()
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+        # Avoid the SQLite persistence side-effect during the unit assertion;
+        # the production path already exercises it elsewhere.
+        monkeypatch.setattr(ms, "_persist_market_events_to_db", lambda *_a, **_k: 0)
+
+        results = ms.find_weather_markets(min_hours_to_resolution=0.0)
+        assert len(results) == 1
+        condition_ids = results[0]["condition_ids"]
+        assert condition_ids == ["cond-low", "cond-center", "cond1"]
+
+        # And the helper returns the same flat set when fed straight from the scanner.
+        assert ms.extract_executable_condition_ids(results) == [
+            "cond-low",
+            "cond-center",
+            "cond1",
+        ]
+
+
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
 

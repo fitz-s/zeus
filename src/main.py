@@ -197,6 +197,44 @@ USER_CHANNEL_REQUIRED_ENV_VARS = (
 )
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auto_derive_user_channel_condition_ids() -> list[str]:
+    """Derive the user-channel WS subscription set from the live market scanner.
+
+    Wraps ``src.data.market_scanner.find_weather_markets`` + the
+    ``extract_executable_condition_ids`` helper. Lives in main.py rather than
+    market_scanner.py to keep the scanner free of side-effecting boot-time
+    logging concerns; the helper itself is pure.
+
+    On scanner failure we log + return [] rather than raising — boot must
+    continue (the daemon will stay reduce_only without WS, which is the
+    fail-closed posture the WS guard records as ``not_configured``).
+    """
+    try:
+        from src.data.market_scanner import (
+            extract_executable_condition_ids,
+            find_weather_markets,
+        )
+
+        # min_hours_to_resolution=0.0: include day0 markets (<6h to settlement).
+        # The scanner's default of 6.0 would silently drop day0 condition_ids
+        # from the WS subscription set, so order/fill updates for day0 trades
+        # — which Zeus actively trades via DiscoveryMode.DAY0_CAPTURE — would
+        # be missed while the WS guard reports healthy. (PR #34 codex P1.)
+        events = find_weather_markets(min_hours_to_resolution=0.0)
+        return extract_executable_condition_ids(events)
+    except Exception as exc:
+        logger.warning(
+            "user-channel WS auto-derive failed: %s; "
+            "daemon stays in reduce_only=True mode",
+            exc,
+        )
+        return []
+
+
 def _start_user_channel_ingestor_if_enabled() -> None:
     """Start M3 Polymarket user-channel ingest in a daemon thread when enabled.
 
@@ -211,10 +249,20 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     ``ws_user_channel.gap_reason='not_configured'`` symptom and no surface
     explanation of which env vars to add to the launchd plist before the
     daemon can leave reduce_only mode.
+
+    Auto-derive (2026-05-01): when ``ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1`` is
+    set together with the master toggle and ``POLYMARKET_USER_WS_CONDITION_IDS``
+    is empty, the subscription list is derived from the live market scanner
+    so the daemon subscribes to exactly the markets it can trade, without
+    a hardcoded plist value that would drift from on-chain truth as markets
+    rotate (operator directive 2026-05-01: hardcoded values are structural
+    failures). Operator can still pin a list via the env var; a non-empty
+    env var always wins. Auto-derive returning 0 markets is a WARNING, not
+    an error — the daemon stays in reduce_only mode, the WS guard reports
+    ``condition_ids_missing``, and no exception escapes boot.
     """
     global _user_channel_ingestor, _user_channel_thread
-    enabled_raw = os.environ.get("ZEUS_USER_CHANNEL_WS_ENABLED", "0").strip().lower()
-    if enabled_raw not in {"1", "true", "yes", "on"}:
+    if not _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED"):
         missing = [
             name for name in USER_CHANNEL_REQUIRED_ENV_VARS
             if not (os.environ.get(name) or "").strip()
@@ -227,12 +275,30 @@ def _start_user_channel_ingestor_if_enabled() -> None:
         return
     if _user_channel_thread is not None and _user_channel_thread.is_alive():
         return
+
     raw_markets = os.environ.get("POLYMARKET_USER_WS_CONDITION_IDS", "")
     condition_ids = [m.strip() for m in raw_markets.split(",") if m.strip()]
+    auto_derived = False
+    if not condition_ids and _truthy_env("ZEUS_USER_CHANNEL_WS_AUTO_DERIVE"):
+        condition_ids = _auto_derive_user_channel_condition_ids()
+        auto_derived = True
+        logger.info(
+            "user-channel WS auto-derive yielded %d condition_ids "
+            "(POLYMARKET_USER_WS_CONDITION_IDS empty, ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1)",
+            len(condition_ids),
+        )
+
     if not condition_ids:
         from src.control.ws_gap_guard import record_gap
 
         record_gap("condition_ids_missing", subscription_state="MARKET_MISMATCH")
+        if auto_derived:
+            logger.warning(
+                "user-channel WS auto-derive yielded 0 condition_ids; daemon stays "
+                "in reduce_only=True mode. Markets may be empty or the gamma query "
+                "failed; check src.data.market_scanner."
+            )
+            return
         raise RuntimeError("POLYMARKET_USER_WS_CONDITION_IDS is required when ZEUS_USER_CHANNEL_WS_ENABLED=1")
 
     from src.data.polymarket_client import PolymarketClient
@@ -260,7 +326,11 @@ def _start_user_channel_ingestor_if_enabled() -> None:
         daemon=True,
     )
     _user_channel_thread.start()
-    logger.info("M3 user-channel ingestor started for %d condition_ids", len(condition_ids))
+    logger.info(
+        "M3 user-channel ingestor started for %d condition_ids (auto_derived=%s)",
+        len(condition_ids),
+        auto_derived,
+    )
 
 
 @_scheduler_job("venue_heartbeat")
