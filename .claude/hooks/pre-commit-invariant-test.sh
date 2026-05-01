@@ -28,18 +28,10 @@ if [ -z "$COMMAND" ]; then
     exit 0
 fi
 
-# Detect `git commit` invocation (allow `git commit-tree`, `git commit-graph` plumbing)
-case "$COMMAND" in
-    *"git commit"*)
-        # Reject only top-level `git commit`, not `git commit-tree` etc.
-        if ! printf '%s' "$COMMAND" | grep -qE 'git commit($| |-m|--)' ; then
-            exit 0
-        fi
-        ;;
-    *)
-        exit 0
-        ;;
-esac
+# Detect `git commit` invocation (allow `git commit-tree`, `git commit-graph` plumbing).
+if ! printf '%s' "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
+    exit 0
+fi
 
 # Allow opt-out for trusted operator overrides
 if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
@@ -47,7 +39,7 @@ if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
     exit 0
 fi
 
-REPO_ROOT="/Users/leofitz/.openclaw/workspace-venus/zeus"
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 # Baseline progression history:
 #   BATCH C (settlement_semantics): 73 → 76 (+3 HKO/WMO type-encoded)

@@ -791,10 +791,20 @@ def _operation_vector_resolution(
         )
     ):
         candidate_ids.append("topology graph agent runtime upgrade")
-    if "runtime_hooks" in mutation_surfaces and any(
-        path in {".claude/hooks/pre-merge-contamination-check.sh", ".claude/settings.json"}
-        for path in requested
-    ):
+    runtime_governance_paths = {
+        ".gitignore",
+        ".claude/CLAUDE.md",
+        ".claude/settings.json",
+        ".claude/hooks/pre-commit-invariant-test.sh",
+        ".claude/hooks/pre-edit-architecture.sh",
+        ".claude/hooks/pre-merge-contamination-check.sh",
+        "architecture/kernel_manifest.yaml",
+        "architecture/inv_prototype.py",
+        "architecture/ast_rules/semgrep_zeus.yml",
+        "architecture/ast_rules/forbidden_patterns.md",
+        "scripts/check_kernel_manifests.py",
+    }
+    if any(path in runtime_governance_paths for path in requested):
         candidate_ids.append("topology graph agent runtime upgrade")
 
     matches: list[dict[str, Any]] = []
