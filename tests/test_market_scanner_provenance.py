@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-17; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: Lock market_scanner provenance and source-contract drift behavior.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"
@@ -87,6 +87,8 @@ def _gamma_temperature_event(
     question: str = "Will the high temperature in Los Angeles be 68°F or higher?",
     resolution_source: str | None = "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
     market_resolution_source: str | None = None,
+    description: str | None = None,
+    market_description: str | None = None,
 ) -> dict:
     match = re.search(r"(-?\d+(?:\.\d+)?)\s*°?([FC])\s+or\s+higher", question)
     threshold = int(float(match.group(1))) if match else 68
@@ -153,6 +155,8 @@ def _gamma_temperature_event(
     }
     if resolution_source is not None:
         event["resolutionSource"] = resolution_source
+    if description is not None:
+        event["description"] = description
     return event
 
 
@@ -680,6 +684,80 @@ class TestSourceContractGate:
         monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
 
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
+
+    def test_blank_structured_source_uses_description_source_proof(
+        self, monkeypatch
+    ):
+        event = _gamma_temperature_event(
+            resolution_source=None,
+            description=(
+                "This market will resolve according to the reported high on "
+                "Weather Underground daily history: "
+                "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX"
+            ),
+        )
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert parsed["source_contract"]["status"] == "MATCH"
+        assert parsed["source_contract"]["reason"] == (
+            "market description matches configured settlement source contract"
+        )
+        assert parsed["source_contract"]["station_id"] == "KLAX"
+
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+
+        assert len(ms.find_weather_markets(min_hours_to_resolution=0.0)) == 1
+
+    def test_structured_source_mismatch_wins_over_description_match(self):
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on April 29?",
+            slug="highest-temperature-in-paris-on-april-29-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "bonneuil-en-france/LFPB"
+            ),
+            description=(
+                "Older prose mentions the configured Paris source "
+                "https://www.wunderground.com/history/daily/fr/paris/LFPG"
+            ),
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is None
+
+    def test_hko_description_source_proof_matches_without_airport_station(self):
+        event = _gamma_temperature_event(
+            title="Highest temperature in Hong Kong on May 1?",
+            slug="highest-temperature-in-hong-kong-on-may-1-2026",
+            question="Will the high temperature in Hong Kong be 27°C or higher?",
+            resolution_source=None,
+            description=(
+                "This market resolves according to Hong Kong Observatory data: "
+                "https://www.weather.gov.hk/en/cis/climat.htm"
+            ),
+        )
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 30, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert parsed["city"].name == "Hong Kong"
+        assert parsed["source_contract"]["status"] == "MATCH"
+        assert parsed["source_contract"]["source_family"] == "hko"
+        assert parsed["source_contract"]["station_id"] is None
 
     def test_watch_report_alerts_on_source_drift(self):
         from scripts.watch_source_contract import analyze_events, exit_code_for_report
@@ -1795,6 +1873,103 @@ class TestSourceContractGate:
             {"action": "quarantine_city_source", "status": "error"}
         ]
         assert report["quarantine_error"] == "cannot write quarantine"
+
+    def test_venus_sensing_report_labels_positions_json_as_legacy_telemetry(
+        self, monkeypatch, tmp_path
+    ):
+        from scripts import venus_sensing_report
+
+        positions_path = tmp_path / "positions.json"
+        positions_path.write_text(json.dumps({
+            "updated_at": "2026-04-12T19:59:43+00:00",
+            "positions": [
+                {
+                    "trade_id": "stale-json-live",
+                    "city": "Seattle",
+                    "target_date": "2026-04-14",
+                    "direction": "buy_no",
+                    "state": "entered",
+                    "strategy_key": "opening_inertia",
+                    "chain_state": "synced",
+                },
+                {
+                    "trade_id": "settled-json-history",
+                    "city": "Seattle",
+                    "target_date": "2026-04-14",
+                    "direction": "buy_no",
+                    "state": "settled",
+                },
+            ],
+        }))
+        monkeypatch.setattr(venus_sensing_report, "POSITIONS_JSON", positions_path)
+
+        report = venus_sensing_report._collect_positions_json()
+
+        assert report["authority"] == "legacy_json_derived_observability_only"
+        assert report["canonical_truth_source"] == "position_current"
+        assert report["status"] == "legacy_active_positions"
+        assert report["active_count"] == 1
+        assert report["exit_count"] == 1
+        assert report["sample_positions"] == [
+            {
+                "trade_id": "stale-json-live",
+                "city": "Seattle",
+                "target_date": "2026-04-14",
+                "direction": "buy_no",
+                "state": "entered",
+                "strategy_key": "opening_inertia",
+                "chain_state": "synced",
+            }
+        ]
+
+    def test_venus_sensing_report_flags_canonical_empty_legacy_active_conflict(self):
+        from scripts import venus_sensing_report
+
+        conn = sqlite3.connect(":memory:")
+        surfaces = {
+            "trade_decisions": {"by_status": {}, "newest": None},
+            "position_current": {"count": 0, "latest_updated_at": None},
+            "positions_json": {
+                "authority": "legacy_json_derived_observability_only",
+                "active_count": 2,
+            },
+            "settlements": {},
+        }
+
+        report = venus_sensing_report._collect_consistency(conn, surfaces)
+
+        assert report["pc_vs_json_active"] == {
+            "pc": 0,
+            "json_active": 2,
+            "match": False,
+            "authority": "legacy_json_derived_observability_only",
+            "canonical_truth_source": "position_current",
+            "status": "conflict",
+            "conflicts": ["canonical_empty_legacy_active_positions"],
+        }
+
+    def test_venus_sensing_report_opens_canonical_trade_connection(self, monkeypatch):
+        from scripts import venus_sensing_report
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        called = {"trade": False}
+
+        def _trade_conn():
+            called["trade"] = True
+            return conn
+
+        monkeypatch.setattr(venus_sensing_report, "get_trade_connection_with_world", _trade_conn)
+        monkeypatch.setattr(venus_sensing_report, "_collect_diagnostics", lambda: {})
+        monkeypatch.setattr(venus_sensing_report, "_collect_truth_surfaces", lambda _conn: {})
+        monkeypatch.setattr(venus_sensing_report, "_collect_consistency", lambda _conn, _surfaces: {})
+        monkeypatch.setattr(venus_sensing_report, "_collect_relationship_checks", lambda: {})
+        monkeypatch.setattr(venus_sensing_report, "_collect_deltas", lambda _surfaces: {})
+
+        report = venus_sensing_report.generate_sensing_report()
+
+        assert called["trade"] is True
+        assert "_error" not in report
 
 
 class TestForwardMarketSubstrateProducer:

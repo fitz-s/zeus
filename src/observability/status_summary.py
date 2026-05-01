@@ -29,11 +29,20 @@ from src.state.db import (
     query_strategy_health_snapshot,
 )
 from src.state.decision_chain import query_no_trade_cases
-from src.state.truth_files import annotate_truth_payload
+from src.state.truth_files import annotate_truth_payload, read_truth_json
 
 logger = logging.getLogger(__name__)
 
 STATUS_PATH = state_path("status_summary.json")
+LEGACY_POSITIONS_PATH = state_path("positions.json")
+_TERMINAL_LEGACY_POSITION_STATES = {
+    "settled",
+    "voided",
+    "quarantined",
+    "admin_closed",
+    "closed",
+    "exited",
+}
 
 
 def _enum_text(value, default: str) -> str:
@@ -130,6 +139,116 @@ def _bounded_table_row_count(conn, schema: str, table: str) -> int:
     except Exception:
         row = conn.execute(f"SELECT 1 FROM {schema_sql}.{table_sql} LIMIT 1").fetchone()
         return 1 if row else 0
+
+
+def _float_or_zero(value) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _legacy_position_state(row: dict) -> str:
+    return str(row.get("phase") or row.get("state") or "").strip().lower()
+
+
+def _is_nonterminal_legacy_position(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not (row.get("trade_id") or row.get("market_id") or row.get("condition_id")):
+        return False
+    state = _legacy_position_state(row)
+    return state not in _TERMINAL_LEGACY_POSITION_STATES
+
+
+def _legacy_positions_artifact_summary(position_view: dict) -> dict:
+    """Summarize legacy positions.json without promoting it to portfolio truth."""
+    path = LEGACY_POSITIONS_PATH
+    summary = {
+        "path": str(path),
+        "exists": path.exists(),
+        "authority": "legacy_json_derived_observability_only",
+        "canonical_truth_source": "position_current",
+        "canonical_db_status": str(position_view.get("status") or "unknown"),
+        "canonical_db_open_positions": int(position_view.get("open_positions", 0) or 0),
+        "status": "missing",
+        "active_positions": 0,
+        "active_cost_basis_usd": 0.0,
+        "conflicts": [],
+        "sample_positions": [],
+    }
+    if not path.exists():
+        return summary
+
+    try:
+        stat = path.stat()
+        summary["mtime"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        data, truth = read_truth_json(path)
+    except Exception as exc:
+        summary["status"] = "unreadable"
+        summary["error_type"] = type(exc).__name__
+        summary["error"] = str(exc)
+        return summary
+
+    summary["deprecated"] = bool(truth.get("deprecated", False))
+    summary["generated_at"] = truth.get("generated_at")
+    summary["stale_age_seconds"] = truth.get("stale_age_seconds")
+    positions = data.get("positions", []) if isinstance(data, dict) else []
+    if not isinstance(positions, list):
+        summary["status"] = "malformed"
+        summary["error"] = "positions is not a list"
+        return summary
+
+    active_positions = [
+        row for row in positions
+        if _is_nonterminal_legacy_position(row)
+    ]
+    summary["active_positions"] = len(active_positions)
+    summary["active_cost_basis_usd"] = round(
+        sum(_float_or_zero(row.get("cost_basis_usd") or row.get("size_usd")) for row in active_positions),
+        4,
+    )
+    target_dates = sorted({
+        str(row.get("target_date"))
+        for row in active_positions
+        if row.get("target_date")
+    })
+    if target_dates:
+        summary["target_dates"] = target_dates
+        summary["oldest_target_date"] = target_dates[0]
+    chain_state_counts: dict[str, int] = {}
+    for row in active_positions:
+        chain_state = str(row.get("chain_state") or "unknown")
+        chain_state_counts[chain_state] = chain_state_counts.get(chain_state, 0) + 1
+    if chain_state_counts:
+        summary["chain_state_counts"] = chain_state_counts
+    summary["sample_positions"] = [
+        {
+            "trade_id": row.get("trade_id"),
+            "city": row.get("city"),
+            "target_date": row.get("target_date"),
+            "bin_label": row.get("bin_label"),
+            "direction": row.get("direction"),
+            "state": _legacy_position_state(row) or None,
+            "strategy_key": row.get("strategy_key") or row.get("strategy"),
+            "chain_state": row.get("chain_state"),
+            "cost_basis_usd": round(_float_or_zero(row.get("cost_basis_usd") or row.get("size_usd")), 4),
+        }
+        for row in active_positions[:10]
+    ]
+    if active_positions:
+        summary["status"] = "active_legacy_positions"
+    else:
+        summary["status"] = "empty"
+
+    canonical_status = str(position_view.get("status") or "").strip().lower()
+    canonical_open = int(position_view.get("open_positions", 0) or 0)
+    if canonical_status in {"ok", "empty"} and canonical_open == 0 and active_positions:
+        summary["conflicts"].append("canonical_empty_legacy_active_positions")
+        summary["status"] = "conflict"
+    if summary.get("deprecated") is True and active_positions:
+        summary["conflicts"].append("deprecated_legacy_file_has_active_positions")
+    return summary
 
 
 def _get_v2_row_counts(conn) -> dict[str, int]:
@@ -628,6 +747,8 @@ def write_status(cycle_summary: dict = None) -> None:
         "dual_track_scaffold_claimed": True,
         "discrepancy_flags": [],
     }
+    legacy_positions_artifact = _legacy_positions_artifact_summary(position_view)
+    status["portfolio"]["legacy_artifact"] = legacy_positions_artifact
     status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
     status["control"]["review_required_commands"] = review_required_commands_from_status(status)
     status["control"]["recommended_commands"] = recommended_commands_from_status(
@@ -718,6 +839,8 @@ def write_status(cycle_summary: dict = None) -> None:
         consistency_issues.append(f"cycle_monitor_chain_missing:{monitor_chain_missing}")
     if position_view.get("status") != "ok":
         consistency_issues.append(f"position_current_{position_view.get('status')}")
+    if "canonical_empty_legacy_active_positions" in set(legacy_positions_artifact.get("conflicts", [])):
+        consistency_issues.append("legacy_positions_json_conflicts_with_canonical_empty")
     strategy_health_status = str(strategy_health.get("status") or "")
     if strategy_health_status not in {"fresh"}:
         consistency_issues.append(f"strategy_health_{strategy_health_status or 'unknown'}")
@@ -747,6 +870,7 @@ def write_status(cycle_summary: dict = None) -> None:
             "learning_summary_unavailable",
             "no_trade_summary_unavailable",
             "cycle_monitor_chain_missing",
+            "legacy_positions_json_conflicts_with_canonical_empty",
             "position_current_missing_table",
             "position_current_query_error",
         )
