@@ -3304,6 +3304,10 @@ def _store_snapshot_p_raw(
         if p_raw_topology is not None:
             topology_payload = json.loads(json.dumps(p_raw_topology, sort_keys=True))
             expected_count = int(len(p_raw))
+            if topology_payload.get("schema_version") != 1:
+                raise ValueError("p_raw_topology schema_version must be 1")
+            if topology_payload.get("topology_status") != "complete":
+                raise ValueError("p_raw_topology topology_status must be complete")
             topology_support_count = topology_payload.get("support_count")
             if topology_support_count != expected_count:
                 raise ValueError(
@@ -3321,13 +3325,48 @@ def _store_snapshot_p_raw(
                         f"p_raw_topology {key} cardinality does not match p_raw: "
                         f"{len(value) if isinstance(value, list) else 'missing'} != {expected_count}"
                     )
+            executable_mask = topology_payload["executable_mask"]
+            if not all(isinstance(is_executable, bool) for is_executable in executable_mask):
+                raise ValueError("p_raw_topology executable_mask must contain booleans")
+            executable_count = int(sum(1 for is_executable in executable_mask if is_executable))
+            if topology_payload.get("executable_count") != executable_count:
+                raise ValueError("p_raw_topology executable_count does not match executable_mask")
             executable_hypothesis_count = topology_payload.get("executable_hypothesis_count")
-            if executable_hypothesis_count != int(
-                sum(1 for is_executable in topology_payload["executable_mask"] if bool(is_executable))
-            ):
+            if executable_hypothesis_count != executable_count:
                 raise ValueError(
                     "p_raw_topology executable_hypothesis_count does not match executable_mask"
                 )
+            skipped_support_indexes = [
+                idx for idx, is_executable in enumerate(executable_mask) if not is_executable
+            ]
+            if topology_payload.get("skipped_support_indexes") != skipped_support_indexes:
+                raise ValueError(
+                    "p_raw_topology skipped_support_indexes does not match executable_mask"
+                )
+            if bool(topology_payload.get("requires_atomic_topology")) != bool(skipped_support_indexes):
+                raise ValueError(
+                    "p_raw_topology requires_atomic_topology does not match executable_mask"
+                )
+            allowed_fusion_status = {
+                True: "pending_executable_quote",
+                False: "disabled_non_executable",
+            }
+            for idx, support in enumerate(topology_payload["support"]):
+                if not isinstance(support, dict):
+                    raise ValueError("p_raw_topology support entries must be objects")
+                if support.get("support_index") != idx:
+                    raise ValueError("p_raw_topology support_index sequence is invalid")
+                if support.get("executable") != executable_mask[idx]:
+                    raise ValueError("p_raw_topology support executable flag mismatch")
+            for idx, status in enumerate(topology_payload["market_fusion_status_by_support_index"]):
+                if not isinstance(status, dict):
+                    raise ValueError("p_raw_topology fusion status entries must be objects")
+                if status.get("support_index") != idx:
+                    raise ValueError("p_raw_topology fusion support_index sequence is invalid")
+                if status.get("status") != allowed_fusion_status[executable_mask[idx]]:
+                    raise ValueError(
+                        "p_raw_topology fusion status does not match executable_mask"
+                    )
         snapshots_table = _ensemble_snapshots_table(conn)
         v2_table = _ensemble_snapshots_v2_table(conn)
         if v2_table:

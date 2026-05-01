@@ -1538,7 +1538,7 @@ def capture_executable_market_snapshot(
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
-    if closed or not active or not enable_orderbook or accepting_orders is False:
+    if closed or not active or not enable_orderbook or accepting_orders is not True:
         raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)

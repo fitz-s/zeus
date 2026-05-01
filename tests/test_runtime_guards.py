@@ -3427,6 +3427,54 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
     assert summary["no_trades"] == 0
 
 
+def test_executable_snapshot_requires_explicit_accepting_orders():
+    from src.data.market_scanner import (
+        ExecutableSnapshotCaptureError,
+        capture_executable_market_snapshot,
+    )
+
+    market = {
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "cond1",
+                "condition_id": "cond1",
+                "question_id": "q1",
+                "active": True,
+                "closed": False,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "id": "gamma1",
+                    "conditionId": "cond1",
+                    "questionID": "q1",
+                    "active": True,
+                    "closed": False,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes1", "no1"],
+                },
+            },
+        ],
+    }
+    decision = types.SimpleNamespace(
+        tokens={"market_id": "cond1", "token_id": "yes1", "no_token_id": "no1"},
+        edge=types.SimpleNamespace(direction="buy_yes"),
+    )
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="not currently tradable"):
+        capture_executable_market_snapshot(
+            None,
+            market=market,
+            decision=decision,
+            clob=object(),
+            captured_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            scan_authority="VERIFIED",
+        )
+
+
 def _trace_status_for_evaluator_decision(tmp_path, candidate):
     conn = get_connection(tmp_path / "trace-early.db")
     init_schema(conn)
@@ -7488,11 +7536,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     assert legacy_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
 
 
-def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-
+def _seed_p_raw_snapshot(conn) -> str:
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     ens = type(
         "DummyEns",
@@ -7510,14 +7554,17 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
         "fetch_time": fetch_time,
         "model": "ecmwf_ifs025",
     }
-    snapshot_id = evaluator_module._store_ens_snapshot(
+    return evaluator_module._store_ens_snapshot(
         conn,
         NYC,
         "2026-01-15",
         ens,
         ens_result,
     )
-    topology = {
+
+
+def _support_topology_payload() -> dict:
+    return {
         "schema_version": 1,
         "topology_status": "complete",
         "unit": "F",
@@ -7538,6 +7585,15 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
             {"support_index": 2, "label": "63°F or higher", "executable": True},
         ],
     }
+
+
+def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+
+    snapshot_id = _seed_p_raw_snapshot(conn)
+    topology = _support_topology_payload()
 
     assert evaluator_module._store_snapshot_p_raw(
         conn,
@@ -7567,6 +7623,40 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     assert provenance["p_raw_topology"]["executable_hypothesis_count"] == 2
     assert len(provenance["p_raw_topology"]["market_fusion_status_by_support_index"]) == 3
     assert json.loads(legacy_row["p_raw_json"]) == [0.2, 0.3, 0.5]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda topology: topology.update({"topology_status": "corrupt_status"}),
+        lambda topology: topology.update({"executable_count": 999}),
+        lambda topology: topology.update({"skipped_support_indexes": [2]}),
+        lambda topology: topology["market_fusion_status_by_support_index"][1].update(
+            {"status": "disabled_non_executable"}
+        ),
+    ],
+)
+def test_store_snapshot_p_raw_rejects_invalid_support_topology(tmp_path, mutate):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    snapshot_id = _seed_p_raw_snapshot(conn)
+    topology = _support_topology_payload()
+    mutate(topology)
+
+    assert not evaluator_module._store_snapshot_p_raw(
+        conn,
+        snapshot_id,
+        np.array([0.2, 0.3, 0.5]),
+        p_raw_topology=topology,
+    )
+    row = conn.execute(
+        "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+        (snapshot_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row["p_raw_json"] is None
 
 
 def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
