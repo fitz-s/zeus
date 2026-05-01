@@ -198,4 +198,6 @@ docs/**/~$*
 docs/archives/
 docs/reports/generated/
 docs/artifacts/generated/
+# Evidence data dumps in operations tasks (market snapshots, settlement/obs corpora).
+docs/operations/**/evidence/*.json
 .zpkt-cache/
