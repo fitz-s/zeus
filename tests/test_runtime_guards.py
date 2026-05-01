@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-01
 # Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -2310,6 +2310,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["shadow_only"] is True
     assert shadow["live_submit_authority"] is False
     assert shadow["field_semantics"] == "passive_limit_requires_maker_only_support"
+    assert shadow["order_policy"] == "post_only_passive_limit"
     assert shadow["selected_token_id"] == "yes1"
     assert shadow["direction"] == "buy_yes"
     assert shadow["snapshot_id"] == "snap-reprice-1"
@@ -2371,6 +2372,7 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
     assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
     assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
+    assert reprice["corrected_pricing_shadow"]["order_policy"] == "marketable_limit_depth_bound"
     assert reprice["corrected_pricing_shadow"]["live_submit_authority"] is False
     assert (
         reprice["corrected_pricing_shadow"]["unsupported_reason"]
@@ -2451,11 +2453,13 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
     assert reprice["live_submit_authority"] is True
     assert shadow["sweep_attempted"] is True
     assert shadow["sweep_depth_status"] == "PASS"
+    assert shadow["order_policy"] == "marketable_limit_depth_bound"
     assert shadow["sweep_levels_consumed"] == 2
     assert float(shadow["sweep_average_price"]) < 0.61
     assert shadow["candidate_size_kind"] == "shares"
     assert shadow["candidate_submitted_shares"] == shadow["candidate_size_value"]
     assert decision.final_execution_intent.order_type == "FOK"
+    assert decision.final_execution_intent.order_policy == "marketable_limit_depth_bound"
     assert decision.final_execution_intent.submitted_shares == Decimal(
         shadow["candidate_submitted_shares"]
     )

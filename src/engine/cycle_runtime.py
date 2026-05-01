@@ -265,7 +265,7 @@ def _attach_corrected_pricing_authority(
         cost_basis = ExecutableCostBasis.from_snapshot_sweep(
             snapshot=snapshot,
             direction=direction,
-            order_policy="limit_may_take_conservative",
+            order_policy="marketable_limit_depth_bound",
             requested_size_kind="shares",
             requested_size_value=submitted_shares,
             final_limit_price=candidate_limit,
@@ -279,7 +279,7 @@ def _attach_corrected_pricing_authority(
         cost_basis = ExecutableCostBasis.from_snapshot_sweep(
             snapshot=snapshot,
             direction=direction,
-            order_policy="limit_may_take_conservative",
+            order_policy="marketable_limit_depth_bound",
             requested_size_kind="notional_usd",
             requested_size_value=candidate_size,
             final_limit_price=candidate_limit,
@@ -289,7 +289,7 @@ def _attach_corrected_pricing_authority(
         cost_basis = ExecutableCostBasis.from_snapshot(
             snapshot=snapshot,
             direction=direction,
-            order_policy="limit_may_take_conservative",
+            order_policy="post_only_passive_limit",
             requested_size_kind="notional_usd",
             requested_size_value=candidate_size,
             final_limit_price=candidate_limit,

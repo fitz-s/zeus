@@ -192,10 +192,40 @@ can re-enter through explicit topology:
 No runtime behavior, live venue submission, production data, source routing,
 schema apply, config, or strategy-promotion surface changed in Packet 0.
 
+## 2026-05-01 Packet 1 F-08 Order Policy Cost Authority
+
+F-08 is now repaired at the existing execution-intent contract seam rather
+than by adding a new cost-basis package. `ExecutableCostBasis` rejects
+order-policy/depth-proof mismatches, and corrected pricing shadow now records:
+
+- passive non-crossing candidates as `post_only_passive_limit` with
+  `PASSIVE_LIMIT` / `NOT_MARKETABLE_PASSIVE_LIMIT` evidence and no live submit
+  authority
+- marketable depth-bound candidates as `marketable_limit_depth_bound` with
+  `CLOB_SWEEP` evidence before a `FinalExecutionIntent` can exist
+- order-policy changes as cost-basis / hypothesis identity changes while
+  posterior belief stays unchanged
+
+This keeps order policy upstream of corrected submit authority and prevents a
+late adapter/executor order-type decision from silently reusing the same cost
+certificate. It does not edit `src/venue/**`, submit live orders, mutate
+production data, apply schema, or promote corrected live strategy behavior.
+
 ## Evidence
 
 Passing checks:
 
+- `python3 -m pytest tests/test_executable_market_snapshot_v2.py::test_order_policy_change_changes_cost_basis_not_model_belief tests/test_executable_market_snapshot_v2.py::test_order_policy_requires_matching_depth_proof tests/test_executable_market_snapshot_v2.py::test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_intent -q` -> 3 passed
+- `python3 -m pytest tests/test_runtime_guards.py::test_executable_snapshot_repricing_updates_edge_and_size tests/test_runtime_guards.py::test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget tests/test_runtime_guards.py::test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget tests/test_runtime_guards.py::test_live_entry_final_intent_receives_executable_snapshot_fields tests/test_runtime_guards.py::test_live_entry_captures_and_commits_snapshot_before_executor tests/test_runtime_guards.py::test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump -q` -> 6 passed
+- `python3 -m pytest tests/test_executable_market_snapshot_v2.py tests/test_execution_intent_typed_slippage.py -q` -> 72 passed
+- `python3 -m pytest tests/test_v2_adapter.py tests/test_executor.py -q` -> 58 passed, 1 skipped
+- `python3 -m compileall -q src/contracts/execution_intent.py src/engine/cycle_runtime.py tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py`
+- `python3 scripts/topology_doctor.py --freshness-metadata --changed-files tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py --json`
+- `python3 scripts/topology_doctor.py --navigation --intent "pricing semantics authority cutover" --write-intent edit --task "pricing semantics authority cutover F-08 order-policy executable-cost authority closeout: order policy is part of executable cost basis, passive vs marketable depth proof is explicit, and no venue adapter/live/prod/schema surface changed" --files src/contracts/execution_intent.py src/engine/cycle_runtime.py tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` -> admitted
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files src/contracts/execution_intent.py src/engine/cycle_runtime.py tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md --plan-evidence docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md`
+- `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout --changed-files src/contracts/execution_intent.py src/engine/cycle_runtime.py tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `git diff --check -- src/contracts/execution_intent.py src/engine/cycle_runtime.py tests/test_executable_market_snapshot_v2.py tests/test_runtime_guards.py docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md`
+- `python3 -m pytest tests/test_runtime_guards.py -q` -> interrupted after hanging beyond the visible 38% progress point; focused F-08 runtime cases above passed
 - `python3 -m pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py` -> 151 passed
 - `python3 scripts/digest_profiles_export.py --check`
 - `python3 scripts/topology_doctor.py --schema`
