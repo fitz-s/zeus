@@ -38,13 +38,18 @@ class V2PreflightError(RuntimeError):
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 
-    Uses OpenClaw's keychain_resolver stdin/stdout protocol directly.
-    Returns dict with 'private_key' and 'funder_address'.
+    Returns {'private_key', 'funder_address'}.
+
+    L2 API creds (key/secret/passphrase) are intentionally NOT read here:
+    they are deterministically derivable from the L1 signer via
+    `ClobClient.create_or_derive_api_key()` inside the v2 adapter. Storing a
+    second copy in Keychain creates a drift hazard — observed 2026-05-01,
+    where the keychain copy was stale and caused PolyException(401 Invalid
+    api key) for the entire trading boot. The adapter now derives at
+    construction time so api_creds always match the active signer.
     """
     try:
-        # Resolve OpenClaw root: OPENCLAW_HOME → ~/.openclaw
         openclaw_root = os.environ.get("OPENCLAW_HOME", os.path.expanduser("~/.openclaw"))
-        # Read credentials via OpenClaw keychain resolver protocol
         result = subprocess.run(
             ["python3", "-c",
              f"import json, sys; sys.path.insert(0, {openclaw_root!r}); "

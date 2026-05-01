@@ -27,7 +27,7 @@ from src.contracts.executable_market_snapshot_v2 import (
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
-DEFAULT_V2_HOST = "https://clob-v2.polymarket.com"
+DEFAULT_V2_HOST = "https://clob.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
     "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-26.txt"
 )
@@ -188,7 +188,7 @@ class PolymarketV2Adapter:
     def _default_client_factory(self, **kwargs: Any) -> Any:
         from py_clob_client_v2.client import ClobClient
 
-        return ClobClient(
+        client = ClobClient(
             kwargs["host"],
             kwargs["chain_id"],
             key=kwargs.get("signer_key"),
@@ -196,6 +196,22 @@ class PolymarketV2Adapter:
             signature_type=2,
             funder=kwargs.get("funder_address"),
         )
+        # CLOB v2 L2 endpoints (balance/order) require API creds. The canonical
+        # SDK path is `set_api_creds(create_or_derive_api_key())` — this derives
+        # them deterministically from the L1 signer rather than relying on a
+        # separately-stored copy that can drift out of sync. We only derive when
+        # no static creds were provided so callers (eg. tests) can still inject
+        # specific credentials.
+        if not kwargs.get("api_creds"):
+            try:
+                client.set_api_creds(client.create_or_derive_api_key())
+            except Exception as exc:  # pragma: no cover - upstream SDK behaviour
+                import logging
+                logging.getLogger(__name__).warning(
+                    "create_or_derive_api_key failed; L2-authenticated calls will "
+                    "fail until creds are provided: %s", exc,
+                )
+        return client
 
     def _sdk_client(self) -> Any:
         if self._client is None:
@@ -427,7 +443,21 @@ class PolymarketV2Adapter:
 
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
-        for position in self.get_positions():
+        # CTF position enumeration goes through a separate read surface (the
+        # Polymarket data-api) — `py_clob_client_v2.ClobClient` does not expose
+        # `get_positions`. When the SDK lacks the method we degrade to an empty
+        # CTF map rather than fail the entire collateral payload, since pUSD
+        # balance is sufficient for boot wallet checks. CTF position truth is
+        # consumed elsewhere (data-api adapter, position reconciliation jobs).
+        try:
+            positions_iter = self.get_positions()
+        except V2ReadUnavailable as exc:
+            import logging
+            logging.getLogger(__name__).debug(
+                "get_collateral_payload: skipping CTF enumeration (%s)", exc,
+            )
+            positions_iter = []
+        for position in positions_iter:
             item = dict(position.raw)
             token_id = item.get("asset") or item.get("token_id") or item.get("tokenId")
             if not token_id:
