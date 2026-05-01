@@ -219,7 +219,12 @@ def _auto_derive_user_channel_condition_ids() -> list[str]:
             find_weather_markets,
         )
 
-        events = find_weather_markets()
+        # min_hours_to_resolution=0.0: include day0 markets (<6h to settlement).
+        # The scanner's default of 6.0 would silently drop day0 condition_ids
+        # from the WS subscription set, so order/fill updates for day0 trades
+        # — which Zeus actively trades via DiscoveryMode.DAY0_CAPTURE — would
+        # be missed while the WS guard reports healthy. (PR #34 codex P1.)
+        events = find_weather_markets(min_hours_to_resolution=0.0)
         return extract_executable_condition_ids(events)
     except Exception as exc:
         logger.warning(

@@ -203,6 +203,45 @@ def test_auto_derive_empty_logs_warning_no_error(monkeypatch, caplog):
     )
 
 
+def test_auto_derive_includes_day0_markets(monkeypatch, _stub_ingestor):
+    """Invariant #6 (PR #34 codex P1): auto-derive must include day0 markets.
+
+    The scanner default ``min_hours_to_resolution=6.0`` excludes markets in
+    the DAY0_CAPTURE window (<6h to settlement). If the auto-derive call
+    inherits that default, the WS subscription set silently omits day0
+    condition_ids — Zeus would actively trade via ``DiscoveryMode.DAY0_CAPTURE``
+    while the WS guard reports healthy and fills on day0 trades go unseen.
+    The call site MUST pass ``min_hours_to_resolution=0.0`` so day0 markets
+    are subscribed.
+    """
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_AUTO_DERIVE", "1")
+    monkeypatch.delenv("POLYMARKET_USER_WS_CONDITION_IDS", raising=False)
+
+    captured: dict[str, object] = {"kwargs": None}
+
+    def _recording_scanner(**kwargs):
+        captured["kwargs"] = kwargs
+        return [{"condition_ids": ["0xday0market"]}]
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.find_weather_markets", _recording_scanner
+    )
+
+    zeus_main._start_user_channel_ingestor_if_enabled()
+
+    assert captured["kwargs"] is not None, "scanner must be invoked"
+    min_hours = captured["kwargs"].get("min_hours_to_resolution")
+    assert min_hours is not None, (
+        "call site must pass min_hours_to_resolution explicitly; "
+        "default 6.0 would drop day0 markets from WS subscription"
+    )
+    assert min_hours <= 0.0 + 1e-9, (
+        f"min_hours_to_resolution must be <=0 to include day0 markets; "
+        f"got {min_hours!r}"
+    )
+
+
 def test_auto_derive_disabled_unless_master_toggle(monkeypatch, caplog):
     """Invariant #5: AUTO_DERIVE alone does not start the WS ingestor."""
     monkeypatch.delenv("ZEUS_USER_CHANNEL_WS_ENABLED", raising=False)
