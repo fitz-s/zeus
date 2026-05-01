@@ -22,7 +22,7 @@ Zeus is live on `main`. Plan-pre5 R3 engineering hardening merged 2026-05-01.
 
 ## Active work items
 
-See `docs/operations/open_work_items.md` for current tail items.
+Tail items in `docs/operations/known_gaps.md` § "Deferred items".
 
 ## Current fact companions
 
