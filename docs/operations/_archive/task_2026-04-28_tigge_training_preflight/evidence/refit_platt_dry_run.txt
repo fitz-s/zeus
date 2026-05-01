@@ -1,5 +1,0 @@
-PLATT V2 REFIT (calibration_pairs_v2 → platt_models_v2)
-Mode: DRY-RUN
-HIGH track: Buckets eligible (n_eff >= 15): 0
-LOW track: Buckets eligible (n_eff >= 15): 0
-Result: pipeline mechanism functional; nothing to fit (calibration_pairs_v2 empty due to D live-write gate)
