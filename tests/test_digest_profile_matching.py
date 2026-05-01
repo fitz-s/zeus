@@ -1573,14 +1573,14 @@ def test_r3_a2_risk_allocator_routes_to_a2_profile_not_heartbeat():
 
 def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     """G1 readiness mentions heartbeat/cutover/risk artifacts, but owns the
-    17-gate orchestration surface; strong G1 phrases must not route to Z3."""
+    16-gate orchestration surface; strong G1 phrases must not route to Z3."""
     digest = build_digest(
-        "R3 G1 live readiness gates live_readiness_check 17 CI gates "
+        "R3 G1 live readiness gates live_readiness_check 16 active CI gates "
         "staged-live-smoke INV-NEW-S live-money-deploy-go",
         [
             "scripts/live_readiness_check.py",
             "tests/test_live_readiness_gates.py",
-            "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-30.json",
+            "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/staged_live_smoke_2026-04-30.json",
             "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml",
         ],
     )
@@ -1590,7 +1590,7 @@ def test_r3_g1_live_readiness_routes_to_g1_profile_not_heartbeat():
     assert "scripts/live_readiness_check.py" in digest["admission"]["admitted_files"]
     assert "tests/test_live_readiness_gates.py" in digest["admission"]["admitted_files"]
     assert (
-        "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/q1_zeus_egress_2026-04-30.json"
+        "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence/staged_live_smoke_2026-04-30.json"
         in digest["admission"]["admitted_files"]
     )
 

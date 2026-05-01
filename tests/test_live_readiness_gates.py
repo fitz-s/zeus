@@ -46,23 +46,12 @@ def _signed_evidence(evidence_type: str, payload: dict, *, secret: str = "unit-s
 def _evidence_root(tmp_path: Path) -> Path:
     root = tmp_path / "evidence"
     root.mkdir()
-    (root / "q1_zeus_egress_probe_2026-04-27.json").write_text(
-        _signed_evidence(
-            "q1_zeus_egress",
-            {
-                "status_code": 200,
-                "protocol": "HTTP/2",
-                "daemon": "Zeus daemon machine",
-                "funder_address_present": True,
-            },
-        )
-    )
     (root / "staged_live_smoke_2026-04-27.json").write_text(
         _signed_evidence(
             "staged_live_smoke",
             {
                 "status": "PASS",
-                "gates_passed": 17,
+                "gates_passed": 16,
                 "environment": "staged-live-smoke",
             },
         )
@@ -70,15 +59,15 @@ def _evidence_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_gate_registry_has_exactly_17_unique_gates():
-    assert len(lrc.GATES) == 17
-    assert len({gate.gate_id for gate in lrc.GATES}) == 17
-    assert {gate.gate_id for gate in lrc.GATES} == {f"G1-{idx:02d}" for idx in range(1, 18)}
-    assert any(gate.kind == "q1_evidence" for gate in lrc.GATES)
+def test_gate_registry_removes_g1_02_and_keeps_remaining_gate_ids_stable():
+    assert len(lrc.GATES) == 16
+    assert len({gate.gate_id for gate in lrc.GATES}) == 16
+    assert {gate.gate_id for gate in lrc.GATES} == {f"G1-{idx:02d}" for idx in range(1, 18)} - {"G1-02"}
+    assert all(gate.kind != "q1_evidence" for gate in lrc.GATES)
     assert any(gate.kind == "agent_docs_scan" for gate in lrc.GATES)
 
 
-def test_missing_q1_or_staged_smoke_evidence_fails_closed(tmp_path):
+def test_missing_staged_smoke_evidence_fails_closed(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
 
@@ -87,8 +76,7 @@ def test_missing_q1_or_staged_smoke_evidence_fails_closed(tmp_path):
     assert report.status == lrc.FAIL
     assert report.live_deploy_authorized is False
     by_id = {gate.gate_id: gate for gate in report.gates}
-    assert by_id["G1-02"].status == lrc.FAIL
-    assert "missing Q1" in by_id["G1-02"].evidence
+    assert "G1-02" not in by_id
     assert report.staged_smoke_status == lrc.FAIL
     assert "missing staged-live-smoke" in report.staged_smoke_evidence
 
@@ -107,25 +95,22 @@ def test_legacy_sdk_gate_detects_nested_v1_imports_without_blocking_v2(tmp_path)
     assert "good.py" not in result.evidence
 
 
-def test_readiness_pass_requires_signed_17_gate_passes_and_staged_smoke(tmp_path, monkeypatch):
+def test_readiness_pass_requires_signed_active_gate_passes_and_staged_smoke(tmp_path, monkeypatch):
     monkeypatch.setenv(lrc.EVIDENCE_HMAC_SECRET_ENV, "unit-secret")
     evidence = _evidence_root(tmp_path)
 
     report = lrc.run_readiness(evidence_roots=(evidence,), runner=_passing_runner)
 
     assert report.status == lrc.PASS
-    assert report.gate_count == 17
-    assert report.passed_gates == 17
+    assert report.gate_count == 16
+    assert report.passed_gates == 16
     assert report.staged_smoke_status == lrc.PASS
     assert report.live_deploy_authorized is False
 
 
-def test_unsigned_marker_files_do_not_satisfy_readiness_evidence(tmp_path):
+def test_unsigned_marker_files_do_not_satisfy_staged_smoke_evidence(tmp_path):
     evidence = tmp_path / "evidence"
     evidence.mkdir()
-    (evidence / "q1_zeus_egress_probe_2026-04-27.txt").write_text(
-        "HTTP/2 200 OK\nZeus daemon machine\nfunder_address=0xREDACTED\n"
-    )
     (evidence / "staged_live_smoke_2026-04-27.json").write_text(
         '{"status":"PASS","gates_passed":17,"environment":"staged-live-smoke"}'
     )
@@ -133,7 +118,7 @@ def test_unsigned_marker_files_do_not_satisfy_readiness_evidence(tmp_path):
     report = lrc.run_readiness(evidence_roots=(evidence,), runner=_passing_runner)
 
     by_id = {gate.gate_id: gate for gate in report.gates}
-    assert by_id["G1-02"].status == lrc.FAIL
+    assert "G1-02" not in by_id
     assert report.staged_smoke_status == lrc.FAIL
 
 

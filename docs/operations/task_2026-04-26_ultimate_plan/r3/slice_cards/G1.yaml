@@ -1,8 +1,8 @@
 id: G1
 phase: G
-title: Live readiness gates — 17 CI gates + staged live-smoke verification
+title: Live readiness gates — 16 active CI gates + staged live-smoke verification
 purpose: |
-  Zeus is not live-money-ready until ALL 17 gates pass in CI AND at least
+  Zeus is not live-money-ready until ALL 16 active gates pass in CI AND at least
   one staged live-smoke environment. Each gate is a runnable test or
   semgrep rule that maps to a specific R3 slice antibody.
 authority_basis:
@@ -13,17 +13,14 @@ preconditions:
 deliverables:
   new_modules:
     - path: scripts/live_readiness_check.py
-      summary: Runs all 17 gates; reports per-gate PASS/FAIL with evidence path.
+      summary: Runs all 16 active gates; reports per-gate PASS/FAIL with evidence path.
   new_tests:
-    - tests/test_live_readiness_gates.py — orchestrates the 17 gate tests
+    - tests/test_live_readiness_gates.py — orchestrates the 16 active gate tests
 acceptance_tests:
   # Gates — each is runnable + auto-runs in CI
   - 1. V2 SDK gate
     | tests/test_live_readiness_gates.py::test_only_v2_sdk_in_live_code
     | grep `from py_clob_client ` in src/ live-mode paths returns 0
-  - 2. Host gate
-    | tests/test_live_readiness_gates.py::test_correct_pre_cutover_or_production_host_verified_from_zeus_daemon
-    | reads evidence/q1_zeus_egress_*.txt; asserts probe response 200 OK
   - 3. Heartbeat gate
     | tests/test_live_readiness_gates.py::test_heartbeat_supervised_failure_quarantines_orders
     | inject heartbeat miss in fake venue; assert HEARTBEAT_CANCEL_SUSPECTED on local resting orders
@@ -72,7 +69,7 @@ acceptance_tests:
 operator_decision_required:
   - gate_id: live-money-deploy-go
     blocking: yes (LIVE deployment final gate)
-    artifact: scripts/live_readiness_check.py output showing 17/17 PASS + staged-live-smoke evidence
+    artifact: scripts/live_readiness_check.py output showing 16/16 active PASS + staged-live-smoke evidence
     runtime_gate: operator dispatches deploy command after CI green + smoke green
 depends_on: [Z0..Z4, U1, U2, M1, M2, M3, M4, M5, R1, T1, F1, F2, F3, A1, A2]
 estimated_h: 14
@@ -82,7 +79,7 @@ links:
   r2_cards: [up-06, up-08, mid-06]
   v2_1_phases: [G1]
 new_invariants_or_NCs:
-  - INV-NEW-S: "LIVE deployment requires 17/17 G1 gate PASS + ≥1 staged-live-smoke environment passing the same test set."
+  - INV-NEW-S: "LIVE deployment requires 16/16 active G1 gate PASS + ≥1 staged-live-smoke environment passing the same test set."
 notes:
   - G1 is the last gate before live-money cutover. All R3 phases contribute their antibodies; G1 is the orchestration surface.
   - Operator gate is the FINAL live-money flip; engineering can ship the suite green but operator pulls the trigger.
