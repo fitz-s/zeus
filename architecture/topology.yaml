@@ -1252,6 +1252,59 @@ digest_profiles:
       - "Stop before creating .omx/context or standalone handoff/evidence/findings files for this capsule."
       - "Stop before turning an improvement insight into implementation without a new admitted route."
       - "Stop if the capsule needs to alter current_state.md or authority docs."
+  - id: "operation planning packet"
+    match_policy:
+      strong_phrases:
+        - "operation planning packet"
+        - "structural decisions impact context"
+        - "fix package planning"
+        - "remediation package planning"
+        - "repair package planning"
+      weak_terms:
+        - "plan"
+        - "planning"
+        - "package"
+      negative_phrases:
+        - "direct operation feedback capsule"
+        - "operation feedback capsule"
+        - "feedback capsule"
+        - "context recycling"
+        - "context recovery"
+        - "live deploy"
+        - "production DB"
+      single_terms_can_select: false
+      min_confidence: 0.45
+    required_law:
+      - "A planning packet may organize structural decisions and cite impact context; it does not authorize implementation edits."
+      - "Requested implementation files in a broad planning task are read-only context until each slice has its own admitted route."
+      - "Prefer K structural decisions over N issue patches; packet plans must name the decision boundaries before implementation."
+      - "Planning evidence may satisfy planning-lock later, but each changed authority/source file still needs the relevant navigation route."
+    allowed_files:
+      - "docs/operations/task_*/PLAN.md"
+      - "docs/operations/task_*/plan.md"
+      - "docs/operations/task_*/implementation_plan.md"
+      - "docs/operations/task_*/**/PLAN.md"
+      - "docs/operations/task_*/**/plan.md"
+      - "docs/operations/task_*/**/implementation_plan.md"
+    forbidden_files:
+      - ".omx/**"
+      - ".claude/**"
+      - "state/*.db"
+      - "src/**"
+      - "architecture/**"
+      - "docs/authority/**"
+      - "docs/operations/task_*/evidence.md"
+      - "docs/operations/task_*/findings.md"
+    gates:
+      - "python3 scripts/topology_doctor.py --navigation --task \"<slice>\" --write-intent edit --files <slice-files>"
+      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <slice-files> --plan-evidence <this-plan>"
+    downstream:
+      - "docs/operations/AGENTS.md"
+      - "architecture/topology.yaml"
+    stop_conditions:
+      - "Stop before editing implementation files from the planning route."
+      - "Stop before turning issue inventory into 1:1 patch packets without naming structural decisions."
+      - "Stop before using this route for packet evidence, findings, receipts, or direct operation feedback."
   - id: "docs navigation cleanup"
     match_policy:
       strong_phrases:
