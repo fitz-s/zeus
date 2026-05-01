@@ -279,6 +279,42 @@ def _assert_order_policy_coherent(
         raise ValueError("limit_may_take_conservative is not post_only")
 
 
+def _assert_cost_basis_order_policy_coherent(
+    *,
+    order_policy: str,
+    depth_status: str,
+    depth_proof_source: str,
+) -> None:
+    if order_policy == "post_only_passive_limit":
+        if depth_status != "NOT_MARKETABLE_PASSIVE_LIMIT":
+            raise ValueError(
+                "post_only_passive_limit cost basis requires "
+                "NOT_MARKETABLE_PASSIVE_LIMIT"
+            )
+        if depth_proof_source != "PASSIVE_LIMIT":
+            raise ValueError(
+                "post_only_passive_limit cost basis requires PASSIVE_LIMIT proof"
+            )
+    elif order_policy == "marketable_limit_depth_bound":
+        if depth_proof_source != "CLOB_SWEEP":
+            raise ValueError(
+                "marketable_limit_depth_bound requires CLOB_SWEEP depth proof"
+            )
+        if depth_status not in {"PASS", "DEPTH_INSUFFICIENT", "EMPTY_BOOK"}:
+            raise ValueError(
+                "marketable_limit_depth_bound requires sweep depth status"
+            )
+    elif order_policy == "limit_may_take_conservative":
+        passive_only = (
+            depth_proof_source == "PASSIVE_LIMIT"
+            or depth_status == "NOT_MARKETABLE_PASSIVE_LIMIT"
+        )
+        if passive_only:
+            raise ValueError(
+                "limit_may_take_conservative cannot claim passive-only depth proof"
+            )
+
+
 def _orderbook_levels(snapshot: "ExecutableMarketSnapshotV2", side: SweepBookSide) -> list[tuple[Decimal, Decimal]]:
     try:
         orderbook = json.loads(snapshot.orderbook_depth_jsonb)
@@ -845,6 +881,11 @@ class ExecutableCostBasis:
             raise ValueError(
                 "PASSIVE_LIMIT proof source requires NOT_MARKETABLE_PASSIVE_LIMIT"
             )
+        _assert_cost_basis_order_policy_coherent(
+            order_policy=self.order_policy,
+            depth_status=str(self.depth_status),
+            depth_proof_source=str(self.depth_proof_source),
+        )
         if not self.quote_snapshot_id or not self.quote_snapshot_hash:
             raise ValueError("snapshot lineage is required")
         if not _valid_payload_hash(self.quote_snapshot_hash):

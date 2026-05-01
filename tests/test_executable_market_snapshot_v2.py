@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-01
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
@@ -1015,6 +1015,75 @@ def test_corrected_cost_basis_rejects_unknown_order_policy():
         _buy_no_cost_basis(order_policy="unknown_policy")
 
 
+def test_order_policy_change_changes_cost_basis_not_model_belief():
+    conservative = _buy_no_cost_basis(order_policy="limit_may_take_conservative")
+    marketable = _buy_no_cost_basis(order_policy="marketable_limit_depth_bound")
+
+    assert conservative.quote_snapshot_hash == marketable.quote_snapshot_hash
+    assert conservative.selected_token_id == marketable.selected_token_id
+    assert (
+        conservative.expected_fill_price_before_fee
+        == marketable.expected_fill_price_before_fee
+    )
+    assert (
+        conservative.fee_adjusted_execution_price
+        == marketable.fee_adjusted_execution_price
+    )
+    assert conservative.cost_basis_hash != marketable.cost_basis_hash
+
+    conservative_hypothesis = _hypothesis(conservative)
+    marketable_hypothesis = _hypothesis(marketable)
+    assert (
+        conservative_hypothesis.payoff_probability
+        == marketable_hypothesis.payoff_probability
+    )
+    assert conservative_hypothesis.order_policy == "limit_may_take_conservative"
+    assert marketable_hypothesis.order_policy == "marketable_limit_depth_bound"
+    assert (
+        conservative_hypothesis.fdr_hypothesis_id
+        != marketable_hypothesis.fdr_hypothesis_id
+    )
+
+
+def test_order_policy_requires_matching_depth_proof():
+    with pytest.raises(
+        ValueError,
+        match="marketable_limit_depth_bound requires CLOB_SWEEP",
+    ):
+        _buy_no_cost_basis(
+            use_sweep=False,
+            order_policy="marketable_limit_depth_bound",
+            depth_status="UNVERIFIED_DEPTH",
+            expected_fill_price_before_fee=Decimal("0.50"),
+            fee_adjusted_execution_price=None,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="post_only_passive_limit cost basis requires",
+    ):
+        _buy_no_cost_basis(order_policy="post_only_passive_limit")
+
+    passive = _buy_no_cost_basis(
+        use_sweep=False,
+        order_policy="post_only_passive_limit",
+        depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+        expected_fill_price_before_fee=Decimal("0.50"),
+        fee_adjusted_execution_price=None,
+    )
+    assert passive.depth_proof_source == "PASSIVE_LIMIT"
+    assert passive.order_policy == "post_only_passive_limit"
+
+    with pytest.raises(ValueError, match="passive-only depth proof"):
+        _buy_no_cost_basis(
+            use_sweep=False,
+            order_policy="limit_may_take_conservative",
+            depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+            expected_fill_price_before_fee=Decimal("0.50"),
+            fee_adjusted_execution_price=None,
+        )
+
+
 def test_corrected_cost_basis_blocks_final_intent_when_depth_not_passed():
     cost_basis = _buy_no_cost_basis(use_sweep=False, depth_status="EMPTY_BOOK")
     hypothesis = _hypothesis(cost_basis)
@@ -1178,6 +1247,7 @@ def test_clob_sweep_non_crossing_limit_is_depth_insufficient_not_empty_book():
 def test_passive_limit_candidate_cost_basis_requires_maker_only_before_submit_intent():
     cost_basis = _buy_no_cost_basis(
         use_sweep=False,
+        order_policy="post_only_passive_limit",
         depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
     )
     hypothesis = _hypothesis(cost_basis)
