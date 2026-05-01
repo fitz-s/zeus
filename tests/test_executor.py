@@ -10,7 +10,7 @@ import sqlite3
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 
 import pytest
 
@@ -211,9 +211,11 @@ def _final_execution_intent(
     direction: str = "buy_yes",
     size_kind: str = "notional_usd",
     size_value: Decimal = Decimal("3.30"),
+    submitted_shares: Decimal | None = None,
     final_limit_price: Decimal = Decimal("0.33"),
+    expected_fill_price_before_fee: Decimal | None = None,
     order_policy: str = "limit_may_take_conservative",
-    order_type: str = "GTC",
+    order_type: str = "FOK",
     post_only: bool = False,
     cancel_after=None,
     event_id: str | None = None,
@@ -243,6 +245,17 @@ def _final_execution_intent(
     assert snapshot is not None
     if event_id is None:
         event_id = snapshot.event_id
+    if expected_fill_price_before_fee is None:
+        expected_fill_price_before_fee = final_limit_price
+    if submitted_shares is None:
+        if size_kind == "shares":
+            submitted_shares = size_value
+        else:
+            submitted_shares = (
+                (size_value / expected_fill_price_before_fee / Decimal("0.01"))
+                .to_integral_value(rounding=ROUND_CEILING)
+                * Decimal("0.01")
+            )
     cost_basis_hash = "d" * 64
     return FinalExecutionIntent(
         hypothesis_id="hyp-final-1",
@@ -250,9 +263,10 @@ def _final_execution_intent(
         direction=direction,
         size_kind=size_kind,
         size_value=size_value,
+        submitted_shares=submitted_shares,
         final_limit_price=final_limit_price,
-        expected_fill_price_before_fee=final_limit_price,
-        fee_adjusted_execution_price=final_limit_price,
+        expected_fill_price_before_fee=expected_fill_price_before_fee,
+        fee_adjusted_execution_price=expected_fill_price_before_fee,
         order_policy=order_policy,
         order_type=order_type,
         post_only=post_only,
@@ -534,6 +548,36 @@ class TestExecutor:
         assert captured["shares"] == pytest.approx(10.0)
         assert captured["decision_id"] == "hyp-final-1"
 
+    def test_execute_final_intent_submits_expected_fill_shares_below_limit(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-better-fill-final",
+            final_limit_price=Decimal("0.33"),
+            expected_fill_price_before_fee=Decimal("0.325"),
+            size_value=Decimal("3.30"),
+            snapshot_top_ask=Decimal("0.325"),
+            submitted_shares=Decimal("10.16"),
+        )
+        captured = {}
+
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(intent=intent, shares=shares)
+            return OrderResult(
+                trade_id=trade_id,
+                status="pending",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN)
+
+        assert result.status == "pending"
+        assert captured["shares"] == pytest.approx(10.16)
+        assert captured["intent"].limit_price == pytest.approx(0.33)
+        assert captured["intent"].target_size_usd == pytest.approx(10.16 * 0.33)
+
     def test_execute_final_intent_routes_buy_no_selected_token(self, monkeypatch):
         final_intent = _final_execution_intent(
             token_id="no-token-final",
@@ -585,7 +629,7 @@ class TestExecutor:
                 return _final_submit_result(self.bound_envelope, order_id="final-buy-1")
 
         monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
-        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
         monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
 
@@ -606,19 +650,19 @@ class TestExecutor:
             "price": pytest.approx(0.33),
             "size": pytest.approx(10.0),
             "side": "BUY",
-            "order_type": "GTC",
+            "order_type": "FOK",
         }
 
     def test_execute_final_intent_fails_closed_when_a2_order_type_would_change(self, monkeypatch):
-        final_intent = _final_execution_intent(order_type="GTC")
+        final_intent = _final_execution_intent(order_type="FOK")
 
         monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
-        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
 
         result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-final")
 
         assert result.status == "rejected"
-        assert result.reason == "final_order_type_mismatch: intent=GTC selected=FOK"
+        assert result.reason == "final_order_type_mismatch: intent=FOK selected=GTC"
 
     @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
     def test_execute_final_intent_submits_allocator_immediate_order_type_when_frozen(
@@ -664,14 +708,26 @@ class TestExecutor:
         assert captured["order_type"] == order_type
         assert captured["token_id"] == f"yes-token-{order_type.lower()}-final"
 
-    def test_execute_final_intent_rejects_unfrozen_share_size_on_legacy_entry_executor(self):
+    def test_execute_final_intent_accepts_frozen_share_size_on_legacy_entry_executor(
+        self,
+        monkeypatch,
+    ):
         final_intent = _final_execution_intent(
             size_kind="shares",
             size_value=Decimal("10"),
         )
+        captured = {}
 
-        with pytest.raises(ValueError, match="notional_usd sizing"):
-            execute_final_intent(final_intent, conn=_TEST_CONN)
+        def fake_live_order(trade_id, intent, shares, conn=None, decision_id=""):
+            captured.update(intent=intent, shares=shares)
+            return OrderResult(trade_id=trade_id, status="pending")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fake_live_order)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN)
+
+        assert result.status == "pending"
+        assert captured["shares"] == pytest.approx(10.0)
 
     def test_execute_final_intent_rejects_expired_cancel_after(self):
         final_intent = _final_execution_intent(
@@ -744,6 +800,7 @@ class TestExecutor:
     def test_execute_final_intent_rejects_legacy_unrepresentable_order_semantics(self):
         final_intent = _final_execution_intent(
             order_policy="post_only_passive_limit",
+            order_type="GTC",
             post_only=True,
         )
 

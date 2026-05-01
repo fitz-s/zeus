@@ -1231,7 +1231,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     monkeypatch.setattr(
         cycle_runner,
         "select_final_order_type",
-        lambda conn, snapshot_id: "GTC",
+        lambda conn, snapshot_id: "FOK",
         raising=False,
     )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
@@ -2234,6 +2234,12 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
     assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
     assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
+    assert reprice["corrected_pricing_shadow"]["live_submit_authority"] is False
+    assert (
+        reprice["corrected_pricing_shadow"]["unsupported_reason"]
+        == "MARKETABLE_FINAL_INTENT_REQUIRES_IMMEDIATE_ORDER_TYPE"
+    )
+    assert getattr(decision, "final_execution_intent", None) is None
 
 
 def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
@@ -2288,20 +2294,34 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
         conn,
         decision,
         {"executable_snapshot_id": "snap-reprice-deeper-ask"},
+        {
+            "order_type": "FOK",
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+        },
     )
     conn.close()
 
     expected_size = (0.70 - 0.61) / (1 - 0.61) * 0.25 * 100.0
     assert best_ask == pytest.approx(0.61)
-    assert decision.size_usd == pytest.approx(expected_size)
     reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert decision.size_usd == pytest.approx(float(shadow["candidate_size_usd"]))
+    assert decision.size_usd >= expected_size
     assert reprice["depth_sweep_limit_price"] == pytest.approx(0.61)
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.61)
-    shadow = reprice["corrected_pricing_shadow"]
+    assert reprice["live_submit_authority"] is True
     assert shadow["sweep_attempted"] is True
     assert shadow["sweep_depth_status"] == "PASS"
     assert shadow["sweep_levels_consumed"] == 2
     assert float(shadow["sweep_average_price"]) < 0.61
+    assert shadow["candidate_size_kind"] == "shares"
+    assert shadow["candidate_submitted_shares"] == shadow["candidate_size_value"]
+    assert decision.final_execution_intent.order_type == "FOK"
+    assert decision.final_execution_intent.submitted_shares == Decimal(
+        shadow["candidate_submitted_shares"]
+    )
 
 
 def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
@@ -2678,7 +2698,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
             AssertionError("live final-intent path must not submit legacy intent")
         ),
         execute_final_intent=_execute_capture,
-        select_final_order_type=lambda conn, snapshot_id: "GTC",
+        select_final_order_type=lambda conn, snapshot_id: "FOK",
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2698,6 +2718,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     conn.close()
 
     assert captured["intent"].final_limit_price == Decimal("0.25")
+    assert captured["intent"].order_type == "FOK"
     reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
     assert reprice["best_ask_blocked_by_slippage"] is False
@@ -2983,7 +3004,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
 
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
-    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
     monkeypatch.setattr("src.execution.executor._assert_heartbeat_allows_submit", lambda order_type="GTC": {"allowed": True})
     monkeypatch.setattr("src.execution.executor._assert_ws_gap_allows_submit", lambda target: {"allowed": True})
     monkeypatch.setattr("src.execution.executor._assert_collateral_allows_buy", lambda intent, spend_micro: {"allowed": True})
@@ -3011,7 +3032,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
             AssertionError("live final-intent path must not submit legacy intent")
         ),
         execute_final_intent=_execute_after_snapshot_commit,
-        select_final_order_type=lambda conn, snapshot_id: "GTC",
+        select_final_order_type=lambda conn, snapshot_id: "FOK",
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -3985,7 +4006,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
     monkeypatch.setattr(
         cycle_runner,
         "select_final_order_type",
-        lambda conn, snapshot_id: "GTC",
+        lambda conn, snapshot_id: "FOK",
         raising=False,
     )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
