@@ -1,9 +1,28 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §3.1
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Authority basis: operator directive 2026-05-01 — "不再采用过往的设计，我们现在是
+#   live全新阶段，serve 获取live alpha收益目标的才是重点". Mid-run gate now trusts
+#   per-source last_success_at when source_health.json itself is parseable but its
+#   written_at is mid-run-stale; full blackout is reserved for genuinely missing /
+#   unparseable files. Original design (2026-04-30 §3.1) had a 5-minute written_at
+#   threshold against a 10-minute probe cadence, which deterministically blacked
+#   out ~50% of cycles after the upstream risk_level=DATA_DEGRADED gate was
+#   removed earlier today (riskguard cold-start fix). The per-source budgets in
+#   FRESHNESS_BUDGETS already absorb minutes of producer-side lag.
 """Trading freshness gate — three-branch decision tree (FRESH / STALE / ABSENT).
 
 Reads state/source_health.json (written by ingest daemon's source_health_probe_tick
 every 10 minutes). Returns a FreshnessVerdict dataclass that callers act on.
+
+Branch semantics (post 2026-05-01 directive):
+- FRESH:  file present + parseable + every governed source within its budget.
+- STALE:  file present + parseable + at least one source over its budget.
+- ABSENT: file missing OR unparseable (ingest daemon presumed dead/stuck).
+          Mid-run: degrades to all-stale + warning. Boot: retry loop then FATAL.
+
+A merely-old written_at (e.g. cycle fires between probe ticks) is NOT ABSENT —
+the per-source last_success_at values are still real signal and are evaluated
+on their own per-source budgets. The constant ABSENT_MID_RUN_THRESHOLD_SECONDS
+is retained only as an advisory log threshold.
 
 Called from:
 - src/main.py boot path (with ABSENT-causes-FATAL-after-retry semantics)
@@ -44,8 +63,10 @@ DAY0_CAPTURE_GATED_SOURCES = frozenset({"open_meteo_archive", "wu_pws", "hko", "
 # Sources whose staleness disables ensemble-only nowcasts
 ENSEMBLE_GATED_SOURCES = frozenset({"ecmwf_open_data", "tigge_mars"})
 
-# Mid-run ABSENT threshold: if file disappears or written_at ages past this, degrade
-ABSENT_MID_RUN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
+# Advisory log threshold: if written_at is older than this mid-run, log a warning
+# but DO NOT treat the file as absent — per-source last_success_at is still
+# evaluated against per-source budgets. See header comment for rationale.
+ABSENT_MID_RUN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes (advisory only since 2026-05-01)
 
 # Boot retry: total 5 minutes, 10s interval = 30 attempts
 BOOT_RETRY_INTERVAL_SECONDS = 10
@@ -148,13 +169,17 @@ def evaluate_freshness(
     written_at_str = data.get("written_at")
     written_at_age = _age_seconds(written_at_str, now)
 
-    # Mid-run: if written_at aged past 5 minutes, treat as ABSENT
+    # Mid-run: if written_at aged past the advisory threshold, log but proceed —
+    # per-source last_success_at values are evaluated against per-source budgets
+    # below. (Pre-2026-05-01 this returned ABSENT; that synthesized a full
+    # blackout that deterministically misfired when the cycle landed between
+    # probe writes — see header comment.)
     if not _is_boot and written_at_age is not None and written_at_age > ABSENT_MID_RUN_THRESHOLD_SECONDS:
         logger.warning(
-            "source_health.json written_at=%s is %.0f seconds old (threshold=%d) — treating as ABSENT",
+            "source_health.json written_at=%s is %.0f seconds old (advisory threshold=%d) — "
+            "trusting per-source last_success_at",
             written_at_str, written_at_age, ABSENT_MID_RUN_THRESHOLD_SECONDS,
         )
-        return FreshnessVerdict(branch="ABSENT", written_at=written_at_str)
 
     # Boot: written_at check is softer — file just needs to exist and be parseable
     if _is_boot and written_at_age is not None and written_at_age > 90:
@@ -272,12 +297,15 @@ def evaluate_freshness_at_boot(state_dir: Path) -> FreshnessVerdict:
 def evaluate_freshness_mid_run(state_dir: Path) -> FreshnessVerdict:
     """Mid-run freshness evaluation — degrade only, never exit.
 
-    ABSENT → treated as all sources STALE (no exit, no retry).
+    ABSENT (file missing or unparseable) → degrades to all sources STALE.
+    A merely-old written_at is NOT ABSENT — `evaluate_freshness` proceeds to
+    per-source evaluation in that case; see module header for rationale.
     """
     verdict = evaluate_freshness(state_dir=state_dir, _is_boot=False)
     if verdict.branch == "ABSENT":
         logger.warning(
-            "source_health.json absent mid-run — treating all sources as STALE (source_health_absent alert)"
+            "source_health.json missing or unparseable mid-run — treating all sources as "
+            "STALE (source_health_absent alert)"
         )
         # Synthesize full-STALE verdict
         stale_all = list(FRESHNESS_BUDGETS.keys())

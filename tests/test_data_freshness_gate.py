@@ -1,5 +1,10 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §3.1, §6 antibody #6
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §3.1
+#   (original three-branch shape) + operator directive 2026-05-01 — "不再采用过往的设计，
+#   我们现在是live全新阶段，serve 获取live alpha收益目标的才是重点". The mid-run gate now
+#   trusts per-source last_success_at when source_health.json itself is parseable but
+#   written_at is mid-run-stale; full blackout is reserved for genuinely missing /
+#   unparseable files. See src/control/freshness_gate.py header for rationale.
 """Antibody #6: freshness gate three-branch behavior — FRESH / STALE / ABSENT.
 
 Tests:
@@ -7,7 +12,9 @@ Tests:
 - STALE: ≥1 source exceeds budget → STALE verdict, per-source degradation flags
   (DAY0_CAPTURE disabled for hourly_obs sources; ensemble disabled for TIGGE sources)
 - ABSENT at boot: file missing → retry loop then SystemExit
-- ABSENT mid-run: file missing → STALE-all degraded verdict (no exit)
+- ABSENT mid-run: file missing/unparseable → STALE-all degraded verdict (no exit)
+- Stale written_at mid-run: file parseable + per-source data fresh → FRESH (was
+  ABSENT-blackout before 2026-05-01; that locked the broken behavior)
 - Operator override: force_ignore_freshness removes source from stale list
 """
 
@@ -194,15 +201,46 @@ class TestAbsentBranchMidRun:
         verdict = evaluate_freshness_mid_run(tmp_path)
         assert verdict is not None
 
-    def test_stale_written_at_mid_run_treated_as_absent(self, tmp_path):
-        """written_at >5min ago mid-run → STALE-all (same as absent)."""
+    def test_stale_written_at_mid_run_with_fresh_sources_returns_fresh(self, tmp_path):
+        """written_at >5min ago + per-source data fresh → FRESH (NOT blackout).
+
+        Locks the 2026-05-01 directive: when source_health.json is parseable and
+        per-source last_success_at values are within budget, a stale written_at
+        is logged as advisory but does NOT force a full-blackout STALE verdict.
+        Pre-2026-05-01 this returned STALE-all and deterministically misfired on
+        ~50% of cycles (5-min threshold against 10-min producer cadence).
+        """
         from src.control.freshness_gate import evaluate_freshness_mid_run
         old_written = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         _write_health(tmp_path, _all_fresh_sources(), written_at=old_written)
         verdict = evaluate_freshness_mid_run(tmp_path)
-        # old written_at triggers absent branch → STALE-all
+        assert verdict.branch == "FRESH", (
+            f"stale written_at + fresh per-source must be FRESH, got {verdict.branch}; "
+            f"stale_sources={verdict.stale_sources}"
+        )
+        assert verdict.stale_sources == []
+        assert verdict.day0_capture_disabled is False
+        assert verdict.ensemble_disabled is False
+        assert verdict.degraded_data is False
+        assert verdict.written_at == old_written  # passes through
+
+    def test_stale_written_at_mid_run_with_one_stale_source_returns_stale_for_that_source(self, tmp_path):
+        """written_at old + one source genuinely over budget → STALE for that source only.
+
+        Per-source evaluation must still fire when the data shows real staleness;
+        we are not bypassing per-source budgets, only the file-metadata blackout.
+        """
+        from src.control.freshness_gate import evaluate_freshness_mid_run
+        sources = _all_fresh_sources()
+        sources["ecmwf_open_data"] = _stale_source(30 * 3600)  # 30h > 24h budget
+        old_written = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        _write_health(tmp_path, sources, written_at=old_written)
+        verdict = evaluate_freshness_mid_run(tmp_path)
         assert verdict.branch == "STALE"
-        assert verdict.day0_capture_disabled
+        assert verdict.stale_sources == ["ecmwf_open_data"]
+        assert verdict.ensemble_disabled is True
+        # Day0 sources are still fresh — must not be disabled
+        assert verdict.day0_capture_disabled is False
 
 
 # ---------------------------------------------------------------------------
