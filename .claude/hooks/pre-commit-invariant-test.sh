@@ -103,9 +103,17 @@ PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
 #   Cherry-pick 7743f692 (ultrareview-25 P3-B): F5/F10 inv_prototype idempotency antibodies — 2 tests: 241 → 243 (+2)
 #   ultrareview25_remediation P2 (dynamic-SQL per-file baseline gate — 2 tests): 243 → 245 (+2)
 #   ultrareview25_remediation P2-1 (contract source-field per-file baseline — 2 tests): 245 → 247 (+2)
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py tests/test_contract_source_fields_baseline.py"
-BASELINE_PASSED=247
-BASELINE_SKIPPED=22
+#   B4 Phase 7 (2026-05-01): expand gate with 14 newly-fixed test files from Phases 3/4/5/6
+#     (Cat A 8 fixture refreshes + Cat B3 P0 hardening + Cat F runtime_guards + Cat G calibration
+#     + Cat H 7 healthcheck + assumptions_validation + semantic_linter). 247→656 (+409); 22→46 (+24).
+#     Files added: test_data_rebuild_relationships, test_phase10d_closeout,
+#     test_ensemble_snapshots_bias_corrected_schema, test_tigge_snapshot_p_raw_backfill, test_db,
+#     test_replay_time_provenance, test_run_replay_cli, test_rebuild_pipeline,
+#     test_calibration_unification, test_p0_hardening, test_healthcheck,
+#     test_assumptions_validation, test_semantic_linter, test_runtime_guards.
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py tests/test_contract_source_fields_baseline.py tests/test_data_rebuild_relationships.py tests/test_phase10d_closeout.py tests/test_ensemble_snapshots_bias_corrected_schema.py tests/test_tigge_snapshot_p_raw_backfill.py tests/test_db.py tests/test_replay_time_provenance.py tests/test_run_replay_cli.py tests/test_rebuild_pipeline.py tests/test_calibration_unification.py tests/test_p0_hardening.py tests/test_healthcheck.py tests/test_assumptions_validation.py tests/test_semantic_linter.py tests/test_runtime_guards.py"
+BASELINE_PASSED=656
+BASELINE_SKIPPED=46
 
 if [ ! -x "$PYTEST_BIN" ]; then
     echo "[pre-commit-invariant-test] WARN: ${PYTEST_BIN} not found; skipping check" >&2

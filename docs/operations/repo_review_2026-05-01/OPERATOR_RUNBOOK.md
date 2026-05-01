@@ -1,6 +1,6 @@
 # Operator Runbook — Remaining P0/P1 Items
 
-**Date**: 2026-05-01 (rev 2 — branch-fork discovery + B2/B3/D1 collapse)
+**Date**: 2026-05-01 (rev 4 — B4 Phases 3-7 closure + crash recovery onto fresh main)
 **Audience**: Operator (Fitz). Single source of truth for actions Claude could not take.
 **Read first**: `SYNTHESIS.md` for full context. This runbook is the action checklist.
 
@@ -25,7 +25,27 @@ Mid-session discovery: `ultrareview25-remediation-2026-05-01` has 6 commits NOT 
 
 ---
 
-## TL;DR — what's left (rev 3 — 2026-05-01 17:00)
+## TL;DR — what's left (rev 4 — 2026-05-01 16:40)
+
+### B4 Phase 3-7 closure (rev 4 — branch `b4-resume-2026-05-01`)
+
+After a session crash, B4 work was migrated from `origin/live-prep-2026-05-01` (e8f9561d) onto a fresh branch off `main` (21f51a21) which absorbed the parallel bankroll P0 + auto-pause + WS PRs. All 7 B4 commits cherry-picked clean (zero conflicts via `git merge-tree --write-tree`). Phases continued from there:
+
+| Phase | Outcome | Closing commit |
+|---|---|---|
+| **Phase 3 (Cat A — ensemble_snapshots fixture refresh × 8)** | ✅ DONE | `45d4ec09` (test_data_rebuild_relationships) + `7d50bc07` (test_tigge_snapshot_p_raw_backfill) + `89600f13` (test_phase10d_closeout + test_ensemble_snapshots_bias_corrected_schema) |
+| **Phase 4 Cat B3 + Cat G** | ✅ DONE via cherry-picks `f8e3ec92` (Cat G) + `53e76c4a` (Cat B3) |
+| **Phase 4 residual (test_v2_preflight_success_does_not_block — idempotency_collision)** | ✅ DONE | `7d051aac` |
+| **Phase 5 (Cat E + Cat F lambdas + signal-quality gate fixtures)** | 🟡 PARTIAL — 8/15 pnl_flow + 195/195 runtime_guards | `a940af85` (8 evaluator-path fixed; 6 harvester + 1 cycle-runner deferred to follow-up slice) |
+| **Phase 6 (Cat H — validate_assumptions + semantic_linter)** | ✅ DONE — 9 tests freed (7 healthcheck + 1 assumptions + 1 semantic_linter) | `d1f9b180` |
+| **Phase 7 (CI gate flip)** | ✅ DONE — BASELINE_PASSED 247 → 656 across 33 files; 14 newly-fixed test files added to `.claude/hooks/pre-commit-invariant-test.sh` |
+
+**Deferred to a follow-up slice (REAL_BUG_FIX, not test-fixture work)**:
+- `test_structural_linter.py::test_entire_repo_passes_linter` — 10 governance violations in production: H3 settlements queries missing `temperature_metric` predicate (e.g. `src/contracts/world_view/settlements.py:50`, `src/execution/harvester_pnl_resolver.py:60`); semantic loss at `src/engine/cycle_runtime.py:164` accessing `p_posterior` without `entry_method`/`selected_method`. These need surgical fixes in production code.
+- `test_pnl_flow_and_audit.py` × 7 — 6 harvester tests + 1 cycle-runner integration test fail with shape unrelated to evaluator-path gates (different fixtures, different cause). Likely Phase 6 / Cat H follow-up per B4_EXECUTION_PLAN.md.
+- 42 broader test failures across the repo (test_topology_doctor × 5, test_calibration_bins_canonical × 3, etc.) — out of B4 scope; need individual triage.
+
+### Original review work status
 
 | Category | Status |
 |---|---|
@@ -34,7 +54,7 @@ Mid-session discovery: `ultrareview25-remediation-2026-05-01` has 6 commits NOT 
 | **B1 AGENTS.md DATA_DEGRADED** | ✅ DONE — operator commit f10ff845 applied option (a) clarification |
 | **B2 invariant cite drift** | ✅ DONE — operator commit f10ff845 fixed all 6 cites + cleared KNOWN_BROKEN |
 | **B3 DEFAULT 'high' cleanup** | ✅ DONE — sites #1/#2/#3/#5 repaired via cherry-pick of 21cff1ec; site #4 closed-as-false-alarm (write-frozen ensemble_snapshots) |
-| **B4 CI gate triage** | 🟡 IN PROGRESS — Phase 1+2+1-D landed (149 → ~121 failures); Phase 3+4 in flight |
+| **B4 CI gate triage** | ✅ Phases 1-7 LANDED on `b4-resume-2026-05-01` (245 → 656 passing in pre-commit gate; +409 tests); 7 Phase 5 residuals (harvester/cycle-runner) + 10 production governance violations deferred per rev 4 §B4 |
 | **C1 launchd creds** | ✅ DONE (POLYMARKET_API_KEY/SECRET/PASSPHRASE injected via PlistBuddy) |
 | **D1 F12 (INV-23↔NC-17 anchor)** | ✅ DONE — cherry-picked 7743f692 (also F5/F10 inv_prototype) |
 | **P2-1 contract source-field baseline** | ✅ DONE — scanner + test landed at `aecd6cf5` (13 fields locked across 5 files) |

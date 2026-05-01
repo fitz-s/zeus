@@ -537,4 +537,11 @@ def _default_websocket_connect(endpoint: str) -> Any:
         import websockets  # type: ignore
     except Exception as exc:  # pragma: no cover - env-dependent optional import
         raise WSDependencyMissing("websockets package is required for live M3 user-channel ingest") from exc
-    return websockets.connect(endpoint)
+    # websockets>=16 defaults to proxy=True and auto-detects HTTPS_PROXY from the
+    # environment.  The daemon plist sets HTTPS_PROXY=localhost:7890 (used for REST
+    # calls through the local proxy) but wss://ws-subscriptions-clob.polymarket.com
+    # is intentionally excluded from that proxy — WebSocket keepalive traffic must
+    # reach the server directly without CONNECT-tunnel overhead.  Pass proxy=None
+    # to bypass the proxy for all WS connections regardless of env var state.
+    # Antibody: test_ws_connect_bypasses_proxy in test_user_channel_ws_auto_derive.py
+    return websockets.connect(endpoint, proxy=None)

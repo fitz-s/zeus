@@ -303,22 +303,65 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
     from src.data.polymarket_client import PolymarketClient
     from src.control.ws_gap_guard import record_gap
-    from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor
+    from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth
 
     adapter = PolymarketClient()._ensure_v2_adapter()
+
+    # Source L2 API credentials from the adapter's SDK client, which derives them
+    # via create_or_derive_api_key().  This is the ONLY correct source of truth for
+    # L2 creds — the plist env vars (POLYMARKET_API_KEY etc.) may be stale or absent
+    # (operator directive 2026-05-01: on-chain derivation is the canonical source).
+    # WSAuth.from_env() is intentionally NOT used here for the live daemon path.
     try:
-        _user_channel_ingestor = PolymarketUserChannelIngestor.from_env(adapter, condition_ids)
+        sdk_client = adapter._sdk_client()
+        sdk_creds = sdk_client.creds
+        ws_auth = WSAuth(
+            api_key=sdk_creds.api_key,
+            secret=sdk_creds.api_secret,
+            passphrase=sdk_creds.api_passphrase,
+        )
+    except Exception as exc:
+        record_gap(f"user_channel_start_failed:creds_unavailable", subscription_state="AUTH_FAILED")
+        logger.error(
+            "M3 user-channel ingestor could not obtain L2 creds from adapter: %s; "
+            "daemon stays in reduce_only=True mode",
+            exc,
+        )
+        return
+
+    try:
+        _user_channel_ingestor = PolymarketUserChannelIngestor(adapter, condition_ids, auth=ws_auth)
     except Exception as exc:
         record_gap(f"user_channel_start_failed:{type(exc).__name__}", subscription_state="AUTH_FAILED")
         raise
 
+    _WS_RETRY_BASE_SECONDS = 5
+    _WS_RETRY_MAX_SECONDS = 300  # cap at 5 minutes
+
     def _runner() -> None:
         import asyncio
+        import math
 
-        try:
-            asyncio.run(_user_channel_ingestor.start())
-        except Exception as exc:
-            logger.error("M3 user-channel ingestor stopped: %s", exc, exc_info=True)
+        attempt = 0
+        while True:
+            try:
+                asyncio.run(_user_channel_ingestor.start())
+                # start() returned cleanly — server closed the connection gracefully.
+                logger.warning("M3 user-channel ingestor exited cleanly; reconnecting")
+            except Exception as exc:
+                logger.error("M3 user-channel ingestor stopped: %s", exc, exc_info=True)
+            attempt += 1
+            backoff = min(
+                _WS_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 6)),
+                _WS_RETRY_MAX_SECONDS,
+            )
+            logger.info(
+                "M3 user-channel ingestor will reconnect in %.0fs (attempt %d)",
+                backoff,
+                attempt,
+            )
+            import time as _time
+            _time.sleep(backoff)
 
     _user_channel_thread = threading.Thread(
         target=_runner,
