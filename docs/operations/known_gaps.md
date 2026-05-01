@@ -1,5 +1,7 @@
 # Known Gaps — Venus Evolution Worklist
 
+**NOTE:** Closed entries moved to known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
+
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
 
@@ -152,44 +154,6 @@ production DB mutation were performed.
 | Monitoring/exit | PARTIAL | LOW monitor/Day0 and exit partial fills are locally repaired; whale-toxicity is now orderbook-adjacent pressure, not true all-market print-sweep detection |
 | Settlement/learning | PARTIAL | harvester HIGH/LOW metric/source/station lineage and pending-exit settlement are locally repaired; live harvester flag and production writes remain operator-gated |
 | Observability | PARTIAL | v2 row-count shadow-table false alarm is closed; broader live-readiness projections remain non-authority |
-
-### [OPEN P1] Day0 observation path can bypass settlement-source routing
-
-**Location:** `src/data/observation_client.py::get_current_observation` and
-`_fetch_wu_observation`; `config/cities.json` Hong Kong and Paris rows.
-**Problem:** Day0 observation fetch tries WU geocode timeseries for every city
-before checking settlement source type. A read-only probe on 2026-04-28 showed
-Hong Kong, whose config is `settlement_source_type="hko"` with `wu_station=null`,
-returning WU `obs_id=VHHH`. The same probe showed Paris returning WU
-`obs_id=LFPG`, while current Polymarket Paris markets resolve on `LFPB`.
-**Impact:** Day0 high/low observation can be anchored to the wrong physical
-station even when settlement semantics correctly say HKO or the live market
-source says LFPB. This directly affects Day0 p_raw, shoulder capture, monitor
-refresh, and exit decisions.
-**False-positive boundary:** London probe returned `obs_id=EGLC`, matching its
-WU config. The issue is source-routed cities and any city where geocode-nearest
-station differs from the contract station.
-**2026-04-30 recheck:** Entry evaluation now has an
-`OBSERVATION_SOURCE_UNAUTHORIZED` gate for executable Day0 entries and only
-allows `wu_api` for `settlement_source_type="wu_icao"`. That is a partial
-entry-side guard, not a full fix. A local no-network monkeypatch still showed
-`get_current_observation()` calling the WU geocode endpoint for a Hong Kong
-`settlement_source_type="hko"` city and returning `source="wu_api"`, and
-`Day0ObservationContext` still carries no `obs_id`/station field. The Day0
-monitor refresh path consumes `_fetch_day0_observation()` directly and does not
-apply the evaluator's source-policy rejection before building `Day0SignalInputs`.
-**Proposed remediation:**
-1. Route Day0 observation by `settlement_source_type`, not by generic provider
-   priority.
-2. For WU cities, require returned `obs_id` to match the contract station or a
-   dated approved station map.
-3. For HKO, skip WU/IEM entirely and use an HKO-native current observation path;
-   if HKO current data is unavailable, fail closed for Day0 HK entries.
-4. Persist `obs_id`/source station in `Day0ObservationContext` and
-   probability-trace facts.
-**Acceptance evidence:** HK Day0 never returns VHHH/WU as settlement observation;
-Paris Day0 only returns LFPB after the Paris source decision; mismatched obs_id
-produces structured no-trade.
 
 ### [OPEN P1] No production executable snapshot producer/refresher was found
 
@@ -349,55 +313,6 @@ appear to lower or override exit thresholds as documented.
    blocks entries and monitors.
 **Acceptance evidence:** ORANGE produces deterministic favorable-exit intents
 for qualifying held positions and no longer has identical behavior to YELLOW.
-
-### [MITIGATED 2026-04-30; RESIDUAL P3] Whale-toxicity uses orderbook-adjacent pressure, not all-market prints
-
-**Location:** `src/engine/monitor_refresh.py::refresh_position`,
-`src/state/portfolio.py::Position.evaluate_exit`, and
-`src/execution/exit_triggers.py::evaluate_exit_triggers`.
-**Original problem:** Exit logic had a `WHALE_TOXICITY` immediate-exit branch
-and the execution module advertised adjacent-bin sweep detection, but monitor
-refresh always initialized `pos.last_monitor_whale_toxicity = None`. The
-portfolio exit path therefore recorded only `whale_toxicity_unavailable`.
-**Current behavior:** Monitor refresh now computes a narrow orderbook-adjacent
-pressure detector for held YES positions. It requires VERIFIED sibling-bin
-metadata and fresh adjacent CLOB top-book facts, compares adjacent YES pressure
-against the held bin with a 5c recent-surge margin or stricter 15c static
-pressure fallback, and requires visible bid notional at least as large as the
-position notional floor. `buy_no` positions are marked not-applicable rather
-than falsely treating adjacent YES buying as toxic.
-**False-positive boundary:** This is not a true all-market trade-print whale
-sweep detector. Zeus's current V2 adapter exposes `get_trades`, and Polymarket
-documents that surface as authenticated account trade history. Public
-market-trade event methods are separate and not wired into this repo path, so
-Zeus does not claim print-level whale detection without a market-stream
-producer. Missing Gamma/CLOB facts leave the field `None`; clear facts set it
-to `False`; strong adjacent pressure sets it to `True`.
-**Evidence:** `tests/test_lifecycle.py::TestMonitorWhaleToxicity` covers toxic,
-clear, unverified-scan unknown, and `buy_no` not-applicable cases. Selected
-monitor-to-exit runtime seams prove `whale_toxicity` still flows through
-`ExitContext` without corrupting Day0 monitor validations.
-**Residual:** If the operator wants a literal "whale swept adjacent bin" claim,
-add a dedicated market-level trade/websocket feed with threshold/lookback
-validation. That is an enhancement beyond the current orderbook-pressure safety
-gate, not a blocker for the current non-Paris local code path.
-
-### [MITIGATED 2026-04-30; RESIDUAL P2] Entry partial fills preserve filled exposure after remainder cancel
-
-**Location:** `src/execution/fill_tracker.py::_check_entry_fill`,
-`_record_partial_entry_observed`.
-**Original problem:** A `PARTIAL` entry could remain `pending_tracked`; after the
-remainder timed out and cancellation succeeded, the entire local position could
-be voided as `UNFILLED_ORDER`, losing already-filled shares.
-**Antibody deployed:** `PARTIAL` now records filled shares, fill price, and cost
-basis without marking the entry active or verified. If the remainder is
-cancelled or expires after observed fill, the position stays `pending_tracked`
-with `partial_remainder_cancelled` status instead of being voided or promoted to
-success before `CONFIRMED`.
-**Evidence:** `tests/test_live_safety_invariants.py::test_partial_remainder_cancel_preserves_filled_exposure`.
-**Residual:** Rich command-fact semantics for partial->failed/retrying and a
-confirmed optimistic-vs-final partial ledger remain a separate packet. The
-specific void-after-cancel exposure-loss bug is no longer an active open gap.
 
 ### [OPEN P1] Exit partial fills do not reduce local position exposure
 
@@ -895,58 +810,6 @@ block non-Day0 opening/update modes.
 **Acceptance evidence:** A `day0_capture` dry-run with a fresh <6h market reaches
 `MarketCandidate(... discovery_mode='day0_capture')`; a >6h market is rejected
 with a structured discovery-window reason, not silently removed by two filters.
-
-### [MITIGATED 2026-04-30; RESIDUAL P1] Live fee-rate `base_fee` shape is parsed, but unit/provenance semantics remain unresolved
-
-**Location:** `src/data/polymarket_client.py::get_fee_rate`,
-`src/engine/evaluator.py::_fee_rate_for_token`,
-`src/engine/evaluator.py::_size_at_execution_price_boundary`.
-**2026-04-30 recheck:** `PolymarketClient.get_fee_rate()` now accepts
-`base_fee`, `baseFee`, `fee_rate_bps`, `feeRateBps`, `feeRate`, `fee_rate`,
-`takerFeeRate`, and `taker_fee_rate`, and `tests/test_v2_adapter.py` covers the
-current `base_fee` shape. The original parser-shape blocker is therefore
-mitigated. The entry remains active because the code returns the raw numeric
-`base_fee` as the `polymarket_fee()` coefficient, while the documented formula
-expects a fractional fee-rate coefficient; raw response capture and conversion
-basis are still not persisted into decision evidence.
-**Original problem:** The live evaluator asks the CLOB client for a token-specific fee
-rate before Kelly sizing. `PolymarketClient.get_fee_rate()` calls
-`https://clob.polymarket.com/fee-rate?token_id=...` but only accepts fields such
-as `feeRate`, `fee_rate`, `takerFeeRate`, or `taker_fee_rate`. Current official
-Polymarket documentation and a live read-only weather-token request show the
-endpoint returning `{"base_fee": <integer>}`. Because `base_fee` is not parsed,
-the client raises `RuntimeError`, `_fee_rate_for_token()` converts that into
-`FeeRateUnavailableError`, and evaluator rejects the candidate at
-`EXECUTION_PRICE_UNAVAILABLE`.
-**Read-only reproduction:** On 2026-04-29, querying a current Paris weather YES
-token returned HTTP 200 with `{"base_fee":1000}` from `/fee-rate`. Calling
-`PolymarketClient().get_fee_rate(token)` on the same token produced
-`RuntimeError: Fee-rate response missing feeSchedule.feeRate ...`.
-**Residual impact:** Even after market discovery, signal, calibration, and
-executable snapshot gates are repaired, live entry sizing can still be wrong if
-the current CLOB `base_fee` integer is interpreted as the wrong
-`polymarket_fee()` coefficient. This is now a unit/provenance compatibility
-blocker, not a parser-shape blocker or alpha/model limitation.
-**False-positive boundary:** If runtime injects a test/dummy `clob` without
-`get_fee_rate`, evaluator falls back to `FEE_RATE_WEATHER`. The live path uses
-the real client method, so unknown fee response units must be converted or fail
-closed with evidence.
-**Proposed remediation:**
-1. Parse `base_fee` from `/fee-rate` and convert it to the exact fee-rate unit
-   expected by `polymarket_fee()`, with an explicit test against official docs and
-   live fixture JSON.
-2. Decide whether sizing should use category reality-contract fallback only when
-   fee-rate endpoint is unavailable, or fail closed when endpoint returns an
-   unknown shape.
-3. Store raw fee response, converted fee rate, and conversion basis in decision
-   evidence/executable snapshot facts.
-4. Add tests for `{"base_fee": 1000}`, legacy `feeRate`, disabled-fee shape, and
-   malformed response.
-**Acceptance evidence:** A current weather token's `/fee-rate` response parses
-without exception, the converted value matches the intended Polymarket fee
-formula units, and evaluator no longer rejects otherwise-valid candidates at
-`EXECUTION_PRICE_UNAVAILABLE` solely because the response field is `base_fee`.
-
 
 ### [OPEN P1] Final SDK submission envelope is not persisted after CLOB submit
 

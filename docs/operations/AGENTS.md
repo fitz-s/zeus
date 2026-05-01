@@ -25,7 +25,6 @@ index, or archive catalog.
 | `known_gaps.md` | Active operational gap register; moved from docs root |
 | `current_data_state.md` | Active current-fact surface for audited data posture |
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
-| `runtime_artifact_inventory.md` | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 
@@ -35,23 +34,8 @@ law or implementation permission.
 
 ### Active Execution Packet
 
-No active execution packet is frozen. The latest closeout evidence packet is
-`task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/plan.md`.
-
-Branch facts show the Immediate 4.1.A-C group and P0 4.2.A/B/C slices are
-already landed and closed; do not reuse those slices as execution packets
-without new evidence. The latest implementation packets closed P2 backfill
-completeness, P2 4.4.A1/A2 revision history, P3 4.5.A metric-read linter
-enforcement, the P3 residual replay usage-path guard, and P3 4.5.B-lite
-obs_v2 reader-gate consumer hardening. The latest closeout evidence packet is
-the operations package cleanup packet; the prior P4 readiness checker remains
-read-only evidence that P4 mutation is blocked by operator evidence. This
-router does not authorize production DB mutation, canonical v2 population,
-market-identity backfill, live executor DB authority, legacy-settlement
-promotion, broad P1 source-role/view work, live daily-ingest changes, row-level
-quarantine, shared obs_v2 view redesign, hourly high/low metric placement, or
-P4 data population. Freeze a new packet through `current_state.md` before any
-next implementation slice.
+No active execution packet is frozen. Freeze a new packet through
+`current_state.md` before starting any implementation slice.
 
 ### Packet Evidence
 
@@ -103,28 +87,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `known_gaps_archive.md` | archive interface | Closed gap antibody archive; historical immune-system record, not active gap authority |
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
-| `runtime_artifact_inventory.md` | active support | Inventory for runtime-local planning artifacts mirrored into repo control |
 | `data_rebuild_plan.md` | active support | Upstream data-rebuild plan; not executable from topology packets |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
-| `task_2026-04-26_polymarket_clob_v2_migration/` | packet evidence | Polymarket CLOB V1→V2 migration packet; now supporting R3 Z0 source-of-truth correction and later R3 CLOB V2 phases |
-| `task_2026-04-26_ultimate_plan/` | packet evidence | R3 ultimate implementation packet for Zeus CLOB V2 live-money execution and dominance infrastructure; phase cards, boot notes, work records, reviews, and M3 user-channel ingest evidence live under `r3/` |
-| `task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | packet evidence | R3 Z0 packet-local live-money invariant summary for CLOB V2; not a durable authority doc |
-| `task_2026-04-29_design_simplification_audit/` | packet evidence | First-principles audit plus phased repair evidence for Open-Meteo/TIGGE source authority, fallback semantics, paper/live/shadow residue, and live-flow simplification; no source-routing, live-deploy, production DB mutation, or calibration authority by presence alone |
-| `task_2026-04-29_design_simplification_audit/README.md` | packet evidence | Local index for the design-simplification audit packet |
-| `task_2026-04-29_design_simplification_audit/findings.md` | packet evidence | Ranked first-principles findings, repair flows, and phase status notes |
-| `task_2026-04-29_design_simplification_audit/simplification_plan.md` | packet evidence | Phased live-flow simplification and repair plan |
-| `task_2026-04-29_design_simplification_audit/evidence.md` | packet evidence | Command outputs, probes, reviews, and verification receipts for the packet |
-| `task_2026-04-29_design_simplification_audit/native_multibin_buy_no_implementation_spec.md` | packet evidence | Native executable multi-bin buy_no implementation handoff; no live authorization or production mutation by presence alone |
-| `task_2026-04-29_design_simplification_audit/probability_execution_split_spec.md` | packet evidence | Critic-approved sequencing spec for separating market-prior probability, executable token cost, live economic hypotheses, executor authority, and reporting cohorts; no live authorization or production mutation by presence alone |
-| `task_2026-04-29_design_simplification_audit/missing_shoulder_support_layer_plan.md` | packet evidence | Revised implementation plan for separating contract support topology from executable weather-bin surfaces; no live authorization or production mutation by presence alone |
-| `task_2026-04-30_reality_semantics_refactor_package/` | package input | Compaction-safe full reality-semantics review plus mirrored pricing-semantics cutover package under `evidence/source_package/`; package input only, not source-routing, live-deploy, production DB mutation, config flip, schema migration apply, live venue submission, or strategy-promotion authority |
-| `task_2026-04-30_reality_semantics_refactor_package/README.md` | package input | Local index for the compaction-safe reality-semantics refactor package |
-| `task_2026-04-30_reality_semantics_refactor_package/START_HERE.md` | package input | Startup read order, commands, current decision, and non-authorization boundary for the refactor package |
-| `task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md` | package input | Phase workflow, skill choices, execution mode, review gates, and stop conditions before source edits |
-| `task_2026-04-30_reality_semantics_refactor_package/REFERENCED_FILES.md` | package input | Durable file reference map for package evidence, root authority, core source seams, tests, and current baseline |
-| `task_2026-04-30_reality_semantics_refactor_package/ENGINEERING_ETHIC.md` | package input | Engineering ethic for a live quant-machine semantics refactor; no live or production authority by presence alone |
-| `task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_EXECUTION_PLAN.md` | package input | Bounded Phase 0/A execution plan for topology admission and first guardrail tests before runtime source edits |
-| `task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md` | package input | Progress evidence for the first guardrail slice; package evidence only, not live/prod authorization |
+| `open_work_items.md` | active support | Consolidated tail items from archived April 2026 task packets; genuine open work only |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
