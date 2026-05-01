@@ -1691,6 +1691,12 @@ def _merge_task_text(task: str) -> str:
     return re.sub(r"\bpre[-_ ]merge\b", "premerge", task.lower())
 
 
+def _task_text_contains_marker(task_l: str, marker: str) -> bool:
+    if marker.isascii():
+        return re.search(rf"(?<![A-Za-z0-9_]){re.escape(marker)}(?![A-Za-z0-9_])", task_l) is not None
+    return marker in task_l
+
+
 def _infer_merge_state(task: str, explicit: str | None, sources: dict[str, str]) -> str:
     explicit_state = _clean_typed(explicit)
     if explicit_state and explicit_state in MERGE_STATES:
@@ -1718,7 +1724,7 @@ def _infer_merge_state(task: str, explicit: str | None, sources: dict[str, str])
     if "narrow conflict" in task_l or "mechanical conflict" in task_l:
         sources["merge_state"] = "task_hint"
         return "narrow_conflict"
-    if re.search(r"\b(?:merge|rebase|pull|am|cherry[-_ ]?pick)\b", task_l) or "conflict" in task_l:
+    if re.search(r"\b(?:merge|rebase|pull|git[-_ ]?am|cherry[-_ ]?pick)\b", task_l) or "conflict" in task_l:
         sources["merge_state"] = "task_hint"
         return "unknown"
     sources["merge_state"] = "default"
@@ -1741,14 +1747,14 @@ def _task_is_planning_package(task: str, files: list[str]) -> bool:
         "准备修复",
         "分组",
     )
-    if any(marker in task_l for marker in planning_markers):
+    if any(_task_text_contains_marker(task_l, marker) for marker in planning_markers):
         return True
     semantic_files = [
         path
         for path in files
         if path.startswith(("architecture/", "src/", ".claude/hooks/", "tests/"))
     ]
-    return len(semantic_files) > 4 and any(word in task_l for word in ("issues", "critical", "fix"))
+    return len(semantic_files) > 4 and any(_task_text_contains_marker(task_l, word) for word in ("issues", "critical", "fix"))
 
 
 def _infer_artifact_target(task: str, files: list[str], profile: str, explicit: str | None, sources: dict[str, str]) -> str:

@@ -4646,6 +4646,33 @@ def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
     assert card["suggested_next_command"] is None
 
 
+def test_operation_vector_does_not_misread_first_person_am_as_merge():
+    digest = topology_doctor.build_digest(
+        "I am updating lifecycle projection validation",
+        ["src/state/lifecycle_manager.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert card["merge_evidence_required"]["required"] is False
+    assert card["dominant_driver"] != "merge_conflict_first"
+
+
+def test_operation_vector_does_not_misread_explanation_as_plan():
+    digest = topology_doctor.build_digest(
+        "tighten route-card explanation for runtime profile",
+        ["scripts/topology_doctor.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert card["operation_vector_sources"]["operation_stage"] == "side_effect"
+    assert card["dominant_driver"] != "planning_package_split"
+
+
 def test_operation_vector_guides_broad_fix_package_to_planning_packet():
     digest = topology_doctor.build_digest(
         "ultrareview-25 fix package: harden pre-commit/pre-merge hooks fail-closed, "
