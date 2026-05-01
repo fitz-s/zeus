@@ -218,7 +218,8 @@ invariants:
     enforced_by:
       spec_sections: [P9.5]
       tests:
-        - tests/test_provenance_enforcement.py
+        - tests/test_provenance_enforcement.py::TestUnregisteredConstantRaises::test_unregistered_constant_raises
+        - tests/test_provenance_enforcement.py::TestAllStrategyConstantsRegistered::test_kelly_constants_in_registry
     severity: P1
   - id: INV-22
     zones: [K1_governance, K2_runtime]
@@ -377,10 +378,10 @@ invariants:
     enforced_by:
       tests:
         - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_persist_precedes_submit
-        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_submit_unknown_writes_event_with_side_effect_unknown
         - tests/test_executor_command_split.py::TestLiveOrderCommandSplit::test_idempotency_key_collision_raises_before_submit
         - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_persist_precedes_submit
-        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_unknown_writes_event_with_state_unknown
+        - tests/test_executor_command_split.py::TestExitOrderCommandSplit::test_exit_submit_unknown_writes_event_with_side_effect_unknown
         - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_returns_existing_state_acked
         - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_filled_state_returns_pending
         - tests/test_executor_command_split.py::TestIdempotencyCollisionRetry::test_idempotency_collision_with_rejected_state_returns_rejected
@@ -420,9 +421,9 @@ invariants:
       materialization to durable ack closes that window.
     enforced_by:
       tests:
-        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_submitting_command
-        - tests/test_discovery_idempotency.py::test_materialize_skipped_for_unknown_command
-        - tests/test_discovery_idempotency.py::test_materialize_runs_for_acked_command
+        - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_submitting_command
+        - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_skipped_for_unknown_command
+        - tests/test_discovery_idempotency.py::TestMaterializePositionGate::test_materialize_runs_for_acked_command
   - id: INV-33
     zones: [K2_runtime, K3_extension]
     statement: Corrected posterior construction must consume calibrated model belief plus either no market input or a named complete MarketPriorDistribution; raw executable quote/VWMP vectors are legacy-only.

@@ -79,8 +79,7 @@ Risk levels change runtime behavior. Advisory-only risk is forbidden (INV-05).
 | ORANGE | No new entries, exit at favorable prices |
 | RED | Cancel all pending, sweep all active positions |
 
-Overall level = max of all individual levels. Computation error or broken truth
-input → RED. Fail-closed.
+Overall level = max of all individual levels. **Genuine computation error → RED, fail-closed (cancel pending, sweep active). Missing or stale truth input → DATA_DEGRADED, YELLOW-equivalent (block new entries, preserve held positions, alert). The distinction**: RED attests to a known boundary breach; DATA_DEGRADED attests that we cannot prove a breach but cannot disprove one either, so we hold rather than force-sell at unfavorable prices on a transient glitch. Both modes block new entries; only RED sweeps active positions.
 
 **Key file**: `src/riskguard/risk_level.py`
 

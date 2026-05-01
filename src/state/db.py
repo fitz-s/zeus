@@ -510,9 +510,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            data_version TEXT NOT NULL,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
-            temperature_metric TEXT NOT NULL DEFAULT 'high',
+            temperature_metric TEXT NOT NULL,
             -- Slice P2-B1 (PR #19 phase 2, 2026-04-26): bias_corrected
             -- declared explicitly. Pre-fix, the column was added only via
             -- the ALTER TABLE migration block below, so fresh init_schema
