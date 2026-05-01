@@ -19,7 +19,17 @@ from src.state.lifecycle_manager import (
     enter_filled_entry_runtime_state,
     enter_voided_entry_runtime_state,
 )
-from src.state.portfolio import PortfolioState, Position, void_position
+from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    PortfolioState,
+    Position,
+    void_position,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +408,53 @@ def _maybe_append_venue_fill_observation(
                 pass
 
 
+def _apply_entry_fill_economics(
+    pos: Position,
+    *,
+    fill_price: float,
+    shares: float | None,
+    fill_authority: str,
+    full_fill: bool,
+) -> None:
+    if shares is None or shares <= 0 or fill_price <= 0:
+        return
+    submitted_limit = float(
+        getattr(pos, "entry_price_submitted", 0.0)
+        or getattr(pos, "entry_price", 0.0)
+        or 0.0
+    )
+    submitted_shares = float(getattr(pos, "shares_submitted", 0.0) or 0.0)
+    if submitted_shares <= 0:
+        submitted_shares = float(
+            shares if full_fill else getattr(pos, "shares", 0.0) or shares
+        )
+    filled_cost_basis = float(shares) * float(fill_price)
+    pos.target_notional_usd = float(
+        getattr(pos, "target_notional_usd", 0.0)
+        or getattr(pos, "size_usd", 0.0)
+        or 0.0
+    )
+    pos.entry_price_submitted = submitted_limit
+    pos.submitted_notional_usd = (
+        submitted_shares * submitted_limit if submitted_limit > 0 else 0.0
+    )
+    pos.shares_submitted = submitted_shares
+    pos.entry_price_avg_fill = float(fill_price)
+    pos.shares_filled = float(shares)
+    pos.filled_cost_basis_usd = filled_cost_basis
+    pos.shares_remaining = max(0.0, submitted_shares - float(shares))
+    pos.entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
+    pos.fill_authority = fill_authority
+    _refresh_corrected_economics_eligibility(pos)
+
+
+def _refresh_corrected_economics_eligibility(pos: Position) -> None:
+    pos.corrected_executable_economics_eligible = (
+        pos.has_fill_economics_authority
+        and pos.pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+    )
+
+
 def _mark_entry_filled(
     pos: Position,
     payload,
@@ -429,6 +486,13 @@ def _mark_entry_filled(
         pos.state = "quarantine_fill_failed"
         return "still_pending", True, False
 
+    _apply_entry_fill_economics(
+        pos,
+        fill_price=fill_price,
+        shares=shares,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        full_fill=True,
+    )
     pos.entry_price = fill_price
     pos.entry_order_id = pos.entry_order_id or pos.order_id
     pos.order_id = pos.order_id or pos.entry_order_id or ""
@@ -498,6 +562,13 @@ def _record_partial_entry_observed(
         pos.state = "quarantine_fill_failed"
         return "still_pending", True, False
 
+    _apply_entry_fill_economics(
+        pos,
+        fill_price=fill_price,
+        shares=shares,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+        full_fill=False,
+    )
     pos.entry_price = fill_price
     pos.entry_order_id = pos.entry_order_id or pos.order_id
     pos.order_id = pos.order_id or pos.entry_order_id or ""
@@ -537,6 +608,13 @@ def _record_optimistic_entry_observed(
         pos.state = "quarantine_fill_failed"
         return "still_pending", True, False
 
+    _apply_entry_fill_economics(
+        pos,
+        fill_price=fill_price,
+        shares=shares,
+        fill_authority=FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
+        full_fill=False,
+    )
     pos.entry_price = fill_price
     pos.entry_order_id = pos.entry_order_id or pos.order_id
     pos.order_id = pos.order_id or pos.entry_order_id or ""
@@ -642,6 +720,8 @@ def _check_entry_fill(
             cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
             if cancel_succeeded:
                 if _position_has_observed_exposure(pos):
+                    pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
+                    _refresh_corrected_economics_eligibility(pos)
                     pending_outcome, pending_dirty, pending_tracker_dirty = _update_pending_status(
                         pos,
                         "partial_remainder_cancelled",
@@ -662,6 +742,8 @@ def _check_entry_fill(
             if getattr(pos, "state", "") == "quarantine_fill_failed":
                 return outcome, dirty, tracker_dirty
         if _position_has_observed_exposure(pos):
+            pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
+            _refresh_corrected_economics_eligibility(pos)
             pending_outcome, pending_dirty, pending_tracker_dirty = _update_pending_status(
                 pos,
                 "partial_remainder_cancelled",
@@ -673,6 +755,8 @@ def _check_entry_fill(
         cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
         if cancel_succeeded:
             if _position_has_observed_exposure(pos):
+                pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
+                _refresh_corrected_economics_eligibility(pos)
                 return _update_pending_status(
                     pos,
                     "partial_remainder_cancelled",
@@ -771,7 +855,10 @@ def _position_has_observed_exposure(pos: Position) -> bool:
     if str(getattr(pos, "order_status", "") or "").lower() not in observed_statuses:
         return False
     try:
-        return float(getattr(pos, "shares", 0) or 0) > 0
+        return (
+            float(getattr(pos, "shares_filled", 0) or 0) > 0
+            or float(getattr(pos, "shares", 0) or 0) > 0
+        )
     except (TypeError, ValueError):
         return False
 

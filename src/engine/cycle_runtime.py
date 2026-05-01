@@ -23,6 +23,14 @@ from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
 )
+from src.state.portfolio import (
+    CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
+    ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+    FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+)
 
 
 CANONICAL_STRATEGY_KEYS = {
@@ -951,8 +959,49 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
             f"state={state!r} env={env!r}; entry materialization requires an authoritative bankroll snapshot"
         )
     now = deps._utcnow()
-    entry_price = result.fill_price or result.submitted_price or decision.edge.entry_price
-    shares = result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0)
+    fill_price = float(result.fill_price or 0.0)
+    submitted_limit_price = float(result.submitted_price or 0.0)
+    fallback_edge_price = float(decision.edge.entry_price or 0.0)
+    entry_price = fill_price or submitted_limit_price or fallback_edge_price
+    shares = float(result.shares or (decision.size_usd / entry_price if entry_price > 0 else 0.0))
+    target_notional_usd = float(decision.size_usd or 0.0)
+    submitted_notional_usd = (
+        shares * submitted_limit_price if submitted_limit_price > 0 and shares > 0 else 0.0
+    )
+    corrected_shadow = {}
+    try:
+        corrected_shadow = (
+            decision.tokens.get("executable_snapshot_reprice", {})
+            .get("corrected_pricing_shadow", {})
+        )
+    except AttributeError:
+        corrected_shadow = {}
+    pricing_semantics_version = str(
+        corrected_shadow.get("pricing_semantics_version")
+        or "legacy_unclassified"
+    )
+    if fill_price > 0 and shares > 0:
+        entry_price_avg_fill = fill_price
+        shares_filled = shares
+        filled_cost_basis_usd = shares * fill_price
+        shares_remaining = 0.0
+        entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
+        fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        corrected_executable_economics_eligible = (
+            pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+        )
+    else:
+        entry_price_avg_fill = 0.0
+        shares_filled = 0.0
+        filled_cost_basis_usd = 0.0
+        shares_remaining = shares
+        entry_economics_authority = (
+            ENTRY_ECONOMICS_SUBMITTED_LIMIT
+            if submitted_limit_price > 0
+            else ENTRY_ECONOMICS_MODEL_EDGE_PRICE
+        )
+        fill_authority = FILL_AUTHORITY_NONE
+        corrected_executable_economics_eligible = False
     timeout_at = ""
     if result.timeout_seconds:
         timeout_at = (now + timedelta(seconds=result.timeout_seconds)).isoformat()
@@ -974,7 +1023,26 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         p_posterior=decision.edge.p_posterior,
         edge=decision.edge.edge,
         shares=shares,
-        cost_basis_usd=decision.size_usd,
+        cost_basis_usd=filled_cost_basis_usd or decision.size_usd,
+        target_notional_usd=target_notional_usd,
+        submitted_notional_usd=submitted_notional_usd,
+        filled_cost_basis_usd=filled_cost_basis_usd,
+        entry_price_submitted=submitted_limit_price,
+        entry_price_avg_fill=entry_price_avg_fill,
+        shares_submitted=shares,
+        shares_filled=shares_filled,
+        shares_remaining=shares_remaining,
+        entry_cost_basis_id=str(corrected_shadow.get("cost_basis_id") or ""),
+        entry_cost_basis_hash=str(corrected_shadow.get("cost_basis_hash") or ""),
+        entry_economics_authority=entry_economics_authority,
+        fill_authority=fill_authority,
+        pricing_semantics_version=pricing_semantics_version,
+        execution_cost_basis_version=str(
+            corrected_shadow.get("execution_cost_basis_version")
+            or corrected_shadow.get("cost_basis_id")
+            or ""
+        ),
+        corrected_executable_economics_eligible=corrected_executable_economics_eligible,
         bankroll_at_entry=bankroll_at_entry,
         entered_at=now.isoformat() if state == "entered" else "",
         entry_ci_width=max(0.0, decision.edge.ci_upper - decision.edge.ci_lower),
