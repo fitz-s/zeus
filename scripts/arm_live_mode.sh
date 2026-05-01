@@ -89,28 +89,38 @@ os.replace(tmp, state_path)
 print(f"  wrote {state_path} :: state=LIVE_ENABLED")
 PY
 
-# ---- 3) Expire entries_paused override ----
-echo "[arm_live_mode] step 3/3 — expire entries_paused override"
-python3 - <<PY
+# ---- 3) Expire entries_paused override + clear auto-pause tombstone ----
+echo "[arm_live_mode] step 3/3 — expire entries_paused + clear tombstone"
+.venv/bin/python - <<PY
+import sys
+sys.path.insert(0, ".")
+from src.state.db import expire_control_override
 import sqlite3
 conn = sqlite3.connect("state/zeus-world.db")
-cur = conn.cursor()
-row = cur.execute(
-    "SELECT effective_until FROM control_overrides "
-    "WHERE override_id='control_plane:global:entries_paused'"
-).fetchone()
-if row is None:
-    print("  no entries_paused override active — nothing to expire")
-else:
-    cur.execute(
-        "UPDATE control_overrides SET effective_until=? "
-        "WHERE override_id='control_plane:global:entries_paused'",
-        ("$NOW_UTC",),
-    )
-    conn.commit()
-    print(f"  expired entries_paused (was effective_until={row[0]!r}) → now={'$NOW_UTC'}")
+result = expire_control_override(
+    conn,
+    override_id="control_plane:global:entries_paused",
+    expired_at="$NOW_UTC",
+)
+conn.commit()
 conn.close()
+print(f"  override-expire: {result}")
 PY
+
+# control_overrides is a VIEW over control_overrides_history (B070), so
+# direct UPDATE is illegal — must INSERT an 'expire' row via the
+# canonical helper. The tombstone is a separate signal: when a cycle
+# auto-pauses on an exception it writes
+# state/auto_pause_failclosed.tombstone. is_entries_paused() OR's the
+# override and the tombstone, so both must be cleared.
+TOMBSTONE="state/auto_pause_failclosed.tombstone"
+if [[ -f "$TOMBSTONE" ]]; then
+  printf "  removing tombstone "
+  cat "$TOMBSTONE"
+  rm -f "$TOMBSTONE"
+else
+  echo "  no tombstone present"
+fi
 
 echo ""
 echo "[arm_live_mode] DONE — daemons NOT loaded."
