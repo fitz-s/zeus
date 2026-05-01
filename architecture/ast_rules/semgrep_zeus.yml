@@ -23,7 +23,13 @@ rules:
     pattern: _control_state[...]
 
   - id: zeus-no-json-authority-write
-    message: "positions.json and status_summary.json are derived exports only; do not introduce new write paths outside their dedicated export modules."
+    # ultrareview-25 F6 narrowed 2026-05-01: prior pattern matched ALL src/ writes
+    # which made the rule a false-positive minefield (every legitimate file
+    # write — logs, caches, audit trails — got flagged). Now scoped to writes
+    # whose target literal contains "positions.json" or "status_summary.json".
+    # Variable-derived paths (e.g. STATUS_PATH = state_path("status_summary.json"))
+    # in the dedicated export modules remain excluded by paths.exclude.
+    message: "positions.json and status_summary.json are derived exports only; do not introduce new write paths outside their dedicated export modules (src/observability/status_summary.py, src/state/portfolio.py)."
     languages: [python]
     severity: ERROR
     paths:
@@ -34,8 +40,26 @@ rules:
         - src/observability/status_summary.py
         - tests/**/*.py
     pattern-either:
-      - pattern: open(..., "w")
-      - pattern: Path(...).write_text(...)
+      - patterns:
+          - pattern: open($PATH, "w")
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '.*(positions|status_summary)\.json.*'
+      - patterns:
+          - pattern: open($PATH, "wb")
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: '.*(positions|status_summary)\.json.*'
+      - patterns:
+          - pattern: $TARGET.write_text(...)
+          - metavariable-regex:
+              metavariable: $TARGET
+              regex: '.*(positions|status_summary)\.json.*'
+      - patterns:
+          - pattern: $TARGET.write_bytes(...)
+          - metavariable-regex:
+              metavariable: $TARGET
+              regex: '.*(positions|status_summary)\.json.*'
 
   - id: zeus-no-ad-hoc-probability-complement
     message: "Do not use ad hoc probability complements across architecture boundaries; use semantic contracts/helpers or explicit math-isolated modules."
