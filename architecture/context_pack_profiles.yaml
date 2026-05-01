@@ -11,9 +11,11 @@ metadata:
       At operation close, recycle context into one compact feedback capsule:
       what scratch/runtime context was promoted, summarized, discarded, or left
       local; one to three Zeus improvement insights with evidence/inference
-      boundaries when relevant; and one topology helped/blocked note. Put it in
-      the final response or an already-required packet work log/receipt, never
-      in a standalone artifact or scope-expanding follow-on task. If routing is
+      boundaries when relevant; and one topology helped/blocked note that names
+      route/admission/risk outcome, semantic match, concrete help, concrete
+      friction, and one next topology delta or none_observed. Put it in the final
+      response or an already-required packet work log/receipt, never in a
+      standalone artifact or scope-expanding follow-on task. If routing is
       needed, use digest intent "direct operation feedback capsule"; do not
       persist through .omx/context handoff files.
 

@@ -69,8 +69,10 @@ The operation-end feedback capsule is a closeout habit, not a packet filename.
 For direct work, keep it in the final response. For packet closeout, append it
 to an already-required work log or receipt. It should briefly capture context
 recovery, Zeus improvement insights, and topology helped/blocked notes without
-creating standalone evidence/findings files or widening the active packet. If
-an agent needs a route card for this habit, use intent
+creating standalone evidence/findings files or widening the active packet. The
+topology note should name the route/admission/risk outcome, whether it matched
+the semantic task, one help, one friction, and one next topology delta or
+`none_observed`. If an agent needs a route card for this habit, use intent
 `direct operation feedback capsule`; do not persist capsules under
 `.omx/context/` or invent `handoff` files in packet folders.
 

@@ -46,8 +46,10 @@ A closeout payload has three distinct concepts:
   default artifact stack for direct T0/T1 edits.
 - A completed operation should recycle context into a compact feedback capsule:
   what was promoted/summarized/discarded/left local, one to three Zeus
-  improvement insights, and topology helped/blocked notes. Direct work records
-  this in the final response; packet closeout records it only in an
+  improvement insights, and topology helped/blocked notes. The topology note
+  should name route/admission/risk, semantic match, one help, one friction, and
+  one next topology delta or `none_observed`. Direct work records this in the
+  final response; packet closeout records it only in an
   already-required work log or receipt.
 - Planning-lock files need plan evidence before implementation closes.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
