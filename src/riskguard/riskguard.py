@@ -266,6 +266,28 @@ def _trailing_loss_snapshot(
     if status not in TRAILING_LOSS_STATUSES:
         raise RuntimeError(f"unexpected trailing loss status: {status}")
     reference = reference_info.get("reference")
+
+    # Cold-start handling (operator directive 2026-05-01 + architecture review):
+    # `_trailing_loss_reference` returns "no_reference_row" / "insufficient_history"
+    # on a fresh deploy — risk_state has no rows older than the lookback window
+    # (e.g., 24h). The previous behaviour mapped both states to DATA_DEGRADED,
+    # which the cycle reads as "block all entries" — making every fresh deploy
+    # permanently undeployable until someone manually seeds risk_state. That
+    # was a deadlock by design, not the structural intent: when there is no
+    # history yet, no loss can have occurred against it. The right level is
+    # GREEN with an explicit `bootstrap_no_history` annotation that downstream
+    # observability can show. `inconsistent_history` is a different beast — it
+    # means rows exist but disagree, which IS a data integrity signal worth
+    # gating on, so it stays DATA_DEGRADED.
+    if status in ("no_reference_row", "insufficient_history"):
+        return {
+            "loss": 0.0,
+            "level": RiskLevel.GREEN,
+            "degraded": False,
+            "status": f"bootstrap_no_history:{status}",
+            "source": str(reference_info["source"]),
+            "reference": None,
+        }
     if status not in ("ok", "stale_reference") or reference is None:
         return {
             "loss": 0.0,
@@ -283,10 +305,25 @@ def _trailing_loss_snapshot(
         else RiskLevel.GREEN
     )
     
-    # Staleness degrades GREEN to DATA_DEGRADED, but preserves RED.
+    # Staleness handling (operator directive 2026-05-01 + cold-start follow-up):
+    # `stale_reference` = we have a reference row but it's older than the
+    # staleness tolerance (default 2h beyond the lookback cutoff). The previous
+    # behaviour mapped this to DATA_DEGRADED whenever loss didn't already trip
+    # RED — meaning every fresh restart after a long unload window saw the
+    # 17-hour-old reference, flagged stale, and blocked entries. This is
+    # symmetric to the `no_reference_row` cold-start: the reference is from
+    # before the latest deploy and doesn't reflect current state. If there's
+    # no demonstrable loss against it (level_from_loss == GREEN), treat as
+    # bootstrap and unblock. RED stays RED — a stale reference showing a real
+    # loss is still a loss signal worth honouring.
     if status == "stale_reference":
-        level = RiskLevel.RED if level_from_loss == RiskLevel.RED else RiskLevel.DATA_DEGRADED
-        is_degraded = True
+        if level_from_loss == RiskLevel.RED:
+            level = RiskLevel.RED
+            is_degraded = True
+        else:
+            level = RiskLevel.GREEN
+            is_degraded = False
+            status = "bootstrap_stale_reference"
     else:
         level = level_from_loss
         is_degraded = False
