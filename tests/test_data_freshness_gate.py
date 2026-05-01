@@ -274,6 +274,46 @@ class TestAbsentBranchBoot:
         assert verdict.branch == "STALE"
         assert "ecmwf_open_data" in verdict.stale_sources
 
+    # PR #31 Codex P1 antibody (2026-05-01): _startup_freshness_check must
+    # delegate to evaluate_freshness_at_boot, NOT evaluate_freshness_mid_run.
+    # Pre-fix the mid-run helper synthesized ABSENT→all-STALE, making the
+    # boot path's retry loop unreachable and letting a missing
+    # source_health.json proceed silently as degraded. The wrapper must
+    # raise SystemExit when source_health.json is absent through the boot
+    # retry window.
+    def test_startup_freshness_check_raises_systemexit_on_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """_startup_freshness_check must SystemExit when source_health.json is
+        absent across the boot retry window. Regression test for PR #31 P1."""
+        import src.main as main_mod
+        import src.control.freshness_gate as fg
+
+        # Speed up the retry so the test finishes in <1s
+        monkeypatch.setattr(fg, "BOOT_RETRY_MAX_ATTEMPTS", 2)
+        monkeypatch.setattr(fg, "BOOT_RETRY_INTERVAL_SECONDS", 0)
+        # Point STATE_DIR (read inside _startup_freshness_check) at empty tmp_path
+        monkeypatch.setattr(main_mod, "STATE_DIR", tmp_path, raising=False)
+        # Also patch src.config.STATE_DIR since _startup_freshness_check imports
+        # from src.config inside the function body
+        import src.config as cfg
+        monkeypatch.setattr(cfg, "STATE_DIR", tmp_path)
+
+        with pytest.raises(SystemExit, match="source_health.json absent"):
+            main_mod._startup_freshness_check()
+
+    def test_startup_freshness_check_passes_when_fresh(self, tmp_path, monkeypatch):
+        """Positive case: with a fresh source_health.json, _startup_freshness_check
+        returns cleanly (no SystemExit, no exception)."""
+        import src.main as main_mod
+        import src.config as cfg
+
+        _write_health(tmp_path, _all_fresh_sources())
+        monkeypatch.setattr(cfg, "STATE_DIR", tmp_path)
+
+        # Should not raise
+        main_mod._startup_freshness_check()
+
 
 # ---------------------------------------------------------------------------
 # S-4 antibody: run_cycle integration with freshness gate (design §3.1)

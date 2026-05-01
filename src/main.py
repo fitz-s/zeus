@@ -285,49 +285,34 @@ def _write_venue_heartbeat() -> None:
 
 
 def _startup_freshness_check() -> None:
-    """Phase 2 §3.1: data freshness gate at boot (warn-only; Phase 3 will enforce).
+    """§3.1: data freshness gate at boot — uses evaluate_freshness_at_boot.
 
     §3.7 gate split:
-    - Data freshness gate: degrade-or-warn. Operator may override via
-      state/control_plane.json::force_ignore_freshness: ["source_name"].
-    - Wallet gate (_startup_wallet_check): NEVER overridable; hard exit on failure.
+    - Data freshness gate: degrade-or-warn on STALE. Operator may override
+      individual sources via state/control_plane.json::force_ignore_freshness.
+    - Wallet gate (_startup_wallet_check): NEVER overridable; hard exit on
+      failure.
 
-    Phase 2 behavior:
+    Boot behavior (driven by evaluate_freshness_at_boot):
     - FRESH: log at INFO, proceed.
     - STALE: log warning with per-source details, proceed (degraded mode).
-    - ABSENT (after 5-min retry): log critical, proceed anyway (warn-only in P2).
-      Phase 3 will change ABSENT→FATAL here to match the design §3.1 contract.
+    - ABSENT: retry every BOOT_RETRY_INTERVAL_SECONDS up to
+      BOOT_RETRY_MAX_ATTEMPTS, then SystemExit. The boot helper handles retry
+      internally and never returns an ABSENT verdict to this caller.
+
+    Codex PR #31 (P1) fix 2026-05-01: previously called
+    evaluate_freshness_mid_run, which synthesizes ABSENT into a degraded
+    all-STALE verdict. That made the `if branch == "ABSENT"` retry path here
+    unreachable and silently weakened the boot safety contract — a missing
+    source_health.json proceeded immediately as degraded instead of
+    triggering the retry-then-FATAL window. Switching to the boot helper
+    restores the design §3.1 contract.
     """
     from src.config import STATE_DIR
-    from src.control.freshness_gate import (
-        evaluate_freshness_mid_run,
-        BOOT_RETRY_INTERVAL_SECONDS,
-        BOOT_RETRY_MAX_ATTEMPTS,
-    )
-    import time
+    from src.control.freshness_gate import evaluate_freshness_at_boot
 
-    state_dir = STATE_DIR
-    health_path = state_dir / "source_health.json"
-
-    # Phase 2: soft retry at boot (ABSENT warns; Phase 3 will FATAL)
-    for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
-        verdict = evaluate_freshness_mid_run(state_dir)
-        if verdict.branch != "ABSENT":
-            break
-        if attempt < BOOT_RETRY_MAX_ATTEMPTS:
-            logger.info(
-                "source_health.json absent at boot — retry %d/%d in %ds",
-                attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
-            )
-            time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
-        else:
-            logger.critical(
-                "source_health.json absent after %d retries — WARN ONLY in Phase 2. "
-                "Phase 3 will make this FATAL. Is com.zeus.data-ingest running? "
-                "Check: launchctl list com.zeus.data-ingest",
-                BOOT_RETRY_MAX_ATTEMPTS,
-            )
-            return  # Phase 2: warn-only, do not exit
+    # evaluate_freshness_at_boot handles retry + SystemExit on ABSENT internally.
+    verdict = evaluate_freshness_at_boot(STATE_DIR)
 
     if verdict.branch == "STALE":
         logger.warning(
