@@ -177,7 +177,66 @@ The 2026-05-01 alignment with the new topology system surfaced that `topology gr
 - Antibody tests: 5/5 passed.
 - topology admission: `pricing semantics authority cutover` admitted SQL file; planning-lock check ok.
 
-### P2b / P3 (queued)
+### P3-A: APPLIED 2026-05-01 — Manifest cross-ref cleanups (F7/F11/F15/F16-doc)
+
+`commit 4e89d00f`. Trivial path/registry fixes:
+- F7 `architecture/kernel_manifest.yaml:108`: `migrations/` → `architecture/`
+- F11 `git rm --cached .claude/baton_state.json` (gitignored runtime state)
+- F15 `.claude/CLAUDE.md:1`: `/zeus/AGENTS.md` (filesystem absolute) → relative `AGENTS.md`
+- F16 `architecture/ast_rules/forbidden_patterns.md` FM-08: filled in explicit rule name (`zeus-no-default-unit-fallback`), test, severity (`WARNING`), and follow-up note about WARNING→ERROR upgrade prerequisites.
+
+F14 (`.code-review-graph/graph.db` double-state) was already closed by pre-existing commit `9ae16a63 Remove .code-review-graph/graph.db from tracking`.
+
+### P3-B: APPLIED 2026-05-01 — inv_prototype idempotency + INV-23↔NC-17 cleanup (F5/F10/F12)
+
+`commit 7743f692`.
+- F5+F10 `architecture/inv_prototype.py`: `validate()` is now PURE (does not mutate `self.drift_findings`). `all_drift_findings()` is idempotent by construction. 2 antibody tests added.
+- F12 `architecture/invariants.yaml` + `architecture/negative_constraints.yaml`: removed inert `enforced_by.negative_constraints: [NC-17]` cross-ref from INV-23 and `invariants: [INV-23]` from NC-17. The two share a "no false certainty" theme but mechanism is layer-disjoint (INV-23 = portfolio-export authority labels; NC-17 = ExecutionIntent capability labels). Comment annotations preserve the theme connection without polluting the mechanism field.
+
+### P2b: APPLIED 2026-05-01 — semgrep narrow zeus-no-json-authority-write (F6)
+
+`commit 92bd0aaa`. Replaced over-broad `pattern-either: open(..., "w") | Path(...).write_text(...)` with metavariable-regex matching `$PATH`/`$TARGET` source text against `(positions|status_summary)\.json`. Now flags `open("data/positions.json", "w")` but not `open(some_log_path, "w")`. Also added `wb` and `write_bytes` patterns.
+
+### P3-C: APPLIED 2026-05-01 — durable OVERRIDE log + tightened verdict anchor (F17/F13)
+
+`commit 51f4c686`.
+- F17: pre-merge hook OVERRIDE path now writes a tab-separated forensic record (timestamp, branch, reason, cwd, command) to `.claude/logs/merge-overrides.log` (gitignored runtime path). Failures emit warning but don't block the override.
+- F13: tightened critic_verdict anchor from `^[[:space:]]*critic_verdict:` to `^critic_verdict:` (no leading whitespace) — schema is strictly flat per `architecture/worktree_merge_protocol.yaml`. Now rejects both commented-out and YAML-nested spoofs.
+- New module-scoped pytest fixture `_protected_branch_worktree` creates a temp `main` worktree once per test session, so all hook regression tests exercise protected-branch code paths regardless of the test runner's current branch (previously tests silently passed via `IS_PROTECTED=0 → exit 0`, illusory coverage).
+
+## 4. Final Status — All Confirmed Findings Addressed
+
+| # | Finding | Resolution | Commit |
+|---|---|---|---|
+| F1+F8 | REPO_ROOT hardcoded | `git rev-parse --show-toplevel` | PR28 `60802f95` |
+| F2 | Stale baseline comment | Header refresh | P1 `9eb45d65` |
+| F3 | Multi-space + git-C bypass | Bash regex (refined in P3-C) | P1 + P3-C |
+| F4 | `plan-*` over-broad | `^(main\|plan-pre[0-9]+(/.*)?\|release-...)$` | P1 |
+| F5+F10 | inv_prototype double-count | `validate()` made pure | P3-B |
+| F6 | semgrep over-broad | metavariable-regex narrow | P2b |
+| F7 | Kernel SQL path | `migrations/` → `architecture/` | P3-A |
+| F9 | DAYO_WINDOW_ENTERED | **REFUTED** — not in code | — |
+| F11 | baton_state.json double-state | `git rm --cached` | P3-A |
+| F12 | INV-23 ↔ NC-17 inert cross-ref | Removed mechanism cite, theme comment | P3-B |
+| F13 | Comment-injection verdict | Anchored regex (refined in P3-C) | P1 + P3-C |
+| F14 | graph.db double-state | (closed by pre-existing `9ae16a63`) | — |
+| F15 | CLAUDE.md absolute path | Relative reference | P3-A |
+| F16 | FM-08 enforcement claim | Doc cleanup; severity upgrade noted as follow-up | P3-A |
+| F17 | OVERRIDE log false claim | Durable log + honest docstring | P1 + P3-C |
+| F18 | DEFAULT 'high' silent fill | Schema dropped + 28 callers + antibody | P2a |
+| P0.5 | 7 archived-path test failures | Removed archived path refs | P1 |
+
+## 5. Remaining Operator-Deferred Follow-ups (NOT in this packet)
+
+- **F16 severity upgrade WARNING → ERROR** for `zeus-no-default-unit-fallback`. Prerequisites: exclude `src/contracts/calibration_bins.py` + `src/contracts/settlement_semantics.py` from the rule's `paths.include` (they are legitimate unit-identity definition sites), and refactor `src/data/observation_client.py:~411` to derive `unit` from the city rather than hardcode `"F"` (ASOS-implicit). Tracked inline in `forbidden_patterns.md` FM-08 entry.
+- **F13 BOM handling**: current behaviour fail-closes (safe) but with a confusing diagnostic when the evidence file has a UTF-8 BOM prefix. Critic ATTACK 4 LOW.
+- **Hook regression suite expansion**: critic ATTACK 8 originally flagged this as HIGH; addressed in P1+P3-C with 21 antibody tests. Future expansion: Path-injection bypass coverage, additional schema-spoof variants.
+
+## 6. Packet Closeout — DONE
+
+All confirmed ultrareview-25 findings addressed across 6 commits on branch `ultrareview25-remediation-2026-05-01`. No operator decisions outstanding for in-packet items. No items legacy at PR-create time.
+
+### (legacy queue — superseded by §3 entries above)
 
 | Packet | Decision | Files | Risk Tier | Topology task wording |
 |---|---|---|---|---|
