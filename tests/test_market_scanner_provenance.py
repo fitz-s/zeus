@@ -17,6 +17,7 @@ state between cases (conftest-free isolation).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshot
 from src.data import market_scanner as ms
 from src.data.market_scanner import (
     MarketSnapshot,
+    build_market_support_topology,
     _clear_active_events_cache,
     _get_active_events,
     _get_active_events_snapshot,
@@ -86,26 +88,121 @@ def _gamma_temperature_event(
     resolution_source: str | None = "https://www.wunderground.com/history/daily/us/ca/los-angeles/KLAX",
     market_resolution_source: str | None = None,
 ) -> dict:
-    market = {
-        "id": market_id,
-        "question": question,
-        "outcomePrices": "[0.55, 0.45]",
-        "outcomes": '["Yes", "No"]',
-        "clobTokenIds": '["token_yes", "token_no"]',
-        "conditionId": "cond1",
-        "active": True,
-        "closed": False,
-    }
-    if market_resolution_source is not None:
-        market["resolutionSource"] = market_resolution_source
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*°?([FC])\s+or\s+higher", question)
+    threshold = int(float(match.group(1))) if match else 68
+    unit = match.group(2) if match else "F"
+    if unit == "F":
+        low_label = f"Will the high temperature be {threshold - 3}°{unit} or below?"
+        center_label = f"Will the high temperature be {threshold - 2}-{threshold - 1}°{unit}?"
+    else:
+        low_label = f"Will the high temperature be {threshold - 2}°{unit} or below?"
+        center_label = f"Will the high temperature be {threshold - 1}°{unit} on April 29?"
+
+    def _market(
+        *,
+        market_id_value: str,
+        condition_id: str,
+        question_value: str,
+        token_suffix: str,
+        yes_price: float,
+    ) -> dict:
+        market = {
+            "id": market_id_value,
+            "question": question_value,
+            "outcomePrices": json.dumps([yes_price, round(1.0 - yes_price, 2)]),
+            "outcomes": '["Yes", "No"]',
+            "clobTokenIds": json.dumps([f"token_yes_{token_suffix}", f"token_no_{token_suffix}"]),
+            "conditionId": condition_id,
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+        }
+        if market_resolution_source is not None:
+            market["resolutionSource"] = market_resolution_source
+        return market
+
+    markets = [
+        _market(
+            market_id_value=f"{market_id}-low",
+            condition_id="cond-low",
+            question_value=low_label,
+            token_suffix="low",
+            yes_price=0.10,
+        ),
+        _market(
+            market_id_value=f"{market_id}-center",
+            condition_id="cond-center",
+            question_value=center_label,
+            token_suffix="center",
+            yes_price=0.35,
+        ),
+        _market(
+            market_id_value=market_id,
+            condition_id="cond1",
+            question_value=question,
+            token_suffix="primary",
+            yes_price=0.55,
+        ),
+    ]
     event = {
         "id": event_id,
         "slug": slug,
         "title": title,
-        "markets": [market],
+        "markets": markets,
     }
     if resolution_source is not None:
         event["resolutionSource"] = resolution_source
+    return event
+
+
+def _gamma_support_event_with_closed_low_shoulder() -> dict:
+    event = _gamma_temperature_event(
+        event_id="support-event",
+        market_id="low-shoulder-market",
+        question="Will the high temperature in Los Angeles be 60°F or below?",
+    )
+    event["markets"] = [
+        {
+            "id": "low-shoulder-market",
+            "question": "Will the high temperature in Los Angeles be 60°F or below?",
+            "outcomePrices": "[0.01, 0.99]",
+            "outcomes": '["Yes", "No"]',
+            "clobTokenIds": '["yes-low-closed", "no-low-closed"]',
+            "conditionId": "cond-low-closed",
+            "questionID": "qid-low-closed",
+            "active": True,
+            "closed": True,
+            "acceptingOrders": False,
+            "enableOrderBook": False,
+        },
+        {
+            "id": "center-market",
+            "question": "Will the high temperature in Los Angeles be 61-62°F?",
+            "outcomePrices": "[0.35, 0.65]",
+            "outcomes": '["Yes", "No"]',
+            "clobTokenIds": '["yes-center", "no-center"]',
+            "conditionId": "cond-center",
+            "questionID": "qid-center",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+        },
+        {
+            "id": "high-shoulder-market",
+            "question": "Will the high temperature in Los Angeles be 63°F or higher?",
+            "outcomePrices": "[0.64, 0.36]",
+            "outcomes": '["Yes", "No"]',
+            "clobTokenIds": '["yes-high", "no-high"]',
+            "conditionId": "cond-high",
+            "questionID": "qid-high",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+        },
+    ]
     return event
 
 
@@ -366,6 +463,72 @@ class TestSourceContractGate:
         assert parsed["source_contract"]["source_family"] == "wu_icao"
         assert parsed["source_contract"]["station_id"] == "KLAX"
         assert parsed["resolution_source"].endswith("/KLAX")
+
+    def test_contract_support_retains_closed_non_executable_shoulder(self):
+        event = _gamma_support_event_with_closed_low_shoulder()
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert [outcome["title"] for outcome in parsed["outcomes"]] == [
+            "Will the high temperature in Los Angeles be 60°F or below?",
+            "Will the high temperature in Los Angeles be 61-62°F?",
+            "Will the high temperature in Los Angeles be 63°F or higher?",
+        ]
+        assert parsed["support_topology"]["topology_status"] == "complete"
+        assert parsed["support_topology"]["executable_mask"] == [False, True, True]
+        assert parsed["outcomes"][0]["executable"] is False
+        assert 0 not in parsed["support_topology"]["token_payload_by_support_index"]
+        assert set(parsed["support_topology"]["token_payload_by_support_index"]) == {1, 2}
+
+    def test_all_child_support_gap_fails_closed_even_when_children_are_executable(self):
+        event = _gamma_support_event_with_closed_low_shoulder()
+        event["markets"][1]["question"] = (
+            "Will the high temperature in Los Angeles be 62-63°F?"
+        )
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is None
+
+    def test_support_topology_builder_separates_support_from_executability(self):
+        topology = build_market_support_topology(
+            _gamma_support_event_with_closed_low_shoulder(),
+            unit="F",
+        )
+
+        assert [b.label for b in topology.support_bins] == [
+            "Will the high temperature in Los Angeles be 60°F or below?",
+            "Will the high temperature in Los Angeles be 61-62°F?",
+            "Will the high temperature in Los Angeles be 63°F or higher?",
+        ]
+        assert topology.executable_mask == (False, True, True)
+        assert [outcome["support_index"] for outcome in topology.support_outcomes] == [0, 1, 2]
+        assert [outcome["support_index"] for outcome in topology.executable_outcomes] == [1, 2]
+
+    def test_missing_tradability_flags_are_not_inferred_executable(self):
+        event = _gamma_support_event_with_closed_low_shoulder()
+        event["markets"][1].pop("acceptingOrders")
+
+        topology = build_market_support_topology(event, unit="F")
+
+        assert topology.executable_mask == (False, False, True)
+        assert [outcome["support_index"] for outcome in topology.executable_outcomes] == [2]
+        assert set(topology.token_payload_by_support_index) == {2}
+
+    def test_current_yes_price_returns_none_for_non_executable_support_child(self, monkeypatch):
+        event = _gamma_support_event_with_closed_low_shoulder()
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+
+        assert ms.get_current_yes_price("cond-low-closed") is None
 
     def test_paris_lfpb_is_rejected_while_configured_lfpg(self):
         event = _gamma_temperature_event(
@@ -629,9 +792,10 @@ class TestSourceContractGate:
 
         assert ms.get_current_yes_price("cond1") == pytest.approx(0.55)
         siblings = ms.get_sibling_outcomes("cond1")
-        assert len(siblings) == 1
-        assert siblings[0]["token_id"] == "token_yes"
-        assert siblings[0]["no_token_id"] == "token_no"
+        assert len(siblings) == 3
+        held = next(outcome for outcome in siblings if outcome["market_id"] == "cond1")
+        assert held["token_id"] == "token_yes_primary"
+        assert held["no_token_id"] == "token_no_primary"
 
     def test_source_quarantine_release_requires_conversion_evidence_refs(self, tmp_path):
         quarantine_path = tmp_path / "source_contract_quarantine.json"

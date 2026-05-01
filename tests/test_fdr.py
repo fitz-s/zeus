@@ -443,12 +443,13 @@ class TestSelectionFamilySubstrate:
             p_value=0.001,
             vwmp=0.50,
             forward_edge=0.05,
+            support_index=0,
         )
 
-        with pytest.raises(ValueError, match="FDR_SELECTED_EDGE_UNEXECUTABLE:40-41°F/buy_no"):
+        with pytest.raises(ValueError, match="FDR_SELECTED_EDGE_UNEXECUTABLE:support_index=0/buy_no"):
             _filter_executable_selected_edges(
                 [edge],
-                {("40-41°F", "buy_no")},
+                {(0, "buy_no")},
             )
 
     def test_multi_bin_full_family_scan_excludes_unexecutable_buy_no(self):
@@ -815,6 +816,7 @@ class TestSelectionFamilySubstrate:
                         p_value=0.001,
                         vwmp=p_market_no,
                         forward_edge=p_posterior_no - p_market_no,
+                        support_index=0,
                     )
                 ]
 
@@ -1063,6 +1065,7 @@ class TestSelectionFamilySubstrate:
                         p_value=0.001,
                         vwmp=0.1,
                         forward_edge=0.1,
+                        support_index=0,
                     )
                 ]
 
@@ -1288,6 +1291,7 @@ class TestSelectionFamilySubstrate:
                         p_value=0.001,
                         vwmp=0.1,
                         forward_edge=0.1,
+                        support_index=0,
                     )
                 ]
 
@@ -1490,6 +1494,7 @@ class TestSelectionFamilySubstrate:
                         p_value=0.001,
                         vwmp=0.1,
                         forward_edge=0.1,
+                        support_index=0,
                     )
                 ]
 

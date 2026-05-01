@@ -268,4 +268,5 @@ class BinEdge:
     p_value: float
     vwmp: float
     forward_edge: float = 0.0
+    support_index: int | None = None
     ev_per_dollar: float = 0.0

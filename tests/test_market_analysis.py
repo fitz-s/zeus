@@ -27,6 +27,7 @@ from src.strategy.market_fusion import (
     vwmp,
 )
 from src.strategy.market_analysis import MarketAnalysis
+from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
 from src.calibration.platt import ExtendedPlattCalibrator, WIDTH_NORMALIZED_SPACE
 from src.types import Bin, BinEdge
 from src.types.temperature import TemperatureDelta
@@ -568,6 +569,40 @@ class TestMarketAnalysis:
         assert ma.supports_buy_no_edges(0) is True
         assert ma.buy_no_market_price(0) == pytest.approx(0.68)
         assert ma.supports_buy_no_edges(1) is False
+
+    def test_non_executable_support_bin_is_not_scanned_or_bootstrapped(self):
+        bins = [
+            Bin(low=None, high=60, label="60°F or below", unit="F"),
+            Bin(low=61, high=62, label="61-62°F", unit="F"),
+            Bin(low=63, high=None, label="63°F or higher", unit="F"),
+        ]
+        p_cal = np.array([0.90, 0.05, 0.05])
+
+        ma = MarketAnalysis(
+            p_raw=p_cal,
+            p_cal=p_cal,
+            p_market=np.array([0.01, 0.02, 0.02]),
+            p_market_no=np.array([0.99, 0.98, 0.98]),
+            buy_no_quote_available=np.array([True, True, True]),
+            executable_mask=np.array([False, True, True]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([59.0, 60.0, 61.0]),
+            unit="F",
+            rng_seed=7,
+        )
+        ma._sigma = 0.0
+
+        edges = ma.find_edges(n_bootstrap=5)
+        assert all(edge.bin.label != "60°F or below" for edge in edges)
+        hypotheses = scan_full_hypothesis_family(ma, n_bootstrap=5)
+        assert {hypothesis.range_label for hypothesis in hypotheses} == {
+            "61-62°F",
+            "63°F or higher",
+        }
+        with pytest.raises(ValueError, match="executable support index 0"):
+            ma._bootstrap_bin(0, 1)
+        assert ma.supports_buy_no_edges(0) is False
 
     def test_market_analysis_corrected_prior_uses_named_distribution(self):
         bins = [

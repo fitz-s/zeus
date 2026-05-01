@@ -40,7 +40,7 @@ def _stub_full_family_scan(monkeypatch):
             assert edge.selected_method
         return [
             FullFamilyHypothesis(
-                index=i,
+                index=int(edge.support_index) if edge.support_index is not None else i,
                 range_label=edge.bin.label,
                 direction=edge.direction,
                 edge=edge.edge,
@@ -109,6 +109,7 @@ def _patch_evaluator(
                 entry_price=entry_price,
                 p_value=0.02,
                 vwmp=entry_price,
+                support_index=1,
             )
             edge.forward_edge = edge.p_posterior - edge.p_market
             return [edge]
