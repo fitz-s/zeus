@@ -5,7 +5,9 @@
 
 import pytest
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import redirect_stdout
 from io import StringIO
 
@@ -186,6 +188,32 @@ def test_navigation_changed_files_aliases_files_instead_of_empty_route():
         write_intent="edit",
     )
     assert payload["route_card"]["admitted_files"] == ["scripts/topology_doctor_cli.py"]
+
+
+def test_navigation_cli_accepts_operation_vector_fields():
+    args = [
+        "--navigation",
+        "--route-card-only",
+        "--json",
+        "--task",
+        "done",
+        "--write-intent",
+        "read_only",
+        "--operation-stage",
+        "closeout",
+        "--artifact-target",
+        "final_response",
+    ]
+
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(args)
+
+    payload = json.loads(buffer.getvalue())
+    assert exit_code == 0
+    assert payload["route_card"]["operation_vector"]["operation_stage"] == "closeout"
+    assert payload["route_card"]["operation_vector"]["artifact_target"] == "final_response"
+    assert payload["route_card"]["persistence_target"] == "final_response"
 
 
 def test_cli_json_parity_for_context_pack_command():
@@ -4537,6 +4565,9 @@ def test_runtime_route_card_contract_matches_schema():
     assert card["task_class"] == "agent_runtime"
     assert card["write_intent"] == "edit"
     assert card["expansion_hints"]
+    assert card["operation_vector"]["operation_stage"]
+    assert card["operation_vector_sources"]
+    assert "structural_decision_hints" in card
 
 
 def test_runtime_claims_appear_in_route_card_and_digest_inputs():
@@ -4566,6 +4597,295 @@ def test_runtime_route_card_explains_generic_source_canary_probe():
     assert "source canary readiness hot-swap" in card["suggested_next_command"]
     assert "src/control/freshness_gate.py" in card["safe_next_files"]
     assert card["merge_evidence_required"]["required"] is False
+
+
+def test_operation_vector_selects_source_canary_without_canonical_phrase():
+    digest = topology_doctor.build_digest(
+        "source canary recovery",
+        ["src/control/freshness_gate.py", "src/engine/cycle_runner.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "source canary readiness hot-swap"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] == "source_canary_readiness_hot_swap"
+
+
+def test_operation_vector_does_not_admit_unrelated_freshness_gate_work_as_canary():
+    digest = topology_doctor.build_digest(
+        "refactor freshness gate logging",
+        ["src/control/freshness_gate.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["profile_selection"]["selected_by"] != "operation_vector"
+    assert "source_behavior" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] != "source_canary_readiness_hot_swap"
+
+
+def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
+    digest = topology_doctor.build_digest(
+        "harden pre-merge hook fail-closed behavior",
+        [".claude/hooks/pre-merge-contamination-check.sh"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert "runtime_hooks" in card["operation_vector"]["mutation_surfaces"]
+    assert card["merge_evidence_required"]["required"] is False
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert card["dominant_driver"] != "merge_conflict_first"
+    assert card["suggested_next_command"] is None
+
+
+def test_operation_vector_does_not_misread_first_person_am_as_merge():
+    digest = topology_doctor.build_digest(
+        "I am updating lifecycle projection validation",
+        ["src/state/lifecycle_manager.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert card["merge_evidence_required"]["required"] is False
+    assert card["dominant_driver"] != "merge_conflict_first"
+
+
+def test_operation_vector_does_not_misread_explanation_as_plan():
+    digest = topology_doctor.build_digest(
+        "tighten route-card explanation for runtime profile",
+        ["scripts/topology_doctor.py"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["operation_stage"] == "edit"
+    assert card["operation_vector_sources"]["operation_stage"] == "side_effect"
+    assert card["dominant_driver"] != "planning_package_split"
+
+
+def test_claude_pre_merge_hook_ignores_non_git_bash_without_empty_error():
+    payload = json.dumps({"tool_input": {"command": "rg topology scripts"}})
+    result = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-merge-contamination-check.sh")],
+        input=payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_claude_pre_commit_hook_detects_multi_space_git_commit_not_plumbing():
+    payload = json.dumps({"tool_input": {"command": "git   commit -m test"}})
+    env = {**os.environ, "COMMIT_INVARIANT_TEST_SKIP": "1"}
+
+    result = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-commit-invariant-test.sh")],
+        input=payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "SKIPPED" in result.stderr
+
+    plumbing_payload = json.dumps({"tool_input": {"command": "git commit-tree abc123"}})
+    plumbing = subprocess.run(
+        [str(topology_doctor.ROOT / ".claude/hooks/pre-commit-invariant-test.sh")],
+        input=plumbing_payload,
+        text=True,
+        cwd=topology_doctor.ROOT,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert plumbing.returncode == 0
+    assert plumbing.stderr == ""
+
+
+def test_operation_vector_admits_runtime_governance_profile_boundary():
+    files = [
+        ".claude/CLAUDE.md",
+        ".claude/hooks/pre-commit-invariant-test.sh",
+        ".claude/hooks/pre-edit-architecture.sh",
+        ".claude/hooks/pre-merge-contamination-check.sh",
+        ".claude/settings.json",
+        ".gitignore",
+        "architecture/kernel_manifest.yaml",
+        "architecture/inv_prototype.py",
+        "architecture/ast_rules/semgrep_zeus.yml",
+        "architecture/ast_rules/forbidden_patterns.md",
+        "scripts/check_kernel_manifests.py",
+    ]
+    digest = topology_doctor.build_digest(
+        "harden git hook fail-closed protocol and governance static rule registry",
+        files,
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "topology graph agent runtime upgrade"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert digest["admission"]["out_of_scope_files"] == []
+
+
+def test_operation_vector_guides_broad_fix_package_to_planning_packet():
+    digest = topology_doctor.build_digest(
+        "ultrareview-25 fix package: harden pre-commit/pre-merge hooks fail-closed, "
+        "narrow semgrep zeus-no-json-authority-write, remove temperature_metric DEFAULT high, "
+        "and repair docs rules bidirectional references",
+        [
+            ".claude/hooks/pre-commit-invariant-test.sh",
+            ".claude/hooks/pre-merge-contamination-check.sh",
+            ".claude/hooks/pre-edit-architecture.sh",
+            ".claude/settings.json",
+            "architecture/ast_rules/semgrep_zeus.yml",
+            "architecture/negative_constraints.yaml",
+            "architecture/invariants.yaml",
+            "src/state/db.py",
+            "tests/test_pscb_hook.py",
+            "tests/test_tigge_schema_contract.py",
+            "tests/test_architecture_contracts.py",
+        ],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert card["operation_vector"]["operation_stage"] == "plan"
+    assert card["operation_vector"]["merge_state"] == "not_merge"
+    assert "runtime_hooks" in card["operation_vector"]["mutation_surfaces"]
+    assert "static_analysis_rules" in card["operation_vector"]["mutation_surfaces"]
+    assert "architecture_policy" in card["operation_vector"]["mutation_surfaces"]
+    assert "db_schema_truth" in card["operation_vector"]["mutation_surfaces"]
+    assert card["dominant_driver"] == "planning_package_split"
+    assert card["merge_evidence_required"]["required"] is False
+    assert "operation planning packet" in card["suggested_next_command"]
+    assert card["structural_decision_hints"]
+
+
+def test_operation_vector_admits_first_class_planning_packet():
+    digest = topology_doctor.build_digest(
+        "operation planning packet: structural decisions, impact context, slice routes, and verification plan",
+        ["docs/operations/task_2026-05-01_ultrareview25/PLAN.md"],
+        write_intent="edit",
+        operation_stage="plan",
+        artifact_target="plan_packet",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "operation planning packet"
+    assert digest["admission"]["status"] == "admitted"
+    assert digest["profile_selection"]["selected_by"] == "operation_vector"
+    assert card["persistence_target"] == "plan_packet"
+    assert card["suggested_next_command"] is None
+
+
+def test_operation_vector_requires_explicit_surface_for_high_fanout_evaluator_profile():
+    soft = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+    )
+    routed = topology_doctor.build_digest(
+        "fix evaluator behavior",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+        mutation_surfaces=["evaluator_behavior"],
+    )
+
+    assert soft["profile"] == "generic"
+    assert soft["admission"]["status"] == "advisory_only"
+    assert routed["profile"] == "evaluator script import bridge"
+    assert routed["admission"]["status"] == "admitted"
+    assert routed["profile_selection"]["selected_by"] == "operation_vector"
+
+
+def test_operation_vector_typed_closeout_routes_feedback_without_alias():
+    digest = topology_doctor.build_digest(
+        "done",
+        [],
+        write_intent="read_only",
+        operation_stage="closeout",
+        artifact_target="final_response",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert card["operation_vector"]["operation_stage"] == "closeout"
+    assert card["operation_vector"]["artifact_target"] == "final_response"
+    assert card["persistence_target"] == "final_response"
+    assert card["suggested_next_command"] is None
+
+
+def test_operation_vector_does_not_turn_plain_receipt_closeout_into_feedback():
+    digest = topology_doctor.build_digest(
+        "write packet closeout receipt",
+        ["docs/operations/task_2026-05-01_plain/receipt.json"],
+        write_intent="edit",
+        operation_stage="closeout",
+        artifact_target="receipt",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] != "direct operation feedback capsule"
+    assert digest["profile_selection"]["selected_by"] != "operation_vector"
+    assert card["operation_vector"]["artifact_target"] == "receipt"
+
+
+def test_operation_vector_redirects_feedback_evidence_file_to_final_response():
+    digest = topology_doctor.build_digest(
+        "operation feedback capsule",
+        ["evidence.md"],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert digest["profile"] == "direct operation feedback capsule"
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert card["operation_vector"]["artifact_target"] == "new_evidence"
+    assert card["persistence_target"] == "new_evidence"
+    assert "--artifact-target final_response" in card["suggested_next_command"]
+
+
+def test_operation_vector_high_risk_merge_conflict_requires_critic_evidence():
+    digest = topology_doctor.build_digest(
+        "broad schema lifecycle DB control live conflict semantic ambiguity",
+        [
+            "src/state/chain_reconciliation.py",
+            "src/control/heartbeat_supervisor.py",
+            "src/execution/exchange_reconcile.py",
+        ],
+        write_intent="edit",
+    )
+    card = digest["route_card"]
+
+    assert card["operation_vector"]["operation_stage"] == "merge"
+    assert card["merge_conflict_scan"] == "high_risk_conflict"
+    assert card["merge_evidence_required"]["required"] is True
+    assert card["dominant_driver"] == "merge_conflict_first"
+    assert "--merge-state high_risk_conflict" in card["suggested_next_command"]
 
 
 def test_runtime_route_card_surfaces_script_manifest_provenance_for_bridge():

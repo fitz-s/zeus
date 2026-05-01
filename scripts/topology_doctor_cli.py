@@ -97,6 +97,11 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
     parser.add_argument("--task-class", default=None, help="Typed semantic boot task class")
     parser.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    parser.add_argument("--operation-stage", default=None, help="Typed operation stage: explore, edit, merge, closeout, handoff")
+    parser.add_argument("--mutation-surface", action="append", default=[], help="Typed mutation surface; repeat for multiple surfaces")
+    parser.add_argument("--side-effect", default=None, help="Typed side effect: read_only, repo_edit, data_mutation, live_mutation")
+    parser.add_argument("--artifact-target", default=None, help="Typed artifact target such as final_response, existing_work_log, receipt, runtime_scratch")
+    parser.add_argument("--merge-state", default=None, help="Typed merge state: clean, narrow_conflict, broad_conflict, high_risk_conflict, unknown")
     parser.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate; repeat for multiple claims")
     parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
 
@@ -107,6 +112,11 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     digest.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
     digest.add_argument("--task-class", default=None, help="Typed semantic boot task class")
     digest.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    digest.add_argument("--operation-stage", default=None, help="Typed operation stage")
+    digest.add_argument("--mutation-surface", action="append", default=[], help="Typed mutation surface; repeat for multiple surfaces")
+    digest.add_argument("--side-effect", default=None, help="Typed side effect")
+    digest.add_argument("--artifact-target", default=None, help="Typed artifact target")
+    digest.add_argument("--merge-state", default=None, help="Typed merge state")
     digest.add_argument("--claim", action="append", default=[], help="Runtime completion claim to include in the route card")
     digest.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -116,6 +126,11 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     runtime.add_argument("--intent", default=None, help="Typed digest profile id")
     runtime.add_argument("--task-class", default=None, help="Typed semantic boot task class")
     runtime.add_argument("--write-intent", default=None, help="Runtime write intent: read_only, edit, apply, live, production")
+    runtime.add_argument("--operation-stage", default=None, help="Typed operation stage")
+    runtime.add_argument("--mutation-surface", action="append", default=[], help="Typed mutation surface; repeat for multiple surfaces")
+    runtime.add_argument("--side-effect", default=None, help="Typed side effect")
+    runtime.add_argument("--artifact-target", default=None, help="Typed artifact target")
+    runtime.add_argument("--merge-state", default=None, help="Typed merge state")
     runtime.add_argument("--role", choices=["explorer", "executor", "critic", "verifier"], default=None, help="Optional role context pack")
     runtime.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate")
     runtime.add_argument("--route-card-only", action="store_true", help="Emit only route card wrapper")
@@ -207,6 +222,17 @@ def _print_route_card(card: dict[str, Any]) -> None:
         print(f"- merge_evidence_required: {evidence.get('required')}")
         if evidence.get("reason"):
             print(f"  reason: {evidence.get('reason')}")
+    if card.get("operation_vector"):
+        vector = card["operation_vector"]
+        surfaces = ", ".join(vector.get("mutation_surfaces") or [])
+        print(
+            "- operation_vector: "
+            f"stage={vector.get('operation_stage')} "
+            f"surface={surfaces or 'none'} "
+            f"side_effect={vector.get('side_effect')} "
+            f"artifact={vector.get('artifact_target')} "
+            f"merge={vector.get('merge_state')}"
+        )
     if card.get("admitted_files"):
         print("- admitted_files:")
         for path in card["admitted_files"]:
@@ -366,12 +392,23 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         return 0 if result.ok else 1
     if args.navigation:
         navigation_kwargs = {"strict_health": args.strict_health}
-        for field in ("intent", "task_class", "write_intent", "claim"):
+        for field in (
+            "intent",
+            "task_class",
+            "write_intent",
+            "operation_stage",
+            "mutation_surface",
+            "side_effect",
+            "artifact_target",
+            "merge_state",
+            "claim",
+        ):
             value = getattr(args, field, None)
-            if field == "claim" and not value:
+            if field in {"claim", "mutation_surface"} and not value:
                 continue
             if value is not None:
-                navigation_kwargs["claims" if field == "claim" else field] = value
+                key = {"claim": "claims", "mutation_surface": "mutation_surfaces"}.get(field, field)
+                navigation_kwargs[key] = value
         if args.issue_schema_version != "1":
             navigation_kwargs["issue_schema_version"] = args.issue_schema_version
         navigation_files = list(args.files or [])
@@ -450,6 +487,11 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                 intent=args.intent,
                 task_class=args.task_class,
                 write_intent=args.write_intent,
+                operation_stage=args.operation_stage,
+                mutation_surfaces=args.mutation_surface,
+                side_effect=args.side_effect,
+                artifact_target=args.artifact_target,
+                merge_state=args.merge_state,
                 claims=args.claim,
             ),
             as_json=args.json,
@@ -462,6 +504,11 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             intent=args.intent,
             task_class=args.task_class,
             write_intent=args.write_intent,
+            operation_stage=args.operation_stage,
+            mutation_surfaces=args.mutation_surface,
+            side_effect=args.side_effect,
+            artifact_target=args.artifact_target,
+            merge_state=args.merge_state,
             role=args.role,
             claims=args.claim,
             route_card_only=args.route_card_only,

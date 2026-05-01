@@ -1,13 +1,13 @@
 ---
 name: zeus-ai-handoff
-description: General-purpose handoff workflow for Zeus — covers any AI-to-AI or session-to-session handoff. Selects the right execution mode (direct / subagent / runtime multi-batch / adversarial debate) per task scale + risk; preserves Zeus authority surfaces; encodes proven discipline (disk-first, scoped critic-gate, bidirectional grep, co-tenant git hygiene, verdict erratum). Use when adapting a Zeus change of any size, converting a request into a packet-ready plan, preparing a handoff bundle, or starting a multi-batch execution across the available agent runtime. Replaces v1 single-mode workflow with a 4-mode playbook validated by Tier 1 + 3-round debate cycle 2026-04-27.
+description: Handoff workflow for Zeus AI-to-AI or session-to-session transfer. Use when a task needs a handoff bundle, bounded subagent dispatch, runtime multi-batch coordination, or adversarial debate; do not invoke as a universal gate for direct solo edits or read-only investigation. Selects direct / subagent / runtime multi-batch / adversarial debate per task scale + risk; preserves Zeus authority surfaces; encodes proven discipline (disk-first, scoped critic-gate, bidirectional grep, co-tenant git hygiene, verdict erratum).
 ---
 
 # Zeus AI Handoff (v2)
 
 ## Purpose
 
-Convert a Zeus task — at any scale, from quick fix to multi-week refactor — into structured handoff truth without overriding Zeus authority files or treating any single artifact (zip, doc, debate verdict) as canonical truth.
+Convert a Zeus task that genuinely needs transfer or coordination into structured handoff truth without overriding Zeus authority files or treating any single artifact (zip, doc, debate verdict) as canonical truth.
 
 This is the **outer workflow layer** for Zeus. The inner authority remains:
 - Root `AGENTS.md` + `workspace_map.md`
@@ -15,7 +15,7 @@ This is the **outer workflow layer** for Zeus. The inner authority remains:
 - `architecture/**` machine manifests
 - `docs/authority/**` constitutional surfaces
 
-This SKILL selects which **execution mode** fits the task, then applies mode-specific discipline.
+This SKILL selects which **execution mode** fits the task, then applies mode-specific discipline. If the task is Mode A direct work, stop at Mode A: do the edit, verify, and close without creating handoff scaffolding.
 
 ---
 
@@ -67,7 +67,11 @@ Before choosing artifacts or dispatching, pick ONE mode based on task profile:
 delegation materially helps; C only for real multi-batch/K0/K1 coordination,
 not merely because the diff crosses an arbitrary file count.
 
-**Anti-pattern**: using D (full debate) for what should be A or B is the most common mistake — wastes 70+ min on a 30-min decision. Use methodology §11 ROI signals to check.
+**Anti-pattern**: using this skill as a universal ritual. Mode A direct work
+does not need packets, critic evidence, findings, receipts, or work logs unless
+an active claim consumes them. Using D (full debate) for what should be A or B
+is the most common mistake — wastes 70+ min on a 30-min decision. Use
+methodology §11 ROI signals to check.
 
 ### §3.0 Runtime surface selection
 
@@ -83,6 +87,10 @@ The mode is the contract; the tool surface is runtime-specific:
 - Critic gates apply to Mode C/D batch boundaries and escalated merge conflicts.
   They do not apply to Mode A/B direct work, clean cross-worktree merges, or
   narrow mechanical conflict resolution.
+- Mode C/D are not for syntax fixes, one-liners, ordinary direct implementation,
+  or read-only investigation. Escalate only when shared-batch coordination,
+  high-risk authority surfaces, or genuinely plural-validity decisions require
+  it.
 - Artifacts are claim-scoped. Do not create `evidence.md`, `findings.md`,
   receipts, work logs, or review records just because prior packets had them.
   Create them only when the selected mode, active packet, closeout gate, or
