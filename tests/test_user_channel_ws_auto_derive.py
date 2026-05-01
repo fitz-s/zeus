@@ -342,6 +342,44 @@ def test_ws_connect_bypasses_proxy(monkeypatch):
     )
 
 
+def test_ws_connect_skips_proxy_kwarg_on_older_websockets(monkeypatch):
+    """PR #35 P1 review: older websockets (10.x/12.x) do not accept `proxy=`.
+
+    Pre-fix, _default_websocket_connect unconditionally passed proxy=None which
+    raised TypeError before any WS session opened. Post-fix, the function probes
+    the connect signature and only forwards proxy=None when the kwarg is
+    supported. This test mocks a connect function with a closed signature
+    (no **kwargs, no proxy parameter) and asserts no proxy kwarg leaks through.
+    """
+    from src.ingest.polymarket_user_channel import _default_websocket_connect
+
+    captured: dict[str, Any] = {"args": None, "kwargs": None}
+
+    class _OldFakeWS:
+        def __init__(self, endpoint: str) -> None:  # closed signature
+            captured["endpoint"] = endpoint
+
+        def __await__(self):
+            return iter([self])
+
+    def _old_connect(endpoint: str):
+        captured["args"] = (endpoint,)
+        captured["kwargs"] = {}
+        return _OldFakeWS(endpoint)
+
+    monkeypatch.setattr("websockets.connect", _old_connect)
+
+    _default_websocket_connect("wss://ws-subscriptions-clob.polymarket.com/ws/user")
+
+    assert captured["args"] == ("wss://ws-subscriptions-clob.polymarket.com/ws/user",), (
+        "older websockets path must call connect(endpoint) positionally"
+    )
+    assert captured["kwargs"] == {}, (
+        f"older websockets does not accept proxy=; got kwargs={captured['kwargs']!r}. "
+        "TypeError would fire at connect time and force a perpetual reconnect-fail loop."
+    )
+
+
 def test_ws_auth_sourced_from_adapter_not_env(monkeypatch, _stub_ingestor):
     """Invariant #7 (2026-05-01 live-blocker): the live daemon must source WSAuth
     from adapter.sdk_client().creds, NOT from POLYMARKET_API_KEY env var.

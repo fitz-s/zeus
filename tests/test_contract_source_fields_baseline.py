@@ -6,8 +6,10 @@
 """Pytest wrapper for scripts/check_contract_source_fields.py.
 
 Locks the per-file count of bare `*source*: str` fields in src/contracts/
-at the 2026-05-01 baseline (13 fields across 5 files). New file gaining
-its first such field, or any file's count growing, fails the gate.
+at the 2026-05-01 baseline (16 fields across 7 files; PR #35 P2 review
+expanded the regex to also catch the `Optional[str]` annotation form).
+New file gaining its first such field, or any file's count growing,
+fails the gate.
 
 Why
 ---

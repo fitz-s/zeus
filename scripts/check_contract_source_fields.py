@@ -72,27 +72,47 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_DIR = REPO_ROOT / "src" / "contracts"
 
 
-# Pattern: leading whitespace, identifier containing "source", colon, str
-# (with optional `| None`), optional default. Matches dataclass attrs and
-# function-signature parameters. Intentionally unanchored to start-of-line
-# so 4-space-indented function params match too.
+# Pattern: leading whitespace, identifier containing "source", colon, str-or-
+# Optional[str] annotation, optional default. Three accepted annotation forms:
+#   - bare    : str
+#   - PEP 604 : str | None
+#   - typing  : Optional[str]
+# Matches dataclass attrs and function-signature parameters. Intentionally
+# unanchored to start-of-line so 4-space-indented function params match too.
+#
+# PR #35 P2 review: prior regex only matched `str` and `str | None`, so
+# `Optional[str]` annotations slipped through (3 hidden cases:
+# world_view/observations.py, world_view/settlements.py, and
+# world_view/forecasts.py:data_source_version). Adding the Optional[str]
+# alternative closed the gap and bumped the baseline accordingly.
 _BARE_SOURCE_STR_PATTERN = re.compile(
-    r"^\s+\w*source\w*\s*:\s*str(?:\s*\|\s*None)?(?:\s*=|\s*$|\s*,)",
+    r"^\s+\w*source\w*\s*:\s*"
+    r"(?:Optional\s*\[\s*str\s*\]|str(?:\s*\|\s*None)?)"
+    r"(?:\s*=|\s*$|\s*,)",
     re.MULTILINE | re.IGNORECASE,
 )
 
 
-# Per-file baseline as of 2026-05-01 (9 fields across 4 files).
+# Per-file baseline as of 2026-05-01 (16 fields across 7 files).
 # Update both this dict AND the test wrapper baseline when a new field
-# lands. The forcing-function principle: a NEW bare `*source*: str` field
-# requires deliberate human judgment (internal label → bump baseline;
-# external authority → wrap in ExternalParameter[T]).
+# lands. The forcing-function principle: a NEW bare `*source*: str` /
+# `Optional[str]` field requires deliberate human judgment (internal
+# label → bump baseline; external authority → wrap in ExternalParameter[T]).
+#
+# PR #35 P2 review (2026-05-01): regex now also matches Optional[str].
+# Three previously-hidden fields surfaced; all classified internal label
+# (string identifier of an internal source/version, not external authority):
+#   - src/contracts/world_view/forecasts.py:34   data_source_version: Optional[str]
+#   - src/contracts/world_view/observations.py:29  source: Optional[str]
+#   - src/contracts/world_view/settlements.py:28  source: Optional[str]
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/contracts/execution_intent.py": 6,
     "src/contracts/executable_market_snapshot_v2.py": 4,
     "src/contracts/semantic_types.py": 1,
     "src/contracts/expiring_assumption.py": 1,
-    "src/contracts/world_view/forecasts.py": 1,
+    "src/contracts/world_view/forecasts.py": 2,
+    "src/contracts/world_view/observations.py": 1,
+    "src/contracts/world_view/settlements.py": 1,
 }
 
 
