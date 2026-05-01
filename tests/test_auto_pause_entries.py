@@ -92,10 +92,36 @@ class TestAutoRauseEntries:
         # polluted by entries_paused=True left behind by auto-pause assertions.
         cp._control_state.clear()
 
-    def test_entry_exception_pauses_entries(self, monkeypatch):
-        """Criterion #2/#3/#4: ValueError in _execute_discovery_phase triggers
-        auto-pause with machine-readable reason_code and fires the alert."""
+    def test_entry_exception_pauses_entries(self, monkeypatch, tmp_path):
+        """Criterion #2/#3/#4: a same-reason ValueError streak in
+        _execute_discovery_phase eventually triggers auto-pause with a
+        machine-readable reason_code and fires the alert.
+
+        Live-blockers 2026-05-01: pause now requires N=3 consecutive
+        failures within a 5-min window. A single transient failure logs
+        but does NOT pause entries. This test injects three cycles back-
+        to-back to exercise the escalation; the streak file lives in a
+        per-test tmp_path so we don't collide with neighbour tests.
+        """
         _patch_cycle(monkeypatch)
+        # Per-test streak file isolation.
+        from src.control import auto_pause_streak as streak
+        monkeypatch.setattr(streak, "_streak_path", lambda: tmp_path / "streak.json")
+        # Force production pause_entries to no-op the DB write so this test
+        # stays focused on the cycle-runner-level contract (reason_code +
+        # alert + summary). The DB persistence is covered by
+        # test_pause_entries_persists_to_db below.
+        original_pause = cp.pause_entries
+
+        def _pause_in_memory_only(reason_code, **kwargs):
+            cp._control_state["entries_paused"] = True
+            cp._control_state["entries_pause_source"] = "auto_exception"
+            cp._control_state["entries_pause_reason"] = reason_code
+            cp.alert_auto_pause(reason_code)
+
+        monkeypatch.setattr(cp, "pause_entries", _pause_in_memory_only)
+        # Re-bind the cycle_runner's bound name to the patched pause_entries.
+        monkeypatch.setattr(cr, "pause_entries", _pause_in_memory_only)
 
         def _raise_discovery(*a, **kw):
             raise ValueError("test_boom")
@@ -105,6 +131,20 @@ class TestAutoRauseEntries:
         alert_calls = []
         monkeypatch.setattr(cp, "alert_auto_pause", lambda r: alert_calls.append(r))
 
+        # Cycle 1 — streak=1 — must NOT pause.
+        summary1 = cr.run_cycle(DiscoveryMode.OPENING_HUNT)
+        assert cp.is_entries_paused() is False, "single failure must not pause"
+        assert summary1.get("entries_paused") is not True
+        assert summary1.get("auto_pause_streak") == 1
+        assert alert_calls == []
+
+        # Cycle 2 — streak=2 — still must NOT pause.
+        summary2 = cr.run_cycle(DiscoveryMode.OPENING_HUNT)
+        assert cp.is_entries_paused() is False, "two failures must not pause"
+        assert summary2.get("auto_pause_streak") == 2
+        assert alert_calls == []
+
+        # Cycle 3 — streak=3 — pause fires.
         summary = cr.run_cycle(DiscoveryMode.OPENING_HUNT)
 
         # Criterion #2: entries_paused flag set in control state
@@ -123,6 +163,7 @@ class TestAutoRauseEntries:
 
         # summary also carries the pause flag
         assert summary.get("entries_paused") is True
+        assert summary.get("auto_pause_streak") == 3
 
     def test_resume_clears_pause(self, monkeypatch):
         """Criterion #6: After auto-pause, clearing entries_paused (resume semantics)
