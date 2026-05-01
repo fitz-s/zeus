@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-03-30; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-03-30; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
 #          substrate boundary-gate + Day0 causal-day edge case coverage.
 # Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
@@ -759,7 +759,7 @@ class TestSelectionFamilySubstrate:
             def __init__(self, *args, **kwargs):
                 pass
 
-            def p_vector(self, bins):
+            def p_vector(self, bins, n_mc=None):
                 # T2.d.1 2026-04-24: return bins-sized uniform vector so
                 # downstream FDR family scan can index by bin without
                 # out-of-bounds (was hardcoded size 3; now dynamic).
@@ -1020,7 +1020,7 @@ class TestSelectionFamilySubstrate:
             def __init__(self, *args, **kwargs):
                 pass
 
-            def p_vector(self, bins):
+            def p_vector(self, bins, n_mc=None):
                 # T2.d.1 2026-04-24: return bins-sized uniform vector so
                 # downstream FDR family scan can index by bin without
                 # out-of-bounds (was hardcoded size 3; now dynamic).
@@ -1245,7 +1245,7 @@ class TestSelectionFamilySubstrate:
             def __init__(self, *args, **kwargs):
                 pass
 
-            def p_vector(self, bins):
+            def p_vector(self, bins, n_mc=None):
                 # T2.d.1 2026-04-24: return bins-sized uniform vector so
                 # downstream FDR family scan can index by bin without
                 # out-of-bounds (was hardcoded size 3; now dynamic).

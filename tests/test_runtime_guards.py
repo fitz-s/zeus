@@ -252,6 +252,7 @@ def _insert_executable_snapshot(
     outcome_label: str = "YES",
     yes_token_id: str = "yes1",
     no_token_id: str = "no1",
+    event_id: str = "evt-1",
     condition_id: str = "cond1",
     top_bid: str = "0.34",
     top_ask: str = "0.36",
@@ -268,7 +269,7 @@ def _insert_executable_snapshot(
         ExecutableMarketSnapshotV2(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-1",
-            event_id="evt-1",
+            event_id=event_id,
             event_slug="slug-1",
             condition_id=condition_id,
             question_id="question-1",
@@ -1050,8 +1051,8 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         yes_token_id="yes1",
         no_token_id="no1",
         condition_id="m1",
-        top_bid="0.34",
-        top_ask="0.36",
+        top_bid="0.25",
+        top_ask="0.25",
     )
     conn.execute(
         """
@@ -1199,8 +1200,40 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
         "temperature_metric": "high",
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision(True), DummyDecision(False)])
-    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: types.SimpleNamespace(limit_price=0.36))
-    monkeypatch.setattr(cycle_runner, "execute_intent", lambda *args, **kwargs: OrderResult(status="filled", trade_id="rt1", order_id="o1", fill_price=0.35, shares=10.0, command_state="ACKED"))  # P1.S5 INV-32
+    monkeypatch.setattr(
+        cycle_runner,
+        "create_execution_intent",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "execute_intent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "execute_final_intent",
+        lambda intent, **kwargs: OrderResult(
+            status="filled",
+            trade_id="rt1",
+            order_id="o1",
+            fill_price=float(intent.final_limit_price),
+            submitted_price=float(intent.final_limit_price),
+            shares=10.0,
+            command_state="ACKED",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "select_final_order_type",
+        lambda conn, snapshot_id: "GTC",
+        raising=False,
+    )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
@@ -1925,10 +1958,10 @@ def test_forward_price_linkage_non_success_statuses_degrade_cycle(status):
     assert cycle_runtime._forward_price_linkage_status_degraded(status) is True
 
 
-def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
+def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
     conn = get_connection(tmp_path / "thread-executable-identity.db")
     init_schema(conn)
-    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
     captured = {}
     decision_time = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
@@ -1972,9 +2005,10 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         outcome_label="YES",
         yes_token_id="yes1",
         no_token_id="no1",
+        event_id="evt-snapshot",
         condition_id="m1",
-        top_bid="0.34",
-        top_ask="0.36",
+        top_bid="0.25",
+        top_ask="0.25",
     )
     decision = EdgeDecision(
         should_trade=True,
@@ -2003,12 +2037,20 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         safety_cap_usd=None,
     )
 
-    def _capture_intent(**kwargs):
-        captured.update(kwargs)
-        return types.SimpleNamespace()
+    def _capture_final_intent(intent, **kwargs):
+        captured["intent"] = intent
+        captured["kwargs"] = kwargs
+        return OrderResult(
+            status="pending",
+            trade_id="trade-1",
+            order_id="ord-1",
+            submitted_price=float(intent.final_limit_price),
+            shares=10.0,
+            command_state="ACKED",
+        )
 
     deps = types.SimpleNamespace(
-        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
         find_weather_markets=lambda **kwargs: [market],
         get_last_scan_authority=lambda: "VERIFIED",
         DiscoveryMode=DiscoveryMode,
@@ -2018,15 +2060,14 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
         _classify_edge_source=lambda _mode, _edge: "center_buy",
-        create_execution_intent=_capture_intent,
-        execute_intent=lambda *args, **kwargs: OrderResult(
-            status="pending",
-            trade_id="trade-1",
-            order_id="ord-1",
-            submitted_price=0.35,
-            shares=10.0,
-            command_state="ACKED",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
         ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        execute_final_intent=_capture_final_intent,
+        select_final_order_type=lambda conn, snapshot_id: "FOK",
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2036,7 +2077,7 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
         artifact=artifact,
         tracker=StrategyTracker(),
         limits=types.SimpleNamespace(),
-        mode=DiscoveryMode.OPENING_HUNT,
+        mode=DiscoveryMode.UPDATE_REACTION,
         summary=summary,
         entry_bankroll=100.0,
         decision_time=decision_time,
@@ -2045,11 +2086,19 @@ def test_entry_intent_receives_executable_snapshot_fields(tmp_path):
     )
     conn.close()
 
-    assert captured["executable_snapshot_id"] == "snap-entry-1"
-    assert captured["executable_snapshot_min_tick_size"] == "0.01"
-    assert captured["executable_snapshot_min_order_size"] == "5"
-    assert captured["executable_snapshot_neg_risk"] is False
-    decision_source_context = captured["decision_source_context"]
+    final_intent = captured["intent"]
+    assert final_intent.snapshot_id == "snap-entry-1"
+    assert final_intent.tick_size == Decimal("0.01")
+    assert final_intent.min_order_size == Decimal("5")
+    assert final_intent.neg_risk is False
+    assert final_intent.order_type == "FOK"
+    assert final_intent.cancel_after == decision_time + timedelta(seconds=60 * 60)
+    assert final_intent.event_id == "evt-snapshot"
+    assert final_intent.resolution_window == "2026-04-01"
+    assert final_intent.correlation_key == "NYC:2026-04-01"
+    assert captured["kwargs"]["conn"] is conn
+    assert captured["kwargs"]["snapshot_conn"] is conn
+    decision_source_context = final_intent.decision_source_context
     assert decision_source_context.source_id == "tigge"
     assert decision_source_context.model_family == "ecmwf_ifs025"
     assert decision_source_context.integrity_errors() == ()
@@ -2074,6 +2123,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
         edge=edge,
         tokens={"token_id": "yes1", "no_token_id": "no1"},
         size_usd=5.0,
+        decision_snapshot_id="decision-snap",
         applied_validations=[],
         edge_context=EdgeContext(
             p_raw=np.array([0.5, 0.5]),
@@ -2122,7 +2172,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     shadow = reprice["corrected_pricing_shadow"]
     assert shadow["shadow_only"] is True
     assert shadow["live_submit_authority"] is False
-    assert shadow["field_semantics"] == "corrected_candidate_not_submitted"
+    assert shadow["field_semantics"] == "passive_limit_requires_maker_only_support"
     assert shadow["selected_token_id"] == "yes1"
     assert shadow["direction"] == "buy_yes"
     assert shadow["snapshot_id"] == "snap-reprice-1"
@@ -2132,6 +2182,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["candidate_fee_adjusted_execution_price"] == "0.23"
     assert shadow["sweep_attempted"] is False
     assert shadow["sweep_depth_status"] == "NOT_MARKETABLE_PASSIVE_LIMIT"
+    assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
     assert shadow["cost_basis_hash"]
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
@@ -2183,6 +2234,74 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
     assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
     assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
+
+
+def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path):
+    from dataclasses import replace
+
+    conn = get_connection(tmp_path / "snapshot-reprice-deeper-ask.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-deeper-ask",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.59",
+        top_ask="0.60",
+        bid_size="100",
+        ask_size="1",
+        orderbook_depth={
+            "bids": [{"price": "0.59", "size": "100"}],
+            "asks": [
+                {"price": "0.60", "size": "1"},
+                {"price": "0.61", "size": "100"},
+            ],
+        },
+    )
+    edge = replace(
+        _edge(),
+        edge=0.10,
+        p_model=0.70,
+        p_market=0.60,
+        p_posterior=0.70,
+        entry_price=0.60,
+        vwmp=0.60,
+        forward_edge=0.10,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-deeper-ask",
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-deeper-ask"},
+    )
+    conn.close()
+
+    expected_size = (0.70 - 0.61) / (1 - 0.61) * 0.25 * 100.0
+    assert best_ask == pytest.approx(0.61)
+    assert decision.size_usd == pytest.approx(expected_size)
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["depth_sweep_limit_price"] == pytest.approx(0.61)
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.61)
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["sweep_attempted"] is True
+    assert shadow["sweep_depth_status"] == "PASS"
+    assert shadow["sweep_levels_consumed"] == 2
+    assert float(shadow["sweep_average_price"]) < 0.61
 
 
 def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
@@ -2361,6 +2480,7 @@ def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_pa
         edge=edge,
         tokens={"token_id": "yes1", "no_token_id": "no1"},
         size_usd=5.0,
+        decision_snapshot_id="decision-snap-negative-ask",
         applied_validations=[],
         edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
         sizing_bankroll=100.0,
@@ -2380,7 +2500,7 @@ def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_pa
     assert decision.edge.vwmp == pytest.approx(0.34)
     assert decision.edge.edge == pytest.approx(0.13)
     assert decision.tokens["executable_snapshot_reprice"]["final_limit_price"] == pytest.approx(0.32)
-    assert "corrected_pricing_shadow_error" in decision.tokens["executable_snapshot_reprice"]
+    assert decision.tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"]["submit_path"] is None
 
 
 def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_path):
@@ -2411,7 +2531,7 @@ def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_p
         safety_cap_usd=None,
     )
 
-    with pytest.raises(ValueError, match="BUY_NO_TAKER_DEPTH_CONSTRAINED"):
+    with pytest.raises(ValueError, match="EXECUTABLE_TAKER_DEPTH_CONSTRAINED"):
         cycle_runtime._reprice_decision_from_executable_snapshot(
             conn,
             decision,
@@ -2441,6 +2561,7 @@ def test_executable_snapshot_repricing_ignores_thin_ask_outside_slippage_budget(
         edge=edge,
         tokens={"token_id": "yes1", "no_token_id": "no1"},
         size_usd=5.0,
+        decision_snapshot_id="decision-snap-thin-wide-ask",
         applied_validations=[],
         edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
         sizing_bankroll=100.0,
@@ -2475,9 +2596,10 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         outcome_label="YES",
         yes_token_id="yes1",
         no_token_id="no1",
+        event_id="evt-wide-gap",
         condition_id="m1",
-        top_bid="0.20",
-        top_ask="0.30",
+        top_bid="0.25",
+        top_ask="0.25",
     )
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
@@ -2527,13 +2649,13 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     )
     captured = {}
 
-    def _execute_capture(intent, edge_vwmp, label, **kwargs):
+    def _execute_capture(intent, **kwargs):
         captured["intent"] = intent
         return OrderResult(
             status="pending",
             trade_id="trade-wide-gap",
             order_id="ord-wide-gap",
-            submitted_price=intent.limit_price,
+            submitted_price=float(intent.final_limit_price),
             shares=1.0,
             command_state="INTENT_CREATED",
         )
@@ -2549,8 +2671,14 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
         _classify_edge_source=lambda _mode, _edge: "center_buy",
-        create_execution_intent=create_execution_intent,
-        execute_intent=_execute_capture,
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        execute_final_intent=_execute_capture,
+        select_final_order_type=lambda conn, snapshot_id: "GTC",
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2569,22 +2697,154 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     )
     conn.close()
 
-    assert captured["intent"].limit_price == pytest.approx(0.23)
+    assert captured["intent"].final_limit_price == Decimal("0.25")
     reprice = artifact.trade_cases[0]["executable_snapshot_reprice"]
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
-    assert reprice["best_ask_blocked_by_slippage"] is True
-    assert reprice["final_limit_price"] == pytest.approx(0.23)
-    assert reprice["submitted_limit_price"] == pytest.approx(0.23)
-    assert reprice["repriced_limit_forced"] is False
-    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.23)
+    assert reprice["best_ask_blocked_by_slippage"] is False
+    assert reprice["final_limit_price"] == pytest.approx(0.25)
+    assert reprice["submitted_limit_price"] == pytest.approx(0.25)
+    assert reprice["repriced_limit_forced"] is True
+    assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.25)
     shadow = reprice["corrected_pricing_shadow"]
-    assert shadow["candidate_final_limit_price"] == "0.23"
-    assert shadow["legacy_submitted_limit_price"] == "0.23"
-    assert shadow["legacy_submitted_matches_corrected_candidate"] is True
+    assert shadow["candidate_final_limit_price"] == "0.25"
+    assert shadow["submitted_limit_price"] == "0.25"
+    assert shadow["submit_path"] == "final_execution_intent"
+    assert shadow["submitted_matches_corrected_candidate"] is True
 
 
-def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
+def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
+    db_path = tmp_path / "live-reprice-passive-final-intent.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-passive-mismatch",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        event_id="evt-passive-mismatch",
+        condition_id="m1",
+        top_bid="0.20",
+        top_ask="0.30",
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-passive-mismatch",
+        "slug": "slug-passive-mismatch",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-passive-mismatch",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=5.0,
+        decision_id="d-passive-mismatch",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-passive-mismatch",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=types.SimpleNamespace(p_posterior=0.47),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    captured = {}
+
+    def _execute_final_capture(intent, **kwargs):
+        captured["intent"] = intent
+        captured["kwargs"] = kwargs
+        return OrderResult(
+            status="pending",
+            trade_id="trade-passive-final",
+            order_id="ord-passive-final",
+            submitted_price=float(intent.final_limit_price),
+            shares=1.0,
+            command_state="INTENT_CREATED",
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        execute_final_intent=_execute_final_capture,
+        select_final_order_type=lambda conn, snapshot_id: "GTC",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    assert captured == {}
+    assert artifact.trade_cases == []
+    assert artifact.no_trade_cases[0].rejection_stage == "EXECUTION_FAILED"
+    assert "FINAL_EXECUTION_INTENT_UNAVAILABLE" in artifact.no_trade_cases[0].rejection_reasons[0]
+    assert (
+        "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+        in artifact.no_trade_cases[0].rejection_reasons[0]
+    )
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert shadow["submit_path"] is None
+    assert shadow["live_submit_authority"] is False
+    assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
+
+
+def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monkeypatch):
     from src.data.market_scanner import capture_executable_market_snapshot
+    from src.execution.executor import execute_final_intent as real_execute_final_intent
     from src.state.snapshot_repo import get_snapshot
 
     db_path = tmp_path / "live-entry-forward-snapshot.db"
@@ -2592,6 +2852,21 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
     init_schema(conn)
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
+    decision_time = datetime.now(timezone.utc)
+    forecast_context = {
+        "forecast_source_id": "tigge",
+        "model_family": "ecmwf_ifs025",
+        "forecast_issue_time": "2026-04-03T00:00:00+00:00",
+        "forecast_valid_time": "2026-04-03T06:00:00+00:00",
+        "forecast_fetch_time": "2026-04-03T01:00:00+00:00",
+        "forecast_available_at": "2026-04-03T00:30:00+00:00",
+        "raw_payload_hash": "b" * 64,
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "decision_time": decision_time.isoformat(),
+        "decision_time_status": "OK",
+    }
     market = {
         "city": NYC,
         "target_date": "2026-04-01",
@@ -2643,6 +2918,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
         edge_source="center_buy",
         strategy_key="center_buy",
         edge_context=types.SimpleNamespace(p_posterior=0.47),
+        epistemic_context_json=json.dumps({"forecast_context": forecast_context}),
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.003,
@@ -2662,11 +2938,11 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
             assert token_id == "yes1"
             return {
                 "asset_id": "yes1",
-                "tick_size": "0.01",
+                "tick_size": "0.001",
                 "min_order_size": "5",
                 "neg_risk": False,
-                "bids": [{"price": "0.34", "size": "100"}],
-                "asks": [{"price": "0.36", "size": "100"}],
+                "bids": [{"price": "0.249", "size": "100"}],
+                "asks": [{"price": "0.25", "size": "100"}],
             }
 
         def get_fee_rate(self, token_id):
@@ -2675,25 +2951,46 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
 
     captured = {}
 
-    def _execute_after_snapshot_commit(intent, edge_vwmp, label, **kwargs):
-        assert "conn" not in kwargs
+    def _execute_after_snapshot_commit(intent, **kwargs):
         captured["intent"] = intent
-        read_conn = get_connection(db_path)
-        init_schema(read_conn)
+        assert kwargs["conn"] is conn
+        snapshot_conn = kwargs["snapshot_conn"]
+        snap = get_snapshot(snapshot_conn, intent.snapshot_id)
+        assert snap is not None
         try:
-            snap = get_snapshot(read_conn, intent.executable_snapshot_id)
-            assert snap is not None
-        finally:
-            read_conn.close()
-        shares = 15.0
-        return OrderResult(
-            status="pending",
-            trade_id="trade-forward-snapshot",
-            order_id="ord-forward-snapshot",
-            submitted_price=intent.limit_price,
-            shares=shares,
-            command_state="INTENT_CREATED",
-        )
+            return real_execute_final_intent(intent, **kwargs)
+        except Exception as exc:
+            captured["error"] = str(exc)
+            raise
+
+    class DummySubmitClient:
+        def __init__(self):
+            self.bound_envelope = None
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def v2_preflight(self):
+            return None
+
+        def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+            return {
+                "success": True,
+                "orderID": "ord-forward-snapshot",
+                "status": "OPEN",
+                "_venue_submission_envelope": self.bound_envelope.to_dict(),
+            }
+
+    monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+    monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+    monkeypatch.setattr("src.execution.executor._assert_heartbeat_allows_submit", lambda order_type="GTC": {"allowed": True})
+    monkeypatch.setattr("src.execution.executor._assert_ws_gap_allows_submit", lambda target: {"allowed": True})
+    monkeypatch.setattr("src.execution.executor._assert_collateral_allows_buy", lambda intent, spend_micro: {"allowed": True})
+    monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummySubmitClient)
 
     deps = types.SimpleNamespace(
         MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
@@ -2707,8 +3004,14 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
         _classify_edge_source=lambda _mode, _edge: "center_buy",
-        create_execution_intent=create_execution_intent,
-        execute_intent=_execute_after_snapshot_commit,
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        execute_final_intent=_execute_after_snapshot_commit,
+        select_final_order_type=lambda conn, snapshot_id: "GTC",
     )
 
     cycle_runtime.execute_discovery_phase(
@@ -2721,13 +3024,17 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
         mode=DiscoveryMode.OPENING_HUNT,
         summary=summary,
         entry_bankroll=100.0,
-        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        decision_time=decision_time,
         env="live",
         deps=deps,
     )
 
     snapshot_count = conn.execute("SELECT COUNT(*) FROM executable_market_snapshots").fetchone()[0]
     command_count = conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+    command_row = conn.execute(
+        "SELECT decision_id, token_id, price, state FROM venue_commands WHERE decision_id = ?",
+        ("d-forward-snapshot",),
+    ).fetchone()
     price_linkage = conn.execute(
         """
         SELECT market_price_linkage, source, best_bid, best_ask,
@@ -2735,22 +3042,27 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path):
         FROM market_price_history
         WHERE snapshot_id = ?
         """,
-        (captured["intent"].executable_snapshot_id,),
+        (captured["intent"].snapshot_id,),
     ).fetchone()
-    loaded_snapshot = get_snapshot(conn, captured["intent"].executable_snapshot_id)
+    loaded_snapshot = get_snapshot(conn, captured["intent"].snapshot_id)
     conn.close()
 
-    assert captured["intent"].executable_snapshot_id
-    assert Decimal(str(captured["intent"].limit_price)) % Decimal("0.01") == 0
+    assert "error" not in captured, captured.get("error")
+    assert captured["intent"].snapshot_id
+    assert captured["intent"].final_limit_price % captured["intent"].tick_size == 0
     assert loaded_snapshot is not None
     assert loaded_snapshot.captured_at != datetime(2026, 4, 3, tzinfo=timezone.utc)
     assert snapshot_count == 1
-    assert command_count == 0
+    assert command_count == 1
+    assert command_row["decision_id"] == "d-forward-snapshot"
+    assert command_row["token_id"] == "yes1"
+    assert command_row["price"] == pytest.approx(float(captured["intent"].final_limit_price))
+    assert command_row["state"] == "ACKED"
     assert price_linkage is not None
     assert price_linkage["market_price_linkage"] == "full"
     assert price_linkage["source"] == "CLOB_ORDERBOOK"
-    assert price_linkage["best_bid"] == pytest.approx(0.34)
-    assert price_linkage["best_ask"] == pytest.approx(0.36)
+    assert price_linkage["best_bid"] == pytest.approx(0.249)
+    assert price_linkage["best_ask"] == pytest.approx(0.25)
     assert price_linkage["raw_orderbook_hash"]
     assert price_linkage["condition_id"] == "cond1"
     assert summary["forward_market_price_linkage_status"] == "inserted"
@@ -3572,8 +3884,8 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
         yes_token_id="yes1",
         no_token_id="no1",
         condition_id="m1",
-        top_bid="0.34",
-        top_ask="0.36",
+        top_bid="0.25",
+        top_ask="0.25",
     )
     conn.commit()
     conn.close()
@@ -3593,7 +3905,7 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
             return 100.0
 
         def get_best_bid_ask(self, token_id):
-            return (0.34, 0.36, 20.0, 20.0)
+            return (0.25, 0.25, 20.0, 20.0)
 
     class DummyDecision:
         def __init__(self):
@@ -3644,11 +3956,37 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
         "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
     }])
     monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
-    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: types.SimpleNamespace(limit_price=0.36))
+    monkeypatch.setattr(
+        cycle_runner,
+        "create_execution_intent",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+    )
     monkeypatch.setattr(
         cycle_runner,
         "execute_intent",
-        lambda *args, **kwargs: OrderResult(status="rejected", trade_id="rt-reject", order_id="o-reject", submitted_price=0.35, reason="insufficient_liquidity"),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "execute_final_intent",
+        lambda intent, **kwargs: OrderResult(
+            status="rejected",
+            trade_id="rt-reject",
+            order_id="o-reject",
+            submitted_price=float(intent.final_limit_price),
+            reason="insufficient_liquidity",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "select_final_order_type",
+        lambda conn, snapshot_id: "GTC",
+        raising=False,
     )
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
