@@ -74,7 +74,9 @@ def _clear_global_supervisor(tmp_path, monkeypatch):
 
 
 def test_initial_state_starting_then_healthy_after_first_success():
-    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"ok": True})])
+    # Polymarket chain-token protocol: first post sends "", server returns
+    # the canonical id which the supervisor must capture for the next tick.
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"})])
     supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
 
     assert supervisor.status().health is HeartbeatHealth.STARTING
@@ -84,12 +86,43 @@ def test_initial_state_starting_then_healthy_after_first_success():
     assert status.health is HeartbeatHealth.HEALTHY
     assert status.last_success_at is not None
     assert status.consecutive_failures == 0
-    assert adapter.heartbeat_ids == [status.heartbeat_id]
+    assert adapter.heartbeat_ids == [""]  # client started a fresh chain
+    assert status.heartbeat_id == "session-A"  # captured server-assigned id
+
+
+def test_chain_token_protocol_rotation_and_failure_resets_to_empty():
+    """Antibody for F5 (smoke 2026-05-01): the supervisor must follow the
+    Polymarket chain-token protocol — first post sends "", server returns
+    canonical id, supervisor echoes it on next post, and on any failure
+    the chain resets to "" so the next tick re-registers cleanly.
+
+    Without this discipline the daemon repeatedly sends a fresh UUID that
+    never matches the server's record, producing perpetual 400 Invalid
+    Heartbeat ID and blocking GTC/GTD orders.
+    """
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-2"}),
+        RuntimeError("server kicked us"),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-3"}),
+    ])
+    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
+
+    _run(supervisor.run_once())  # sends "", server returns id-1
+    _run(supervisor.run_once())  # sends id-1, server returns id-2
+    _run(supervisor.run_once())  # sends id-2, server fails
+    _run(supervisor.run_once())  # chain reset → sends "" again
+
+    assert adapter.heartbeat_ids == ["", "id-1", "id-2", ""], (
+        "supervisor must (a) start chain with empty string, (b) echo the "
+        "server-returned id on each tick, (c) reset to empty string after "
+        f"any failure. Got: {adapter.heartbeat_ids!r}"
+    )
 
 
 def test_one_miss_degraded_two_misses_lost():
     adapter = FakeHeartbeatAdapter([
-        HeartbeatAck(ok=True, raw={}),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "chain-1"}),
         RuntimeError("miss-1"),
         RuntimeError("miss-2"),
     ])
