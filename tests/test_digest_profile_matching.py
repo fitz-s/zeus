@@ -1729,14 +1729,14 @@ def test_direct_operation_feedback_capsule_routes_without_persisted_files():
 def test_operation_feedback_capsule_admits_existing_packet_work_log_only():
     digest = build_digest(
         "operation feedback capsule for packet closeout",
-        ["docs/archives/packets/task_2026-04-30_merge_protocol_conflict_first/work_log.md"],
+        ["docs/operations/task_2026-05-01_example/work_log.md"],
         write_intent="edit",
     )
 
     assert digest["profile"] == "direct operation feedback capsule"
     assert digest["admission"]["status"] == "admitted"
     assert digest["admission"]["admitted_files"] == [
-        "docs/archives/packets/task_2026-04-30_merge_protocol_conflict_first/work_log.md"
+        "docs/operations/task_2026-05-01_example/work_log.md"
     ]
 
 
@@ -1862,9 +1862,10 @@ def test_high_fanout_evaluator_file_does_not_select_profile_by_itself(monkeypatc
     )
 
     assert digest["profile"] == "generic"
-    assert digest["admission"]["status"] == "ambiguous"
+    assert digest["admission"]["status"] == "advisory_only"
     assert digest["admission"]["admitted_files"] == []
     assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
+    assert "soft ambiguity" in " ".join(digest["admission"]["decision_basis"]["why"])
     assert digest["profile_selection"]["evidence_class"] == "high_fanout_file_only"
     assert digest["profile_selection"]["needs_typed_intent"] is True
     assert "src/engine/evaluator.py" in digest["profile_selection"]["semantic_file_hits"]
@@ -1914,10 +1915,29 @@ def test_diagnostic_text_about_wrong_capability_route_does_not_admit_evaluator(m
 
     assert digest["profile"] == "generic"
     assert digest["profile"] != "phase 2c execution capability proof implementation synthetic"
-    assert digest["admission"]["status"] == "ambiguous"
+    assert digest["admission"]["status"] == "advisory_only"
+    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
+    assert "soft ambiguity" in " ".join(digest["admission"]["decision_basis"]["why"])
+    assert digest["profile_selection"]["needs_typed_intent"] is True
+
+
+def test_real_evaluator_fix_wording_soft_routes_instead_of_blocking_navigation():
+    digest = build_digest(
+        "修复 evaluator 里面的错误",
+        ["src/engine/evaluator.py"],
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "generic"
+    assert digest["admission"]["status"] == "advisory_only"
     assert digest["admission"]["admitted_files"] == []
     assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
     assert digest["profile_selection"]["needs_typed_intent"] is True
+    assert digest["route_card"]["admission_status"] == "advisory_only"
+    assert "pass typed intent" in digest["route_card"]["next_action"]
+    assert "not edit permission" in " ".join(digest["route_card"]["expansion_hints"])
+    assert "admitted files" not in " ".join(digest["route_card"]["expansion_hints"])
 
 
 def test_typed_intent_overrides_phrase_scoring_without_bypassing_admission():
