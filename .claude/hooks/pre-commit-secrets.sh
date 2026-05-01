@@ -94,4 +94,45 @@ EOF
     exit 2
 fi
 
+# ---------------------------------------------------------------------------
+# pip-audit — only fires if requirements.txt is in the staged diff.
+# Catches a CVE-flagged version pin landing on a `git commit -- requirements.txt`.
+# Same advisory-vs-block contract as gitleaks: if pip-audit is not installed,
+# emit a one-time advisory and exit 0; otherwise scan and fail-closed on
+# vulnerabilities. Audit-trail override via PIP_AUDIT_SKIP=1.
+# (P3 follow-up to ultrareview25_remediation P1-4 pinning work.)
+# ---------------------------------------------------------------------------
+
+# Detect whether requirements.txt is in the staged diff. Cheap; only fires
+# when the dependency surface actually changed.
+if git diff --cached --name-only | grep -qx "requirements.txt"; then
+    if [ "${PIP_AUDIT_SKIP:-0}" = "1" ]; then
+        OVERRIDE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        OVERRIDE_LOG_PATH="${REPO_ROOT}/.claude/logs/pip-audit-overrides.log"
+        mkdir -p "$(dirname "$OVERRIDE_LOG_PATH")" 2>/dev/null || true
+        printf '%s\tchannel=%s\tcwd=%s\n' "$OVERRIDE_TS" "$CHANNEL" "$PWD" \
+            >> "$OVERRIDE_LOG_PATH" 2>/dev/null || true
+        echo "[pre-commit-secrets] pip-audit SKIPPED (PIP_AUDIT_SKIP=1) channel=${CHANNEL}; logged to ${OVERRIDE_LOG_PATH}" >&2
+    elif command -v pip-audit >/dev/null 2>&1; then
+        echo "[pre-commit-secrets] requirements.txt staged — running pip-audit (channel=${CHANNEL})..." >&2
+        if ! pip-audit -r "${REPO_ROOT}/requirements.txt" --strict 2>&1; then
+            cat >&2 <<EOF
+[pre-commit-secrets] BLOCKED: pip-audit reported vulnerabilities in staged
+requirements.txt. Bump the affected pin to a non-vulnerable version OR
+explicitly opt out:
+  PIP_AUDIT_SKIP=1 git commit ...
+(audit-logged to .claude/logs/pip-audit-overrides.log)
+
+Pin policy: every \`>=\` floor must be a \`==\` exact pin per the
+2026-05-01 ultrareview25_remediation P1-4 audit. New pins must clear
+pip-audit before merging.
+EOF
+            exit 2
+        fi
+    else
+        echo "[pre-commit-secrets] ADVISORY: requirements.txt staged but pip-audit not on PATH — skipping (channel=${CHANNEL})." >&2
+        echo "[pre-commit-secrets] Install: pip install pip-audit" >&2
+    fi
+fi
+
 exit 0
