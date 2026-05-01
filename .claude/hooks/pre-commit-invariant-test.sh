@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
-# Authority basis: round2_verdict.md §4.1 #5 + judge_ledger.md §54 (LIVE baseline 73/22/0)
+# Last reused/audited: 2026-05-01
+# Authority basis: round2_verdict.md §4.1 #5 + judge_ledger.md §54 + ultrareview-25 F2 fix
 #
 # pre-commit-invariant-test.sh — runs pytest tests/test_architecture_contracts.py
 # before any `git commit` is executed via Bash, and aborts on new failures vs the
-# LIVE baseline. Baseline (per BATCH A close + judge_ledger): 73 passed / 22
-# skipped / 0 new failures (+2 vs the 71-pass baseline cited in dispatch dispatch).
+# LIVE baseline. The current baseline value is the BASELINE_PASSED variable below
+# (single source of truth — historical progression appears in the BATCH comment block).
 #
 # Wired as a PreToolUse hook for Bash with command-pattern match on `git commit`
 # in .claude/settings.json. Receives a JSON payload on stdin.

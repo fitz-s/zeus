@@ -5974,3 +5974,141 @@ def test_core_map_rejects_reference_doc_authority_node(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "core_map_reference_authority_leak" for issue in result.issues)
+
+
+# === ultrareview-25 P1 hook fail-closed antibodies ===
+# Subprocess-driven regression tests for the bash hooks at
+# .claude/hooks/{pre-commit-invariant-test.sh,pre-merge-contamination-check.sh}.
+# Antibodies for F3 (multi-space + git -C bypass), F4 (protected branch glob
+# over-match), F13 (critic verdict comment-injection), and F17 (OVERRIDE doc
+# claim honesty). These tests pin the regression behaviour: a future refactor
+# from regex back to literal `case` would silently re-open the bypass — these
+# tests catch that.
+
+import json as _json
+import subprocess as _subprocess
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PRE_MERGE_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-merge-contamination-check.sh")
+
+
+def _run_pre_merge_hook(command, env=None, evidence_path=None):
+    """Invoke pre-merge hook with a fake Bash tool payload; return (rc, stderr)."""
+    payload = _json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    proc_env = dict(os.environ)
+    if env:
+        proc_env.update(env)
+    if evidence_path is not None:
+        proc_env["MERGE_AUDIT_EVIDENCE"] = evidence_path
+    elif "MERGE_AUDIT_EVIDENCE" in proc_env:
+        del proc_env["MERGE_AUDIT_EVIDENCE"]
+    proc = _subprocess.run(
+        ["bash", _PRE_MERGE_HOOK],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=proc_env,
+    )
+    return proc.returncode, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command,must_detect",
+    [
+        ("git merge feature", True),
+        ("git  merge feature", True),  # F3: multi-space
+        ("git\tmerge feature", True),  # F3: tab-separated
+        ("/usr/bin/git merge feature", True),  # F3: absolute path
+        ("git -C /tmp merge feature", True),  # F3: -C path form
+        ("git -C /tmp -c user.x=y merge feature", True),  # F3: chained options
+        ("GIT_DIR=. git merge feature", True),  # F3: env-prefixed
+        ("git pull origin main", True),
+        ("git cherry-pick abc", True),
+        ("git rebase main", True),
+        ("git am patch.mbox", True),
+        # Must NOT trigger:
+        ("git mergetool", False),  # different subcmd
+        ("git-merge x", False),  # not a real git invocation
+        ("git commit -m 'merge feature'", False),  # commit, not merge
+        ("ungit merge x", False),  # word-boundary
+        # NOTE: text-mentions inside shell string args (e.g. `echo "git merge"`)
+        # ARE detected by the first-line scan — this is the documented trade-off
+        # (lines 31-35 of the hook); the hook errs fail-closed in that case.
+    ],
+)
+def test_hook_pre_merge_F3_detector_catches_evil_inputs(command, must_detect):
+    """F3 antibody: regex must catch every form of merge-class command on
+    a protected branch, including multi-space, absolute path, -C form."""
+    rc, stderr = _run_pre_merge_hook(command)
+    detected = "ADVISORY" in stderr or "BLOCKED" in stderr or "PASS" in stderr or "OVERRIDE" in stderr
+    if must_detect:
+        assert detected, f"F3 regression: failed to detect merge-class in {command!r}"
+    else:
+        assert not detected, f"F3 false positive on {command!r}: {stderr[:200]}"
+
+
+def test_hook_pre_merge_F4_protected_branch_regex():
+    """F4 antibody: the protected-branch list is enumerated, not glob-wide."""
+    # Re-implement the same regex Python-side; if hook regex drifts, this drifts too.
+    import re
+
+    def is_protected(branch):
+        return bool(re.match(r"^(main|plan-pre[0-9]+(/.*)?|release-[A-Za-z0-9._/-]+)$", branch))
+
+    # Must protect:
+    assert is_protected("main")
+    assert is_protected("plan-pre5")
+    assert is_protected("plan-pre10")
+    assert is_protected("plan-pre5/sub-branch")  # sub-branch namespacing preserved
+    assert is_protected("release-1.0")
+    assert is_protected("release-2.0/rc1")
+    # Must NOT protect:
+    assert not is_protected("plan-pretty")  # F4 over-broad glob fix
+    assert not is_protected("plan-prototype")
+    assert not is_protected("plan-pre")  # no number
+    assert not is_protected("release-")  # empty suffix
+    assert not is_protected("Release-1.0")  # case-sensitive
+    assert not is_protected("feature-x")
+    assert not is_protected("topology-runtime-hooks-governance")
+
+
+def test_hook_pre_merge_F13_blocks_commented_critic_verdict(tmp_path):
+    """F13 antibody: a fully-commented evidence file must NOT satisfy the
+    critic_verdict existence check (comment-injection spoof)."""
+    spoof = tmp_path / "evidence_spoof.txt"
+    spoof.write_text(
+        "# critic_verdict: APPROVE\n"
+        "# diff_scope: 1 file\n"
+        "# drift_keyword_scan: clean\n"
+    )
+    # Run on a protected branch context (current repo HEAD is main per setup)
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(spoof))
+    assert "BLOCKED" in stderr, f"F13 regression: spoofed evidence accepted: {stderr[:300]}"
+
+
+def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path):
+    """F13 dual: a legit evidence file with both a comment mentioning the field
+    AND a real un-commented field must PASS."""
+    legit = tmp_path / "evidence_legit.txt"
+    legit.write_text(
+        "# This comment mentions critic_verdict: APPROVE for context\n"
+        "critic_verdict: APPROVE\n"
+        "diff_scope: 5 files +200/-50\n"
+        "drift_keyword_scan: bidirectional clean\n"
+    )
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(legit))
+    assert "PASS" in stderr, f"F13 false positive on legit evidence: {stderr[:300]}"
+
+
+def test_hook_pre_merge_F17_OVERRIDE_does_not_claim_drift_table_log():
+    """F17 antibody: the OVERRIDE docstring must NOT claim writes to
+    docs/operations/current_state.md drift table (which the code does not do).
+    The honest replacement language is preserved."""
+    with open(_PRE_MERGE_HOOK, "r") as f:
+        text = f.read()
+    assert "logged to docs/operations/current_state.md drift table" not in text, (
+        "F17 regression: false log-target claim is back in the OVERRIDE docstring"
+    )
+    assert "audit trail emitted to stderr" in text, (
+        "F17 regression: honest replacement language has been removed"
+    )

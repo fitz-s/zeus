@@ -4,9 +4,9 @@
 # verdict file containing required fields per architecture/worktree_merge_protocol.yaml.
 #
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
-# Authority basis: contamination remediation verdict.md §6 Stage 4 Gate B
-# Plan evidence: docs/operations/task_2026-04-28_contamination_remediation/STAGE4_PROCESS_GATES_AE_PLAN.md §2
+# Last reused/audited: 2026-05-01
+# Authority basis: contamination remediation verdict.md §6 Stage 4 Gate B + ultrareview-25 F3/F4/F13/F17 fixes
+# Plan evidence: docs/operations/task_2026-05-01_ultrareview25_remediation/PLAN.md §3 P1
 # Wired as PreToolUse hook for Bash tool in .claude/settings.json
 # Receives JSON payload on stdin: {tool_name, tool_input{command,...}, ...}
 # Exit 0 = allow/advisory; exit 2 = block invalid escalated evidence.
@@ -32,30 +32,33 @@ fi
 # heredoc (e.g. commit message body) mentions merge/pull/etc as text.
 # Trade-off: chained `git status && git merge X` on a single line where the
 # FIRST git command is non-merge will NOT block (rare edge case).
-FIRST_GIT=$(printf '%s' "$COMMAND" | head -1 | grep -oE 'git[[:space:]]+[a-z-]+' | head -1 || true)
-case "$FIRST_GIT" in
-    "git merge"|"git pull"|"git cherry-pick"|"git rebase"|"git am")
-        IS_MERGE=1
-        ;;
-    *)
-        IS_MERGE=0
-        ;;
-esac
+# F3 fix (ultrareview-25): bash regex handles multi-space `git  merge`,
+# absolute `/usr/bin/git merge`, and the `git -C <path> merge` form that
+# the prior literal `case` silently bypassed. Backslash escapes inside
+# `[...]` are not required for `;`/`&`/`|` in bash ERE.
+FIRST_LINE=$(printf '%s' "$COMMAND" | head -1)
+if [[ "$FIRST_LINE" =~ (^|[;&|[:space:]])(/[^[:space:]]+/)?git[[:space:]]+(-[A-Za-z][[:space:]]+[^[:space:]]+[[:space:]]+)*(merge|pull|cherry-pick|rebase|am)([[:space:]]|$) ]]; then
+    IS_MERGE=1
+else
+    IS_MERGE=0
+fi
 
 if [ "$IS_MERGE" -eq 0 ]; then
     exit 0
 fi
 
-# Check current branch is in protected set
+# Check current branch is in protected set.
+# F4 fix (ultrareview-25): the prior `plan-*` glob over-matched arbitrary
+# branches like `plan-pretty` / `plan-prototype`. Restrict to the documented
+# protected family `plan-pre<N>` (with optional `/sub-branch` so prior
+# behaviour for sub-branch namespacing is preserved), plus `main` and
+# `release-<non-empty>`. Empty-suffix `release-` is rejected; case-sensitive.
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-case "$CURRENT_BRANCH" in
-    main|plan-pre5|plan-*|release-*)
-        IS_PROTECTED=1
-        ;;
-    *)
-        IS_PROTECTED=0
-        ;;
-esac
+if [[ "$CURRENT_BRANCH" =~ ^(main|plan-pre[0-9]+(/.*)?|release-[A-Za-z0-9._/-]+)$ ]]; then
+    IS_PROTECTED=1
+else
+    IS_PROTECTED=0
+fi
 
 if [ "$IS_PROTECTED" -eq 0 ]; then
     exit 0
@@ -86,7 +89,8 @@ Escalated path:
 
 To override (operator emergency only):
   MERGE_AUDIT_EVIDENCE=OVERRIDE_<reason> <your git command>
-  (logged to docs/operations/current_state.md drift table)
+  (audit trail emitted to stderr; capture via shell redirect or terminal log.
+   TODO(ultrareview-25 F17 follow-up): durable OVERRIDE log -> drift table)
 EOF
     exit 0
 fi
@@ -104,16 +108,21 @@ if [ ! -f "$MERGE_AUDIT_EVIDENCE" ]; then
     exit 2
 fi
 
-# Check evidence file contains required fields
+# Check evidence file contains required fields. F13 fix (ultrareview-25):
+# anchor field detection at start-of-line (whitespace allowed, `#` rejected)
+# so a commented-out field cannot satisfy the existence check.
 for FIELD in "critic_verdict:" "diff_scope:" "drift_keyword_scan:"; do
-    if ! grep -q "$FIELD" "$MERGE_AUDIT_EVIDENCE"; then
-        echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE missing required field: $FIELD" >&2
+    if ! grep -qE "^[[:space:]]*${FIELD}" "$MERGE_AUDIT_EVIDENCE"; then
+        echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE missing required field: $FIELD (commented-out lines do not satisfy this check)" >&2
         exit 2
     fi
 done
 
-# Check critic_verdict is APPROVE or REVISE (not BLOCK)
-VERDICT=$(grep "critic_verdict:" "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/.*critic_verdict:[[:space:]]*//;s/[[:space:]]*$//')
+# Check critic_verdict is APPROVE or REVISE (not BLOCK).
+# F13 fix (ultrareview-25): anchor critic_verdict to start-of-line (allowing
+# leading whitespace but rejecting `#` comment lines) so a commented hint
+# like `# critic_verdict: APPROVE` cannot spoof the actual field value.
+VERDICT=$(grep -E '^[[:space:]]*critic_verdict:' "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/.*critic_verdict:[[:space:]]*//;s/[[:space:]]*$//')
 case "$VERDICT" in
     APPROVE|REVISE)
         echo "[pre-merge-contamination-check] PASS: $MERGE_AUDIT_EVIDENCE verdict=$VERDICT" >&2

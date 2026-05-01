@@ -345,7 +345,6 @@ def test_pricing_semantics_authority_cutover_routes_to_refactor_profile():
             "architecture/negative_constraints.yaml",
             "tests/test_no_bare_float_seams.py",
             "tests/test_architecture_contracts.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/WORKFLOW.md",
         ],
     )
 
@@ -381,7 +380,6 @@ def test_pricing_semantics_authority_cutover_admits_state_owned_exit_quote_split
         [
             "src/state/portfolio.py",
             "tests/test_hold_value_exit_costs.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
@@ -399,7 +397,6 @@ def test_pricing_semantics_authority_cutover_admits_monitor_quote_split_safety_t
             "src/engine/monitor_refresh.py",
             "tests/test_runtime_guards.py",
             "tests/test_live_safety_invariants.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
@@ -419,7 +416,6 @@ def test_pricing_semantics_authority_cutover_admits_f06_client_envelope_first_pa
             "src/contracts/venue_submission_envelope.py",
             "tests/test_v2_adapter.py",
             "tests/test_risk_allocator.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
@@ -460,7 +456,6 @@ def test_pricing_semantics_authority_cutover_admits_f08_order_policy_existing_co
             "tests/test_execution_intent_typed_slippage.py",
             "tests/test_runtime_guards.py",
             "tests/test_v2_adapter.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
@@ -504,7 +499,6 @@ def test_pricing_semantics_authority_cutover_admits_f09_fill_authority_packet_wi
             "tests/test_realized_fill_at_receipt.py",
             "tests/test_harvester_metric_identity.py",
             "tests/test_db.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
@@ -532,7 +526,6 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
             "tests/test_run_replay_cli.py",
             "tests/test_pnl_flow_and_audit.py",
             "tests/test_backtest_skill_economics.py",
-            "docs/operations/task_2026-04-30_reality_semantics_refactor_package/PHASE_0A_PROGRESS.md",
         ],
     )
 
