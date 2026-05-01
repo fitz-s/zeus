@@ -31,7 +31,9 @@ from src.contracts import (
     compute_native_limit_price,
     ExecutionIntent,
     EdgeContext,
+    FinalExecutionIntent,
     Direction,
+    simulate_clob_sweep,
 )
 from src.contracts.execution_price import (
     ExecutionPrice,
@@ -821,6 +823,213 @@ def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | 
     return float(aligned)
 
 
+def _entry_buy_submit_shares(target_size_usd: float, limit_price: float) -> float:
+    shares = target_size_usd / limit_price if limit_price > 0 else 0
+    return math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
+
+
+def _final_intent_submit_shares(intent: FinalExecutionIntent) -> float:
+    """Adapt immutable final sizing to the legacy entry executor contract."""
+
+    if intent.size_kind == "notional_usd":
+        return _entry_buy_submit_shares(
+            float(intent.size_value),
+            float(intent.final_limit_price),
+        )
+    raise ValueError(
+        "execute_final_intent requires notional_usd sizing until the entry "
+        f"executor can submit frozen share quantities; got {intent.size_kind!r}"
+    )
+
+
+def _final_intent_target_size_usd(intent: FinalExecutionIntent, shares: float) -> float:
+    return float(Decimal(str(shares)) * intent.final_limit_price)
+
+
+def _final_intent_timeout_seconds(intent: FinalExecutionIntent) -> int:
+    if intent.cancel_after is None:
+        raise ValueError("FinalExecutionIntent missing cancel_after")
+    timeout = math.ceil((intent.cancel_after - datetime.now(timezone.utc)).total_seconds())
+    if timeout <= 0:
+        raise ValueError("FinalExecutionIntent cancel_after has already expired")
+    return timeout
+
+
+def _final_intent_snapshot_metadata(
+    intent: FinalExecutionIntent,
+    conn: Optional[sqlite3.Connection],
+    *,
+    submitted_shares: float,
+) -> tuple[str, str]:
+    """Resolve venue identity from the cited executable snapshot."""
+
+    from src.state.snapshot_repo import get_snapshot
+
+    own_conn = conn is None
+    lookup_conn = get_trade_connection_with_world() if own_conn else conn
+    try:
+        snapshot = get_snapshot(lookup_conn, intent.snapshot_id)
+    finally:
+        if own_conn:
+            lookup_conn.close()
+    if snapshot is None:
+        raise ValueError(f"FinalExecutionIntent snapshot_id not found: {intent.snapshot_id}")
+    if snapshot.executable_snapshot_hash != intent.snapshot_hash:
+        raise ValueError("FinalExecutionIntent snapshot_hash does not match executable snapshot")
+    if snapshot.selected_outcome_token_id != intent.selected_token_id:
+        raise ValueError("FinalExecutionIntent selected_token_id does not match executable snapshot")
+    if intent.direction in {"buy_yes", "sell_yes"}:
+        expected_token_id = snapshot.yes_token_id
+        expected_label = "YES"
+    elif intent.direction in {"buy_no", "sell_no"}:
+        expected_token_id = snapshot.no_token_id
+        expected_label = "NO"
+    else:
+        raise ValueError(f"unsupported direction {intent.direction!r}")
+    if intent.selected_token_id != expected_token_id:
+        raise ValueError(
+            "FinalExecutionIntent direction does not match executable snapshot side: "
+            f"direction={intent.direction!r} selected_token_id={intent.selected_token_id!r} "
+            f"expected_{expected_label.lower()}_token_id={expected_token_id!r}"
+        )
+    if intent.tick_size != snapshot.min_tick_size:
+        raise ValueError("FinalExecutionIntent tick_size does not match executable snapshot")
+    if intent.min_order_size != snapshot.min_order_size:
+        raise ValueError("FinalExecutionIntent min_order_size does not match executable snapshot")
+    if intent.neg_risk != snapshot.neg_risk:
+        raise ValueError("FinalExecutionIntent neg_risk does not match executable snapshot")
+    sweep = simulate_clob_sweep(
+        snapshot=snapshot,
+        direction=intent.direction,
+        requested_size_kind="shares",
+        requested_size_value=Decimal(str(submitted_shares)),
+        limit_price=intent.final_limit_price,
+    )
+    if sweep.depth_status != "PASS" or sweep.average_price is None:
+        raise ValueError(
+            "FinalExecutionIntent executable depth validation failed: "
+            f"{sweep.depth_status}"
+        )
+    if sweep.average_price != intent.expected_fill_price_before_fee:
+        raise ValueError(
+            "FinalExecutionIntent expected_fill_price_before_fee does not match "
+            "executable snapshot sweep"
+        )
+    return snapshot.gamma_market_id, snapshot.event_id
+
+
+def _legacy_entry_intent_from_final(
+    intent: FinalExecutionIntent,
+    *,
+    market_id: str,
+    event_id: str,
+    submitted_shares: float,
+) -> ExecutionIntent:
+    """Build the legacy executor envelope without repricing probability inputs."""
+
+    if intent.direction not in {"buy_yes", "buy_no"}:
+        raise ValueError(
+            "execute_final_intent only supports buy_yes/buy_no entry directions; "
+            f"got {intent.direction!r}"
+        )
+    if intent.post_only:
+        raise ValueError("execute_final_intent cannot honor post_only on the legacy entry executor")
+    if intent.order_policy == "post_only_passive_limit":
+        raise ValueError("execute_final_intent cannot honor post_only_passive_limit")
+    if intent.decision_source_context is None:
+        raise ValueError("FinalExecutionIntent missing decision_source_context")
+    decision_source_errors = intent.decision_source_context.integrity_errors()
+    if decision_source_errors:
+        raise ValueError(
+            "FinalExecutionIntent decision_source_context failed integrity: "
+            + ",".join(decision_source_errors)
+        )
+
+    snapshot_event_id = str(event_id or "").strip()
+    intent_event_id = str(intent.event_id or "").strip()
+    if intent_event_id and snapshot_event_id and intent_event_id != snapshot_event_id:
+        raise ValueError(
+            "FinalExecutionIntent event_id does not match executable snapshot: "
+            f"intent={intent_event_id!r} snapshot={snapshot_event_id!r}"
+        )
+    execution_event_id = snapshot_event_id or intent_event_id
+    return ExecutionIntent(
+        direction=Direction(intent.direction),
+        target_size_usd=_final_intent_target_size_usd(intent, submitted_shares),
+        limit_price=float(intent.final_limit_price),
+        toxicity_budget=0.05,
+        max_slippage=SlippageBps(
+            value_bps=float(intent.max_slippage_bps),
+            direction="adverse",
+        ),
+        is_sandbox=False,
+        market_id=market_id,
+        token_id=intent.selected_token_id,
+        timeout_seconds=_final_intent_timeout_seconds(intent),
+        decision_edge=0.0,
+        executable_snapshot_id=intent.snapshot_id,
+        executable_snapshot_min_tick_size=intent.tick_size,
+        executable_snapshot_min_order_size=intent.min_order_size,
+        executable_snapshot_neg_risk=intent.neg_risk,
+        event_id=execution_event_id,
+        resolution_window=intent.resolution_window,
+        correlation_key=intent.correlation_key or execution_event_id or intent.hypothesis_id,
+        decision_source_context=intent.decision_source_context,
+        submit_order_type=intent.order_type,
+    )
+
+
+def execute_final_intent(
+    intent: FinalExecutionIntent,
+    conn: Optional[sqlite3.Connection] = None,
+    decision_id: str = "",
+    snapshot_conn: Optional[sqlite3.Connection] = None,
+) -> "OrderResult":
+    """Submit an immutable corrected execution intent through the live entry path.
+
+    This seam intentionally consumes only FinalExecutionIntent fields. It does
+    not inspect BinEdge, VWMP, posterior probability, or any legacy fair-value
+    inputs; those belong upstream of corrected cost-basis construction.
+    """
+
+    if not isinstance(intent, FinalExecutionIntent):
+        raise TypeError(
+            "execute_final_intent requires FinalExecutionIntent, "
+            f"got {type(intent).__name__}"
+        )
+    intent.assert_no_recompute_inputs()
+    intent.assert_submit_ready()
+    submitted_shares = _final_intent_submit_shares(intent)
+    market_id, event_id = _final_intent_snapshot_metadata(
+        intent,
+        snapshot_conn if snapshot_conn is not None else conn,
+        submitted_shares=submitted_shares,
+    )
+    legacy_intent = _legacy_entry_intent_from_final(
+        intent,
+        market_id=market_id,
+        event_id=event_id,
+        submitted_shares=submitted_shares,
+    )
+    trade_id = str(uuid.uuid4())[:12]
+    if not legacy_intent.token_id:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason="No token_id provided for intent",
+        )
+    from src.execution.command_bus import IntentKind
+
+    _assert_cutover_allows_submit(IntentKind.ENTRY)
+    return _live_order(
+        trade_id,
+        legacy_intent,
+        submitted_shares,
+        conn=conn,
+        decision_id=decision_id or intent.hypothesis_id,
+    )
+
+
 def execute_intent(
     intent: ExecutionIntent,
     edge_vwmp: float,  # Phase 2: remove this parameter (dead after _paper_fill deletion)
@@ -842,8 +1051,7 @@ def execute_intent(
     limit_price = intent.limit_price
 
     # V6: Compute shares with proper quantization
-    shares = intent.target_size_usd / limit_price if limit_price > 0 else 0
-    shares = math.ceil(shares * 100 - 1e-9) / 100.0  # BUY: round UP
+    shares = _entry_buy_submit_shares(intent.target_size_usd, limit_price)
 
     if not intent.token_id:
         return OrderResult(
@@ -1669,6 +1877,20 @@ def _live_order(
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        raw_submit_order_type = getattr(intent, "submit_order_type", None)
+        submit_order_type = raw_submit_order_type if isinstance(raw_submit_order_type, str) else None
+        if submit_order_type is not None and order_type != submit_order_type:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=(
+                    "final_order_type_mismatch: "
+                    f"intent={submit_order_type} selected={order_type}"
+                ),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+            )
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
         collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
