@@ -28,8 +28,52 @@ Use `python3 scripts/topology_doctor.py --tests --json` to check that active
 | `fakes/` | Test-only fake venue/runtime doubles; must not import credentials or perform live I/O |
 | `integration/` | Cross-module integration antibodies such as R3 T1 fake/live adapter parity scenarios |
 
-Top-level `test_*.py` files are intentionally not duplicated here. Query
-`architecture/test_topology.yaml` instead of hand-maintaining another file list.
+Top-level `test_*.py` files are registered below for topology compliance. The
+authoritative machine registry is `architecture/test_topology.yaml`.
+
+| Path | Purpose |
+|------|---------|
+| `conftest.py` | Shared pytest fixtures for R3 T1 fake venue parity tests (created 2026-04-27) |
+| `conftest_connection_pair.py` | Test helper fake_connection_pair() for riskguard/fill_tracker monkeypatching (two-system independence; created 2026-04-30) |
+| `test_attribution_drift.py` | Cross-module antibody: silent attribution drift detector per R3 §1 #2 ATTRIBUTION_DRIFT packet (created 2026-04-28) |
+| `test_attribution_drift_weekly.py` | End-to-end runner antibody for attribution drift batch-3 weekly dispatch (created 2026-04-28) |
+| `test_calibration_observation.py` | Cross-module antibody: Platt parameter drift monitoring per R3 §1 #2 CALIBRATION_HARDENING packet (created 2026-04-29) |
+| `test_calibration_observation_weekly.py` | End-to-end runner antibody for calibration hardening batch-3 weekly dispatch (created 2026-04-29) |
+| `test_control_plane_dual_consumer.py` | Antibody #14: control_plane.json dual consumer — ingest_main.py must contain control_plane read pattern (two-system independence; created 2026-04-30) |
+| `test_data_freshness_gate.py` | Antibody #6: freshness gate three-branch behavior — FRESH/STALE/ABSENT (two-system independence; created 2026-04-30) |
+| `test_data_version_priority.py` | Antibody: opendata data_version preferred over TIGGE when both rows exist for same (city, target_date, metric) (created 2026-05-01) |
+| `test_drift_detector_threshold.py` | Antibody #SC-6: drift detector threshold tests (two-system independence; created 2026-04-30) |
+| `test_dual_run_lock_obeyed.py` | Antibody #11: dual-run file lock race test (two-system independence; created 2026-04-30) |
+| `test_dynamic_sql_baseline.py` | Pytest wrapper for check_dynamic_sql.py; security antibody for f-string SQL interpolations (created 2026-05-01) |
+| `test_edge_observation.py` | Cross-module antibody: alpha-decay tracker per strategy_key per R3 §1 #2 EDGE_OBSERVATION packet (created 2026-04-28) |
+| `test_edge_observation_weekly.py` | End-to-end runner antibody for edge observation batch-3 weekly dispatch (created 2026-04-28) |
+| `test_harvester_split_independence.py` | Antibody #12: structural boundary between ingest-side settlement harvester and trading lane (created 2026-04-30) |
+| `test_heartbeat_dual_coverage.py` | Antibody #15: heartbeat sensor must monitor BOTH daemon heartbeat files (two-system independence; created 2026-04-30) |
+| `test_identity_column_defaults.py` | Pytest wrapper for check_identity_column_defaults.py; INV-14 identity-column DEFAULT antibody (created 2026-05-01) |
+| `test_ingest_provenance_contract.py` | Antibody #9: IngestionGuard provenance contract tests (two-system independence; created 2026-04-30) |
+| `test_inv_prototype.py` | Prototype evidence tests for @enforced_by INV decorator experiment; advisory only (created 2026-04-28) |
+| `test_invariant_citations.py` | Pytest wrapper for check_invariant_test_citations.py; two-ring invariant citation enforcement (created 2026-05-01) |
+| `test_learning_loop_observation.py` | Cross-module antibody: settlement-corpus->calibration update pipeline per R3 §1 #2 LEARNING_LOOP packet (created 2026-04-29) |
+| `test_learning_loop_observation_weekly.py` | End-to-end runner antibody for learning loop batch-3 weekly dispatch (created 2026-04-29) |
+| `test_main_module_scope.py` | Antibody #8: Phase 3 module-scope enforcement for src.main (two-system independence; created 2026-04-30) |
+| `test_no_raw_world_attach.py` | Antibody #13: no raw ATTACH DATABASE or get_trade_connection_with_world in trading-lane source modules (created 2026-04-30) |
+| `test_no_synthetic_provenance_marker.py` | Relapse antibody: blocks re-introduction of synthetic provenance markers per critic findings #6A/E (created 2026-04-28) |
+| `test_observations_k1_migration.py` | Antibody for Invariant C: observations schema migrated to K1 dual-atom shape (created 2026-05-01) |
+| `test_opendata_mx2t6_not_2t.py` | Antibody for Invariant A: download_ecmwf_open_ens.py default param must be mx2t6+mn2t6, not 2t (created 2026-05-01) |
+| `test_opendata_writes_v2_table.py` | Antibody for Invariant A: Open Data ENS rows land in ensemble_snapshots_v2 with canonical data_versions (created 2026-05-01) |
+| `test_riskguard_cold_start.py` | Antibody: riskguard cold-start deadlock fix — empty outcome fact must not block startup (created 2026-05-01) |
+| `test_scheduler_health_truthfulness.py` | Antibody for Invariant D: structural-failure job must produce status=FAILED in scheduler_jobs_health.json (created 2026-05-01) |
+| `test_settlements_physical_quantity_invariant.py` | Antibody for INV-14 identity spine: settlement metric identity correctness and migration residuals (created 2026-04-28) |
+| `test_source_health_probe.py` | Antibody #5: source health probe contract tests (two-system independence; created 2026-04-30) |
+| `test_station_migration_probe.py` | Antibody for Invariant F: station-migration drift detection when Polymarket gamma URL differs from cities.json station (created 2026-05-01) |
+| `test_tigge_daily_ingest.py` | Antibody: TIGGE retrieval inside ingest daemon — MARS-credential-missing auto-pause, idempotent re-run, control_plane pause (created 2026-05-01) |
+| `test_tigge_schema_contract.py` | Antibody #16: TIGGE extractor<->ingester schema drift structural tests (created 2026-04-29) |
+| `test_trading_isolation.py` | Antibody #3: trading-lane isolation — src.engine/execution/strategy/signal must not import ingest modules (created 2026-04-30) |
+| `test_truth_authority_enum.py` | Antibody for INV-23: DEGRADED_PROJECTION must be a distinct TruthAuthority enum value; ultrareview P1-3 (created 2026-05-01) |
+| `test_world_schema_ready_check.py` | Antibody for A-2: _startup_world_schema_ready_check() must exist in src/main.py (two-system independence; created 2026-05-01) |
+| `test_world_writer_boundary.py` | Antibody #2: only allowlisted modules may contain world-DB write SQL (INSERT/UPDATE/DELETE) (created 2026-04-30) |
+| `test_ws_poll_reaction.py` | Cross-module antibody: WS/poll reaction timing invariant per R3 §1 #2 WS_OR_POLL_TIGHTENING packet (created 2026-04-28) |
+| `test_ws_poll_reaction_weekly.py` | End-to-end runner antibody for WS/poll tightening batch-3 weekly dispatch (created 2026-04-29) |
 
 ## Test Trust Policy
 

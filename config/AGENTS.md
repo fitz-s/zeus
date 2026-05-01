@@ -17,6 +17,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `reality_contracts/data.yaml` | External assumption contract: data source availability and behavior |
 | `data_availability_exceptions.yaml` | K2 hole_scanner whitelist: per-model retro-start dates, publication lag, onboarding floor, fill policy |
 | `risk_caps.yaml` | R3 A2 engineering defaults for RiskAllocator/PortfolioGovernor capacity, drawdown, heartbeat/WS-gap, reconciliation, unknown-side-effect, and maker/taker thresholds |
+| `settings.example.json` | Template for config/settings.json with operator-specific values marked null; copy to settings.json to configure |
 
 ## Rules
 

@@ -71,6 +71,14 @@ Changes here are architecture or governance changes, never “just docs.”
 | `ast_rules/forbidden_patterns.md` | Forbidden code patterns |
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
 | `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — conflict-first merge inspection; MERGE_AUDIT_EVIDENCE critic verdict required only for escalated broad/high-risk conflict surfaces |
+| `world_schema_manifest.yaml` | World DB schema manifest: per-table column inventory and schema authority for two-system independence (created 2026-04-30) |
+| `preflight_overrides_2026-04-28.yaml` | Operator-approved preflight drift overrides for WU ICAO history residuals (schema_version 1; created 2026-04-28) |
+| `inv_prototype.py` | @enforced_by decorator prototype for round-2 §H1 INV annotation experiment (created 2026-04-28) |
+| `world_schema_version.yaml` | World DB schema version sentinel for two-system independence axis 4 (created 2026-05-01) |
+| `runtime_posture.yaml` | Runtime posture YAML — read-only at runtime per INV-26 (created 2026-04-26) |
+| `scope_schema.json` | JSON Schema for Zeus packet scope.yaml sidecar; machine-read by zpkt and pre-commit hook |
+| `digest_profiles.py` | Auto-generated digest profiles for topology_doctor — DO NOT EDIT BY HAND; regenerated from topology.yaml |
+| `paris_station_resolution_2026-05-01.yaml` | Operator decision 2026-05-01: Paris Polymarket settlement station is LFPB (not LFPG) |
 
 ## Subdirectory navigation
 

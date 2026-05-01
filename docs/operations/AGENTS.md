@@ -87,6 +87,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
+| `observations_k1_migration.md` | packet evidence | Design doc for K1 dual-atom observations migration — operator directive 2026-05-01 |
+| `tigge_daemon_integration.md` | packet evidence | Design doc for TIGGE retrieval inside the data-ingest daemon — operator directive 2026-05-01 |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
