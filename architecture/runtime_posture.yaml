@@ -19,10 +19,10 @@
 # default_posture. A default_posture outside the grammar raises ValueError.
 
 schema_version: 1
-default_posture: NO_NEW_ENTRIES
+default_posture: NORMAL
 
 branches:
-  main: NO_NEW_ENTRIES
+  main: NORMAL
 
 posture_grammar:
   - NORMAL
