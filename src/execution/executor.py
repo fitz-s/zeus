@@ -539,6 +539,11 @@ class ExitOrderIntent:
     shares: float
     current_price: float
     best_bid: Optional[float] = None
+    market_id: str = ""
+    condition_id: str = ""
+    question_id: str = ""
+    yes_token_id: str = ""
+    no_token_id: str = ""
     intent_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     executable_snapshot_id: str = ""
@@ -1044,6 +1049,11 @@ def create_exit_order_intent(
     shares: float,
     current_price: float,
     best_bid: Optional[float] = None,
+    market_id: str = "",
+    condition_id: str = "",
+    question_id: str = "",
+    yes_token_id: str = "",
+    no_token_id: str = "",
     executable_snapshot_id: str = "",
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
@@ -1057,6 +1067,11 @@ def create_exit_order_intent(
         shares=shares,
         current_price=current_price,
         best_bid=best_bid,
+        market_id=market_id,
+        condition_id=condition_id,
+        question_id=question_id,
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
         intent_id=f"{trade_id}:exit",
         idempotency_key=f"{trade_id}:exit:{token_id}",
         executable_snapshot_id=executable_snapshot_id,
@@ -1066,13 +1081,16 @@ def create_exit_order_intent(
     )
 
 
-
-
 def place_sell_order(
     token_id: str,
     shares: float,
     current_price: float,
     best_bid: Optional[float] = None,
+    market_id: str = "",
+    condition_id: str = "",
+    question_id: str = "",
+    yes_token_id: str = "",
+    no_token_id: str = "",
 ) -> dict:
     """Legacy compatibility wrapper for the executor-level exit-order path."""
 
@@ -1083,6 +1101,11 @@ def place_sell_order(
             shares=shares,
             current_price=current_price,
             best_bid=best_bid,
+            market_id=market_id,
+            condition_id=condition_id,
+            question_id=question_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
         )
     )
     if result.status == "rejected":
@@ -1095,6 +1118,38 @@ def place_sell_order(
     if result.venue_status:
         payload["status"] = result.venue_status
     return payload
+
+
+def _exit_market_id_for_command(conn: sqlite3.Connection, intent: ExitOrderIntent) -> str:
+    """Return condition/gamma market identity for an exit command row."""
+
+    explicit_market_id = str(getattr(intent, "market_id", "") or "").strip()
+    if explicit_market_id and explicit_market_id != intent.token_id:
+        return explicit_market_id
+
+    if intent.executable_snapshot_id:
+        from src.state.snapshot_repo import get_snapshot
+
+        snapshot = get_snapshot(conn, intent.executable_snapshot_id)
+        if snapshot is not None:
+            for value in (
+                getattr(snapshot, "gamma_market_id", ""),
+                getattr(snapshot, "condition_id", ""),
+                getattr(snapshot, "question_id", ""),
+            ):
+                normalized = str(value or "").strip()
+                if normalized and normalized != intent.token_id:
+                    return normalized
+
+    for value in (
+        getattr(intent, "condition_id", ""),
+        getattr(intent, "question_id", ""),
+    ):
+        normalized = str(value or "").strip()
+        if normalized and normalized != intent.token_id:
+            return normalized
+
+    return explicit_market_id or intent.token_id
 
 
 def execute_exit_order(
@@ -1203,9 +1258,6 @@ def execute_exit_order(
     )
     command_id = uuid.uuid4().hex[:16]
     now_str = datetime.now(timezone.utc).isoformat()
-    # ExitOrderIntent carries no market_id; use token_id as market identifier
-    # for the command row. P1.S5 can refine if a market_id surface is added.
-    market_id_for_cmd = intent.token_id
 
     # -----------------------------------------------------------------------
     # persist phase — insert command row + transition to SUBMITTING (INV-30)
@@ -1220,6 +1272,7 @@ def execute_exit_order(
     _own_conn = conn is None
     if _own_conn:
         conn = get_trade_connection_with_world()
+    market_id_for_cmd = _exit_market_id_for_command(conn, intent)
     if not decision_id:
         logger.warning(
             "EXECUTOR: synthetic decision_id %s — retry-idempotency NOT guaranteed; "
@@ -1229,7 +1282,7 @@ def execute_exit_order(
     try:
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
-        ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
+        ws_gap_component = _assert_ws_gap_allows_submit(market_id_for_cmd)
         collateral_component = _assert_collateral_allows_sell(intent.token_id, shares)
 
         # -------------------------------------------------------------------
