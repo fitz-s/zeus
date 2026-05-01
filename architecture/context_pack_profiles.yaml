@@ -7,6 +7,13 @@ metadata:
     existing topology primitives into work packets; they do not create new
     authority and must keep provisional-context warnings visible.
   common_runtime_guidance:
+    route_card_runtime_packet: >
+      Treat route cards as typed runtime decision packets: read
+      dominant_driver, why_not_admitted, suggested_next_command,
+      safe_next_files, persistence_target, merge_evidence_required, and
+      provenance_notes before broadening context or retrying task wording.
+      These fields explain next action and artifact/provenance state; they do
+      not replace admission.status as write authority.
     operation_feedback_loop: >
       At operation close, recycle context into one compact feedback capsule:
       what scratch/runtime context was promoted, summarized, discarded, or left
