@@ -1,12 +1,21 @@
-"""Zeus main entry point. Blueprint v2 §9.1.
+"""Zeus main entry point — trading daemon only (Phase 3).
 
 All discovery modes go through the same CycleRunner with different DiscoveryMode values.
 The lifecycle is identical for all modes — only scanner parameters differ.
+
+Phase 3: K2 ingest jobs removed. src/ingest_main.py owns all K2 ticks,
+etl_recalibrate, ecmwf_open_data, automation_analysis, hole_scanner,
+startup_catch_up, source_health_probe, drift_detector, ingest_status_rollup,
+and harvester_truth_writer. Trading owns only discovery, harvester_pnl_resolver,
+venue heartbeat, wallet gate, freshness gate (consumer), schema validator (consumer).
+
+Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
+— other daemons may be added in future. The K2 ticks that called it are removed.
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-04-21
-# Authority basis: Phase 10 DT-close B047 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B047_scheduler_observability.md
+# Last reused/audited: 2026-04-30
+# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3
 
 import functools
 import logging
@@ -60,13 +69,6 @@ def _scheduler_job(job_name: str):
     return _decorator
 
 
-def _etl_subprocess_python() -> str:
-    candidate = Path(__file__).parent.parent / ".venv" / "bin" / "python"
-    if candidate.exists():
-        return str(candidate)
-    return sys.executable
-
-
 @_scheduler_job("run_mode")
 def _run_mode(mode: DiscoveryMode):
     """Wrapper with error handling and cycle lock for scheduler.
@@ -103,224 +105,35 @@ def _run_mode(mode: DiscoveryMode):
 
 @_scheduler_job("harvester")
 def _harvester_cycle():
-    from src.execution.harvester import run_harvester
-    result = run_harvester()
-    logger.info("Harvester: %s", result)
+    """Phase 1.5 harvester split: trading-side P&L resolver.
 
-
-@_scheduler_job("k2_daily_obs")
-def _k2_daily_obs_tick():
-    """K2 daily-observations tick — replaces legacy wu_daily_collector.
-
-    Fires every hour. Inside:
-    - WU cities whose local peak+4h window is active get their last
-      completed local day fetched via the WU ICAO historical endpoint
-    - HKO current+prior month refreshed once per day (gated to UTC 02:00)
-    - All writes flow through ObservationAtom + IngestionGuard (no Layer 3)
-    - data_coverage is updated in the same transaction as the physical row
+    Reads world.settlements (written by ingest-side harvester_truth_writer)
+    and settles positions + writes decision_log. Falls back to legacy
+    run_harvester() if resolver import fails (backward compat during transition).
     """
-    from src.data.daily_obs_append import daily_tick
-    from src.state.db import get_world_connection
-    conn = get_world_connection()
-    try:
-        result = daily_tick(conn)
-    finally:
-        conn.close()
-    logger.info("K2 daily_obs_tick: %s", result)
-
-
-@_scheduler_job("k2_hourly_instants")
-def _k2_hourly_instants_tick():
-    """K2 hourly Open-Meteo archive tick for observation_instants.
-
-    Sweeps all 46 cities with a per-city dynamic end_date (each city's
-    most recently completed local day). 3-day rolling window allows
-    Open-Meteo archive ~2-3 day delay + catches promotions.
-    """
-    from src.data.hourly_instants_append import hourly_tick
-    from src.state.db import get_world_connection
-    conn = get_world_connection()
-    try:
-        result = hourly_tick(conn)
-    finally:
-        conn.close()
-    logger.info("K2 hourly_instants_tick: %s", result)
-
-
-@_scheduler_job("k2_solar_daily")
-def _k2_solar_daily_tick():
-    """K2 daily sunrise/sunset refresh — once per day (UTC 00:30).
-
-    Fetches [today, today+14] per city. Deterministic astronomical data
-    so no backoff / retry semantics are needed beyond network errors.
-    """
-    from src.data.solar_append import daily_tick
-    from src.state.db import get_world_connection
-    conn = get_world_connection()
-    try:
-        result = daily_tick(conn)
-    finally:
-        conn.close()
-    logger.info("K2 solar_daily_tick: %s", result)
-
-
-@_scheduler_job("k2_forecasts_daily")
-def _k2_forecasts_daily_tick():
-    """K2 daily NWP forecasts refresh — once per day (UTC 07:30).
-
-    Fires after ECMWF 00Z and GFS 06Z runs are populated in the
-    Previous Runs API (empirically ~UTC 07:00). Fetches [today-3,
-    today+7] × 5 models × 7 leads per city.
-    """
-    from src.data.forecasts_append import daily_tick
-    from src.state.db import get_world_connection
-    conn = get_world_connection()
-    try:
-        result = daily_tick(conn)
-    finally:
-        conn.close()
-    logger.info("K2 forecasts_daily_tick: %s", result)
-
-
-@_scheduler_job("k2_hole_scanner")
-def _k2_hole_scanner_tick():
-    """K2 hole scanner daily patrol — runs hole_scanner.scan_all().
-
-    Finds physical-table rows not yet in data_coverage (self-seed from
-    critic S2#2) and writes MISSING rows for expected-but-absent ones.
-    The appenders pick up the new MISSING rows on their next tick via
-    find_pending_fills. Logs a compact summary per data_table.
-    """
-    from src.data.hole_scanner import HoleScanner
-    from src.state.db import get_world_connection
-
-    conn = get_world_connection()
-    try:
-        scanner = HoleScanner(conn)
-        results = scanner.scan_all()
-        for r in results:
-            logger.info("K2 hole_scanner %s: %s", r.data_table.value, r.as_dict())
-    finally:
-        conn.close()
-
-
-@_scheduler_job("k2_startup_catch_up")
-def _k2_startup_catch_up():
-    """K2 boot-time hole filler — runs once at daemon start.
-
-    For each of the 4 data tables, calls the module's catch_up_missing()
-    which queries data_coverage for MISSING/retry-ready FAILED rows in
-    the last 30 days and fills them. This handles daemon downtime gaps
-    without human intervention.
-    """
-    from src.data.daily_obs_append import catch_up_missing as catch_up_obs
-    from src.data.hourly_instants_append import catch_up_missing as catch_up_hourly
-    from src.data.solar_append import catch_up_missing as catch_up_solar
-    from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
-    from src.state.db import get_world_connection
-
-    conn = get_world_connection()
-    try:
-        logger.info("K2 startup catch-up: observations")
-        logger.info("  %s", catch_up_obs(conn, days_back=30))
-        logger.info("K2 startup catch-up: observation_instants")
-        logger.info("  %s", catch_up_hourly(conn, days_back=30))
-        logger.info("K2 startup catch-up: solar_daily")
-        logger.info("  %s", catch_up_solar(conn, days_back=30))
-        logger.info("K2 startup catch-up: forecasts")
-        logger.info("  %s", catch_up_forecasts(conn, days_back=30))
-    finally:
-        conn.close()
-
-
-@_scheduler_job("ecmwf_open_data")
-def _ecmwf_open_data_cycle():
-    from src.data.ecmwf_open_data import collect_open_ens_cycle
-
-    result = collect_open_ens_cycle()
-    logger.info("ECMWF Open Data: %s", result)
-
-
-@_scheduler_job("etl_recalibrate")
-def _etl_recalibrate():
-    """Weekly recalibration: refresh ETL tables + refit Platt + replay audit.
-
-    Cross-module sync mechanism. Keeps data tables fresh and downstream
-    consumers (Platt calibration) aligned with current data.
-
-    History:
-    - Originally included per-city α validation (validate_dynamic_alpha.py).
-      Removed after D1 analysis (2026-03-31) showed MAE→α mapping is
-      fundamentally wrong (r=+0.032). α improvements are now per-decision
-      (spread bonus D4, tail scaling D3) not per-city.
-    - Platt refit is critical (D5: overconfidence Brier 0.31→0.02, -92%).
-    """
-    import subprocess
-
-    venv_python = _etl_subprocess_python()
-    scripts_dir = Path(__file__).parent.parent / "scripts"
-
-    results = {}
-
-    # 1. Refresh ETL tables (diurnal curves, persistence, observations)
-    for script in [
-        "etl_diurnal_curves.py",
-        "etl_temp_persistence.py",
-        "etl_hourly_observations.py",
-    ]:
-        script_path = scripts_dir / script
-        if script_path.exists():
+    from src.data.dual_run_lock import acquire_lock
+    from src.state.db import get_trade_connection, get_world_connection
+    with acquire_lock("harvester_pnl") as acquired:
+        if not acquired:
+            logger.info("harvester_pnl_resolver skipped_lock_held")
+            return
+        try:
+            from src.execution.harvester_pnl_resolver import resolve_pnl_for_settled_markets
+            trade_conn = get_trade_connection()
+            world_conn = get_world_connection()
             try:
-                r = subprocess.run(
-                    [venv_python, str(script_path)],
-                    capture_output=True, text=True, timeout=300,
-                )
-                results[script] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
-            except Exception as e:
-                results[script] = f"ERROR: {e}"
-
-    # 3. Calibration pairs are produced by the post-fillback canonical cascade.
-    # Do not run legacy/direct TIGGE pair generators here; refit consumes only
-    # already-certified canonical pairs.
-    results["calibration_pairs"] = "SKIP: run rebuild_calibration_pairs_canonical post-fillback"
-
-    # 4. Platt refit is explicit-only after the canonical post-fillback cascade.
-    results["platt_refit"] = "SKIP: run explicit post-fillback canonical refit"
-
-    # 5. Replay audit snapshot — track system performance trend
-    try:
-        r = subprocess.run(
-            [venv_python, str(scripts_dir / "run_replay.py"),
-             "--mode", "audit", "--start", "2025-01-01", "--end", "2099-12-31"],
-            capture_output=True, text=True, timeout=600,
-        )
-        results["replay_audit"] = "OK" if r.returncode == 0 else "FAIL"
-    except Exception as e:
-        results["replay_audit"] = f"ERROR: {e}"
-
-    logger.info("ETL recalibration: %s", results)
-
-
-@_scheduler_job("automation_analysis")
-def _automation_analysis_cycle():
-    """Daily diagnostic: check calibration layer tables and bias correction readiness.
-
-    Designed to run every 6 hours so Zeus operator always knows the state
-    of the automation layer without manual DB queries.
-    """
-    import sys
-    import subprocess
-    venv_python = sys.executable
-    script = Path(__file__).parent.parent / "scripts" / "automation_analysis.py"
-    r = subprocess.run(
-        [venv_python, str(script)],
-        capture_output=True, text=True, timeout=60,
-    )
-    output = r.stdout.strip()
-    if output:
-        logger.info("[automation_analysis]\n%s", output)
-    if r.returncode != 0 and r.stderr:
-        logger.warning("[automation_analysis] errors: %s", r.stderr[-300:])
+                result = resolve_pnl_for_settled_markets(trade_conn, world_conn)
+            finally:
+                trade_conn.close()
+                world_conn.close()
+        except ImportError:
+            # Fallback during Phase 1.5 transition: use legacy harvester
+            logger.warning(
+                "harvester_pnl_resolver not importable; falling back to legacy run_harvester"
+            )
+            from src.execution.harvester import run_harvester
+            result = run_harvester()
+    logger.info("Harvester: %s", result)
 
 
 def run_single_cycle():
@@ -362,7 +175,7 @@ def _write_heartbeat() -> None:
             })
         except Exception:
             pass
-            
+
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
             import os
@@ -471,6 +284,114 @@ def _write_venue_heartbeat() -> None:
         )
 
 
+def _startup_freshness_check() -> None:
+    """Phase 2 §3.1: data freshness gate at boot (warn-only; Phase 3 will enforce).
+
+    §3.7 gate split:
+    - Data freshness gate: degrade-or-warn. Operator may override via
+      state/control_plane.json::force_ignore_freshness: ["source_name"].
+    - Wallet gate (_startup_wallet_check): NEVER overridable; hard exit on failure.
+
+    Phase 2 behavior:
+    - FRESH: log at INFO, proceed.
+    - STALE: log warning with per-source details, proceed (degraded mode).
+    - ABSENT (after 5-min retry): log critical, proceed anyway (warn-only in P2).
+      Phase 3 will change ABSENT→FATAL here to match the design §3.1 contract.
+    """
+    from src.config import STATE_DIR
+    from src.control.freshness_gate import (
+        evaluate_freshness_mid_run,
+        BOOT_RETRY_INTERVAL_SECONDS,
+        BOOT_RETRY_MAX_ATTEMPTS,
+    )
+    import time
+
+    state_dir = STATE_DIR
+    health_path = state_dir / "source_health.json"
+
+    # Phase 2: soft retry at boot (ABSENT warns; Phase 3 will FATAL)
+    for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
+        verdict = evaluate_freshness_mid_run(state_dir)
+        if verdict.branch != "ABSENT":
+            break
+        if attempt < BOOT_RETRY_MAX_ATTEMPTS:
+            logger.info(
+                "source_health.json absent at boot — retry %d/%d in %ds",
+                attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
+            )
+            time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
+        else:
+            logger.critical(
+                "source_health.json absent after %d retries — WARN ONLY in Phase 2. "
+                "Phase 3 will make this FATAL. Is com.zeus.data-ingest running? "
+                "Check: launchctl list com.zeus.data-ingest",
+                BOOT_RETRY_MAX_ATTEMPTS,
+            )
+            return  # Phase 2: warn-only, do not exit
+
+    if verdict.branch == "STALE":
+        logger.warning(
+            "Freshness gate STALE at boot: stale_sources=%s day0_capture_disabled=%s "
+            "ensemble_disabled=%s (trading continues in degraded mode)",
+            verdict.stale_sources, verdict.day0_capture_disabled, verdict.ensemble_disabled,
+        )
+    elif verdict.branch == "FRESH":
+        logger.info("Freshness gate: FRESH — all sources within budget")
+
+
+def _startup_world_schema_ready_check() -> None:
+    """Design §4.2: trading boot retries then FAILs if world_schema_ready.json is missing/stale.
+
+    Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
+    Fail-closed: raises SystemExit if sentinel absent after retries or written_at > 24h old.
+    This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
+    """
+    import json
+    import time
+    from datetime import timedelta
+    from src.config import STATE_DIR
+    from src.control.freshness_gate import BOOT_RETRY_INTERVAL_SECONDS, BOOT_RETRY_MAX_ATTEMPTS
+
+    sentinel_path = STATE_DIR / "world_schema_ready.json"
+    max_age = timedelta(hours=24)
+
+    for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
+        if sentinel_path.exists():
+            try:
+                data = json.loads(sentinel_path.read_text())
+                written_at_str = data.get("written_at", "")
+                written_at = datetime.fromisoformat(written_at_str)
+                age = datetime.now(timezone.utc) - written_at
+                if age > max_age:
+                    raise SystemExit(
+                        f"FATAL: world_schema_ready.json is {age.total_seconds()/3600:.1f}h old "
+                        f"(max 24h). Is com.zeus.data-ingest running? "
+                        f"Check: launchctl list com.zeus.data-ingest"
+                    )
+                logger.info(
+                    "world_schema_ready sentinel OK: schema_version=%s written_at=%s",
+                    data.get("schema_version", "unknown"),
+                    written_at_str,
+                )
+                return
+            except SystemExit:
+                raise
+            except Exception as exc:
+                logger.warning("world_schema_ready sentinel parse error: %s — retrying", exc)
+                sentinel_path = STATE_DIR / "world_schema_ready.json"
+        if attempt < BOOT_RETRY_MAX_ATTEMPTS:
+            logger.info(
+                "world_schema_ready sentinel absent at boot — retry %d/%d in %ds",
+                attempt, BOOT_RETRY_MAX_ATTEMPTS, BOOT_RETRY_INTERVAL_SECONDS,
+            )
+            time.sleep(BOOT_RETRY_INTERVAL_SECONDS)
+
+    raise SystemExit(
+        "FATAL: ingest daemon must boot first; world_schema_ready sentinel not found within 5 min. "
+        "Check: launchctl list com.zeus.data-ingest"
+    )
+
+
 def _startup_wallet_check(clob=None):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
@@ -485,7 +406,7 @@ def _startup_wallet_check(clob=None):
         logger.info("Startup wallet check: $%.2f pUSD available", balance)
     except Exception as exc:
         logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
-        sys.exit("FATAL: Cannot start \u2014 wallet unreachable. Fix credentials or network and restart.")
+        sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
 
 
 def _startup_data_health_check(conn):
@@ -627,7 +548,32 @@ def main():
     # Startup health check: warn about deferred data actions
     _startup_data_health_check(conn)
 
+    # §1 axis 4 + §6 antibody #5: World schema manifest validation (Phase 2: warn-only).
+    # Phase 3 will FATAL on mismatch. The validator reads architecture/world_schema_manifest.yaml
+    # and asserts all required columns are present via PRAGMA table_info().
+    try:
+        from src.contracts.world_schema_validator import validate_world_schema_at_boot
+        validate_world_schema_at_boot(conn)
+    except Exception as _schema_exc:
+        logger.warning("World schema validation error (non-fatal in Phase 2): %s", _schema_exc)
+
     conn.close()
+
+    # §4.2 World schema ready sentinel gate — fail-closed (Phase 3 enforcement).
+    # Ingest daemon must have written state/world_schema_ready.json within 24h.
+    # If absent: 5-min retry then FATAL (mirrors freshness check retry pattern).
+    # Ensures trading never boots against a schema the ingest daemon hasn't validated.
+    _startup_world_schema_ready_check()
+
+    # §3.1 Data freshness gate — WARN-only at boot (Phase 2: warn; Phase 3: enforce).
+    # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
+    # strategy gate refuses. GATE SPLIT (§3.7): data gate is operator-overridable
+    # via state/control_plane.json::force_ignore_freshness: ["source_name"].
+    # Wallet gate (_startup_wallet_check below) is NEVER overridable.
+    # Absent source_health.json → 5-min retry then FATAL (see freshness_gate.py).
+    # Stale source_health.json → degrade per source family; trading continues.
+    # Phase 3 will promote ABSENT result here to a hard FATAL (currently warn).
+    _startup_freshness_check()
 
     # G6 antibody (2026-04-26, fixed 2026-04-26 per con-nyx CONDITION C1):
     # Refuse boot if any non-allowlisted strategy is enabled. Must run AFTER
@@ -640,6 +586,7 @@ def main():
     _assert_live_safe_strategies_or_exit()
 
     # P7: Fail-closed wallet gate — must run before first cycle.
+    # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
     _startup_wallet_check()
     _start_user_channel_ingestor_if_enabled()
 
@@ -682,89 +629,13 @@ def main():
         max_instances=1,
         coalesce=True,
     )
-    for time_str in discovery["ecmwf_open_data_times_utc"]:
-        h, m = time_str.split(":")
-        scheduler.add_job(
-            _ecmwf_open_data_cycle, "cron",
-            hour=int(h), minute=int(m), id=f"ecmwf_open_data_{time_str}",
-        )
 
-    # K2 live-ingestion packet (task #59) — 4 appenders that replace the
-    # legacy wu_daily_collector. Each writes to its own physical table AND
-    # to the shared `data_coverage` ledger in the same transaction, so the
-    # hole scanner always has a truthful view of what's been fetched.
-    #
-    # Job cadence rationale:
-    #   daily_obs_tick          hourly — WuDailyScheduler fires per city at
-    #                           local peak+4h, HKO refresh gated to UTC 02:00
-    #   hourly_instants_tick    hourly — 3-day rolling window per city with
-    #                           per-city dynamic end_date (most-recently
-    #                           completed local day)
-    #   solar_daily_tick        daily UTC 00:30 — deterministic astronomical
-    #                           data, [today, today+14] per city
-    #   forecasts_daily_tick    daily UTC 07:30 — after ECMWF 00Z + GFS 06Z
-    #                           runs populate in Previous Runs API
-    scheduler.add_job(
-        _k2_daily_obs_tick, "cron",
-        minute=0, id="k2_daily_obs",
-        max_instances=1, coalesce=True, misfire_grace_time=1800,
-    )
-    scheduler.add_job(
-        _k2_hourly_instants_tick, "cron",
-        minute=7, id="k2_hourly_instants",   # :07 to stagger from daily_obs :00
-        max_instances=1, coalesce=True, misfire_grace_time=1800,
-    )
-    scheduler.add_job(
-        _k2_solar_daily_tick, "cron",
-        hour=0, minute=30, id="k2_solar_daily",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _k2_forecasts_daily_tick, "cron",
-        hour=7, minute=30, id="k2_forecasts_daily",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-
-    # Daily recalibration: ETL refresh + TIGGE direct cal + Platt refit
-    scheduler.add_job(
-        _etl_recalibrate, "cron",
-        hour=6, minute=0,
-        id="etl_recalibrate",
-    )
-
-    # Daily automation analysis: calibration layer diagnostics once a day
-    scheduler.add_job(
-        _automation_analysis_cycle, "cron",
-        hour=9, minute=0, id="automation_analysis",
-        max_instances=1, coalesce=True,
-    )
-
-    # K2 boot-time catch-up: register as the FIRST scheduled job with
-    # next_run_time=now so the scheduler starts immediately and the
-    # catch-up runs on the scheduler thread rather than blocking boot.
-    # Rationale (critic S2#3): running catch-up inline before
-    # scheduler.start() blocks the heartbeat writer, which lets the
-    # OpenClaw process supervisor mark the daemon stale and kill it
-    # mid-catch-up, creating a livelock: restart → re-run 30 min of
-    # catch-up → get killed → restart. Registering as a normal job with
-    # max_instances=1 avoids the stall.
-    from datetime import datetime as _datetime_now
-    scheduler.add_job(
-        _k2_startup_catch_up, "date",
-        run_date=_datetime_now.now(),  # fire once, immediately
-        id="k2_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-    )
-
-    # K2 hole scanner: scheduled pass once per day (UTC 04:00) so the
-    # coverage ledger stays healthy even for cities onboarded after
-    # daemon boot. Previously the scanner only ran via the post-fillback
-    # shell script; K2 now has a permanent patrol schedule (critic S3).
-    scheduler.add_job(
-        _k2_hole_scanner_tick, "cron",
-        hour=4, minute=0, id="k2_hole_scanner",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
+    # Phase 3: K2 ingest jobs removed from this scheduler block.
+    # All K2 ticks, etl_recalibrate, ecmwf_open_data, automation_analysis,
+    # hole_scanner, startup_catch_up, source_health_probe, drift_detector,
+    # ingest_status_rollup, and harvester_truth_writer are now owned by
+    # com.zeus.data-ingest (src/ingest_main.py).
+    # See design §5 Phase 3 and antibody #8 (tests/test_main_module_scope.py).
 
     jobs = [j.id for j in scheduler.get_jobs()]
     logger.info("Scheduler ready. %d jobs: %s", len(jobs), jobs)
