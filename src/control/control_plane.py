@@ -313,9 +313,14 @@ def strategy_gates() -> dict[str, GateDecision]:
     return result
 
 
+_LIVE_ALLOWED_STRATEGIES = {"settlement_capture", "center_buy", "opening_inertia"}
+
+
 def is_strategy_enabled(strategy: str) -> bool:
     if not strategy:
         return True
+    if strategy not in _LIVE_ALLOWED_STRATEGIES:
+        return False
     decision = strategy_gates().get(strategy)
     if decision is None:
         return True

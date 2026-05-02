@@ -23,6 +23,8 @@ from src.state.lifecycle_manager import (
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
 )
+MAX_SNAPSHOT_AGE_SECONDS = 5
+
 from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
@@ -433,6 +435,12 @@ def _reprice_decision_from_executable_snapshot(
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+    captured_at = snapshot.captured_at
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    snapshot_age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
+    if snapshot_age_seconds > MAX_SNAPSHOT_AGE_SECONDS:
+        raise ValueError("executable_snapshot_stale")
     from src.config import settings
     from src.contracts import (
         Direction,
@@ -2157,7 +2165,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     if not strategy_key:
                         summary["no_trades"] += 1
                         rejection_stage = "SIGNAL_QUALITY"
-                        rejection_reasons = ["invalid_or_missing_strategy_key"]
+                        rejection_reasons = ["strategy_key_unclassified"]
                         _record_opportunity_fact(
                             candidate,
                             d,
@@ -2525,6 +2533,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 )
                             if final_intent is None:
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING")
+                            sweep_payload = reprice_payload.get("corrected_pricing_shadow")
+                            if not isinstance(sweep_payload, dict):
+                                sweep_payload = reprice_payload
+                            try:
+                                submitted_shares = Decimal(str(sweep_payload["sweep_submitted_shares"]))
+                                filled_shares = Decimal(str(sweep_payload["sweep_filled_shares"]))
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise ValueError("FINAL_EXECUTION_INTENT_MISSING: sweep depth unavailable") from exc
+                            if filled_shares < submitted_shares:
+                                raise ValueError("depth_below_submitted_shares")
                             if (
                                 reprice_payload.get("final_execution_intent_id")
                                 != final_intent.hypothesis_id
@@ -2633,7 +2651,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     except Exception as exc:
                         summary["no_trades"] += 1
                         rejection_stage = "EXECUTION_FAILED"
-                        rejection_reasons = [f"execution_intent_rejected:{exc}"]
+                        reason = str(exc)
+                        if reason in {"strategy_key_unclassified", "depth_below_submitted_shares", "executable_snapshot_stale"}:
+                            rejection_reasons = [reason]
+                        else:
+                            rejection_reasons = [f"execution_intent_rejected:{exc}"]
                         _record_opportunity_fact(
                             candidate,
                             d,
@@ -2802,7 +2824,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
                         if not strategy_name:
                             rejection_stage = "SIGNAL_QUALITY"
-                            rejection_reasons = [*rejection_reasons, "invalid_or_missing_strategy_key"]
+                            rejection_reasons = [*rejection_reasons, "strategy_key_unclassified"]
                     availability_status = str(getattr(d, "availability_status", "") or "")
                     if availability_status:
                         _record_availability_fact(

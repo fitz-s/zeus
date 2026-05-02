@@ -65,7 +65,7 @@ from src.state.portfolio import (
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
-from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+from src.strategy.kelly import dynamic_kelly_mult, kelly_size, strategy_kelly_multiplier
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import (
@@ -735,7 +735,7 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     return "opening_inertia"
 
 
-def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str:
+def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
@@ -744,7 +744,7 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "shoulder_sell"
     if edge.direction == "buy_yes":
         return "center_buy"
-    return "opening_inertia"
+    return None
 
 
 def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str:
@@ -2421,6 +2421,19 @@ def evaluate_candidate(
         tokens = token_map[bin_idx]
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
+        if strategy_key is None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["strategy_key_unclassified"],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "strategy_key_classification"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+            ))
+            continue
         ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
         if ci_rejection_reason is not None:
             decisions.append(EdgeDecision(
@@ -2566,6 +2579,7 @@ def evaluate_candidate(
                 ci_width=edge.ci_upper - edge.ci_lower,
                 lead_days=lead_days_for_calibration,
                 portfolio_heat=current_heat,
+                strategy_key=strategy_key,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -2598,6 +2612,9 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
+        per_strategy_multiplier = strategy_kelly_multiplier(strategy_key)
+        decision_validations.append(f"strategy_kelly_multiplier_{per_strategy_multiplier:g}x")
+
         if policy.threshold_multiplier > 1.0:
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")

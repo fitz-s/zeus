@@ -70,6 +70,22 @@ def kelly_size(
     return raw_proposal
 
 
+STRATEGY_KELLY_MULTIPLIERS = {
+    "settlement_capture": 1.0,
+    "center_buy": 1.0,
+    "opening_inertia": 0.5,
+    "shoulder_sell": 0.0,
+    "shoulder_buy": 0.0,
+    "center_sell": 0.0,
+}
+
+
+def strategy_kelly_multiplier(strategy_key: str | None) -> float:
+    """Return the live sizing multiplier for a strategy key, fail-closed."""
+
+    return STRATEGY_KELLY_MULTIPLIERS.get(str(strategy_key or "").strip(), 0.0)
+
+
 def dynamic_kelly_mult(
     base: float = 0.25,
     ci_width: float = 0.0,
@@ -78,6 +94,7 @@ def dynamic_kelly_mult(
     portfolio_heat: float = 0.0,
     drawdown_pct: float = 0.0,
     max_drawdown: float = 0.20,
+    strategy_key: str | None = None,
 ) -> float:
     """Compute dynamic Kelly multiplier. Spec §5.2.
 
@@ -115,7 +132,10 @@ def dynamic_kelly_mult(
     if drawdown_pct > 0 and max_drawdown > 0:
         m *= max(0.0, 1.0 - drawdown_pct / max_drawdown)
 
-    # INV-05 / §P9.7: cascade floor — multiplier must never reach zero or NaN
+    # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
+    # Note: This check applies to the upstream Kelly computation before per-strategy
+    # gating. The final multiplier step (below) can legitimately produce 0.0 to
+    # disable shadow, dormant, or unknown strategies via STRATEGY_KELLY_MULTIPLIERS.
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
             f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "
@@ -127,4 +147,6 @@ def dynamic_kelly_mult(
             f"dynamic_kelly_mult collapsed to {m} — all sizing gates triggered, "
             f"refusing to fabricate a floor value"
         )
+    if strategy_key is not None:
+        m *= strategy_kelly_multiplier(strategy_key)
     return m

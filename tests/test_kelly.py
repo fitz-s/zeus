@@ -3,7 +3,7 @@
 import pytest
 
 from src.contracts.execution_price import ExecutionPrice
-from src.strategy.kelly import kelly_size, dynamic_kelly_mult
+from src.strategy.kelly import kelly_size, dynamic_kelly_mult, strategy_kelly_multiplier
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
 
 
@@ -80,6 +80,26 @@ class TestDynamicKellyMult:
         """NaN from upstream must raise, not produce a floor."""
         with pytest.raises(ValueError, match="NaN"):
             dynamic_kelly_mult(base=float("nan"))
+
+    def test_strategy_multiplier_table(self):
+        expected = {
+            "settlement_capture": 1.0,
+            "center_buy": 1.0,
+            "opening_inertia": 0.5,
+            "shoulder_sell": 0.0,
+            "shoulder_buy": 0.0,
+            "center_sell": 0.0,
+            "unknown": 0.0,
+        }
+        for strategy_key, multiplier in expected.items():
+            assert strategy_kelly_multiplier(strategy_key) == multiplier
+
+    def test_dynamic_kelly_applies_strategy_multiplier(self):
+        assert dynamic_kelly_mult(base=0.25, strategy_key="center_buy") == pytest.approx(0.25)
+        assert dynamic_kelly_mult(base=0.25, strategy_key="opening_inertia") == pytest.approx(0.125)
+        assert dynamic_kelly_mult(base=0.25, strategy_key="shoulder_sell") == 0.0
+        assert dynamic_kelly_mult(base=0.25, strategy_key="center_sell") == 0.0
+        assert dynamic_kelly_mult(base=0.25, strategy_key="unknown") == 0.0
 
 
 class TestRiskLimits:
