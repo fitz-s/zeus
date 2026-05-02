@@ -57,3 +57,38 @@ def test_oracle_penalty_reload_picks_up_new_file(monkeypatch, tmp_path):
     oracle_penalty.reload()
     info = oracle_penalty.get_oracle_info("Shenzhen", "high")
     assert info.status == oracle_penalty.OracleStatus.OK
+
+
+def test_oracle_penalty_reload_swallows_malformed_json(monkeypatch, tmp_path):
+    """Codex P1 on PR #40: reload() must NOT propagate parse errors.
+
+    A concurrent bridge write can leave oracle_error_rates.json half-written.
+    The evaluator calls reload() every cycle; an unhandled json.JSONDecodeError
+    would resurrect the exact halt-live-trading failure PR #40 fixed.
+    Contract: malformed file → keep previous cache (or empty) + log warning.
+    """
+    import json as _json
+
+    path = tmp_path / "oracle_error_rates.json"
+    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", path)
+
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": 0.0}}}))
+    oracle_penalty.reload()
+    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
+
+    path.write_text("{not valid json,,,")
+    oracle_penalty.reload()
+    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
+    assert oracle_penalty.get_oracle_info("Anywhere", "high").status == oracle_penalty.OracleStatus.OK
+
+
+def test_oracle_penalty_reload_swallows_bad_value_types(monkeypatch, tmp_path):
+    """Bad numeric values (e.g., string instead of float) must not crash reload."""
+    import json as _json
+
+    path = tmp_path / "oracle_error_rates.json"
+    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", path)
+
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": "not-a-number"}}}))
+    oracle_penalty.reload()
+    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK

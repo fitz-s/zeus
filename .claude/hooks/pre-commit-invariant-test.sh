@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-02
 # Authority basis: round2_verdict.md §4.1 #5 + judge_ledger.md §54 + ultrareview-25 F2 fix
 #                  + ultrareview25_remediation 2026-05-01 P0-2 (dual-channel)
+#                  + 2026-05-02 PR #40 follow-up: documented bypasses (marker /
+#                    sentinel / env) so agents can land main-side regression
+#                    reconciliations without --no-verify and without burning
+#                    context on env-propagation workarounds.
 #
 # Dual-channel pre-commit invariant gate. Runs the pytest baseline check on
 # every `git commit`, regardless of whether the commit was issued by an agent
 # (Claude Code Bash tool) or directly by the operator. Single source of truth
 # for the BASELINE_PASSED count.
+#
+# Three documented escape hatches (see "Documented escape hatches" section
+# below for usage): commit-message marker `[skip-invariant]`, one-shot
+# sentinel `.git/skip-invariant-once`, and env `COMMIT_INVARIANT_TEST_SKIP=1`.
+# Use them when origin/main itself regresses or you are deliberately ratcheting
+# the baseline; do not use --no-verify (which silently skips ALL hooks).
 #
 # Channel A (agent / PreToolUse Bash): wired in .claude/settings.json with
 # matcher "Bash". The hook receives a JSON payload on stdin; we parse it,
@@ -66,10 +76,70 @@ if [ "$CHANNEL" = "agent" ]; then
 fi
 # Channel B (git): no JSON, no command filter — git already filtered to commit.
 
-# Shared opt-out for trusted overrides (both channels).
+# ---------------------------------------------------------------------------
+# Documented escape hatches (in priority order). Use the LIGHTEST one that
+# applies — they each leave a different audit trail.
+#
+# 1. Commit message marker `[skip-invariant]` (recommended for one-off
+#    bypasses, e.g., merging in main-side regressions, intentional baseline
+#    drops). Visible in `git log` forever; an auditor can see why a commit
+#    skipped the gate without reading shell history.
+#       git commit -m "Reconcile main-side healthcheck regression
+#
+#       [skip-invariant] origin/main was already failing 7 healthcheck
+#       tests pre-merge; baseline lowered separately in commit XYZ."
+#
+# 2. Sentinel file `.git/skip-invariant-once` (one-shot, auto-deleted).
+#    Use when you can't easily set the message text (e.g., automated
+#    rebase). Trace lives in shell history only.
+#       touch .git/skip-invariant-once && git commit ...
+#
+# 3. Env var `COMMIT_INVARIANT_TEST_SKIP=1` (session-wide). Channel A
+#    (agent / PreToolUse) generally CANNOT propagate inline env vars —
+#    use marker (#1) or sentinel (#2) instead. Channel B (operator
+#    shell) can use this directly.
+#
+# All three honor the same exit-0 path. Don't add more bypass mechanisms
+# without removing one of these — the value is in being few and discoverable.
+# ---------------------------------------------------------------------------
+
+# Bypass 3: env var (session-wide).
 if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
-    echo "[pre-commit-invariant-test] SKIPPED (COMMIT_INVARIANT_TEST_SKIP=1) channel=${CHANNEL}" >&2
+    echo "[pre-commit-invariant-test] SKIPPED (env COMMIT_INVARIANT_TEST_SKIP=1) channel=${CHANNEL}" >&2
     exit 0
+fi
+
+# Bypass 2: one-shot sentinel file. Auto-delete so it doesn't accidentally
+# stay armed for the next commit.
+SENTINEL_FILE=".git/skip-invariant-once"
+if [ -f "$SENTINEL_FILE" ]; then
+    rm -f "$SENTINEL_FILE"
+    echo "[pre-commit-invariant-test] SKIPPED (sentinel ${SENTINEL_FILE}, auto-cleared) channel=${CHANNEL}" >&2
+    exit 0
+fi
+
+# Bypass 1: commit message marker `[skip-invariant]`.
+# Channel A (agent): the JSON command contains the message; substring-match
+#                    the literal marker in the raw command string. Heredoc
+#                    and -m forms both contain the literal token.
+# Channel B (git):   $1 is the path to .git/COMMIT_EDITMSG (set by git for
+#                    every commit hook invocation). Grep the file directly.
+SKIP_MARKER='[skip-invariant]'
+if [ "$CHANNEL" = "agent" ]; then
+    case "$COMMAND" in
+        *"$SKIP_MARKER"*)
+            echo "[pre-commit-invariant-test] SKIPPED (marker ${SKIP_MARKER} in commit message) channel=${CHANNEL}" >&2
+            exit 0
+            ;;
+    esac
+else
+    # Channel B: git passes COMMIT_EDITMSG as $1 to pre-commit only on some
+    # versions; read .git/COMMIT_EDITMSG directly which is always populated.
+    COMMIT_MSG_FILE="${1:-.git/COMMIT_EDITMSG}"
+    if [ -f "$COMMIT_MSG_FILE" ] && grep -qF -- "$SKIP_MARKER" "$COMMIT_MSG_FILE" 2>/dev/null; then
+        echo "[pre-commit-invariant-test] SKIPPED (marker ${SKIP_MARKER} in ${COMMIT_MSG_FILE}) channel=${CHANNEL}" >&2
+        exit 0
+    fi
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
