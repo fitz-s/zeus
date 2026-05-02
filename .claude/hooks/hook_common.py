@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ GIT_VALUELESS_OPTIONS = {
 
 SEPARATORS = {"&&", "||", ";", "|"}
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+REVIEW_SAFE_TAG = re.compile(r"\[REVIEW-SAFE:\s*([A-Z0-9_]+)\]")
 
 
 def _is_git_token(token: str) -> bool:
@@ -59,7 +61,7 @@ def _shell_tokens(command: str) -> list[str]:
 
 
 def git_subcommands(command: str) -> list[str]:
-    """Return git subcommands found on the command's first line.
+    """Return git subcommands found in a shell command string.
 
     The parser is intentionally shell-token based rather than regex based. It
     handles env assignments, git global options with/without values, absolute
@@ -111,6 +113,67 @@ def git_subcommands(command: str) -> list[str]:
     return found
 
 
+def _git(repo_root: str, args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", repo_root, *args],
+        capture_output=True,
+        check=check,
+    )
+
+
+def _staged_blob(repo_root: str, path: str) -> bytes | None:
+    result = _git(repo_root, ["show", f":{path}"])
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _registered_review_safe_tags(repo_root: str) -> set[str]:
+    staged = _staged_blob(repo_root, "SECURITY-FALSE-POSITIVES.md")
+    if staged is None:
+        registry_path = Path(repo_root) / "SECURITY-FALSE-POSITIVES.md"
+        if not registry_path.exists():
+            return set()
+        text = registry_path.read_text(encoding="utf-8", errors="replace")
+    else:
+        text = staged.decode("utf-8", errors="replace")
+    return set(REVIEW_SAFE_TAG.findall(text))
+
+
+def validate_staged_review_safe_tags(repo_root: str) -> list[tuple[str, str]]:
+    """Return newly staged REVIEW-SAFE tag lines not registered in the index.
+
+    The registry is read from the staged SECURITY-FALSE-POSITIVES.md blob when
+    present, allowing a source tag and its registry entry to land atomically in
+    the same commit. If no staged registry exists, the working-tree registry is
+    used as the current authority. Only added diff lines are scanned; an
+    unrelated edit to a file that already contains a historical unregistered
+    example should not make the commit impossible to create.
+    """
+    registered = _registered_review_safe_tags(repo_root)
+    diff = _git(repo_root, ["diff", "--cached", "--unified=0", "--no-ext-diff", "--diff-filter=ACMR"])
+    if diff.returncode != 0:
+        raise ValueError(diff.stderr.decode("utf-8", errors="replace") or "could not read staged diff")
+    unregistered: list[tuple[str, str]] = []
+    current_path = "<unknown>"
+    for line in diff.stdout.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("+++ "):
+            raw_path = line[4:].strip()
+            if raw_path == "/dev/null":
+                current_path = "<deleted>"
+            elif raw_path.startswith("b/"):
+                current_path = raw_path[2:]
+            else:
+                current_path = raw_path
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        for tag in REVIEW_SAFE_TAG.findall(line[1:]):
+            if tag not in registered:
+                unregistered.append((current_path, tag))
+    return unregistered
+
+
 def command_from_json(payload: str, field: str) -> str:
     try:
         data = json.loads(payload)
@@ -154,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
     rel.add_argument("repo_root")
     rel.add_argument("file_path")
 
+    review_safe = sub.add_parser("validate-review-safe-tags")
+    review_safe.add_argument("repo_root")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "extract-json-field":
@@ -181,6 +247,18 @@ def main(argv: list[str] | None = None) -> int:
         if path:
             print(path)
         return code
+
+    if args.cmd == "validate-review-safe-tags":
+        try:
+            unregistered = validate_staged_review_safe_tags(args.repo_root)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 64
+        if unregistered:
+            for path, tag in unregistered:
+                print(f"{path}: unregistered REVIEW-SAFE tag {tag}", file=sys.stderr)
+            return 2
+        return 0
 
     return 2
 

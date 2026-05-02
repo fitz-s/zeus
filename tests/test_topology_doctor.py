@@ -1,4 +1,7 @@
 """Tests for topology_doctor compiled topology gates."""
+# Created: 2026-04-13
+# Last reused/audited: 2026-05-02
+# Authority basis: docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slices 4-5
 # Lifecycle: created=2026-04-13; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: Regression tests for topology_doctor lanes, CLI parity, and closeout compilation.
 # Reuse: Use targeted -k selectors for the lane being changed; inspect current manifest law first.
@@ -6136,6 +6139,7 @@ def test_core_map_rejects_reference_doc_authority_node(monkeypatch):
 # tests catch that.
 
 import json as _json
+import shutil as _shutil
 import subprocess as _subprocess
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -6174,6 +6178,31 @@ def _protected_branch_worktree(tmp_path_factory):
     )
 
 
+@pytest.fixture
+def _secrets_hook_worktree(tmp_path):
+    repo_root = _REPO_ROOT
+    worktree_dir = tmp_path / "secrets-hook-worktree"
+    branch_name = f"hook-secrets-test-{os.getpid()}-{tmp_path.name}"
+    rc = _subprocess.run(
+        ["git", "-C", repo_root, "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if rc.returncode != 0:
+        pytest.skip(f"could not create secrets hook worktree: {rc.stderr[:200]}")
+    yield str(worktree_dir)
+    _subprocess.run(
+        ["git", "-C", repo_root, "worktree", "remove", "--force", str(worktree_dir)],
+        capture_output=True,
+        text=True,
+    )
+    _subprocess.run(
+        ["git", "-C", repo_root, "branch", "-D", branch_name],
+        capture_output=True,
+        text=True,
+    )
+
+
 def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
     """Invoke pre-merge hook with a fake Bash tool payload; return (rc, stderr).
 
@@ -6198,6 +6227,128 @@ def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
         cwd=cwd,
     )
     return proc.returncode, proc.stderr
+
+
+def _git_index_env(cwd, extra=None):
+    result = _subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--git-path", "index"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = result.stdout.strip()
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _run_pre_commit_secrets_git(cwd, env=None):
+    proc = _subprocess.run(
+        ["bash", _PRE_COMMIT_SECRETS_HOOK],
+        input="",
+        capture_output=True,
+        text=True,
+        env=_git_index_env(cwd, env),
+        cwd=cwd,
+        check=False,
+    )
+    return proc.returncode, proc.stderr
+
+
+def _path_without_gitleaks(tmp_path):
+    fake_bin = tmp_path / "no-gitleaks-bin"
+    fake_bin.mkdir()
+    for tool in ("git", "python3"):
+        target = _shutil.which(tool)
+        assert target, f"{tool} must be available for hook regression tests"
+        os.symlink(target, fake_bin / tool)
+    return fake_bin, f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def test_pre_commit_secrets_blocks_unregistered_review_safe_tag(_secrets_hook_worktree):
+    tag = "NEW" + "_TAG"
+    probe = pathlib.Path(_secrets_hook_worktree) / "tmp_review_safe_probe.txt"
+    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
+    _subprocess.run(["git", "add", str(probe)], cwd=_secrets_hook_worktree, check=True)
+
+    rc, stderr = _run_pre_commit_secrets_git(_secrets_hook_worktree)
+
+    assert rc == 2
+    assert tag in stderr
+    assert "not registered" in stderr
+
+
+def test_pre_commit_secrets_blocks_unregistered_review_safe_without_gitleaks(tmp_path, _secrets_hook_worktree):
+    tag = "MISSING_GITLEAKS" + "_TAG"
+    probe = pathlib.Path(_secrets_hook_worktree) / "tmp_review_safe_no_gitleaks_probe.txt"
+    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
+    _subprocess.run(["git", "add", str(probe)], cwd=_secrets_hook_worktree, check=True)
+    _, path_without_gitleaks = _path_without_gitleaks(tmp_path)
+
+    rc, stderr = _run_pre_commit_secrets_git(
+        _secrets_hook_worktree,
+        env={"PATH": path_without_gitleaks},
+    )
+
+    assert rc == 2
+    assert tag in stderr
+    assert "not registered" in stderr
+
+
+def test_pre_commit_secrets_accepts_review_safe_tag_registered_in_same_commit(_secrets_hook_worktree):
+    tag = "TEST_REGISTERED" + "_TAG"
+    worktree = pathlib.Path(_secrets_hook_worktree)
+    registry = worktree / "SECURITY-FALSE-POSITIVES.md"
+    registry.write_text(
+        registry.read_text()
+        + f"\n## [REVIEW-SAFE: {tag}] — test-local cleared token\n\n"
+        + "**Operator ruling 2026-05-02**: test-only registry validation fixture.\n"
+    )
+    probe = worktree / "tmp_registered_review_safe_probe.txt"
+    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
+    _subprocess.run(["git", "add", "SECURITY-FALSE-POSITIVES.md", str(probe)], cwd=_secrets_hook_worktree, check=True)
+
+    rc, stderr = _run_pre_commit_secrets_git(_secrets_hook_worktree)
+
+    assert rc == 0, stderr
+
+
+def test_pre_commit_secrets_audits_staged_requirements_blob_not_worktree(tmp_path, _secrets_hook_worktree):
+    worktree = pathlib.Path(_secrets_hook_worktree)
+    requirements = worktree / "requirements-local.txt"
+    requirements.write_text("staged-package==1.0.0\n")
+    _subprocess.run(["git", "add", str(requirements)], cwd=_secrets_hook_worktree, check=True)
+    requirements.write_text("unstaged-package==9.9.9\n")
+
+    fake_bin, path_without_gitleaks = _path_without_gitleaks(tmp_path)
+    (fake_bin / "pip-audit").write_text(
+        "#!/usr/bin/env bash\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"-r\" ]; then cat \"$2\" > \"$CAPTURE_FILE\"; exit 0; fi\n"
+        "  shift\n"
+        "done\n"
+        "exit 1\n"
+    )
+    os.chmod(fake_bin / "pip-audit", 0o755)
+    capture = tmp_path / "audited_requirements.txt"
+
+    rc, stderr = _run_pre_commit_secrets_git(
+        _secrets_hook_worktree,
+        env={
+            "PATH": path_without_gitleaks,
+            "CAPTURE_FILE": str(capture),
+        },
+    )
+
+    assert rc == 0, stderr
+    assert "gitleaks not on PATH" in stderr
+    assert capture.read_text() == "staged-package==1.0.0\n"
+
+
+def test_gitleaks_config_has_no_review_safe_catch_all():
+    config = (pathlib.Path(_REPO_ROOT) / ".gitleaks.toml").read_text()
+    assert "'''\\[REVIEW-SAFE:" not in config
 
 
 @pytest.mark.parametrize(

@@ -57,6 +57,8 @@ Convert the two crashed review sessions' partial findings into a deduped, topolo
 
 ## Execution Slices
 
+Status update 2026-05-02: Slice 4 committed as `f1397022` (`Harden Claude hook parsing gates`) after focused hook/topology tests and independent code-review approval. Slice 5 is now in progress.
+
 ### 0. Freeze baseline and ownership
 - Files: none.
 - What: re-run `git status --short`, `git worktree list`, and per-file diff stats; decide whether to implement here or in a dedicated worktree; preserve unrelated dirty files.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
-# Authority basis: ultrareview25_remediation 2026-05-01 P0-2 + repo_review_2026-05-01 SYNTHESIS K-E
+# Last reused/audited: 2026-05-02
+# Authority basis: ultrareview25_remediation 2026-05-01 P0-2 + docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md Slice 5
 #
 # Dual-channel pre-commit secrets scan.
 #
@@ -72,18 +72,26 @@ if [ "${SECRETS_SCAN_SKIP:-0}" = "1" ]; then
     exit 0
 fi
 
-if ! command -v gitleaks >/dev/null 2>&1; then
-    echo "[pre-commit-secrets] ADVISORY: gitleaks not on PATH — skipping scan (channel=${CHANNEL})." >&2
-    echo "[pre-commit-secrets] Install: brew install gitleaks  (.gitleaks.toml is already configured)." >&2
-    exit 0
-fi
-
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$REPO_ROOT"
 
-# `gitleaks protect --staged` scans the index. Honors .gitleaks.toml at repo root.
-if ! gitleaks protect --staged --redact --no-banner --config "${REPO_ROOT}/.gitleaks.toml" 2>&1; then
-    cat >&2 <<EOF
+set +e
+python3 "$HOOK_COMMON" validate-review-safe-tags "$REPO_ROOT"
+STATUS=$?
+set -e
+if [ "$STATUS" -ne 0 ]; then
+    if [ "$STATUS" -eq 64 ]; then
+        echo "[pre-commit-secrets] BLOCKED: could not validate staged REVIEW-SAFE registry" >&2
+    else
+        echo "[pre-commit-secrets] BLOCKED: staged REVIEW-SAFE tag is not registered in SECURITY-FALSE-POSITIVES.md" >&2
+    fi
+    exit 2
+fi
+
+if command -v gitleaks >/dev/null 2>&1; then
+    # `gitleaks protect --staged` scans the index. Honors .gitleaks.toml at repo root.
+    if ! gitleaks protect --staged --redact --no-banner --config "${REPO_ROOT}/.gitleaks.toml" 2>&1; then
+        cat >&2 <<EOF
 [pre-commit-secrets] BLOCKED: gitleaks found secrets in staged content (channel=${CHANNEL}).
 
 If this is a documented operator-cleared false positive:
@@ -95,7 +103,11 @@ If this is a documented operator-cleared false positive:
 Emergency override (audit-logged):
   SECRETS_SCAN_SKIP=1 git commit ...
 EOF
-    exit 2
+        exit 2
+    fi
+else
+    echo "[pre-commit-secrets] ADVISORY: gitleaks not on PATH — skipping gitleaks scan only (channel=${CHANNEL})." >&2
+    echo "[pre-commit-secrets] Install: brew install gitleaks  (.gitleaks.toml is already configured)." >&2
 fi
 
 # ---------------------------------------------------------------------------
