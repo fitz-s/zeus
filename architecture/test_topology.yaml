@@ -183,6 +183,8 @@ test_trust_policy:
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -243,6 +245,8 @@ categories:
     - tests/test_strategy_benchmark.py
     - tests/test_risk_allocator.py
     - tests/test_live_readiness_gates.py
+    - tests/test_ingest_boot_time_semantics.py
+    - tests/test_readiness_state.py
     - tests/test_discovery_idempotency.py
     - tests/test_hk_settlement_floor_rounding.py
     - tests/test_ingest_isolation.py
@@ -573,6 +577,14 @@ law_gate:
       - scripts/live_readiness_check.py
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/G1.md
+  DATA_DAEMON_READINESS_CONTRACT:
+    tests:
+      - tests/test_ingest_boot_time_semantics.py
+      - tests/test_readiness_state.py
+    protects:
+      - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
+      - src/ingest_main.py
+      - src/engine/cycle_runner.py
   UNIT_BIN_TOPOLOGY:
     tests:
       - tests/test_temperature.py
