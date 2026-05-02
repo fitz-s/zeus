@@ -1,0 +1,12 @@
+{
+  "_comment": "Mutable last_verified timestamps for RealityContracts. Updated by verifier after successful live checks. Overrides static YAML last_verified values.",
+  "last_verified": {
+    "TICK_SIZE_STANDARD": "2026-04-07T06:49:43.010424+00:00",
+    "MIN_ORDER_SIZE_SHARES": "2026-04-07T06:49:43.010639+00:00",
+    "FEE_RATE_WEATHER": "2026-04-07T06:49:43.009734+00:00",
+    "NOAA_TIME_SCALE": "2026-04-07T06:49:43.010812+00:00",
+    "MARKET_CONTRACT_RULES": "2026-04-07T06:49:43.010954+00:00",
+    "GAMMA_CLOB_PRICE_CONSISTENCY": "2026-04-07T06:49:43.011096+00:00",
+    "WEBSOCKET_REQUIRED": "2026-04-07T06:49:43.011237+00:00"
+  }
+}

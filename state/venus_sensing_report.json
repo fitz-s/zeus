@@ -1,0 +1,196 @@
+{
+  "generated_at": "2026-04-07T11:16:47.991634+00:00",
+  "diagnostics": {
+    "canonical_freshness": {
+      "status": "PASS",
+      "evidence": "max_updated_at=2026-04-07T10:58:44.847407+00:00, age_hours=0.3",
+      "detail": "newest_trade_decision=2026-04-07T08:22:51.177261+00:00, has_newer_entries=False"
+    },
+    "position_count_match": {
+      "status": "PASS",
+      "evidence": "position_current=24, positions_json_active=24",
+      "detail": "delta=0"
+    },
+    "ghost_positions": {
+      "status": "PASS",
+      "evidence": "ghost_count=0",
+      "detail": "trade_ids=[]"
+    },
+    "settlement_harvester": {
+      "status": "FAIL",
+      "evidence": "max_settled_at=2026-04-04T08:06:12.393569+00:00, age_hours=75.2",
+      "detail": "latest_calibration_target_date=2026-04-03"
+    },
+    "portfolio_truth_source": {
+      "status": "FAIL",
+      "evidence": "portfolio_truth_source=working_state_fallback",
+      "detail": "portfolio_loader_status=CANONICAL_AUTHORITY_UNAVAILABLE"
+    },
+    "status_summary_completeness": {
+      "status": "PASS",
+      "evidence": "risk.details has 49 keys",
+      "detail": "sample_keys=['brier_level', 'settlement_quality_level', 'execution_quality_level', 'strategy_signal_level', 'daily_loss_level']"
+    },
+    "fact_tables": {
+      "status": "PASS",
+      "evidence": "outcome_fact=19, execution_fact=12",
+      "detail": ""
+    },
+    "unfilled_ghosts": {
+      "status": "PASS",
+      "evidence": "unfilled_ghost_count=0",
+      "detail": ""
+    }
+  },
+  "truth_surfaces": {
+    "trade_decisions": {
+      "total": 144,
+      "by_status": {
+        "day0_window": 31,
+        "entered": 18,
+        "exited": 57,
+        "unresolved_ghost": 38
+      },
+      "oldest_entered": "2026-04-03T20:13:29.291296+00:00",
+      "newest": "2026-04-07T11:14:35.727460+00:00"
+    },
+    "position_current": {
+      "count": 24,
+      "latest_updated_at": "2026-04-07T10:58:44.847407+00:00",
+      "phases": {
+        "active": 12,
+        "day0_window": 12
+      }
+    },
+    "positions_json": {
+      "active_count": 11,
+      "exit_count": 13,
+      "total_count": 24,
+      "states": {
+        "day0_window": 7,
+        "economically_closed": 13,
+        "entered": 4
+      }
+    },
+    "settlements": {
+      "total": 1399,
+      "latest_target_date": "2026-03-30",
+      "latest_settled_at": "2026-03-30T12:00:00Z"
+    },
+    "risk_state": {
+      "level": "YELLOW",
+      "portfolio_truth_source": "working_state_fallback",
+      "realized_pnl": 211.37,
+      "unrealized_pnl": 221.54,
+      "total_pnl": 432.91,
+      "settlement_sample_size": 22,
+      "brier_level": "GREEN",
+      "portfolio_fallback_active": true
+    },
+    "reality_contracts": {
+      "total": 25,
+      "blocking_total": 18,
+      "blocking_stale": 0,
+      "stale": [
+        "GAMMA_CLOB_PRICE_CONSISTENCY"
+      ],
+      "stale_count": 1,
+      "blocking_ok": true,
+      "freshness_ok": false
+    },
+    "fact_tables": {
+      "outcome_fact": 19,
+      "execution_fact": 12
+    }
+  },
+  "consistency": {
+    "td_entered_vs_pc": {
+      "td_entered": 18,
+      "pc_count": 24,
+      "gap": -6
+    },
+    "pc_vs_json_active": {
+      "pc": 24,
+      "json_active": 11,
+      "match": false
+    },
+    "ghost_positions": {
+      "count": 0
+    },
+    "settlement_gap_hours": 191.3,
+    "canonical_path_alive": false
+  },
+  "relationship_checks": {
+    "settlement_pnl_consistent": {
+      "status": "PASS",
+      "surfaces_checked": 3,
+      "trades_checked": 19,
+      "agreement": true,
+      "failures": [],
+      "detail": "checked 19 settlements across 3 surfaces"
+    },
+    "canonical_write_matching": {
+      "status": "PASS",
+      "events_count": 24,
+      "projected_count": 24,
+      "missing_projections": 0,
+      "detail": "all 24 events projected"
+    },
+    "monitor_freshness_propagation": {
+      "status": "PASS",
+      "freshness_flag_survived_boundary": true,
+      "detail": "monitor->exit_context freshness boundary intact"
+    },
+    "daily_baseline_anchoring": {
+      "status": "PASS",
+      "daily_baseline": 142.47,
+      "weekly_baseline": 141.71,
+      "capital_base": 150.0,
+      "anchored_away_from_capital": true,
+      "detail": "daily=142.47, weekly=141.71, capital=150.00"
+    },
+    "position_count_consistent": {
+      "status": "FAIL",
+      "db_count": 12,
+      "json_count": 24,
+      "detail": "position_current=12 != positions.json=24"
+    },
+    "fill_status_definitions_match": {
+      "status": "PASS",
+      "lifecycle_statuses": [
+        "FILLED",
+        "MATCHED",
+        "PARTIALLY_FILLED"
+      ],
+      "tracker_statuses": [
+        "FILLED",
+        "MATCHED",
+        "PARTIALLY_FILLED"
+      ],
+      "diverged": [],
+      "detail": "FILL_STATUSES identical"
+    },
+    "settlement_outcomes_written": {
+      "status": "PASS",
+      "settled_trades": 19,
+      "missing_edge_usd": 0,
+      "detail": "19/19 trades have settlement_edge_usd written"
+    },
+    "realized_pnl_matches_chronicle": {
+      "status": "FAIL",
+      "chronicle_total": -13.03,
+      "risk_state_realized": 211.37,
+      "diff": 224.4,
+      "tolerance": 0.6515,
+      "detail": "diff=224.4000 vs tol=0.6515 DIVERGED"
+    }
+  },
+  "deltas": {
+    "new_entries_since_last": 0,
+    "new_exits_since_last": 0,
+    "new_settlements_since_last": 0,
+    "pnl_change": 9.64,
+    "risk_level_changed": true,
+    "previous_report_at": "2026-04-07T11:16:04.099034+00:00"
+  }
+}

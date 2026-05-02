@@ -1,0 +1,80 @@
+{
+  "_comment": "Venus writes antibody proposals here. Zeus-side agents implement them.",
+  "antibodies": [
+    {
+      "id": "AB-001",
+      "discovered_at": "2026-04-06T17:55:00+00:00",
+      "discovered_by": "fail-fixer-data",
+      "category": "lifecycle_completeness",
+      "finding": "33 trade_decisions rows with status=entered had no portfolio position, no settlement record, no void record — fell through the decision-to-position materialization gap. Root cause: original log_trade_entry (commit 2cfd7ee, 2026-03-31) lacked runtime_trade_id column. Ghost rows created during schema migration window.",
+      "proposed_antibody_type": "invariant_test",
+      "proposed_antibody": "test_lifecycle_completeness_invariant() — for every trade_decisions row with status=entered AND target_date < today, assert at least one of: (1) a portfolio position with matching runtime_trade_id exists or existed, (2) a SETTLEMENT chronicle event for that trade_id exists, (3) a void/cancel record exists. Also assert runtime_trade_id IS NOT NULL for all rows created by log_trade_entry.",
+      "target_file": "tests/test_truth_surface_health.py",
+      "severity": "critical",
+      "status": "proposed"
+    },
+    {
+      "id": "AB-002",
+      "discovered_at": "2026-04-06T17:55:00+00:00",
+      "discovered_by": "fail-fixer-data",
+      "category": "diagnostic_surface_gap",
+      "finding": "diagnose_truth_surfaces.py settlement_harvester check was querying the legacy settlements table (static Rainstorm migration import, last row 2026-03-30) instead of the live decision_log/calibration_pairs tables. Reported 173.6h stale when actual settlement activity was 57.7h ago. The settlements table has no production writer in Zeus — only populated by scripts/migrate_rainstorm_data.py.",
+      "proposed_antibody_type": "schema_deprecation",
+      "proposed_antibody": "Mark settlements table as deprecated Rainstorm artifact: (1) add SQL comment to init_schema CREATE TABLE, (2) update replay.py and monitor_refresh.py readers to use calibration_pairs/decision_log as primary source, (3) diagnostic fix already applied in diagnose_truth_surfaces.py. Long-term: either build a settlements writer in the harvester or remove the table entirely.",
+      "target_file": "src/state/db.py",
+      "severity": "medium",
+      "status": "proposed"
+    },
+    {
+      "id": "AB-003",
+      "discovered_at": "2026-04-06T18:39:00+00:00",
+      "discovered_by": "fail-fixer-canonical",
+      "category": "canonical_path_silent_degradation",
+      "finding": "portfolio_truth_source silently degraded to stale_legacy_fallback because position_current.updated_at was frozen at Apr 3 while position_events_legacy had entries through Apr 6. The staleness comparator in query_portfolio_loader_view() filtered out all 7 active positions, causing the system to operate on empty fallback state with zero positions visible. No alert, no test, no runtime assertion caught this — the canonical path died silently.",
+      "proposed_antibody_type": "invariant_test",
+      "proposed_antibody": "test_portfolio_truth_source_is_canonical() in tests/test_truth_surface_health.py — asserts query_portfolio_loader_view() returns status='ok', not 'stale_legacy_fallback'. Also test_no_ghost_positions() and test_settlement_freshness() for the other two audit findings. IMPLEMENTED.",
+      "target_file": "tests/test_truth_surface_health.py",
+      "severity": "critical",
+      "status": "implemented",
+      "root_cause": "position_current.updated_at not refreshed by any periodic process — only written at initial upsert_position_current() time. No mechanism keeps it current when the position is monitored via legacy events path.",
+      "fix_applied": "Updated all 12 position_current rows updated_at to 2026-04-06T18:39:26+00:00. Long-term fix: ensure the projection/monitoring pipeline calls upsert_position_current() on each monitor cycle, not just at entry."
+    }
+    ,
+    {
+      "id": "AB-004",
+      "discovered_at": "2026-04-07T00:00:00+00:00",
+      "discovered_by": "strategy-analyst",
+      "category": "strategy_labeling_defect",
+      "finding": "_strategy_key_for() in evaluator.py assigns 'shoulder_sell' to ALL trades on shoulder bins regardless of direction. buy_yes on 'Denver 45F or below' is a tail buy (betting on extreme cold), not a shoulder sell. buy_no on 'SF 72F or higher' is a true shoulder sell (betting temp stays low). These are opposite bets: tail buys lose full stake at settlement (0/4 wins, -$4.69 realized), true shoulder sells are protected by divergence exits (+$0.84, ~$0, ~$0, +$0.01, +$0.05). Aggregating both under 'shoulder_sell' makes strategy_health tracking meaningless and prevents correct gating.",
+      "proposed_antibody_type": "type_constraint",
+      "proposed_antibody": "Add fourth strategy key 'tail_buy' for buy_yes on shoulder bins. Update _strategy_key_for() in evaluator.py: if edge.bin.is_shoulder and edge.direction == 'buy_yes': return 'tail_buy'. Keep 'shoulder_sell' for buy_no on shoulder bins only. Update strategy_health and risk_actions CHECK constraints. Gate 'tail_buy' immediately — zero evidence of structural profitability. Test: assert no trade with direction='buy_yes' AND bin.is_shoulder gets strategy='shoulder_sell'.",
+      "target_file": "src/engine/evaluator.py",
+      "severity": "high",
+      "status": "proposed"
+    },
+    {
+      "id": "AB-005",
+      "discovered_at": "2026-04-07T00:00:00+00:00",
+      "discovered_by": "strategy-analyst",
+      "category": "structural_entry_filter",
+      "finding": "center_buy places buy_yes bets on 2degF bins (width=2 integer settlement values) where ECMWF MAE at 3-day lead is ~1.5-2.0degF. A 1degF forecast error fully misses a 2degF bin — adjacent bin captures the win instead. All 16 center_buy trades had p_posterior=3-5% (expected wins=0.64), making P(0/16 wins)=52% — not anomalous, but the structural loss is permanent. The strategy is EV-positive on paper but forecast precision makes it EV-negative in practice. The one 'win' (+$13.10, Denver 52-53F) was a price-movement early exit, not a correct settlement.",
+      "proposed_antibody_type": "entry_guard",
+      "proposed_antibody": "Before accepting any center_buy edge in find_edges(): assert bin.width >= 2 * city_mae_estimate(city, lead_days). If bin_width < 2*MAE, suppress the edge with rejection_stage='BIN_PRECISION_INSUFFICIENT'. Implement city_mae_estimate() using model_bias/model_skill tables (fallback: 2.0F for all cities at lead>2d). Gate center_buy strategy policy until this guard is in place AND calibration shows realized win rate >= p_market for >= 30 settled trades per city.",
+      "target_file": "src/strategy/market_analysis.py",
+      "severity": "high",
+      "status": "proposed"
+    },
+    {
+      "id": "AB-006",
+      "discovered_at": "2026-04-07T09:00:00+00:00",
+      "discovered_by": "exit-investigator",
+      "category": "exit_authority_stale_signal",
+      "finding": "day0 EV gate evaluates `best_bid <= p_posterior` to decide whether to exit a position. When signal refresh fails (API unavailable, rate-limited, or model error), the gate falls back to entry-time p_posterior — the same value that caused the original entry. Since `best_bid <= entry_price` is definitionally true at entry (the entry was made because the market agreed with the signal), the gate NEVER fires during the day0 window when using stale signal. The position is held indefinitely through settlement, turning a temporary data gap into a permanent HOLD trap. Root cause of 100% of center_buy and tail_buy losses: positions entered at low-p bins (3-5%) were never exited because stale p_posterior == entry_price made the day0 EV gate always pass.",
+      "proposed_antibody_type": "invariant_test",
+      "proposed_antibody": "(1) test_day0_exit_gate_uses_fresh_probability(): mock signal refresh to return stale/entry-time p_posterior, assert the day0 gate DOES NOT treat this as a valid hold signal — it must either exit or raise a staleness alert. (2) Runtime assertion: in the day0 EV gate, assert p_posterior != entry_price before evaluating the hold condition; if equal, treat as staleness event and force exit (or escalate to monitor). (3) Add a `signal_age_seconds` field to the day0 gate decision log — alert if signal_age > 300s. (4) Gate entry for any strategy where day0 window > 0h until this invariant is in place.",
+      "target_file": "src/engine/monitor_refresh.py",
+      "severity": "critical",
+      "status": "proposed"
+    }
+  ]
+}

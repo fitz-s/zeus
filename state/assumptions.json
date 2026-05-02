@@ -1,0 +1,97 @@
+{
+  "_comment": "Zeus's declared beliefs about reality. Venus verifies these against actual data. If reality changes and this file doesn't, Venus detects the mismatch.",
+  "updated_at": "2026-04-27",
+  "bin_structure": {
+    "fahrenheit_width": 2,
+    "fahrenheit_pattern": "range: 50-51°F (covers integer settlement values 50 and 51)",
+    "celsius_width": 1,
+    "celsius_pattern": "point: 10°C (covers integer settlement value 10)",
+    "typical_bin_count": "9 center bins + 2 shoulder bins per market",
+    "shoulder_format_low": "X°F or below / X°C or below",
+    "shoulder_format_high": "X°F or higher / X°C or higher"
+  },
+  "settlement": {
+    "source": "Polymarket Gamma API (canonical) + WU (calibration metadata)",
+    "precision_f": 1.0,
+    "precision_f_note": "Integer precision: 1.0 = whole degrees F. SettlementSemantics.round_values() supports decimal if markets change.",
+    "precision_c": 1.0,
+    "precision_c_note": "Integer precision: 1.0 = whole degrees C. SettlementSemantics.round_values() supports decimal if markets change.",
+    "rounding_rule": "wmo_half_up",
+    "rounding_rule_note": "Default WU settlement uses WMO asymmetric half-up; Hong Kong HKO is explicitly overridden to oracle_truncate/floor per same-source settlement evidence.",
+    "settlement_chain": "Atmosphere → NWP → ASOS sensor → METAR (0.1°C) → WMO half-up WU display (integer) → Polymarket Gamma API → Settlement",
+    "rounding_rule_overrides": {
+      "Hong Kong": "oracle_truncate"
+    }
+  },
+  "signal": {
+    "ens_member_count": 51,
+    "ens_source": "ECMWF via Open-Meteo Ensemble API",
+    "mc_count_entry": 10000,
+    "mc_count_monitor": 10000,
+    "instrument_noise_f": 0.5,
+    "instrument_noise_c": 0.28
+  },
+  "cities": {
+    "fahrenheit": [
+      "Atlanta",
+      "Austin",
+      "Chicago",
+      "Dallas",
+      "Denver",
+      "Houston",
+      "Los Angeles",
+      "Miami",
+      "NYC",
+      "San Francisco",
+      "Seattle"
+    ],
+    "celsius": [
+      "Amsterdam",
+      "Ankara",
+      "Auckland",
+      "Beijing",
+      "Buenos Aires",
+      "Busan",
+      "Cape Town",
+      "Chengdu",
+      "Chongqing",
+      "Guangzhou",
+      "Helsinki",
+      "Hong Kong",
+      "Istanbul",
+      "Jakarta",
+      "Jeddah",
+      "Karachi",
+      "Kuala Lumpur",
+      "Lagos",
+      "London",
+      "Lucknow",
+      "Madrid",
+      "Manila",
+      "Mexico City",
+      "Milan",
+      "Moscow",
+      "Munich",
+      "Panama City",
+      "Paris",
+      "Sao Paulo",
+      "Seoul",
+      "Shanghai",
+      "Shenzhen",
+      "Singapore",
+      "Taipei",
+      "Tel Aviv",
+      "Tokyo",
+      "Toronto",
+      "Warsaw",
+      "Wellington",
+      "Wuhan"
+    ]
+  },
+  "execution": {
+    "order_type": "limit_only",
+    "sell_rounds_down": true,
+    "buy_rounds_up": true,
+    "exit_requires_confirmed_fill": true
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "commands": [],
+  "acks": [
+    {
+      "command": "resume",
+      "acked_at": "2026-04-12T18:47:53.338859+00:00",
+      "status": "executed"
+    }
+  ]
+}
