@@ -439,11 +439,12 @@ def _insert_executable_snapshot(
     bid_size: str = "100",
     ask_size: str = "100",
     orderbook_depth: dict | None = None,
+    captured_at: datetime | None = None,
 ) -> None:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import insert_snapshot
 
-    captured_at = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+    captured_at = captured_at or datetime.now(timezone.utc)
     insert_snapshot(
         conn,
         ExecutableMarketSnapshotV2(
@@ -2378,6 +2379,39 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["unsupported_reason"] == "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
     assert shadow["cost_basis_hash"]
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
+
+
+def test_executable_snapshot_repricing_rejects_stale_snapshot(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-stale.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-stale",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        captured_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        cycle_runtime._reprice_decision_from_executable_snapshot(
+            conn,
+            decision,
+            {"executable_snapshot_id": "snap-stale"},
+        )
+    conn.close()
 
 
 def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_path):
@@ -5434,7 +5468,7 @@ def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():
         p_value=0.02,
         vwmp=0.58,
     )
-    assert evaluator_module._strategy_key_for(update, buy_no_center) == "opening_inertia"
+    assert evaluator_module._strategy_key_for(update, buy_no_center) is None
     assert evaluator_module._entry_ci_rejection_reason(day0, center_edge).startswith(
         "DEGENERATE_CONFIDENCE_BAND"
     )

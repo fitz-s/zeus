@@ -60,7 +60,8 @@ class TestGateDecision:
         )
         cp._control_state["strategy_gates"] = {"center_buy": decision.to_dict()}
         assert cp.is_strategy_enabled("center_buy") is False
-        assert cp.is_strategy_enabled("opening_inertia") is True  # unknown = enabled
+        assert cp.is_strategy_enabled("opening_inertia") is True  # live-allowed unknown gate = enabled
+        assert cp.is_strategy_enabled("shoulder_sell") is False
 
     def test_backward_compat_bool_gate(self):
         """Bare bool from DB refresh converts to GateDecision(UNSPECIFIED) seamlessly."""
