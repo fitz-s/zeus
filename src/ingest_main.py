@@ -318,21 +318,41 @@ def _k2_hole_scanner_tick():
             conn.close()
 
 
+# Staleness threshold for boot-time force-fetch.  A once-per-day cron
+# (forecasts at 07:30 UTC, solar at 00:30 UTC) that was missed while the
+# daemon was offline leaves the table stale.  If max captured_at / fetched_at
+# is older than this many hours on boot, we call daily_tick immediately rather
+# than waiting for the next scheduled cron.
+_BOOT_FRESHNESS_THRESHOLD_HOURS = 18
+
+
 @_scheduler_job("ingest_k2_startup_catch_up")
 def _k2_startup_catch_up():
     """K2 boot-time hole filler — runs once at ingest daemon start.
 
-    Fills MISSING/retry-ready FAILED rows for the last 30 days across
-    all four K2 tables. Mirrors src/main.py:_k2_startup_catch_up.
+    Two-phase:
+
+    Phase 1 — hole filler (unchanged): fills MISSING/retry-ready FAILED rows
+    for the last 30 days across all four K2 tables via catch_up_missing.
+
+    Phase 2 — staleness guard (new): for each once-per-day table
+    (forecasts, solar_daily) checks whether the most-recent row is older than
+    _BOOT_FRESHNESS_THRESHOLD_HOURS.  If stale, calls daily_tick immediately
+    so the live evaluator is never starved after an overnight outage.
+    APScheduler coalesce=True correctly skips missed cron runs; this guard is
+    the explicit catch-up path for that gap.
     """
     from src.data.daily_obs_append import catch_up_missing as catch_up_obs
     from src.data.hourly_instants_append import catch_up_missing as catch_up_hourly
     from src.data.solar_append import catch_up_missing as catch_up_solar
     from src.data.forecasts_append import catch_up_missing as catch_up_forecasts
+    from src.data.forecasts_append import daily_tick as forecasts_daily_tick
+    from src.data.solar_append import daily_tick as solar_daily_tick
     from src.state.db import get_world_connection
 
     conn = get_world_connection()
     try:
+        # ---- Phase 1: hole filler (existing semantics, unchanged) -----------
         logger.info("K2 startup catch-up: observations")
         logger.info("  %s", catch_up_obs(conn, days_back=30))
         logger.info("K2 startup catch-up: observation_instants")
@@ -341,6 +361,58 @@ def _k2_startup_catch_up():
         logger.info("  %s", catch_up_solar(conn, days_back=30))
         logger.info("K2 startup catch-up: forecasts")
         logger.info("  %s", catch_up_forecasts(conn, days_back=30))
+
+        # ---- Phase 2: staleness guard for once-per-day tables ---------------
+        now_utc = datetime.now(timezone.utc)
+        threshold_h = _BOOT_FRESHNESS_THRESHOLD_HOURS
+
+        # forecasts — has captured_at column written by the appender
+        row = conn.execute(
+            "SELECT MAX(captured_at) FROM forecasts"
+        ).fetchone()
+        max_captured = row[0] if row else None
+        if max_captured is None:
+            staleness_h = float("inf")
+        else:
+            from dateutil.parser import parse as _parse_dt
+            staleness_h = (now_utc - _parse_dt(max_captured)).total_seconds() / 3600
+        if staleness_h > threshold_h:
+            logger.warning(
+                "forecasts stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
+                staleness_h, threshold_h,
+            )
+            result = forecasts_daily_tick(conn)
+            logger.info("boot-forced forecasts daily_tick: %s", result)
+        else:
+            logger.info(
+                "forecasts fresh (%.1fh <= %dh threshold) — skipping boot force-fetch",
+                staleness_h, threshold_h,
+            )
+
+        # solar_daily — no captured_at column; use data_coverage.fetched_at
+        row = conn.execute(
+            "SELECT MAX(fetched_at) FROM data_coverage WHERE data_table = 'solar_daily'"
+        ).fetchone()
+        max_solar_fetched = row[0] if row else None
+        if max_solar_fetched is None:
+            solar_staleness_h = float("inf")
+        else:
+            from dateutil.parser import parse as _parse_dt
+            solar_staleness_h = (
+                (now_utc - _parse_dt(max_solar_fetched)).total_seconds() / 3600
+            )
+        if solar_staleness_h > threshold_h:
+            logger.warning(
+                "solar_daily stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
+                solar_staleness_h, threshold_h,
+            )
+            result = solar_daily_tick(conn)
+            logger.info("boot-forced solar daily_tick: %s", result)
+        else:
+            logger.info(
+                "solar_daily fresh (%.1fh <= %dh threshold) — skipping boot force-fetch",
+                solar_staleness_h, threshold_h,
+            )
     finally:
         conn.close()
 
