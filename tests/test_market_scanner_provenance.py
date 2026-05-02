@@ -821,6 +821,53 @@ class TestSourceContractGate:
         assert report["events"][0]["source_contract"]["station_id"] == "LFPB"
         assert exit_code_for_report(report, fail_on="WARN") == 2
 
+    def test_compact_alert_report_contains_only_alert_rows(self):
+        from scripts.watch_source_contract import analyze_events, build_compact_alert_report
+
+        paris_alert = _gamma_temperature_event(
+            event_id="paris-alert",
+            title="Highest temperature in Paris on May 3?",
+            slug="highest-temperature-in-paris-on-may-3-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "bonneuil-en-france/LFPB"
+            ),
+        )
+        karachi_ok = _gamma_temperature_event(
+            event_id="karachi-ok",
+            title="Highest temperature in Karachi on May 3?",
+            slug="highest-temperature-in-karachi-on-may-3-2026",
+            question="Will the high temperature in Karachi be 35°C or higher?",
+            resolution_source="https://www.wunderground.com/history/daily/pk/karachi/OPKC",
+        )
+
+        report = analyze_events(
+            [paris_alert, karachi_ok],
+            checked_at_utc=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        compact = build_compact_alert_report(report, report_only=True)
+
+        assert compact["summary"] == {
+            "OK": 1,
+            "WARN": 0,
+            "ALERT": 1,
+            "DATA_UNAVAILABLE": 0,
+        }
+        assert compact["affected_cities"] == ["Paris"]
+        assert [event["city"] for event in compact["alert_events"]] == ["Paris"]
+        assert all(event["city"] != "Karachi" for event in compact["alert_events"])
+        assert compact["quarantine"] == {
+            "report_only": True,
+            "written": False,
+            "actions": [],
+            "mode": "read_only_no_write",
+        }
+        assert any(
+            "Only alert_events are ALERT-affected" in rule
+            for rule in compact["model_reporting_contract"]
+        )
+
     def test_watch_report_warns_on_missing_source(self):
         from scripts.watch_source_contract import analyze_events, exit_code_for_report
 
@@ -1237,6 +1284,21 @@ class TestSourceContractGate:
         assert candidate["confirmation_status"] == "auto_confirmed"
         assert candidate["source_contract"]["from_station_ids"] == ["LFPG"]
         assert candidate["source_contract"]["to_station_ids"] == ["LFPB"]
+        source_change_git = candidate["source_change_git"]
+        assert source_change_git["required"] is True
+        assert source_change_git["branch_name"].startswith(
+            "source-contract/2026-04-29-paris-lfpg-to-lfpb-test-run"
+        )
+        assert source_change_git["worktree_path"].endswith(
+            "zeus-source-contract-2026-04-29-paris-lfpg-to-lfpb-test-run"
+        )
+        assert source_change_git["create_command"][:5] == [
+            "git",
+            "-C",
+            str(auto.ROOT),
+            "worktree",
+            "add",
+        ]
         assert candidate["affected_metrics"] == ["high", "low"]
         assert candidate["date_scope"]["affected_market_start"] == "2026-04-29"
         assert candidate["date_scope"]["affected_market_end"] == "2026-05-01"
@@ -1264,6 +1326,8 @@ class TestSourceContractGate:
         ].endswith("/test-run/paris/config_update.json")
         locator = mini_packet["workspace_locator"]
         assert locator["repo_root"] == str(auto.ROOT)
+        assert locator["required_branch"] == source_change_git["branch_name"]
+        assert locator["required_worktree"] == source_change_git["worktree_path"]
         assert any(
             item["path"] == "scripts/watch_source_contract.py"
             for item in locator["code_navigation"]
@@ -1275,6 +1339,8 @@ class TestSourceContractGate:
         )
         safe_contract = mini_packet["safe_execution_contract"]
         assert safe_contract["command_policy"] == "exact_allowed_command_only"
+        assert safe_contract["source_change_branch_required"] == source_change_git["branch_name"]
+        assert safe_contract["apply_cwd_required"] == source_change_git["worktree_path"]
         assert "state/zeus-world.db (only via exact scoped rebuild commands from the receipt)" in safe_contract["allowed_write_globs_current_phase"]
         assert any("--apply/--no-dry-run/--force outside" in token for token in safe_contract["forbidden_command_tokens"])
         assert mini_packet["report_template"] == {
@@ -1287,6 +1353,12 @@ class TestSourceContractGate:
         controller_apply = next(
             item for item in candidate["command_plan"] if item["id"] == "controller_apply"
         )
+        prepare_worktree = next(
+            item
+            for item in mini_packet["step_protocol"]
+            if item["id"] == "prepare_source_change_worktree"
+        )
+        assert prepare_worktree["allowed_command"] == source_change_git["create_command"]
         assert controller_apply["command"][:6] == [
             sys.executable,
             "scripts/source_contract_auto_convert.py",
@@ -1366,6 +1438,58 @@ class TestSourceContractGate:
         assert candidate["threshold_blockers"] == [
             "alert market count 1 is below threshold 2"
         ]
+
+    def test_auto_convert_init_source_change_worktree_uses_exact_git_command(
+        self, monkeypatch
+    ):
+        from scripts import source_contract_auto_convert as auto
+        from scripts.watch_source_contract import analyze_events
+
+        events = [
+            _gamma_temperature_event(
+                event_id="paris-high-20260429",
+                title="Highest temperature in Paris on April 29?",
+                slug="highest-temperature-in-paris-on-april-29-2026",
+                question="Will the high temperature in Paris be 20°C or higher?",
+                resolution_source=(
+                    "https://www.wunderground.com/history/daily/fr/"
+                    "bonneuil-en-france/LFPB"
+                ),
+            ),
+            _gamma_temperature_event(
+                event_id="paris-low-20260429",
+                title="Lowest temperature in Paris on April 29?",
+                slug="lowest-temperature-in-paris-on-april-29-2026",
+                question="Will the low temperature in Paris be 10°C or lower?",
+                resolution_source=(
+                    "https://www.wunderground.com/history/daily/fr/"
+                    "bonneuil-en-france/LFPB"
+                ),
+            ),
+        ]
+        report = analyze_events(
+            events,
+            checked_at_utc=datetime(2026, 4, 30, tzinfo=timezone.utc),
+        )
+        receipt = auto.build_receipt(
+            report,
+            policy=auto.RuntimePolicy(today=auto.date(2026, 5, 3)),
+            run_id="branch-run",
+        )
+        expected = receipt["candidates"][0]["source_change_git"]["create_command"]
+        observed: list[list[str]] = []
+
+        def _fake_run(command, **kwargs):
+            observed.append([str(part) for part in command])
+            return auto.subprocess.CompletedProcess(command, 0, "created", "")
+
+        monkeypatch.setattr(auto.subprocess, "run", _fake_run)
+
+        actions = auto.init_source_change_worktrees(receipt)
+
+        assert observed == [expected]
+        assert actions[0]["status"] == "created"
+        assert receipt["candidates"][0]["source_change_git"]["status"] == "exists"
 
     def test_auto_convert_blocks_provider_family_change(self):
         from scripts import source_contract_auto_convert as auto

@@ -13,24 +13,44 @@
 
 set -euo pipefail
 
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+HOOK_COMMON="${HOOK_DIR}/hook_common.py"
+
 INPUT=$(cat)
 
 # Extract file_path (Edit/Write) or notebook_path (NotebookEdit) from tool_input
-FILE_PATH=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-ti = d.get('tool_input', {}) or {}
-print(ti.get('file_path') or ti.get('notebook_path') or '')
-" 2>/dev/null || echo "")
+if ! FILE_PATH=$(printf '%s' "$INPUT" | python3 "$HOOK_COMMON" extract-json-field file_path 2>/tmp/pre-edit-json.err); then
+    echo "[pre-edit-architecture] BLOCKED: malformed Claude hook JSON ($(cat /tmp/pre-edit-json.err 2>/dev/null || echo parse failure))" >&2
+    exit 2
+fi
+if [ -z "$FILE_PATH" ]; then
+    if ! FILE_PATH=$(printf '%s' "$INPUT" | python3 "$HOOK_COMMON" extract-json-field notebook_path 2>/tmp/pre-edit-json.err); then
+        echo "[pre-edit-architecture] BLOCKED: malformed Claude hook JSON ($(cat /tmp/pre-edit-json.err 2>/dev/null || echo parse failure))" >&2
+        exit 2
+    fi
+fi
 
 # If no file_path, allow (other tool, not relevant to this gate)
 if [ -z "$FILE_PATH" ]; then
     exit 0
 fi
 
-# Only gate edits inside architecture/
-case "$FILE_PATH" in
-    */architecture/*|architecture/*)
+# Only gate edits inside this repository's architecture/ directory. Do not
+# block unrelated paths whose names happen to contain `/architecture/`.
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if REL_PATH=$(python3 "$HOOK_COMMON" repo-relative "$REPO_ROOT" "$FILE_PATH"); then
+    :
+else
+    REL_STATUS=$?
+    if [ "$REL_STATUS" -eq 10 ]; then
+        exit 0
+    fi
+    echo "[pre-edit-architecture] BLOCKED: could not resolve path relative to repo: $FILE_PATH" >&2
+    exit 2
+fi
+
+case "$REL_PATH" in
+    architecture/*)
         ;;
     *)
         exit 0

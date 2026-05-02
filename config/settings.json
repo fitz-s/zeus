@@ -1,0 +1,154 @@
+{
+  "capital_base_usd": 150,
+  "live_safety_cap_usd": 5.0,
+  "_live_safety_cap_usd_note": "Phase 1 maturity rail. Kelly output hard-clipped to this ceiling for canary window. Lifted only after Tier 6 canary passes.",
+  "smoke_test_portfolio_cap_usd": 5.0,
+  "_smoke_test_portfolio_cap_usd_note": "ONE-TIME smoke test guard: portfolio-wide filled+pending exposure cap. Blocks new entries once total cost-basis across all non-terminal positions exceeds this. Not a permanent feature \u2014 remove after the first full entry\u2192fill\u2192settlement lifecycle has been observed. Added 2026-04-12 after first live cycle placed 12 orders (2 matched) intending $60 exposure when operator expected a single $5 test trade.",
+  "discovery": {
+    "opening_hunt_interval_min": 30,
+    "update_reaction_times_utc": [
+      "07:00",
+      "09:00",
+      "19:00",
+      "21:00"
+    ],
+    "day0_interval_min": 15,
+    "ecmwf_open_data_times_utc": [
+      "01:30",
+      "13:30"
+    ],
+    "max_lead_days": 7,
+    "preferred_lead_days": [
+      3,
+      4,
+      5
+    ],
+    "min_hours_to_resolution": 6
+  },
+  "ensemble": {
+    "primary": "ecmwf_ifs025",
+    "crosscheck": "gfs025",
+    "primary_members": 51,
+    "crosscheck_members": 31,
+    "n_mc": 10000,
+    "_n_mc_note": "Runtime per-trade Monte Carlo iterations. Bumped 2026-04-29 from 5000 (LAW 4 forbidden move 7 floor) to 10000 for tighter per-trade SE (0.0071 -> 0.005 at p=0.5). Training calibration_pairs_v2 was rebuilt at n_mc=5000 on 2026-04-29; LAW 4 derivation shows that aggregate Platt fit difference between 5000 and 10000 is < 1e-3 sigma (label noise dominates). Future re-rebuild at 10000 is queued in backlog for full pipeline symmetry but is empirically not load-bearing for fit quality.",
+    "instrument_noise_f": 0.5,
+    "instrument_noise_c": 0.28,
+    "bimodal_kde_order": 10,
+    "bimodal_gap_ratio": 0.3,
+    "boundary_window": 0.5,
+    "unimodal_range_epsilon": 0.5,
+    "conflict_kl_threshold": 0.15
+  },
+  "calibration": {
+    "method": "platt",
+    "refit_every_n": 50,
+    "n_bootstrap": 200,
+    "seasonal_dates": [
+      "03-20",
+      "06-21",
+      "09-22",
+      "12-21"
+    ],
+    "maturity": {
+      "level1": 150,
+      "level2": 50,
+      "level3": 15
+    }
+  },
+  "day0": {
+    "n_mc": 10000,
+    "_n_mc_note": "Day0 nowcast Monte Carlo iterations. Bumped 2026-04-29 from 5000 to 10000 in lockstep with ensemble.n_mc per LAW 4 forbidden move 7 (runtime per-trade precision >= 5000; 10000 preferred)."
+  },
+  "edge": {
+    "n_bootstrap": 500,
+    "base_alpha": {
+      "level1": 0.65,
+      "level2": 0.55,
+      "level3": 0.4,
+      "level4": 0.25,
+      "level5": 0.25
+    },
+    "_base_alpha_note": "HARDCODED. Replace after 100+ settlements by comparing Model Brier vs Market Brier per calibration level.",
+    "spread_tight_f": 2.0,
+    "_spread_tight_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city using per-city ensemble spread percentiles.",
+    "spread_wide_f": 5.0,
+    "_spread_wide_f_note": "HARDCODED. Replace after 1000+ ENS snapshots per city using per-city ensemble spread percentiles.",
+    "fdr_alpha": 0.1,
+    "_fdr_alpha_note": "HARDCODED. Replace after 500+ candidate evaluations using observed false positive rate vs target FDR.",
+    "opening_alpha_bonus": 0.15
+  },
+  "sizing": {
+    "kelly_multiplier": 0.25,
+    "_kelly_multiplier_note": "HARDCODED. Replace after 500+ settlements using empirical edge-estimation error and optimal Kelly fraction.",
+    "max_single_position_pct": 0.1,
+    "max_portfolio_heat_pct": 0.5,
+    "max_correlated_pct": 0.25,
+    "max_city_pct": 0.2,
+    "min_order_usd": 1.0
+  },
+  "correlation": {
+    "default_cross_cluster": 0.1
+  },
+  "exit": {
+    "reversal_confirmations": 2,
+    "_reversal_confirmations_note": "Legacy alias retained for compatibility. Use consecutive_confirmations for new code.",
+    "expiry_hours": 4,
+    "_expiry_hours_note": "Legacy alias retained for compatibility. Use near_settlement_hours for new code.",
+    "consecutive_confirmations": 2,
+    "_consecutive_confirmations_note": "HARDCODED. Replace after 500+ exit events by comparing 1/2/3-cycle false-positive rates.",
+    "near_settlement_hours": 4.0,
+    "_near_settlement_hours_note": "HARDCODED. Replace after 100+ near-settlement trades per city using per-city optimal hold window.",
+    "buy_no_scaling_factor": 0.5,
+    "_buy_no_scaling_factor_note": "HARDCODED. Replace after 200+ buy_no settlements using optimal scaling from historical edge noise.",
+    "buy_yes_scaling_factor": 0.3,
+    "_buy_yes_scaling_factor_note": "HARDCODED. Replace after 200+ buy_yes settlements using optimal scaling from historical edge noise.",
+    "buy_no_floor": -0.02,
+    "_buy_no_floor_note": "HARDCODED. Replace after analyzing historical forward-edge noise floor for buy_no exits.",
+    "buy_no_ceiling": -0.15,
+    "_buy_no_ceiling_note": "HARDCODED. Replace after observing deep buy_no reversals and false-hold rate.",
+    "buy_yes_floor": -0.01,
+    "_buy_yes_floor_note": "HARDCODED. Replace after analyzing historical forward-edge noise floor for buy_yes exits.",
+    "buy_yes_ceiling": -0.1,
+    "_buy_yes_ceiling_note": "HARDCODED. Replace after observing deep buy_yes reversals and false-hold rate.",
+    "divergence_soft_threshold": 0.2,
+    "_divergence_soft_threshold_note": "HARDCODED. Soft divergence trigger requires confirmation from adverse market velocity. Replace after replay + live divergence audit.",
+    "divergence_hard_threshold": 0.3,
+    "_divergence_hard_threshold_note": "HARDCODED. Hard divergence panic threshold. Replace after replay + live divergence audit.",
+    "divergence_velocity_confirm": -0.05,
+    "_divergence_velocity_confirm_note": "HARDCODED. Minimum adverse 1h market velocity required to confirm soft divergence panic.",
+    "fee_rate": 0.05,
+    "_fee_rate_note": "T6.4 HoldValue fee estimate uses polymarket_fee(best_bid, fee_rate); 0.05 matches execution_price.py:130 default (calibrated against Polymarket fee schedule). HARDCODED — revisit after observed-exit-fee corpus stabilizes.",
+    "daily_hurdle_rate": 0.0001,
+    "_daily_hurdle_rate_note": "T6.4 opportunity-cost rate per day of locked capital (0.01%/day ≈ 3.65%/year conservative hurdle). HARDCODED — replace with live-readiness B3 derived value once realized-return corpus exceeds 100 settlements.",
+    "correlation_crowding_rate": 0.0,
+    "_correlation_crowding_rate_note": "T6.4-phase2 correlation-crowding cost rate. Cost model: crowding_cost_usd = rate × correlated_exposure_ratio × shares × best_bid. rate=0.01 means 1% of exit notional per unit of correlated exposure across other held positions. Default 0.0 = no-op (safe default — feature-flag OFF preserves pre-T6.4-phase2 behavior even when HOLD_VALUE_EXIT_COSTS flips ON). Operator raises after T6.3-followup-1 replay audit measures should_exit sensitivity. HARDCODED until live-readiness B3 corpus."
+  },
+  "riskguard": {
+    "brier_yellow": 0.25,
+    "brier_orange": 0.3,
+    "brier_red": 0.35,
+    "accuracy_orange": 0.45,
+    "win_rate_yellow": 0.4,
+    "win_rate_orange": 0.35,
+    "max_daily_loss_pct": 0.08,
+    "max_weekly_loss_pct": 0.15,
+    "max_drawdown_pct": 0.2,
+    "staleness_hours": 6
+  },
+  "execution": {
+    "order_type": "limit_only",
+    "limit_offset_pct": 0.02,
+    "fill_timeout_seconds": 600,
+    "cancel_if_not_filled": true
+  },
+  "bias_correction_enabled": false,
+  "feature_flags": {
+    "CANONICAL_EXIT_PATH": false,
+    "HOLD_VALUE_EXIT_COSTS": false,
+    "_HOLD_VALUE_EXIT_COSTS_note": "T6.4 flag-gates HoldValue.compute_with_exit_costs at _buy_yes_exit + _buy_no_exit seams in src/state/portfolio.py. Default OFF to preserve pre-T6.4 zero-cost behavior during shadow validation; flip ON after operator reviews should_exit rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a pre-requisite). When ON, exit decisions include fee + time opportunity cost (not yet correlation — that lives in T6.4-phase2 requiring portfolio context in ExitContext).",
+    "NATIVE_MULTIBIN_BUY_NO_SHADOW": false,
+    "NATIVE_MULTIBIN_BUY_NO_LIVE": false,
+    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization of multi-bin buy_no only from native NO-token quotes; live additionally gates live entry submission and must remain false until operator promotion evidence exists."
+  }
+}

@@ -110,8 +110,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-01_tigge_5_01_backfill/work_log.md` | deferred packet evidence | 2026-05-01 TIGGE issue remains embargoed until 2026-05-03T00:00Z |
 | `task_2026-05-01_ultrareview25_remediation/` | deferred planning container | Contains operator-deferred ultrareview remediation planning residue |
 | `task_2026-05-01_ultrareview25_remediation/PLAN.md` | deferred planning packet | Operator-deferred governance/remediation residue |
-| `task_2026-05-02_review_crash_remediation/` | active planning container | Contains crashed-review remediation planning awaiting operator approval |
-| `task_2026-05-02_review_crash_remediation/PLAN.md` | active planning packet | Crashed-review remediation plan awaiting operator approval |
+| `task_2026-05-02_review_crash_remediation/` | plan packet | Dedupe and remediation plan for crashed review findings (#38 merged 2026-05-02) |
+| `task_2026-05-02_review_crash_remediation/PLAN.md` | active planning packet | Crashed-review remediation plan |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
