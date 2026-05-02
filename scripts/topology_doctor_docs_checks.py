@@ -4,7 +4,7 @@ This module intentionally receives the topology_doctor module as `api` instead
 of importing its internals. That keeps this first checker-family split small and
 preserves the existing public helper surface during migration.
 """
-# Lifecycle: created=2026-04-16; last_reviewed=2026-04-28; last_reused=2026-04-28
+# Lifecycle: created=2026-04-16; last_reviewed=2026-04-28; last_reused=2026-05-02
 # Purpose: Docs-tree, operations-registry, runtime-plan, and docs-registry checks for topology_doctor.
 # Reuse: Keep docs-specific policy checks here; route root/state/source checks through their checker modules.
 
@@ -99,6 +99,9 @@ STALE_TRUTH_PATTERNS = (
 DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/task_*/",
     "docs/operations/*_package_*/",
+    "docs/operations/*_observation/",
+    "docs/operations/ws_poll_reaction/",
+    "docs/operations/attribution_drift/",
     "docs/reports/",
     "docs/artifacts/",
     "docs/to-do-list/",
@@ -599,6 +602,9 @@ def check_current_state_receipt_bound(api: Any, topology: dict[str, Any]) -> lis
     receipt_source = current_state_label_value(text, "Receipt-bound source")
     issues: list[Any] = []
     if not packet:
+        lowered = text.lower()
+        if "active execution packet: none" in lowered or "no active execution packet" in lowered:
+            return issues
         issues.append(api._issue("current_state_receipt_missing", rel, "missing Active execution packet or Closeout evidence packet"))
         return issues
     if active_source and active_source.startswith((".omx/", ".omc/")):

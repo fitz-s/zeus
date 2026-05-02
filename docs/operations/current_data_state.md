@@ -66,8 +66,8 @@ law, read `architecture/data_rebuild_topology.yaml`,
    feature flag (default OFF). Current runtime produces 0 harvester writes
    per cycle. Flipping the flag requires separate DR-33-C review.
 10. Daily and hourly ingest lag may still be non-zero; consult
-    `docs/operations/current_source_validity.md` for per-source freshness
-    claims and `docs/operations/known_gaps.md` for known ingest issues.
+   `docs/operations/current_source_validity.md` for per-source freshness
+   claims and `docs/to-do-list/known_gaps.md` for known ingest issues.
 11. Hong Kong source status remains an explicit caution path; read
     `docs/operations/current_source_validity.md` and
     `architecture/fatal_misreads.yaml::hong_kong_hko_explicit_caution_path`.

@@ -153,7 +153,8 @@ scripts/              Topology doctor, replay parity, maintenance tools
 architecture/         Machine-readable manifests, invariants, zones, task profiles
 docs/authority/       Durable architecture and delivery law
 docs/reference/       Domain model, math spec, module references
-docs/operations/      Current-fact surfaces, active work packets, known gaps
+docs/operations/      Current-fact surfaces and active work packets
+docs/to-do-list/      Known gaps, active checklists, and audit queues
 config/               Runtime configuration and source/provenance registries
 migrations/           SQL migrations defining canonical DB schema
 state/                Runtime databases and projections (local, not committed)

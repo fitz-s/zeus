@@ -18,10 +18,10 @@ archives."
 | `authority/` | Durable architecture and delivery law only | No packet docs, ADRs, or historical governance evidence |
 | `reference/` | Canonical durable references only | Concepts, system references, and routing into dense module books |
 | `reference/modules/` | Dense module books | Module cognition layer; reference only, not law |
-| `operations/` | Live control pointer, current fact surfaces, active packets, package inputs, gap register | Current work routing |
+| `operations/` | Live control pointer, current fact surfaces, active packets, package inputs | Current work routing |
 | `runbooks/` | Operator runbooks | Runtime support |
 | `reports/` | Generated diagnostic reports | Evidence only |
-| `to-do-list/` | Active checklist workbooks and audit queues | Never authority |
+| `to-do-list/` | Active known-gap worklist, checklist workbooks, and audit queues | Never authority |
 | `artifacts/` | Active evidence artifacts and inventories | Never authority |
 
 Historical governance files demoted from authority live under
@@ -44,7 +44,8 @@ Historical governance files demoted from authority live under
 - `operations/current_data_state.md` - current audited data posture
 - `operations/current_source_validity.md` - current audited source-validity posture
 - `runbooks/live_operation.md` - day-to-day live daemon runbook
-- `operations/known_gaps.md` - active operational gap register
+- `to-do-list/known_gaps.md` - active known-gap worklist
+- `to-do-list/known_gaps_archive.md` - closed known-gap antibody archive
 - `operations/task_2026-04-23_midstream_remediation/` - midstream remediation package; phase evidence lives under `phases/`
 - `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` - R3 Z0 packet-local live-money invariant summary for CLOB V2
 - `operations/task_2026-04-29_design_simplification_audit/` - first-principles audit plus phased repair evidence; not live-deploy authority

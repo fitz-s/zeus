@@ -1,6 +1,6 @@
 # Created: 2026-04-21
 # Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-05-02
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet.
 # Purpose: Pin observation_instants_v2 writer provenance and source-role semantics.
 # Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
@@ -53,6 +53,7 @@ def _minimal_valid_kwargs(**overrides) -> dict:
         target_date="2024-01-15",
         source="wu_icao_history",
         timezone_name="America/Chicago",
+        local_hour=8.0,
         local_timestamp="2024-01-15T08:00:00-06:00",
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=-360,
@@ -110,6 +111,21 @@ def test_minimal_valid_row_constructs_without_error():
     assert row.authority == "VERIFIED"
 
 
+def test_local_hour_is_required_for_hourly_rows():
+    with pytest.raises(InvalidObsV2RowError, match="local_hour is required"):
+        _make_row(local_hour=None)
+
+
+def test_local_hour_must_match_local_timestamp_hour():
+    with pytest.raises(InvalidObsV2RowError, match="does not match local_timestamp hour"):
+        _make_row(local_hour=7.0)
+
+
+def test_target_date_must_match_local_timestamp_local_date():
+    with pytest.raises(InvalidObsV2RowError, match="must match local_timestamp local date"):
+        _make_row(target_date="2024-01-16")
+
+
 # ----------------------------------------------------------------------
 # A1: missing / wrong authority
 # ----------------------------------------------------------------------
@@ -141,6 +157,7 @@ def test_a1_accepts_icao_station_native():
             ),
             station_id="HKO",
             timezone_name="Asia/Hong_Kong",
+            local_hour=22.0,
             local_timestamp="2024-01-15T22:00:00+08:00",
             utc_timestamp="2024-01-15T14:00:00+00:00",
             utc_offset_minutes=480,
@@ -242,6 +259,7 @@ def test_a2_ogimet_city_accepts_correct_source():
         city="Moscow",
         source="ogimet_metar_uuww",
         timezone_name="Europe/Moscow",
+        local_hour=17.0,
         local_timestamp="2024-01-15T17:00:00+03:00",
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=180,
@@ -524,6 +542,7 @@ def test_insert_rows_round_trip_primary_ogimet_city_persists_source_role_trainin
         city="Moscow",
         source="ogimet_metar_uuww",
         timezone_name="Europe/Moscow",
+        local_hour=17.0,
         local_timestamp="2024-01-15T17:00:00+03:00",
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=180,
@@ -584,6 +603,7 @@ def test_insert_rows_round_trip_hko_persists_source_reaudit_status(mem_db):
             ),
             station_id="HKO",
             timezone_name="Asia/Hong_Kong",
+            local_hour=22.0,
             local_timestamp="2024-01-15T22:00:00+08:00",
             utc_timestamp="2024-01-15T14:00:00+00:00",
             utc_offset_minutes=480,
