@@ -397,6 +397,56 @@ def test_mid_run_reconnect_after_real_disconnect_preserves_m5_reconcile_required
     )
 
 
+def test_subscribe_reconnect_with_empty_local_surface_clears_m5_requirement():
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    init_schema(c)
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+    try:
+        status = PolymarketUserChannelIngestor(
+            adapter=object(),
+            condition_ids=["condition-ws"],
+            auth=WSAuth("key", "secret", "pass"),
+            conn_factory=lambda: c,
+            own_connection=False,
+        )._record_subscribed_message(observed_at=NOW)
+
+        assert status.m5_reconcile_required is False
+        assert status.gap_reason == "message_received_no_local_side_effects"
+        assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+    finally:
+        c.close()
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_subscribe_reconnect_with_local_command_preserves_m5_requirement(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert status.m5_reconcile_required is True
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+
+
 def test_not_configured_default_blocks_submit_until_user_channel_truth_exists(conn):
     """M3 is live-truth-gated; absent WS configuration is not an implicit PASS."""
     ws_gap_guard.configure_status(
@@ -423,12 +473,13 @@ def test_explicit_test_clear_remains_allowed_for_unit_harness(conn):
 
 
 def test_ws_guard_test_reset_helpers_are_rejected_outside_test_runtime(monkeypatch):
-    monkeypatch.setattr(ws_gap_guard, "_test_runtime_enabled", lambda: False)
+    with monkeypatch.context() as m:
+        m.setattr(ws_gap_guard, "_test_runtime_enabled", lambda: False)
 
-    with pytest.raises(RuntimeError, match="clear_for_test"):
-        ws_gap_guard.clear_for_test(observed_at=NOW)
-    with pytest.raises(RuntimeError, match="configure_status"):
-        ws_gap_guard.configure_status(ws_gap_guard.WSGapStatus())
+        with pytest.raises(RuntimeError, match="clear_for_test"):
+            ws_gap_guard.clear_for_test(observed_at=NOW)
+        with pytest.raises(RuntimeError, match="configure_status"):
+            ws_gap_guard.configure_status(ws_gap_guard.WSGapStatus())
 
 
 def test_stale_last_message_triggers_gap_event(conn):

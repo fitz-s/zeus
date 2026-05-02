@@ -177,6 +177,43 @@ def record_message(
     return _status
 
 
+def clear_after_no_local_side_effects(
+    *,
+    observed_at: datetime | None = None,
+    stale_after_seconds: int | None = None,
+) -> WSGapStatus:
+    """Clear a real reconnect latch after caller-provided empty-journal proof.
+
+    The proof is intentionally outside this module: M3 owns the submit guard,
+    not durable exchange reconciliation. Production callers may use this only
+    after proving Zeus has no local venue-command/position/finding surface that
+    could have missed side effects during the gap. If the channel is not already
+    healthy, this remains fail-closed.
+    """
+
+    global _status
+    now = observed_at or _utcnow()
+    current = _status
+    if current.subscription_state not in {"AUTHED", "SUBSCRIBED"} or current.is_stale(now=now):
+        raise WSGapSubmitBlocked(
+            f"cannot clear ws gap without healthy subscription: "
+            f"ws_gap={current.subscription_state}:{current.gap_reason}; "
+            f"m5_reconcile_required={current.m5_reconcile_required}"
+        )
+    _status = WSGapStatus(
+        connected=True,
+        last_message_at=current.last_message_at or now,
+        consecutive_gaps=current.consecutive_gaps,
+        subscription_state=current.subscription_state,
+        gap_reason="message_received_no_local_side_effects",
+        m5_reconcile_required=False,
+        affected_markets=current.affected_markets,
+        updated_at=now,
+        stale_after_seconds=stale_after_seconds or current.stale_after_seconds,
+    )
+    return _status
+
+
 def record_gap(
     reason: str,
     *,

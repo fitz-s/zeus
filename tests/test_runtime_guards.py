@@ -7817,7 +7817,7 @@ def test_store_ens_snapshot_refuses_legacy_id_collision_without_p_raw_corruption
     assert v2_count == 0
 
 
-def test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback(tmp_path):
+def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -7887,15 +7887,24 @@ def test_store_ens_snapshot_refuses_v2_conflict_without_legacy_fallback(tmp_path
         "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?",
         (NYC.name,),
     ).fetchone()[0]
-    v2_count = conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = ?",
+    v2_rows = conn.execute(
+        """
+        SELECT snapshot_id, valid_time, available_at, fetch_time, model_version
+          FROM ensemble_snapshots_v2
+         WHERE city = ?
+        """,
         (NYC.name,),
-    ).fetchone()[0]
+    ).fetchall()
     conn.close()
 
-    assert snapshot_id == ""
-    assert legacy_count == 0
-    assert v2_count == 1
+    assert snapshot_id
+    assert legacy_count == 1
+    assert len(v2_rows) == 1
+    assert str(v2_rows[0]["snapshot_id"]) == snapshot_id
+    assert v2_rows[0]["valid_time"] is None
+    assert v2_rows[0]["available_at"] == "2026-01-14T06:05:00+00:00"
+    assert v2_rows[0]["fetch_time"] == "2026-01-14T06:05:00+00:00"
+    assert v2_rows[0]["model_version"] == "ecmwf_ifs025"
 
 
 @pytest.mark.skip(

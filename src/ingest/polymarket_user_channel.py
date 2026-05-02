@@ -272,7 +272,7 @@ class PolymarketUserChannelIngestor:
         try:
             async with connect(self.endpoint) as ws:
                 await ws.send(json.dumps(self.subscription_message()))
-                ws_gap_guard.record_message(subscription_state="SUBSCRIBED", stale_after_seconds=self.stale_after_seconds)
+                self._record_subscribed_message()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
                 async for raw in ws:
                     await self.handle_raw_message(raw)
@@ -304,12 +304,48 @@ class PolymarketUserChannelIngestor:
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
             if raw in {"PONG", "PING", "pong", "ping"}:
-                ws_gap_guard.record_message(subscription_state="SUBSCRIBED", stale_after_seconds=self.stale_after_seconds)
+                self._record_subscribed_message()
                 return None
             message = json.loads(raw)
         else:
             message = dict(raw)
         return self.handle_message(message)
+
+    def _record_subscribed_message(self, *, observed_at: datetime | None = None) -> WSStatus:
+        status = ws_gap_guard.record_message(
+            observed_at=observed_at,
+            subscription_state="SUBSCRIBED",
+            stale_after_seconds=self.stale_after_seconds,
+        )
+        if status.m5_reconcile_required and self._local_side_effect_surface_empty():
+            status = ws_gap_guard.clear_after_no_local_side_effects(
+                observed_at=observed_at,
+                stale_after_seconds=self.stale_after_seconds,
+            )
+            logger.info(
+                "M3 user-channel gap latch cleared after reconnect: "
+                "no local venue commands, position lots, or unresolved M5 findings exist"
+            )
+        return status
+
+    def _local_side_effect_surface_empty(self) -> bool:
+        conn = self.conn_factory()
+        try:
+            checks = (
+                "SELECT COUNT(*) FROM venue_commands",
+                "SELECT COUNT(*) FROM position_lots",
+                "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL",
+            )
+            return all(int(conn.execute(sql).fetchone()[0] or 0) == 0 for sql in checks)
+        except Exception as exc:
+            logger.warning(
+                "M3 user-channel clean-reconnect proof unavailable; preserving M5 latch: %s",
+                exc,
+            )
+            return False
+        finally:
+            if self.own_connection:
+                conn.close()
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         if self._message_is_auth_failure(message):
