@@ -120,8 +120,8 @@ def test_rebuild_calibration_end_to_end(tmp_path):
         conn.execute(
             "INSERT OR IGNORE INTO ensemble_snapshots "
             "(city, target_date, issue_time, valid_time, available_at, "
-            " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
-            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED')",
+            " fetch_time, lead_hours, members_json, model_version, data_version, authority, temperature_metric) "
+            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED', 'high')",
             (
                 target,
                 f"{target}T00:00:00Z",
@@ -178,8 +178,8 @@ def test_rebuild_pipeline_skips_unverified_snapshots(tmp_path):
         conn.execute(
             "INSERT OR IGNORE INTO ensemble_snapshots "
             "(city, target_date, issue_time, valid_time, available_at, "
-            " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
-            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', ?)",
+            " fetch_time, lead_hours, members_json, model_version, data_version, authority, temperature_metric) "
+            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', ?, 'high')",
             (
                 target,
                 f"{target}T00:00:00Z",
@@ -343,8 +343,8 @@ def test_rows_written_reflects_actual_inserts(tmp_path):
         conn.execute(
             "INSERT OR IGNORE INTO ensemble_snapshots "
             "(city, target_date, issue_time, valid_time, available_at, "
-            " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
-            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED')",
+            " fetch_time, lead_hours, members_json, model_version, data_version, authority, temperature_metric) "
+            "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED', 'high')",
             (
                 target, f"{target}T00:00:00Z", f"{target}T12:00:00Z",
                 f"{target}T06:00:00Z", f"{target}T07:00:00Z",
@@ -415,8 +415,8 @@ def test_rebuild_calibration_db_error_is_not_swallowed(tmp_path):
     conn.execute(
         "INSERT OR IGNORE INTO ensemble_snapshots "
         "(city, target_date, issue_time, valid_time, available_at, "
-        " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
-        "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED')",
+        " fetch_time, lead_hours, members_json, model_version, data_version, authority, temperature_metric) "
+        "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED', 'high')",
         (
             target, f"{target}T00:00:00Z", f"{target}T12:00:00Z",
             f"{target}T06:00:00Z", f"{target}T07:00:00Z",
@@ -462,8 +462,8 @@ def test_rebuild_calibration_synthetic_bins_use_real_degree_symbol(tmp_path):
     conn.execute(
         "INSERT OR IGNORE INTO ensemble_snapshots "
         "(city, target_date, issue_time, valid_time, available_at, "
-        " fetch_time, lead_hours, members_json, model_version, data_version, authority) "
-        "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED')",
+        " fetch_time, lead_hours, members_json, model_version, data_version, authority, temperature_metric) "
+        "VALUES ('NYC', ?, ?, ?, ?, ?, 48.0, ?, 'ecmwf_tigge', 'v1', 'VERIFIED', 'high')",
         (
             target,
             f"{target}T00:00:00Z",

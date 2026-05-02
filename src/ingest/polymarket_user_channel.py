@@ -532,9 +532,50 @@ def _redacted_message(message: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
+def _websocket_connect_accepts_proxy_kwarg(connect_fn: Any) -> bool:
+    """Return True if `connect_fn` accepts a `proxy=` kwarg.
+
+    websockets>=15 added the `proxy` parameter; 10.x/12.x do not have it. The
+    repo does not pin `websockets` in `requirements.txt`, so an environment
+    with an older release would otherwise raise TypeError before any WS
+    session opens (PR #35 P1 review).
+
+    Detection via signature inspection rather than version string keeps the
+    check robust across vendored, backported, or test-mocked builds. A
+    function with `**kwargs` is treated as supporting `proxy` because the
+    upstream client will silently accept it.
+    """
+    try:
+        import inspect
+        sig = inspect.signature(connect_fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == "proxy":
+            return True
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
 def _default_websocket_connect(endpoint: str) -> Any:
     try:
         import websockets  # type: ignore
     except Exception as exc:  # pragma: no cover - env-dependent optional import
         raise WSDependencyMissing("websockets package is required for live M3 user-channel ingest") from exc
+    # websockets>=16 defaults to proxy=True and auto-detects HTTPS_PROXY from the
+    # environment.  The daemon plist sets HTTPS_PROXY=localhost:7890 (used for REST
+    # calls through the local proxy) but wss://ws-subscriptions-clob.polymarket.com
+    # is intentionally excluded from that proxy — WebSocket keepalive traffic must
+    # reach the server directly without CONNECT-tunnel overhead.  Pass proxy=None
+    # to bypass the proxy for all WS connections regardless of env var state.
+    #
+    # Older websockets (10.x/12.x) do not accept the proxy kwarg; passing it
+    # would raise TypeError before the connection opens. We probe the signature
+    # and only forward proxy=None when the installed client supports it.
+    # Antibodies:
+    #   tests/test_user_channel_ws_auto_derive.py::test_ws_connect_bypasses_proxy
+    #   tests/test_user_channel_ws_auto_derive.py::test_ws_connect_skips_proxy_kwarg_on_older_websockets
+    if _websocket_connect_accepts_proxy_kwarg(websockets.connect):
+        return websockets.connect(endpoint, proxy=None)
     return websockets.connect(endpoint)

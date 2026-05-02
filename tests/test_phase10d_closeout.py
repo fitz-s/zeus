@@ -90,14 +90,14 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
 
 
 def _make_metric_identity(metric: str):
-    """Build a MetricIdentity for testing."""
-    from src.types.metric_identity import MetricIdentity
-    return MetricIdentity(
-        temperature_metric=metric,
-        physical_quantity="temperature",
-        observation_field="high_temp" if metric == "high" else "low_temp",
-        data_version="v1",
-    )
+    """Build a MetricIdentity for testing.
+
+    B4 Phase 3 (2026-05-01): switched to canonical module-level constants because
+    `data_version='v1'` is now rejected by the canonical-allowlist guard at
+    `src/contracts/ensemble_snapshot_provenance.py` (CANONICAL_ENSEMBLE_DATA_VERSIONS).
+    """
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+    return HIGH_LOCALDAY_MAX if metric == "high" else LOW_LOCALDAY_MIN
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +110,21 @@ class TestRCYCausalityStatusWire:
 
     def test_r_cy_1_v2_row_causality_propagates(self):
         """R-CY.1: v2 row causality_status='N/A_CAUSAL_DAY_ALREADY_STARTED' reaches
-        Day0SignalInputs (not overridden by 'OK' default)."""
+        Day0SignalInputs (not overridden by 'OK' default).
+
+        B4 Phase 3 (2026-05-01): _read_v2_snapshot_metadata now requires snapshot_id
+        per decision-time ordering rule (`src/engine/evaluator.py:233`); pass the
+        autoincrement id of the seeded row.
+        """
         from src.engine.evaluator import _read_v2_snapshot_metadata
 
         conn = _make_v2_snapshots_db(causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED")
-        meta = _read_v2_snapshot_metadata(conn, "NYC", "2026-01-01", "low")
+        snapshot_id = conn.execute(
+            "SELECT snapshot_id FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
+        ).fetchone()["snapshot_id"]
+        meta = _read_v2_snapshot_metadata(
+            conn, "NYC", "2026-01-01", "low", snapshot_id=str(snapshot_id),
+        )
 
         assert meta.get("causality_status") == "N/A_CAUSAL_DAY_ALREADY_STARTED", (
             "R-CY.1: causality_status must be read from the v2 row, "
@@ -259,14 +269,19 @@ class TestRDALegacyMetricColumn:
     """R-DA.1/2/3: ensemble_snapshots has temperature_metric column + correct stamping."""
 
     def test_r_da_1_schema_has_temperature_metric_column(self):
-        """R-DA.1: init_schema creates ensemble_snapshots with temperature_metric column,
-        default 'high'."""
+        """R-DA.1: init_schema creates ensemble_snapshots with temperature_metric column.
+
+        B4 Phase 3 (2026-05-01): the silent DEFAULT 'high' was retired by
+        commit 2e7c3dfd (B3 P1-2 identity-column scanner). The new law:
+        fresh init_schema requires explicit INSERT supply for temperature_metric.
+        Legacy DBs migrated via ALTER TABLE still receive DEFAULT 'high' for
+        backfill safety; that path is verified by db.py:1581.
+        """
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         from src.state.db import init_schema
         init_schema(conn)
 
-        # Check column exists in PRAGMA table_info
         cols = {
             row["name"]: row
             for row in conn.execute("PRAGMA table_info(ensemble_snapshots)").fetchall()
@@ -274,8 +289,12 @@ class TestRDALegacyMetricColumn:
         assert "temperature_metric" in cols, (
             "R-DA.1: ensemble_snapshots must have temperature_metric column after init_schema"
         )
-        assert cols["temperature_metric"]["dflt_value"] in ("'high'", "high"), (
-            "R-DA.1: temperature_metric default must be 'high'. Got: "
+        assert cols["temperature_metric"]["notnull"] == 1, (
+            "R-DA.1: temperature_metric must be NOT NULL on fresh init_schema"
+        )
+        assert cols["temperature_metric"]["dflt_value"] is None, (
+            "R-DA.1: fresh init_schema must NOT set DEFAULT on temperature_metric "
+            "(silent-default antibody, B3 P1-2). Got: "
             + repr(cols["temperature_metric"]["dflt_value"])
         )
 

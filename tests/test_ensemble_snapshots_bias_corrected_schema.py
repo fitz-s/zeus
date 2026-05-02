@@ -104,9 +104,10 @@ def test_legacy_db_without_column_gets_migrated():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, available_at, fetch_time, lead_hours,
-         members_json, model_version)
+         members_json, model_version, data_version, temperature_metric)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12Z', '2026-04-15T12Z',
-                12, '[]', 'ecmwf_ens')
+                12, '[]', 'ecmwf_ens',
+                'tigge_mx2t6_local_calendar_day_max_v1', 'high')
     """)
     init_schema(conn)
     cols = _columns_of(conn, "ensemble_snapshots")
@@ -138,9 +139,10 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, available_at, fetch_time, lead_hours,
-         members_json, model_version)
+         members_json, model_version, data_version, temperature_metric)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12Z', '2026-04-15T12Z',
-                12, '[]', 'ecmwf_ens')
+                12, '[]', 'ecmwf_ens',
+                'tigge_mx2t6_local_calendar_day_max_v1', 'high')
     """)
     snapshot_id = conn.execute(
         "SELECT snapshot_id FROM ensemble_snapshots WHERE city = 'NYC'"

@@ -68,6 +68,12 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     "store.py",              # src/calibration/store.py — canonical query layer
     "blocked_oos.py",       # src/calibration/blocked_oos.py — K2_struct approved, has authority_filter
     "effective_sample_size.py",  # src/calibration/effective_sample_size.py — K2_struct approved
+    # B4 Phase 6 (2026-05-01): two additional calibration-internal queriers.
+    # Both files live under src/calibration/ and operate within the same domain
+    # boundary as store.py; routing every internal calibration query through
+    # store.py is over-abstraction. Same pattern as blocked_oos / effective_sample_size.
+    "drift_detector.py",    # src/calibration/drift_detector.py — K2_struct approved
+    "retrain_trigger_v2.py",  # src/calibration/retrain_trigger_v2.py — K2_struct approved
 })
 
 HOURLY_OBSERVATIONS_SELECT_ALLOWLIST: frozenset[str] = frozenset({

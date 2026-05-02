@@ -137,20 +137,39 @@ def record_message(
 ) -> WSGapStatus:
     """Mark the user channel as receiving messages.
 
-    This clears transient disconnect/auth state, but deliberately does not clear
-    ``m5_reconcile_required``.  M5 or a future explicit recovery proof owns that
-    release.
+    This clears transient disconnect/auth state. Historically this function
+    deliberately did NOT clear ``m5_reconcile_required`` because true mid-run
+    reconnect-after-gap could have missed fills that need REST reconciliation.
+
+    Live-blockers 2026-05-01 fix: that policy combined with the module-init
+    value of ``m5_reconcile_required=True`` and the fact that no production
+    code path ever sets it to False meant the gate was permanently latched
+    closed once a daemon booted — entries were blocked forever even on a
+    perfectly healthy SUBSCRIBED stream. The `not_configured` boot state has
+    no missed-orders risk because the daemon never had a connection to lose
+    messages from, so transitioning OUT of `not_configured` directly into
+    SUBSCRIBED safely clears the flag. Genuine mid-run reconnect (where the
+    prior gap_reason was a real disconnect) still preserves the flag and
+    waits for explicit M5 reconciliation.
     """
 
     global _status
     now = observed_at or _utcnow()
+    prior_m5_required = _status.m5_reconcile_required
+    new_m5_required = prior_m5_required
+    if (
+        prior_m5_required
+        and subscription_state == "SUBSCRIBED"
+        and _status.gap_reason in {"not_configured", None}
+    ):
+        new_m5_required = False
     _status = WSGapStatus(
         connected=True,
         last_message_at=now,
         consecutive_gaps=0,
         subscription_state=subscription_state,
         gap_reason="message_received",
-        m5_reconcile_required=_status.m5_reconcile_required,
+        m5_reconcile_required=new_m5_required,
         affected_markets=_status.affected_markets,
         updated_at=now,
         stale_after_seconds=stale_after_seconds or _status.stale_after_seconds,
