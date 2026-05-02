@@ -100,9 +100,26 @@ def _load() -> dict[tuple[str, str], OracleInfo]:
 
 
 def reload() -> None:
-    """Force reload of oracle error rates (e.g. after bridge script runs)."""
+    """Force reload of oracle error rates (e.g. after bridge script runs).
+
+    Non-fatal on error. If the file is malformed, mid-write, or unreadable,
+    we keep the previous _cache (or fall through to empty/_DEFAULT_OK) and
+    log a warning. The evaluator calls this every cycle; a crash here would
+    halt every candidate evaluation, the exact failure mode PR #40 was opened
+    to remove. Oracle is a sizing modifier, not a truth gate.
+    """
     global _cache
-    _cache = _load()
+    try:
+        new_cache = _load()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "oracle_penalty reload failed (%s: %s); keeping previous cache "
+            "(or empty if first load)", type(exc).__name__, exc,
+        )
+        if _cache is None:
+            _cache = {}
+        return
+    _cache = new_cache
     logger.info("oracle_penalty reloaded: %d entries, %d blacklisted",
                 len(_cache),
                 sum(1 for v in _cache.values() if v.status == OracleStatus.BLACKLIST))

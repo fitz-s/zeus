@@ -1,5 +1,5 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-02
 # Authority basis: docs/operations/task_2026-04-29_design_simplification_audit Phase 1A/1B evaluator gates
 from __future__ import annotations
 
@@ -182,18 +182,14 @@ def _patch_evaluator(
     return DummyClob()
 
 
-def _patch_point_in_time_oracle_evidence(monkeypatch, tmp_path):
-    evidence_path = tmp_path / "oracle_error_rates.json"
-    evidence_path.write_text(json.dumps({
-        "NYC": {
-            "high": {
-                "oracle_error_rate": 0.0,
-                "last_date": "2026-04-01",
-                "status": "OK",
-            }
-        }
-    }))
-    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
+def _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path):
+    """Deprecated compatibility shim.
+
+    Oracle fail-closed gate was removed 2026-05-02; file presence/freshness is
+    no longer a trade prerequisite. Existing tests can call this while older
+    patch sites are retired.
+    """
+    return None
 
 
 def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:
@@ -232,7 +228,7 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
 
 
 def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch, tmp_path):
-    _patch_point_in_time_oracle_evidence(monkeypatch, tmp_path)
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
     clob = _patch_evaluator(monkeypatch, entry_price=0.01)
 
     decisions = evaluator_module.evaluate_candidate(

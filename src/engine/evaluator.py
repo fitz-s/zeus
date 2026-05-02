@@ -106,8 +106,6 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
-ORACLE_EVIDENCE_PATH = PROJECT_ROOT / "data" / "oracle_error_rates.json"
-ORACLE_EVIDENCE_MAX_STALENESS_DAYS = 30
 NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
 NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
 
@@ -392,76 +390,6 @@ def _day0_observation_quality_rejection_reason(
             "Day0 observation is stale for executable probability generation: "
             f"city={city.name} age_hours={age_hours:.3f} "
             f"max_age_hours={DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS:.3f}"
-        )
-    return None
-
-
-def _oracle_evidence_row(data: object, city_name: str, temperature_metric: str) -> dict | None:
-    if not isinstance(data, dict):
-        return None
-    city_row = data.get(city_name)
-    if not isinstance(city_row, dict):
-        return None
-    metric_row = city_row.get(temperature_metric)
-    if isinstance(metric_row, dict):
-        return metric_row
-    if temperature_metric == "high" and "oracle_error_rate" in city_row:
-        return city_row
-    return None
-
-
-def _oracle_evidence_rejection_reason(
-    city_name: str,
-    temperature_metric: str,
-    *,
-    decision_time: datetime | None,
-) -> str | None:
-    try:
-        payload = json.loads(ORACLE_EVIDENCE_PATH.read_text())
-    except FileNotFoundError:
-        return f"oracle evidence unavailable: {ORACLE_EVIDENCE_PATH} is missing"
-    except Exception as exc:
-        return f"oracle evidence unavailable: {ORACLE_EVIDENCE_PATH} is unreadable ({exc})"
-
-    row = _oracle_evidence_row(payload, city_name, temperature_metric)
-    if row is None:
-        return (
-            "oracle evidence unavailable: missing city/metric row for "
-            f"{city_name}/{temperature_metric}"
-        )
-
-    last_date_raw = row.get("last_date")
-    if not last_date_raw:
-        return (
-            "oracle evidence unavailable: missing last_date for "
-            f"{city_name}/{temperature_metric}"
-        )
-    try:
-        last_date = date.fromisoformat(str(last_date_raw))
-    except ValueError:
-        return (
-            "oracle evidence unavailable: invalid last_date for "
-            f"{city_name}/{temperature_metric}: {last_date_raw!r}"
-        )
-
-    as_of = (
-        decision_time.date()
-        if isinstance(decision_time, datetime)
-        else datetime.now(timezone.utc).date()
-    )
-    if last_date > as_of:
-        return (
-            "oracle evidence unavailable: future-dated relative to decision: "
-            f"{city_name}/{temperature_metric} last_date={last_date.isoformat()} "
-            f"as_of={as_of.isoformat()}"
-        )
-    age_days = (as_of - last_date).days
-    if age_days > ORACLE_EVIDENCE_MAX_STALENESS_DAYS:
-        return (
-            "oracle evidence stale: "
-            f"{city_name}/{temperature_metric} last_date={last_date.isoformat()} "
-            f"as_of={as_of.isoformat()} age_days={age_days} "
-            f"max_days={ORACLE_EVIDENCE_MAX_STALENESS_DAYS}"
         )
     return None
 
@@ -2462,12 +2390,6 @@ def evaluate_candidate(
     projected_total_exposure_usd = current_heat * sizing_bankroll
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)
     projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
-    oracle_evidence_rejection_reason = _oracle_evidence_rejection_reason(
-        city.name,
-        temperature_metric.temperature_metric,
-        decision_time=decision_time,
-    )
-
     decisions = []
     for edge in filtered:
         decision_validations = list(entry_validations)
@@ -2590,22 +2512,6 @@ def evaluate_candidate(
                 rejection_reasons=["CROSS_DATE_BLOCK"],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-            ))
-            continue
-
-        if oracle_evidence_rejection_reason is not None:
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="ORACLE_EVIDENCE_UNAVAILABLE",
-                rejection_reasons=[oracle_evidence_rejection_reason],
-                availability_status="DATA_UNAVAILABLE",
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "oracle_evidence"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,

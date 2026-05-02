@@ -11,6 +11,16 @@ from datetime import datetime, timedelta, timezone
 from scripts import healthcheck
 
 
+@pytest.fixture(autouse=True)
+def _mock_run_validation(monkeypatch):
+    """Healthcheck calls validate_assumptions.run_validation which reads
+    state/assumptions.json from disk. Mock to keep tests hermetic."""
+    monkeypatch.setattr(
+        "scripts.validate_assumptions.run_validation",
+        lambda: {"valid": True, "mismatches": []},
+    )
+
+
 def _write_risk_state(path, *, checked_at=None, details=None):
     conn = sqlite3.connect(str(path))
     conn.execute(

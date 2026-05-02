@@ -108,17 +108,8 @@ def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
             ci_bound=0.05,
         ),
     )
-    # B4 Phase 5 (2026-05-01): bypass the oracle-evidence gate. The gate reads
-    # data/oracle_error_rates.json and rejects when last_date > decision_time.
-    # In these unit tests target_date and decision_time are arbitrary fixture
-    # noise; the oracle file is shipped with last_date=2026-04-14 (NYC) which
-    # makes any decision_time before that day fail the gate. Tests target the
-    # signal-quality / FDR / risk seams, not the oracle freshness contract.
-    monkeypatch.setattr(
-        evaluator_module,
-        "_oracle_evidence_rejection_reason",
-        lambda *args, **kwargs: None,
-    )
+    # Oracle fail-closed gate removed 2026-05-02 (PR-B). Previous monkeypatch
+    # bypassed _oracle_evidence_rejection_reason; gate no longer exists.
 
 
 def _insert_source_correct_harvester_obs(
