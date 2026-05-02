@@ -20,14 +20,17 @@
 # already populated the index by the time pre-commit fires, so the same
 # `gitleaks protect --staged` works.
 #
-# If gitleaks is not installed, this hook prints a one-time advisory and exits
-# 0 (does NOT block commits). The .gitleaks.toml configuration is in place for
+# If gitleaks is not installed, this hook prints an advisory and exits 0
+# (does NOT block commits). The .gitleaks.toml configuration is in place for
 # whenever the binary is added to PATH.
 #
 # Override: `SECRETS_SCAN_SKIP=1 git commit ...` skips the scan with audit-trail.
 # Exit 0 = allow; exit 2 = block.
 
 set -euo pipefail
+
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+HOOK_COMMON="${HOOK_DIR}/hook_common.py"
 
 SCRIPT_BASENAME=$(basename "$0")
 if [ "$SCRIPT_BASENAME" = "pre-commit-secrets-git" ] || [ -n "${GIT_INDEX_FILE:-}" ]; then
@@ -38,21 +41,22 @@ fi
 
 if [ "$CHANNEL" = "agent" ]; then
     INPUT=$(cat)
-    COMMAND=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print('')
-    sys.exit(0)
-ti = d.get('tool_input', {}) or {}
-print(ti.get('command') or '')
-" 2>/dev/null || echo "")
+    if ! COMMAND=$(printf '%s' "$INPUT" | python3 "$HOOK_COMMON" extract-json-field command 2>/tmp/pre-commit-secrets-json.err); then
+        echo "[pre-commit-secrets] BLOCKED: malformed Claude hook JSON ($(cat /tmp/pre-commit-secrets-json.err 2>/dev/null || echo parse failure))" >&2
+        exit 2
+    fi
 
     if [ -z "$COMMAND" ]; then
         exit 0
     fi
-    if ! printf '%s' "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
+    if HOOK_COMMAND="$COMMAND" python3 "$HOOK_COMMON" has-git-subcommand commit; then
+        :
+    else
+        PARSE_STATUS=$?
+        if [ "$PARSE_STATUS" -eq 64 ]; then
+            echo "[pre-commit-secrets] BLOCKED: could not safely parse git commit command" >&2
+            exit 2
+        fi
         exit 0
     fi
 fi
@@ -95,17 +99,19 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# pip-audit — only fires if requirements.txt is in the staged diff.
-# Catches a CVE-flagged version pin landing on a `git commit -- requirements.txt`.
+# pip-audit — only fires if a requirements file is in the staged diff.
+# Catches a CVE-flagged version pin landing on a `git commit -- requirements*.txt`.
 # Same advisory-vs-block contract as gitleaks: if pip-audit is not installed,
-# emit a one-time advisory and exit 0; otherwise scan and fail-closed on
+# emit an advisory and exit 0; otherwise scan and fail-closed on
 # vulnerabilities. Audit-trail override via PIP_AUDIT_SKIP=1.
 # (P3 follow-up to ultrareview25_remediation P1-4 pinning work.)
 # ---------------------------------------------------------------------------
 
-# Detect whether requirements.txt is in the staged diff. Cheap; only fires
-# when the dependency surface actually changed.
-if git diff --cached --name-only | grep -qx "requirements.txt"; then
+# Detect whether a requirements file is in the staged diff. Cheap; only fires
+# when the dependency surface actually changed. Include nested requirements
+# files so package-local dependency surfaces are not missed.
+STAGED_REQUIREMENTS=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)requirements([^/]*\.txt|/.*\.txt)$' || true)
+if [ -n "$STAGED_REQUIREMENTS" ]; then
     if [ "${PIP_AUDIT_SKIP:-0}" = "1" ]; then
         OVERRIDE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         OVERRIDE_LOG_PATH="${REPO_ROOT}/.claude/logs/pip-audit-overrides.log"
@@ -114,11 +120,20 @@ if git diff --cached --name-only | grep -qx "requirements.txt"; then
             >> "$OVERRIDE_LOG_PATH" 2>/dev/null || true
         echo "[pre-commit-secrets] pip-audit SKIPPED (PIP_AUDIT_SKIP=1) channel=${CHANNEL}; logged to ${OVERRIDE_LOG_PATH}" >&2
     elif command -v pip-audit >/dev/null 2>&1; then
-        echo "[pre-commit-secrets] requirements.txt staged — running pip-audit (channel=${CHANNEL})..." >&2
-        if ! pip-audit -r "${REPO_ROOT}/requirements.txt" --strict 2>&1; then
-            cat >&2 <<EOF
+        echo "[pre-commit-secrets] requirements file(s) staged — running pip-audit on staged blobs (channel=${CHANNEL})..." >&2
+        while IFS= read -r REQ_FILE; do
+            [ -z "$REQ_FILE" ] && continue
+            TMP_REQ=$(mktemp)
+            if ! git show ":${REQ_FILE}" > "$TMP_REQ" 2>/dev/null; then
+                rm -f "$TMP_REQ"
+                echo "[pre-commit-secrets] BLOCKED: could not read staged blob for ${REQ_FILE}" >&2
+                exit 2
+            fi
+            if ! pip-audit -r "$TMP_REQ" --strict 2>&1; then
+                rm -f "$TMP_REQ"
+                cat >&2 <<EOF
 [pre-commit-secrets] BLOCKED: pip-audit reported vulnerabilities in staged
-requirements.txt. Bump the affected pin to a non-vulnerable version OR
+${REQ_FILE}. Bump the affected pin to a non-vulnerable version OR
 explicitly opt out:
   PIP_AUDIT_SKIP=1 git commit ...
 (audit-logged to .claude/logs/pip-audit-overrides.log)
@@ -127,10 +142,14 @@ Pin policy: every \`>=\` floor must be a \`==\` exact pin per the
 2026-05-01 ultrareview25_remediation P1-4 audit. New pins must clear
 pip-audit before merging.
 EOF
-            exit 2
-        fi
+                exit 2
+            fi
+            rm -f "$TMP_REQ"
+        done <<EOF_REQS
+$STAGED_REQUIREMENTS
+EOF_REQS
     else
-        echo "[pre-commit-secrets] ADVISORY: requirements.txt staged but pip-audit not on PATH — skipping (channel=${CHANNEL})." >&2
+        echo "[pre-commit-secrets] ADVISORY: requirements file(s) staged but pip-audit not on PATH — skipping (channel=${CHANNEL})." >&2
         echo "[pre-commit-secrets] Install: pip install pip-audit" >&2
     fi
 fi

@@ -24,14 +24,22 @@ export GIT_INDEX_FILE="${GIT_INDEX_FILE:-$(git rev-parse --git-path index 2>/dev
 
 STATUS=0
 
+run_required_hook() {
+    if "$@"; then
+        return 0
+    else
+        local rc=$?
+        if [ "$STATUS" -eq 0 ]; then
+            STATUS=$rc
+        fi
+    fi
+    return 0
+}
+
 # Step 1: invariant test baseline
-if ! "${HOOK_DIR}/pre-commit-invariant-test.sh" </dev/null; then
-    STATUS=1
-fi
+run_required_hook "${HOOK_DIR}/pre-commit-invariant-test.sh" </dev/null
 
 # Step 2: secrets scan (gracefully skipped if gitleaks not installed)
-if ! "${HOOK_DIR}/pre-commit-secrets.sh" </dev/null; then
-    STATUS=1
-fi
+run_required_hook "${HOOK_DIR}/pre-commit-secrets.sh" </dev/null
 
 exit $STATUS

@@ -6,6 +6,7 @@
 import pytest
 import json
 import os
+import pathlib
 import sqlite3
 import subprocess
 from contextlib import redirect_stdout
@@ -4722,10 +4723,159 @@ def test_claude_pre_commit_hook_detects_multi_space_git_commit_not_plumbing():
     assert plumbing.stderr == ""
 
 
+def test_claude_pre_commit_hooks_detect_git_global_options_for_commit():
+    payload = _json.dumps({"tool_input": {"command": "git -C . -c user.name=pytest commit -m test"}})
+
+    invariant = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "COMMIT_INVARIANT_TEST_SKIP": "1"},
+        check=False,
+    )
+    assert invariant.returncode == 0
+    assert "SKIPPED" in invariant.stderr
+
+    secrets = _subprocess.run(
+        [_PRE_COMMIT_SECRETS_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "SECRETS_SCAN_SKIP": "1"},
+        check=False,
+    )
+    assert secrets.returncode == 0
+    assert "SKIPPED" in secrets.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status&&git commit -m test",
+        "echo ok;git commit -m test",
+        "git status\ngit commit -m test",
+    ],
+)
+def test_claude_pre_commit_hook_detects_chained_or_multiline_commit(command):
+    payload = _json.dumps({"tool_input": {"command": command}})
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "COMMIT_INVARIANT_TEST_SKIP": "1"},
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "SKIPPED" in result.stderr
+
+
+def test_claude_pre_commit_hook_blocks_dynamic_git_subcommand():
+    payload = _json.dumps({"tool_input": {"command": "cmd=commit; git $cmd -m test"}})
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "COMMIT_INVARIANT_TEST_SKIP": "1"},
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "could not safely parse" in result.stderr
+
+
+def test_claude_pre_commit_invariant_missing_python_blocks_not_skips():
+    payload = _json.dumps({"tool_input": {"command": "git commit -m test"}})
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "BLOCKED" in result.stderr
+    assert "not found or not executable" in result.stderr
+
+
+def test_git_pre_commit_orchestrator_preserves_subhook_exit_status():
+    result = _subprocess.run(
+        [_PRE_COMMIT_ORCHESTRATOR],
+        input="",
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "GIT_INDEX_FILE": "fake", "ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "pre-commit-invariant-test" in result.stderr
+
+
+def test_pre_edit_architecture_blocks_malformed_json_and_repo_architecture_only(tmp_path):
+    malformed = _subprocess.run(
+        [_PRE_EDIT_HOOK],
+        input="{not-json",
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert malformed.returncode == 2
+    assert "malformed Claude hook JSON" in malformed.stderr
+
+    outside_arch = tmp_path / "architecture" / "note.md"
+    outside_arch.parent.mkdir()
+    outside_arch.write_text("x")
+    outside_payload = _json.dumps({"tool_input": {"file_path": str(outside_arch)}})
+    outside = _subprocess.run(
+        [_PRE_EDIT_HOOK],
+        input=outside_payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert outside.returncode == 0
+    assert outside.stderr == ""
+
+    repo_payload = _json.dumps({
+        "tool_input": {"file_path": str(pathlib.Path(_REPO_ROOT) / "architecture" / "kernel_manifest.yaml")}
+    })
+    repo_arch = _subprocess.run(
+        [_PRE_EDIT_HOOK],
+        input=repo_payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert repo_arch.returncode == 2
+    assert "without plan-evidence" in repo_arch.stderr
+
+
+def test_settings_wires_pre_edit_architecture_for_multiedit():
+    settings = _json.loads((pathlib.Path(_REPO_ROOT) / ".claude" / "settings.json").read_text())
+    matchers = [entry.get("matcher", "") for entry in settings["hooks"]["PreToolUse"]]
+    assert any("MultiEdit" in matcher and "Edit" in matcher for matcher in matchers)
+
+
 def test_operation_vector_admits_runtime_governance_profile_boundary():
     files = [
         ".claude/CLAUDE.md",
+        ".claude/hooks/hook_common.py",
+        ".claude/hooks/pre-commit",
         ".claude/hooks/pre-commit-invariant-test.sh",
+        ".claude/hooks/pre-commit-secrets.sh",
         ".claude/hooks/pre-edit-architecture.sh",
         ".claude/hooks/pre-merge-contamination-check.sh",
         ".claude/settings.json",
@@ -5990,30 +6140,36 @@ import subprocess as _subprocess
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PRE_MERGE_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-merge-contamination-check.sh")
+_PRE_EDIT_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-edit-architecture.sh")
+_PRE_COMMIT_INVARIANT_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit-invariant-test.sh")
+_PRE_COMMIT_SECRETS_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit-secrets.sh")
+_PRE_COMMIT_ORCHESTRATOR = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit")
 
 
 @pytest.fixture(scope="module")
 def _protected_branch_worktree(tmp_path_factory):
-    """Session-scoped fixture creating a temp worktree on `main` so the hook's
+    """Session-scoped fixture creating a temp worktree on a unique protected
+    branch so the hook's
     branch-protection check fires the merge-class detection paths under test.
     The hook short-circuits on non-protected branches; without this fixture,
     the test runner's current branch (e.g. a feature branch) would silently
     bypass coverage of F3/F4/F13/F17 antibodies."""
     repo_root = _REPO_ROOT
     worktree_dir = tmp_path_factory.mktemp("hook-test-worktree")
+    branch_name = f"plan-pre999/hook-test-{os.getpid()}-{worktree_dir.name}"
     rc = _subprocess.run(
-        ["git", "-C", repo_root, "worktree", "add", "--detach", str(worktree_dir), "main"],
+        ["git", "-C", repo_root, "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"],
         capture_output=True, text=True,
     )
     if rc.returncode != 0:
-        pytest.skip(f"could not create main worktree for hook tests: {rc.stderr[:200]}")
-    _subprocess.run(
-        ["git", "-C", str(worktree_dir), "checkout", "main"],
-        capture_output=True, text=True, check=False,
-    )
+        pytest.skip(f"could not create protected branch worktree for hook tests: {rc.stderr[:200]}")
     yield str(worktree_dir)
     _subprocess.run(
         ["git", "-C", repo_root, "worktree", "remove", "--force", str(worktree_dir)],
+        capture_output=True, text=True,
+    )
+    _subprocess.run(
+        ["git", "-C", repo_root, "branch", "-D", branch_name],
         capture_output=True, text=True,
     )
 
@@ -6053,6 +6209,13 @@ def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
         ("/usr/bin/git merge feature", True),  # F3: absolute path
         ("git -C /tmp merge feature", True),  # F3: -C path form
         ("git -C /tmp -c user.x=y merge feature", True),  # F3: chained options
+        ("git --no-pager merge feature", True),  # long value-less option
+        ("git --git-dir .git --work-tree . merge feature", True),  # long options with values
+        ("git -c core.editor='vim -e' merge feature", True),  # quoted option value
+        ("git status && git --no-pager merge feature", True),  # chained git command
+        ("git status&&git merge feature", True),  # no-space operator
+        ("echo ok;git merge feature", True),  # no-space semicolon
+        ("git status\ngit merge feature", True),  # multiline command
         ("GIT_DIR=. git merge feature", True),  # F3: env-prefixed
         ("git pull origin main", True),
         ("git cherry-pick abc", True),
@@ -6131,6 +6294,32 @@ def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path
     assert "PASS" in stderr, f"F13 false positive on legit evidence: {stderr[:300]}"
 
 
+def test_hook_pre_merge_accepts_verdict_with_trailing_comment(tmp_path, _protected_branch_worktree):
+    """Review-crash antibody: critic_verdict may carry a YAML-style trailing
+    comment, but the parsed value must still be exactly APPROVE/REVISE."""
+    evidence = tmp_path / "evidence_trailing_comment.txt"
+    evidence.write_text(
+        "critic_verdict: APPROVE # reviewer note\n"
+        "diff_scope: 1 file\n"
+        "drift_keyword_scan: clean\n"
+    )
+    rc, stderr = _run_pre_merge_hook("git --no-pager merge x", evidence_path=str(evidence), cwd=_protected_branch_worktree)
+    assert rc == 0
+    assert "PASS" in stderr, f"trailing comment verdict was not accepted: {stderr[:300]}"
+
+
+def test_hook_pre_merge_blocks_revise_verdict(tmp_path, _protected_branch_worktree):
+    evidence = tmp_path / "evidence_revise.txt"
+    evidence.write_text(
+        "critic_verdict: REVISE\n"
+        "diff_scope: 1 file\n"
+        "drift_keyword_scan: clean\n"
+    )
+    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(evidence), cwd=_protected_branch_worktree)
+    assert rc == 2
+    assert "critic_verdict=REVISE" in stderr
+
+
 def test_hook_pre_merge_F17_OVERRIDE_docstring_matches_implementation():
     """F17 antibody: the OVERRIDE docstring must match the actual log target
     (.claude/logs/merge-overrides.log), and must NOT claim writes to the
@@ -6170,6 +6359,35 @@ def test_hook_pre_merge_F17_OVERRIDE_writes_durable_log_on_protected_branch(_pro
     )
     log_text = log_path.read_text()
     assert "reason=pytest_F17_durable_log" in log_text, f"log missing reason field: {log_text}"
+    assert "channel=agent" in log_text, f"log missing channel field: {log_text}"
+    assert "command=git merge feature-x" in log_text, f"log missing command field: {log_text}"
+
+
+def test_hook_pre_merge_git_channel_override_logs_non_empty_command_context(_protected_branch_worktree):
+    """Review-crash antibody: git pre-merge-commit channel has no Claude
+    command payload, but the forensic log must still carry non-empty context."""
+    import pathlib
+    worktree_dir = pathlib.Path(_protected_branch_worktree)
+    log_path = worktree_dir / ".claude" / "logs" / "merge-overrides.log"
+    if log_path.exists():
+        log_path.unlink()
+    env = {
+        **os.environ,
+        "GIT_INDEX_FILE": "fake",
+        "MERGE_AUDIT_EVIDENCE": "OVERRIDE_pytest_git_channel",
+    }
+    proc = _subprocess.run(
+        ["bash", _PRE_MERGE_HOOK],
+        input="",
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(worktree_dir),
+    )
+    assert proc.returncode == 0, proc.stderr[:300]
+    log_text = log_path.read_text()
+    assert "channel=git" in log_text, f"log missing git channel: {log_text}"
+    assert "command=git-hook:" in log_text, f"git-channel command context empty: {log_text}"
 
 
 def test_hook_pre_merge_F13_blocks_yaml_nested_critic_verdict_spoof(tmp_path, _protected_branch_worktree):
