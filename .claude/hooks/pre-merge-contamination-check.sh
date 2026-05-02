@@ -25,6 +25,9 @@
 
 set -euo pipefail
 
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+HOOK_COMMON="${HOOK_DIR}/hook_common.py"
+
 # ---------------------------------------------------------------------------
 # Channel detection
 # ---------------------------------------------------------------------------
@@ -38,33 +41,27 @@ fi
 
 if [ "$CHANNEL" = "agent" ]; then
     INPUT=$(cat)
-    COMMAND=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print('')
-    sys.exit(0)
-ti = d.get('tool_input', {}) or {}
-print(ti.get('command') or '')
-" 2>/dev/null || echo "")
+    if ! COMMAND=$(printf '%s' "$INPUT" | python3 "$HOOK_COMMON" extract-json-field command 2>/tmp/pre-merge-json.err); then
+        echo "[pre-merge-contamination-check] BLOCKED: malformed Claude hook JSON ($(cat /tmp/pre-merge-json.err 2>/dev/null || echo parse failure))" >&2
+        exit 2
+    fi
 
     if [ -z "$COMMAND" ]; then
         exit 0
     fi
 
-    # Detect merge-class commands by extracting the FIRST `git <subcmd>` token
-    # from the FIRST LINE only. This avoids false-positives where a multi-line
-    # heredoc (e.g. commit message body) mentions merge/pull/etc as text.
-    # Trade-off: chained `git status && git merge X` on a single line where the
-    # FIRST git command is non-merge will NOT block (rare edge case).
-    # F3 fix (ultrareview-25): bash regex handles multi-space `git  merge`,
-    # absolute `/usr/bin/git merge`, and the `git -C <path> merge` form that
-    # the prior literal `case` silently bypassed.
-    FIRST_LINE=$(printf '%s' "$COMMAND" | head -1)
-    if [[ "$FIRST_LINE" =~ (^|[;&|[:space:]])(/[^[:space:]]+/)?git[[:space:]]+(-[A-Za-z][[:space:]]+[^[:space:]]+[[:space:]]+)*(merge|pull|cherry-pick|rebase|am)([[:space:]]|$) ]]; then
+    # Detect merge-class commands via a shell-token parser, not ad hoc regex.
+    # Handles git -C/-c, long options, quoted option values, and chained git
+    # commands on the first line. Parse ambiguity on a git-looking command
+    # fails closed.
+    if HOOK_COMMAND="$COMMAND" python3 "$HOOK_COMMON" has-git-subcommand merge pull cherry-pick rebase am; then
         IS_MERGE=1
     else
+        PARSE_STATUS=$?
+        if [ "$PARSE_STATUS" -eq 64 ]; then
+            echo "[pre-merge-contamination-check] BLOCKED: could not safely parse merge-class git command" >&2
+            exit 2
+        fi
         IS_MERGE=0
     fi
 
@@ -136,10 +133,11 @@ case "${MERGE_AUDIT_EVIDENCE}" in
         OVERRIDE_LOG_PATH="${REPO_ROOT_FOR_LOG}/.claude/logs/merge-overrides.log"
         OVERRIDE_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         OVERRIDE_REASON="${MERGE_AUDIT_EVIDENCE#OVERRIDE_}"
-        mkdir -p "$(dirname "$OVERRIDE_LOG_PATH")" 2>/dev/null
-        if printf '%s\tbranch=%s\treason=%s\tcwd=%s\tcommand=%s\n' \
-                "$OVERRIDE_TS" "$CURRENT_BRANCH" "$OVERRIDE_REASON" "$PWD" \
-                "$(printf '%s' "$COMMAND" | head -1 | tr '\t\n' '  ')" \
+        COMMAND_CONTEXT=$(printf '%s' "${COMMAND:-git-hook:${SCRIPT_BASENAME}}" | head -1 | tr '\t\n' '  ')
+        if mkdir -p "$(dirname "$OVERRIDE_LOG_PATH")" 2>/dev/null && \
+            printf '%s\tchannel=%s\tbranch=%s\treason=%s\tcwd=%s\tcommand=%s\n' \
+                "$OVERRIDE_TS" "$CHANNEL" "$CURRENT_BRANCH" "$OVERRIDE_REASON" "$PWD" \
+                "$COMMAND_CONTEXT" \
                 >> "$OVERRIDE_LOG_PATH" 2>/dev/null; then
             echo "[pre-merge-contamination-check] OVERRIDE: MERGE_AUDIT_EVIDENCE=$MERGE_AUDIT_EVIDENCE; logged to ${OVERRIDE_LOG_PATH}" >&2
         else
@@ -172,11 +170,15 @@ done
 # whitespace allowed — since the evidence schema is flat (top-level keys
 # only). This rejects both commented spoofs (`# critic_verdict: ...`) AND
 # YAML-nested spoofs (`parent:\n  critic_verdict: ...`).
-VERDICT=$(grep -E '^critic_verdict:' "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/.*critic_verdict:[[:space:]]*//;s/[[:space:]]*$//')
+VERDICT=$(grep -E '^critic_verdict:' "$MERGE_AUDIT_EVIDENCE" | head -1 | sed 's/^critic_verdict:[[:space:]]*//;s/[[:space:]]#.*$//;s/[[:space:]]*$//')
 case "$VERDICT" in
-    APPROVE|REVISE)
+    APPROVE)
         echo "[pre-merge-contamination-check] PASS: $MERGE_AUDIT_EVIDENCE verdict=$VERDICT" >&2
         exit 0
+        ;;
+    REVISE)
+        echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE critic_verdict=REVISE; address requested revisions + re-dispatch" >&2
+        exit 2
         ;;
     BLOCK|*)
         echo "[pre-merge-contamination-check] BLOCKED: $MERGE_AUDIT_EVIDENCE critic_verdict=$VERDICT; address defects + re-dispatch" >&2

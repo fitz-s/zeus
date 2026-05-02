@@ -234,12 +234,16 @@ def _parse_ingest_bundle(
         raise ValueError(
             "registered ingest member vectors must align with the provided times"
         )
-    return {
+    bundle_fetch_time = bundle.captured_at
+    available_at = None
+    if isinstance(raw, Mapping):
+        available_at = raw.get("available_at")
+    result = {
         "members_hourly": members_hourly,
         "times": list(times),
         "issue_time": bundle.run_init_utc,
         "first_valid_time": _parse_timestamp_as_utc(str(times[0])),
-        "fetch_time": fetch_time,
+        "fetch_time": bundle_fetch_time,
         "captured_at": bundle.captured_at.isoformat(),
         "model": model,
         "source_id": bundle.source_id,
@@ -249,6 +253,9 @@ def _parse_ingest_bundle(
         "forecast_source_role": role,
         "n_members": int(members_hourly.shape[0]),
     }
+    if available_at is not None:
+        result["available_at"] = available_at
+    return result
 
 
 def _extract_times(raw: object) -> Sequence[object]:

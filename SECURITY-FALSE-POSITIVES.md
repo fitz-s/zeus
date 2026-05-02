@@ -59,7 +59,7 @@ When the operator clears another false-positive:
 
 1. Add a `# [REVIEW-SAFE: <TAG>]` banner at every use site (full at the canonical site, short-form callout at duplicates).
 2. Add an entry here following the format above. Include all the locations and the operator ruling quote / date.
-3. If a scanner is in scope (gitleaks, semgrep, trufflehog, etc.), add the tag to its allowlist file — do NOT add the raw value, add the tag (so future entries with the same tag are also covered) plus the specific value as a regex.
+3. If a scanner is in scope (gitleaks, semgrep, trufflehog, etc.), add a narrow scanner allowlist for the exact cleared value/path plus this tag in the description. Do **not** add a broad `[REVIEW-SAFE: ...]` regex: the pre-commit hook validates staged tags against this registry before scanners run.
 4. Append a one-line entry to `MEMORY.md` so future Claude sessions find this index without grepping.
 
 **Anti-pattern to avoid**: silently allowlisting a value in a scanner config without updating this file. The scanner will be quiet but the next code-review agent (which doesn't read scanner configs) will re-raise the finding. The in-source banner + this file are what stop the loop.

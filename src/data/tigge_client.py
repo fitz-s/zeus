@@ -226,7 +226,41 @@ def _extract_payload_path(text: str) -> str | None:
     return None
 
 
-def _fetch_db_payload(city: object, fetch_time: datetime) -> dict | None:
+def _coerce_utc_datetime(value: object, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_payload_time(key: str, *payloads: object) -> tuple[str, datetime | None]:
+    parsed: list[tuple[datetime, str]] = []
+    fallback = datetime.min.replace(tzinfo=timezone.utc)
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        text = str(payload.get(key, "") or "").strip()
+        if not text:
+            continue
+        dt = _coerce_utc_datetime(text, fallback)
+        if dt != fallback:
+            parsed.append((dt, text))
+    if not parsed:
+        return "", None
+    dt, text = max(parsed, key=lambda item: item[0])
+    return text, dt
+
+
+def _fetch_db_payload(city: object, fetch_time: datetime) -> ForecastBundle | None:
     """Combine high+low TIGGE rows into a 51 x (24*N) hourly grid.
 
     Sonnet's per-metric ``tigge_db_fetcher.fetch_from_db`` broadcasts the
@@ -242,6 +276,7 @@ def _fetch_db_payload(city: object, fetch_time: datetime) -> dict | None:
     entry_primary path uses extrema, not means.
     """
 
+    from src.data.forecast_source_registry import stable_payload_hash
     from src.data.tigge_db_fetcher import fetch_from_db
 
     high_bundle = fetch_from_db(city, "high", fetch_time)  # type: ignore[arg-type]
@@ -303,19 +338,36 @@ def _fetch_db_payload(city: object, fetch_time: datetime) -> dict | None:
     if not times:
         return None
 
-    issue_time_str = ""
-    if isinstance(high_payload, Mapping):
-        issue_time_str = str(high_payload.get("issue_time", "") or "")
-    if not issue_time_str and isinstance(low_payload, Mapping):
-        issue_time_str = str(low_payload.get("issue_time", "") or "")
+    issue_time, issue_dt = _latest_payload_time("issue_time", high_payload, low_payload)
+    available_at, available_dt = _latest_payload_time("available_at", high_payload, low_payload)
+    source_fetch_time, fetch_dt = _latest_payload_time("fetch_time", high_payload, low_payload)
+    captured_at, captured_dt = _latest_payload_time("captured_at", high_payload, low_payload)
+    recorded_at, recorded_dt = _latest_payload_time("recorded_at", high_payload, low_payload)
+    capture_dt = fetch_dt or captured_dt or recorded_dt or available_dt or issue_dt or _coerce_utc_datetime(fetch_time, datetime.now(timezone.utc))
+    run_init_dt = issue_dt or capture_dt
 
-    return {
+    raw_payload: dict = {
         "source_id": SOURCE_ID,
         "times": times,
         "members_hourly": members_grid,
-        "issue_time": issue_time_str,
+        "issue_time": issue_time or run_init_dt.isoformat(),
+        "available_at": available_at or issue_time or run_init_dt.isoformat(),
+        "fetch_time": source_fetch_time or captured_at or capture_dt.isoformat(),
+        "captured_at": captured_at or capture_dt.isoformat(),
+        "recorded_at": recorded_at,
         "synthesised_from": "ensemble_snapshots_v2.high+low",
     }
+
+    return ForecastBundle(
+        source_id=SOURCE_ID,
+        run_init_utc=run_init_dt,
+        lead_hours=tuple(range(len(times))),
+        captured_at=capture_dt,
+        raw_payload_hash=stable_payload_hash(raw_payload),
+        authority_tier=AUTHORITY_TIER,
+        ensemble_members=tuple(members_grid),
+        raw_payload=raw_payload,
+    )
 
 
 def _load_json_payload(path: Path) -> object:

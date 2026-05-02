@@ -26,6 +26,9 @@
 
 set -euo pipefail
 
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+HOOK_COMMON="${HOOK_DIR}/hook_common.py"
+
 # ---------------------------------------------------------------------------
 # Channel detection
 # ---------------------------------------------------------------------------
@@ -41,22 +44,23 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$CHANNEL" = "agent" ]; then
     INPUT=$(cat)
-    COMMAND=$(printf '%s' "$INPUT" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print('')
-    sys.exit(0)
-ti = d.get('tool_input', {}) or {}
-print(ti.get('command') or '')
-" 2>/dev/null || echo "")
+    if ! COMMAND=$(printf '%s' "$INPUT" | python3 "$HOOK_COMMON" extract-json-field command 2>/tmp/pre-commit-invariant-json.err); then
+        echo "[pre-commit-invariant-test] BLOCKED: malformed Claude hook JSON ($(cat /tmp/pre-commit-invariant-json.err 2>/dev/null || echo parse failure))" >&2
+        exit 2
+    fi
 
     if [ -z "$COMMAND" ]; then
         exit 0
     fi
     # Detect `git commit` invocation (allow `git commit-tree`, `git commit-graph` plumbing).
-    if ! printf '%s' "$COMMAND" | grep -qE '(^|[;&|[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
+    if HOOK_COMMAND="$COMMAND" python3 "$HOOK_COMMON" has-git-subcommand commit; then
+        :
+    else
+        PARSE_STATUS=$?
+        if [ "$PARSE_STATUS" -eq 64 ]; then
+            echo "[pre-commit-invariant-test] BLOCKED: could not safely parse git commit command" >&2
+            exit 2
+        fi
         exit 0
     fi
 fi
@@ -69,7 +73,7 @@ if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
+PYTEST_BIN="${ZEUS_HOOK_PYTEST_BIN:-${REPO_ROOT}/.venv/bin/python}"
 # Baseline progression history:
 #   BATCH C (settlement_semantics): 73 → 76 (+3 HKO/WMO type-encoded)
 #   SIDECAR-3 (negative-half): 76 → 79
@@ -116,22 +120,51 @@ BASELINE_PASSED=656
 BASELINE_SKIPPED=46
 
 if [ ! -x "$PYTEST_BIN" ]; then
-    echo "[pre-commit-invariant-test] WARN: ${PYTEST_BIN} not found; skipping check" >&2
-    exit 0
+    cat >&2 <<EOF
+[pre-commit-invariant-test] BLOCKED: ${PYTEST_BIN} not found or not executable.
+Cannot prove invariant-test baseline ${BASELINE_PASSED} passed / ${BASELINE_SKIPPED} skipped.
+
+Fix the Python environment OR explicitly opt out:
+  export COMMIT_INVARIANT_TEST_SKIP=1
+EOF
+    exit 2
 fi
 
 cd "$REPO_ROOT"
 
 # Run, capture, parse (PYTEST_BIN is the venv python; invoke pytest as module).
 # Multi-file: TEST_FILES is space-separated; let word-splitting expand it.
-RESULT=$("$PYTEST_BIN" -m pytest $TEST_FILES -q --no-header 2>&1 || true)
+set +e
+RESULT=$("$PYTEST_BIN" -m pytest $TEST_FILES -q --no-header 2>&1)
+PYTEST_STATUS=$?
+set -e
 # Note: `-m pytest` after the python interpreter is correct (python -m pytest <args>)
 SUMMARY=$(printf '%s' "$RESULT" | tail -3 | tr '\n' ' ')
 
-# Extract counts via grep
-PASSED=$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '[0-9]+' || echo "0")
-FAILED=$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9]+' || echo "0")
-ERRORS=$(printf '%s' "$SUMMARY" | grep -oE '[0-9]+ error' | head -1 | grep -oE '[0-9]+' || echo "0")
+# Extract counts from full pytest output, not only the tail. Use Python so
+# `set -o pipefail` cannot turn no-match grep pipelines into parser drift.
+COUNTS=$(printf '%s' "$RESULT" | "$PYTEST_BIN" -c '
+import re, sys
+text = sys.stdin.read()
+def last_count(word_re: str) -> int:
+    matches = re.findall(r"(\d+)\s+" + word_re + r"\b", text)
+    return int(matches[-1]) if matches else 0
+print(last_count("passed"), last_count("failed"), last_count("errors?"))
+')
+PASSED=$(printf '%s' "$COUNTS" | awk '{print $1}')
+FAILED=$(printf '%s' "$COUNTS" | awk '{print $2}')
+ERRORS=$(printf '%s' "$COUNTS" | awk '{print $3}')
+
+if [ "$PYTEST_STATUS" -ne 0 ] && [ "$FAILED" -eq 0 ] && [ "$ERRORS" -eq 0 ]; then
+    cat >&2 <<EOF
+[pre-commit-invariant-test] BLOCKED: pytest exited with status ${PYTEST_STATUS}
+but no failed/error count could be parsed. Treating as fail-closed.
+
+Last 3 lines of pytest output:
+${SUMMARY}
+EOF
+    exit 2
+fi
 
 if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
     cat >&2 <<EOF

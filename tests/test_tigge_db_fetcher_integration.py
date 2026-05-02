@@ -1,17 +1,7 @@
 # Created: 2026-05-01
 # Last reused/audited: 2026-05-01
-# Authority basis: live-blockers session 2026-05-01 — TIGGE F3 trading-side
-#   loader was deliberately a "JSON-only" stub; the data-ingest daemon
-#   writes ensemble_snapshots_v2 directly. This relationship antibody
-#   covers the integration that closes that loop: TIGGEIngest reading
-#   from DB when a city is provided and no JSON payload is configured.
-"""Relationship antibody: TIGGE DB fetcher → trading-side ensemble path.
-
-Tests the cross-module invariant that was missing on 2026-05-01:
-``fetch_ensemble(model='tigge', role='entry_primary')`` MUST succeed
-when the data-ingest daemon has populated ``ensemble_snapshots_v2``
-for the requested city, even without a pre-staged JSON payload file.
-"""
+# Authority basis: live-blockers session 2026-05-01 — TIGGE DB-backed entry evidence relationship
+"""Relationship antibody: TIGGE DB rows → trading-side ensemble evidence."""
 
 from __future__ import annotations
 
@@ -24,9 +14,15 @@ from types import SimpleNamespace
 import pytest
 
 
+ISSUE_TIME = "2026-04-29T00:00:00+00:00"
+AVAILABLE_AT = "2026-04-29T00:00:00+00:00"
+DB_FETCH_TIME = "2026-05-01T14:04:22+00:00"
+RECORDED_AT = "2026-05-01 14:04:22"
+DECISION_TIME = datetime(2026, 5, 1, 23, 44, 21, tzinfo=timezone.utc)
+
+
 @pytest.fixture
 def fake_city():
-    """City stub matching the attributes the fetcher reads."""
     return SimpleNamespace(
         name="London",
         timezone="Europe/London",
@@ -38,7 +34,6 @@ def fake_city():
 
 @pytest.fixture
 def staged_world_db(tmp_path: Path, monkeypatch):
-    """Build a minimal ensemble_snapshots_v2 with one high + one low row for London."""
     db_path = tmp_path / "zeus-world.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
@@ -80,35 +75,48 @@ def staged_world_db(tmp_path: Path, monkeypatch):
 
     high_members = [20.0 + 0.1 * i for i in range(51)]
     low_members = [10.0 + 0.1 * i for i in range(51)]
-    fresh_recorded_at = datetime.now(timezone.utc).isoformat()
-
-    conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
-        (city, target_date, temperature_metric, physical_quantity, observation_field,
-         issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-         data_version, causality_status, authority, recorded_at, members_unit)
-        VALUES (?, ?, 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
-                '2026-04-29T00:00:00+00:00', '2026-05-02', ?, ?, 72.0, ?,
-                'tigge_mx2t6_local_calendar_day_max_v1', 'OK', 'VERIFIED', ?, 'degC')""",
-        ("London", "2026-05-02", fresh_recorded_at, fresh_recorded_at,
-         json.dumps(high_members), fresh_recorded_at),
-    )
-    conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
-        (city, target_date, temperature_metric, physical_quantity, observation_field,
-         issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-         data_version, causality_status, authority, recorded_at, members_unit)
-        VALUES (?, ?, 'low', 'mn2t6_local_calendar_day_min', 'low_temp',
-                '2026-04-29T00:00:00+00:00', '2026-05-02', ?, ?, 72.0, ?,
-                'tigge_mn2t6_local_calendar_day_min_v1', 'OK', 'VERIFIED', ?, 'degC')""",
-        ("London", "2026-05-02", fresh_recorded_at, fresh_recorded_at,
-         json.dumps(low_members), fresh_recorded_at),
-    )
+    for metric, physical, field, members, data_version in (
+        (
+            "high",
+            "mx2t6_local_calendar_day_max",
+            "high_temp",
+            high_members,
+            "tigge_mx2t6_local_calendar_day_max_v1",
+        ),
+        (
+            "low",
+            "mn2t6_local_calendar_day_min",
+            "low_temp",
+            low_members,
+            "tigge_mn2t6_local_calendar_day_min_v1",
+        ),
+    ):
+        conn.execute(
+            """INSERT INTO ensemble_snapshots_v2
+            (city, target_date, temperature_metric, physical_quantity, observation_field,
+             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+             data_version, causality_status, authority, recorded_at, members_unit)
+            VALUES (?, ?, ?, ?, ?, ?, '2026-05-03T00:00:00+00:00', ?, ?, 72.0, ?,
+                    ?, 'OK', 'VERIFIED', ?, 'degC')""",
+            (
+                "London",
+                "2026-05-03",
+                metric,
+                physical,
+                field,
+                ISSUE_TIME,
+                AVAILABLE_AT,
+                DB_FETCH_TIME,
+                json.dumps(members),
+                data_version,
+                RECORDED_AT,
+            ),
+        )
     conn.commit()
     conn.close()
 
+    import src.data.tigge_db_fetcher as tdf
     import src.state.db as state_db
-    monkeypatch.setattr(state_db, "WORLD_DB_PATH", db_path, raising=False)
 
     def _fake_get_world_connection(*_args, **_kwargs):
         c = sqlite3.connect(str(db_path))
@@ -116,48 +124,31 @@ def staged_world_db(tmp_path: Path, monkeypatch):
         return c
 
     monkeypatch.setattr(state_db, "get_world_connection", _fake_get_world_connection)
-    import src.data.tigge_db_fetcher as tdf
     monkeypatch.setattr(tdf, "get_world_connection", _fake_get_world_connection)
-
     return db_path
 
 
-def test_db_fetcher_returns_synthetic_grid_with_high_and_low_for_one_target_date(
-    fake_city, staged_world_db
-):
-    """Invariant: with one (city, target_date) high+low row pair, the fetcher
-    returns a 51 × 24 grid where afternoon hours equal the daily high and
-    morning hours equal the daily low (member-wise)."""
+def test_db_payload_preserves_high_low_extrema_and_source_times(fake_city, staged_world_db):
     from src.data.tigge_client import _fetch_db_payload
-    fetch_time = datetime.now(timezone.utc)
 
-    payload = _fetch_db_payload(fake_city, fetch_time)
-    assert payload is not None
-    times = payload["times"]
-    members_hourly = payload["members_hourly"]
-    assert len(times) == 24
-    assert len(members_hourly) == 51
+    bundle = _fetch_db_payload(fake_city, DECISION_TIME)
 
-    high_expected = 20.0
-    low_expected = 10.0
-    member0 = members_hourly[0]
-    morning_value = member0[6]
-    afternoon_value = member0[18]
-    assert abs(morning_value - low_expected) < 1e-6, (
-        f"Morning hour 6 must equal daily low; got {morning_value}, expected {low_expected}"
-    )
-    assert abs(afternoon_value - high_expected) < 1e-6, (
-        f"Afternoon hour 18 must equal daily high; got {afternoon_value}, expected {high_expected}"
-    )
-
-    member_max = max(member0)
-    member_min = min(member0)
-    assert abs(member_max - high_expected) < 1e-6
-    assert abs(member_min - low_expected) < 1e-6
+    assert bundle is not None
+    assert bundle.source_id == "tigge"
+    assert bundle.run_init_utc.isoformat() == ISSUE_TIME
+    assert bundle.captured_at.isoformat() == DB_FETCH_TIME
+    raw = bundle.raw_payload
+    assert isinstance(raw, dict)
+    assert raw["issue_time"] == ISSUE_TIME
+    assert raw["available_at"] == AVAILABLE_AT
+    assert raw["fetch_time"] == DB_FETCH_TIME
+    assert len(raw["times"]) == 24
+    assert len(raw["members_hourly"]) == 51
+    assert raw["members_hourly"][0][6] == pytest.approx(10.0)
+    assert raw["members_hourly"][0][18] == pytest.approx(20.0)
 
 
-def test_db_fetcher_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
-    """Invariant: empty DB → None (caller treats as 'no ensemble', skips candidate)."""
+def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     db_path = tmp_path / "empty.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
@@ -167,13 +158,14 @@ def test_db_fetcher_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
+            issue_time TEXT,
+            available_at TEXT NOT NULL,
+            fetch_time TEXT NOT NULL,
             members_json TEXT NOT NULL,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             causality_status TEXT NOT NULL DEFAULT 'OK',
             data_version TEXT NOT NULL,
             recorded_at TEXT NOT NULL,
-            issue_time TEXT,
-            available_at TEXT NOT NULL,
             members_unit TEXT NOT NULL DEFAULT 'degC'
         );
         """
@@ -181,8 +173,8 @@ def test_db_fetcher_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    import src.state.db as state_db
     import src.data.tigge_db_fetcher as tdf
+    import src.state.db as state_db
 
     def _fake_conn(*_a, **_k):
         c = sqlite3.connect(str(db_path))
@@ -193,32 +185,46 @@ def test_db_fetcher_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     monkeypatch.setattr(tdf, "get_world_connection", _fake_conn)
 
     from src.data.tigge_client import _fetch_db_payload
-    payload = _fetch_db_payload(fake_city, datetime.now(timezone.utc))
-    assert payload is None
+
+    assert _fetch_db_payload(fake_city, DECISION_TIME) is None
 
 
-def test_tigge_ingest_with_city_uses_db_when_no_json_payload(
+def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
     fake_city, staged_world_db, monkeypatch
 ):
-    """End-to-end: TIGGEIngest(city=...) with the gate open and no JSON
-    payload configured falls through to the DB fetcher and returns a
-    valid bundle. This is the integration that unblocks live entries."""
-    monkeypatch.setenv("ZEUS_TIGGE_INGEST_ENABLED", "1")
-
-    from src.data.tigge_client import TIGGEIngest
-
-    def _fake_gate_open(**_kwargs):
-        return True
-
+    """Cross-module invariant: DB-backed TIGGE output must pass entry evidence."""
+    import src.data.ensemble_client as ec
     import src.data.tigge_client as tc
-    monkeypatch.setattr(tc, "_operator_gate_open", _fake_gate_open)
+    from src.data.tigge_client import TIGGEIngest
+    from src.engine.evaluator import _entry_forecast_evidence_errors
 
-    ingest = TIGGEIngest(city=fake_city)
-    bundle = ingest.fetch(datetime.now(timezone.utc), tuple(range(96)))
+    ec._clear_cache()
+    monkeypatch.setattr(
+        ec,
+        "gate_source",
+        lambda _source_id: SimpleNamespace(
+            source_id="tigge",
+            authority_tier="FORECAST",
+            degradation_level="OK",
+            ingest_class=TIGGEIngest,
+        ),
+    )
+    monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
+    monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
 
-    assert bundle is not None
-    assert bundle.source_id == "tigge"
-    raw = bundle.raw_payload
-    assert isinstance(raw, dict)
-    assert "members_hourly" in raw
-    assert len(raw["members_hourly"]) == 51
+    result = ec.fetch_ensemble(
+        fake_city,
+        forecast_days=4,
+        model="tigge",
+        role="entry_primary",
+    )
+
+    assert result is not None
+    assert result["source_id"] == "tigge"
+    assert result["model"] == "tigge"
+    assert result["forecast_source_role"] == "entry_primary"
+    assert result["authority_tier"] == "FORECAST"
+    assert result["degradation_level"] == "OK"
+    assert result["available_at"] == AVAILABLE_AT
+    assert result["fetch_time"].isoformat() == DB_FETCH_TIME
+    assert _entry_forecast_evidence_errors(result, "2026-05-03", DECISION_TIME) == []

@@ -2,8 +2,9 @@
 #
 # Companion to SECURITY-FALSE-POSITIVES.md (root). The allowlist below mirrors
 # entries in that file — do NOT add raw values here without also recording the
-# operator ruling there. Tag-based pattern (e.g. `[REVIEW-SAFE: <TAG>]`) is
-# what makes future review-mode agents AND gitleaks both stay quiet.
+# operator ruling there. REVIEW-SAFE tags are registry-validated by
+# .claude/hooks/pre-commit-secrets.sh; this file only carries exact scanner
+# allowlists for already-registered rulings.
 #
 # When adding an entry: also add the [REVIEW-SAFE: <TAG>] banner at the source
 # site so a human reading the file sees the clearance without consulting this
@@ -27,15 +28,6 @@ paths = [
     '''docs/operations/repo_review_.*/SYNTHESIS\.md''',
     '''docs/operations/repo_review_.*/architecture\.md''',
     '''docs/operations/task_2026-04-14_session_backlog\.md''',
-]
-
-# Catch-all for the [REVIEW-SAFE: <TAG>] convention — any line carrying a
-# REVIEW-SAFE tag that has been registered in SECURITY-FALSE-POSITIVES.md is
-# allowed. New tags here MUST also have an entry in that file.
-[[allowlists]]
-description = "Lines tagged [REVIEW-SAFE: ...] are operator-cleared per SECURITY-FALSE-POSITIVES.md"
-regexes = [
-    '''\[REVIEW-SAFE:\s*[A-Z0-9_]+\]''',
 ]
 
 # Test fixture path: `tests/**` files routinely contain synthetic identifiers

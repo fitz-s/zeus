@@ -1878,7 +1878,7 @@ def evaluate_candidate(
             )
         except Exception as e:
             return [EdgeDecision(
-                decision_id=_generate_decision_id(),
+                decision_id=_decision_id(),
                 tokens=tokens,
                 edge=None,
                 size_usd=0.0,
@@ -3140,13 +3140,32 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         model_version = ens_result["model"]
         if v2_table:
             conn.execute(f"""
-                INSERT OR IGNORE INTO {v2_table}
+                INSERT INTO {v2_table}
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
                  spread, is_bimodal, model_version, data_version, training_allowed,
                  causality_status, boundary_ambiguous, provenance_json, authority,
                  members_unit, unit)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(city, target_date, temperature_metric, issue_time, data_version)
+                DO UPDATE SET
+                    physical_quantity = excluded.physical_quantity,
+                    observation_field = excluded.observation_field,
+                    valid_time = excluded.valid_time,
+                    available_at = excluded.available_at,
+                    fetch_time = excluded.fetch_time,
+                    lead_hours = excluded.lead_hours,
+                    members_json = excluded.members_json,
+                    spread = excluded.spread,
+                    is_bimodal = excluded.is_bimodal,
+                    model_version = excluded.model_version,
+                    training_allowed = excluded.training_allowed,
+                    causality_status = excluded.causality_status,
+                    boundary_ambiguous = excluded.boundary_ambiguous,
+                    provenance_json = excluded.provenance_json,
+                    authority = excluded.authority,
+                    members_unit = excluded.members_unit,
+                    unit = excluded.unit
             """, (
                 city.name,
                 target_date,
