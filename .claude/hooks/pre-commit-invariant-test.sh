@@ -109,12 +109,20 @@ if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
     exit 0
 fi
 
-# Bypass 2: one-shot sentinel file. Auto-delete so it doesn't accidentally
-# stay armed for the next commit.
+# Bypass 2: one-shot sentinel file. Auto-delete in Channel B (git) only —
+# both channels fire for a single `git commit`, so if Channel A (agent
+# PreToolUse) cleared it, Channel B (the actual git pre-commit) would
+# see no sentinel and run pytest anyway. Channel B is always the LAST
+# to run before the commit object is created, so clearing there gives
+# a true one-shot semantics for both channels.
 SENTINEL_FILE=".git/skip-invariant-once"
 if [ -f "$SENTINEL_FILE" ]; then
-    rm -f "$SENTINEL_FILE"
-    echo "[pre-commit-invariant-test] SKIPPED (sentinel ${SENTINEL_FILE}, auto-cleared) channel=${CHANNEL}" >&2
+    if [ "$CHANNEL" = "git" ]; then
+        rm -f "$SENTINEL_FILE"
+        echo "[pre-commit-invariant-test] SKIPPED (sentinel ${SENTINEL_FILE}, auto-cleared) channel=${CHANNEL}" >&2
+    else
+        echo "[pre-commit-invariant-test] SKIPPED (sentinel ${SENTINEL_FILE}; will auto-clear in channel=git) channel=${CHANNEL}" >&2
+    fi
     exit 0
 fi
 
