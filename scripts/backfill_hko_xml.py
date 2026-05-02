@@ -2,7 +2,7 @@
 # Created: 2026-05-02
 # Last reused/audited: 2026-05-02
 # Authority basis: architecture/preflight_overrides_2026-04-28.yaml (hko_canonical
-#   release block) + docs/operations/task_2026-05-02_hk_paris_release/work_log.md
+#   release block) + docs/archives/packets/task_2026-05-02_hk_paris_release/work_log.md
 """Backfill Hong Kong daily high+low from the HKO `dailyExtract` XML endpoint.
 
 The original `scripts/backfill_hko_daily.py` uses the HKO `opendata.php`

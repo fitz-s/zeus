@@ -39,7 +39,8 @@ body or bundle.
 |------|---------|
 | `README.md` | Tracked docs index and visibility guide |
 | `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
-| `operations/known_gaps.md` | Active operational gap register |
+| `to-do-list/known_gaps.md` | Active known-gap worklist; operational task inventory, not authority |
+| `to-do-list/known_gaps_archive.md` | Closed known-gap antibody archive |
 | `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
 | `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
 | `reference/modules/ingest.md` | Dense ingest module book for R3 user-channel event-stream routing; reference, not authority |

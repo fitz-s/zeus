@@ -22,7 +22,7 @@ index, or archive catalog.
 
 | File | Purpose |
 |------|---------|
-| `known_gaps.md` | Active operational gap register; moved from docs root |
+| `known_gaps.md` | Compatibility pointer; active known gaps now live at `docs/to-do-list/known_gaps.md` |
 | `current_data_state.md` | Active current-fact surface for audited data posture |
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
@@ -47,6 +47,15 @@ Packet-local file names are not global workflow requirements. Files such as
 only when the active packet, closeout gate, audit/review task, or future handoff
 consumes them. Direct T0/T1 work should not create packet evidence just to make
 the workflow look complete.
+
+Discrete `task_*` packet folders are agent-closeable by default once their
+work log, report, or committed code proves the task is complete or superseded.
+The closing agent must move the packet body to `docs/archives/packets/`, add or
+update the `docs/archive_registry.md` closeout entry, remove active pointers,
+and promote any residual OPEN work into `docs/to-do-list/known_gaps.md` or a
+new admitted packet. Operator-only closeout is required only when the packet
+itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,
+or carries an active runtime-gating artifact.
 
 The operation-end feedback capsule is a closeout habit, not a packet filename.
 For direct work, keep it in the final response. For packet closeout, append it
@@ -82,14 +91,27 @@ make a surface default-read unless `current_state.md` routes it.
 |------|-------|---------|
 | `AGENTS.md` | operations router | Registry for live operations surfaces in this directory |
 | `current_state.md` | live pointer | Single current program, active packet, required evidence, freeze point, next action |
-| `known_gaps.md` | active support | Active operational gap register |
+| `known_gaps.md` | compatibility pointer | Redirects to `docs/to-do-list/known_gaps.md`; no active gap content belongs here |
+| `docs/to-do-list/known_gaps.md` | active checklist | Active known-gap worklist outside operations |
 | `docs/to-do-list/known_gaps_archive.md` | archive interface | Closed gap antibody archive; moved to to-do-list 2026-05-01 |
 | `current_data_state.md` | current fact | Current audited data posture; not authority law |
 | `current_source_validity.md` | current fact | Current audited source-validity posture; not authority law |
 | `packet_scope_protocol.md` | active support | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
 | `observations_k1_migration.md` | packet evidence | Design doc for K1 dual-atom observations migration — operator directive 2026-05-01 |
 | `tigge_daemon_integration.md` | packet evidence | Design doc for TIGGE retrieval inside the data-ingest daemon — operator directive 2026-05-01 |
-| `task_2026-05-02_review_crash_remediation/` | plan packet | Dedupe and remediation plan for crashed review findings; active while `review-crash-remediation-2026-05-02` is open |
+| `edge_observation/` | active monitoring | Operator-managed edge trajectory observation surface |
+| `attribution_drift/` | active monitoring | Operator-managed strategy attribution drift observation surface |
+| `ws_poll_reaction/` | active monitoring | Operator-managed WebSocket/poll reaction observation surface |
+| `calibration_observation/` | active monitoring | Operator-managed calibration stability observation surface |
+| `learning_loop_observation/` | active monitoring | Operator-managed learning-loop health observation surface |
+| `task_2026-04-26_ultimate_plan/` | active packet container | Contains live-alpha runtime-gating TIGGE authorization evidence |
+| `task_2026-04-26_ultimate_plan/2026-05-01_live_alpha/evidence/tigge_ingest_decision_2026-05-01.md` | active runtime-gating evidence | TIGGE entry-primary operator authorization evidence; do not archive without replacement |
+| `task_2026-05-01_tigge_5_01_backfill/` | deferred packet container | Contains the deferred/open TIGGE 2026-05-01 backfill work log |
+| `task_2026-05-01_tigge_5_01_backfill/work_log.md` | deferred packet evidence | 2026-05-01 TIGGE issue remains embargoed until 2026-05-03T00:00Z |
+| `task_2026-05-01_ultrareview25_remediation/` | deferred planning container | Contains operator-deferred ultrareview remediation planning residue |
+| `task_2026-05-01_ultrareview25_remediation/PLAN.md` | deferred planning packet | Operator-deferred governance/remediation residue |
+| `task_2026-05-02_review_crash_remediation/` | plan packet | Dedupe and remediation plan for crashed review findings (#38 merged 2026-05-02) |
+| `task_2026-05-02_review_crash_remediation/PLAN.md` | active planning packet | Crashed-review remediation plan |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
@@ -108,6 +130,9 @@ archive_registry entry becomes its single source of historical truth.
   `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`; do not create
   sibling top-level folders for phases of the same package.
 - Do not leave completed packet material in the live pointer after closeout.
+- Do not leave completed or superseded packet folders in `docs/operations/`;
+  archive them and leave only active packets, active monitoring surfaces,
+  current-fact surfaces, and compatibility pointers.
 - Runtime-local `.omx/.omc` planning artifacts must be inventoried or mirrored
   before they are treated as durable work evidence.
 - `state/daemon-heartbeat.json` and `state/status_summary.json` are live

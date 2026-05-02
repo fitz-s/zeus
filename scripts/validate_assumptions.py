@@ -17,6 +17,7 @@ from src.signal.ensemble_signal import DEFAULT_N_MC
 
 ASSUMPTIONS_PATH = PROJECT_ROOT / "state" / "assumptions.json"
 MAIN_PATH = PROJECT_ROOT / "src" / "main.py"
+INGEST_MAIN_PATH = PROJECT_ROOT / "src" / "ingest_main.py"
 MONITOR_PATH = PROJECT_ROOT / "src" / "engine" / "monitor_refresh.py"
 
 
@@ -85,16 +86,29 @@ def run_validation() -> dict:
     else:
         checks.append("monitor_refresh MC counts are sourced from config helpers")
 
-    # B4 Phase 6 (2026-05-01): the two time-semantic ETLs (etl_diurnal_curves.py
-    # and etl_hourly_observations.py) are cron-driven, not daemon-startup; main.py
-    # has not referenced them since the diurnal subsystem moved to cron. The old
-    # check enforced dead law and broke every release because main.py was
-    # correctly NOT importing these. Architecture: see history_lore.yaml entry
-    # `task_terms: [DST, timezone, diurnal, ...]` for the proper home of these
-    # scripts.
-    main_source = MAIN_PATH.read_text(encoding="utf-8")
-    _ = main_source  # retained for potential future startup-source assertions
-    checks.append("startup ETL contract validated (cron-driven; no main.py refs required)")
+    # B4 Phase 6 (2026-05-01) + PR #35 critic MAJOR-1 follow-up (2026-05-02):
+    # The two time-semantic ETLs (etl_diurnal_curves.py, etl_hourly_observations.py)
+    # are launched by `src/ingest_main.py` (the ingest daemon), not `src/main.py`
+    # (the trading daemon). The original check looked at the wrong file and was
+    # silently blinded when the diurnal subsystem moved out of trading-daemon
+    # startup. Phase 6 deleted the check entirely; this slice restores it
+    # against the correct file so the canary still fires if ingest_main.py
+    # ever stops kicking off these ETLs.
+    #
+    # Why ingest_main.py is the right anchor: see src/ingest_main.py:472-485
+    # (subprocess loop over scripts/etl_*.py). Output tables (diurnal_curves,
+    # observation_instants) are read at runtime by src/signal/diurnal.py and
+    # src/data/ingest_status_writer.py.
+    ingest_main_source = INGEST_MAIN_PATH.read_text(encoding="utf-8")
+    for required_script in (
+        "etl_diurnal_curves.py",
+        "etl_hourly_observations.py",
+    ):
+        if required_script not in ingest_main_source:
+            mismatches.append(
+                f"ingest daemon missing required script {required_script}"
+            )
+    checks.append("ingest daemon references time-semantic sync scripts")
 
     return {
         "valid": not mismatches,

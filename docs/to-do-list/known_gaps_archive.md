@@ -2,7 +2,7 @@
 
 This file is the immune-system record: gaps that were resolved by code, type,
 or test antibodies, kept for traceability when a similar pattern resurfaces.
-Active gaps live in `known_gaps.md`.
+Active gaps live in `docs/to-do-list/known_gaps.md`.
 
 Each entry preserves its original `[FIXED]` / `[CLOSED]` status tag and the
 antibody description. Do not re-open an entry without proof the antibody

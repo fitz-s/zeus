@@ -382,3 +382,42 @@ dir created 2026-04-29). Entire contents physically moved to
 
 **Batch 3 total**: 40 entries. `docs/operations/_archive/` directory removed
 from git tracking; contents consultable from `docs/archives/packets/`.
+
+---
+
+## Batch 4 — 2026-05-02 operations cleanup
+
+**Source**: `docs/operations/` live packet surface. The cleanup separated
+closed/superseded packet evidence from still-open operation work, moved the
+active known-gap worklist to `docs/to-do-list/known_gaps.md`, and left only
+current-fact surfaces, active monitoring surfaces, active/deferred packets, and
+compatibility pointers in `docs/operations/`.
+
+**Packets archived (8 entries)**:
+
+- `repo_review_2026-05-01/` — completed 4-lane repo review; follow-up work
+  now lives in active remediation plans / known gaps.
+- `task_2026-05-01_hko_backfill/` — closed no-write HKO opendata backfill;
+  superseded by the later HK+Paris release packet.
+- `task_2026-05-01_hko_release/` — closed no-write HKO release attempt;
+  superseded by the later HK+Paris release packet.
+- `task_2026-05-01_live_arming/` — completed live-arming runbook packet;
+  operator-runbook residue is historical evidence.
+- `task_2026-05-01_live_smoke_test/` — completed smoke-test evidence; open
+  follow-ups remain as known-gap/remediation work, not live packet residency.
+- `task_2026-05-01_paris_station_resolution/` — completed LFPG→LFPB station
+  resolution packet; implementation landed in commit `e75f5237`.
+- `task_2026-05-01_tigge_4_29_backfill/` — superseded/incomplete duplicate;
+  the completed 2026-04-29 retry is recorded in
+  `docs/operations/task_2026-05-01_tigge_5_01_backfill/work_log.md`.
+- `task_2026-05-02_hk_paris_release/` — completed HK+Paris release packet;
+  implementation landed in commit `c3f9814d`.
+
+**Known-gaps relocation**:
+
+- Active worklist: `docs/to-do-list/known_gaps.md`.
+- Closed antibody archive: `docs/to-do-list/known_gaps_archive.md`.
+- Compatibility pointer: `docs/operations/known_gaps.md`.
+
+**Remaining live operations surfaces after cleanup** are listed in
+`docs/operations/current_state.md`.

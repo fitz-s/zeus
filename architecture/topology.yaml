@@ -486,14 +486,7 @@ active_operations_registry:
     - Required evidence
     - Next action
   surface_prefix: docs/operations/
-  required_anchors:
-    - docs/archives/packets/task_2026-04-23_midstream_remediation/plan.md
-    - docs/archives/packets/task_2026-04-23_midstream_remediation/POST_AUDIT_HANDOFF_2026-04-24.md
-    - docs/archives/packets/task_2026-04-23_midstream_remediation/phases/README.md
-    - docs/archives/packets/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_operations_package_cleanup/plan.md
-    - docs/archives/packets/task_2026-04-23_midstream_remediation/phases/task_2026-04-26_pr17_review_fixes/plan.md
-    - docs/operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md
-    - docs/operations/task_2026-04-29_design_simplification_audit/
+  required_anchors: []
 
 docs_registry:
   path: architecture/docs_registry.yaml
@@ -1324,9 +1317,18 @@ digest_profiles:
       - "Preserve settlement/replay history wording unless the task explicitly routes a semantic reference edit."
       - "Broken packet links should resolve to active, archived, missing, or unregistered path status."
     allowed_files:
+      - "AGENTS.md"
+      - "README.md"
+      - "docs/AGENTS.md"
+      - "docs/README.md"
       - "docs/operations/current_state.md"
       - "docs/operations/AGENTS.md"
+      - "docs/operations/known_gaps.md"
+      - "docs/to-do-list/AGENTS.md"
+      - "docs/to-do-list/known_gaps.md"
+      - "docs/to-do-list/known_gaps_archive.md"
       - "docs/archive_registry.md"
+      - "architecture/docs_registry.yaml"
       - "tests/test_topology_doctor.py"
       - "tests/test_digest_profile_matching.py"
     forbidden_files:

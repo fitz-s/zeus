@@ -58,6 +58,9 @@ allowed_coverage_scopes:
 parent_coverage_allowed_patterns:
 - docs/operations/task_*/
 - docs/operations/*_package_*/
+- docs/operations/*_observation/
+- docs/operations/ws_poll_reaction/
+- docs/operations/attribution_drift/
 - docs/reports/
 - docs/artifacts/
 - docs/to-do-list/
@@ -442,7 +445,27 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: active runtime gap register
+  current_role: compatibility pointer to active known-gap worklist
+  canonical_replaced_by:
+  - docs/to-do-list/known_gaps.md
+  next_action: keep
+  lifecycle_state: transitional
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: stable
+  supersedes: []
+  superseded_by:
+  - docs/to-do-list/known_gaps.md
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: n/a
+- path: docs/to-do-list/known_gaps.md
+  doc_class: checklist
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active runtime gap worklist
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: active
@@ -450,13 +473,14 @@ entries:
   parent_coverage_allowed: false
   truth_profile: volatile_current_fact
   freshness_class: audit_bound
-  supersedes: []
+  supersedes:
+  - docs/operations/known_gaps.md
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/known_gaps_archive.md
+- path: docs/to-do-list/known_gaps_archive.md
   doc_class: archive_interface
   default_read: false
   direct_reference_allowed: true
@@ -546,6 +570,96 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: n/a
+- path: docs/operations/*_observation/
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: false
+  current_role: active operator-managed observation surfaces under current_state routing
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/ws_poll_reaction/
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: false
+  current_role: active operator-managed WebSocket/poll reaction observation surface
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/attribution_drift/
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: false
+  current_role: active operator-managed strategy attribution drift observation surface
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/observations_k1_migration.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: K1 dual-atom observations migration design note
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/tigge_daemon_integration.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: TIGGE daemon integration design note
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/active_unfinished_backlog.md
   doc_class: operations
   default_read: false
@@ -564,7 +678,7 @@ entries:
   may_live_in_reference: false
   contains_volatile_metrics: false
   current_tense_allowed: true
-  refresh_source: operations_consolidation
+  refresh_source: n/a
 - path: docs/operations/task_*/
   doc_class: operations
   default_read: false

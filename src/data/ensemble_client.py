@@ -31,6 +31,7 @@ API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
 CACHE_TTL_SECONDS = 15 * 60
+_CACHE_STORED_AT_KEY = "_cache_stored_at"
 _ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str, int, ForecastSourceRole], dict] = {}
 
 
@@ -53,11 +54,21 @@ def _cache_key(
 
 def _clone_result(result: dict) -> dict:
     cloned = dict(result)
+    cloned.pop(_CACHE_STORED_AT_KEY, None)
     if "members_hourly" in cloned:
         cloned["members_hourly"] = np.array(cloned["members_hourly"], copy=True)
     if "times" in cloned:
         cloned["times"] = list(cloned["times"])
     return cloned
+
+
+def _cache_age_seconds(cached: dict, now: datetime) -> float:
+    anchor = cached.get(_CACHE_STORED_AT_KEY) or cached["fetch_time"]
+    if isinstance(anchor, datetime):
+        anchor_dt = anchor if anchor.tzinfo else anchor.replace(tzinfo=timezone.utc)
+    else:
+        anchor_dt = _parse_timestamp_as_utc(str(anchor))
+    return (now - anchor_dt.astimezone(timezone.utc)).total_seconds()
 
 
 def _parse_timestamp_as_utc(value: str) -> datetime:
@@ -116,7 +127,7 @@ def fetch_ensemble(
     cache_key = _cache_key(city, model, past_days, role)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
-        age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
+        age_seconds = _cache_age_seconds(cached, fetch_time)
         cached_days = int(cached.get("forecast_days", 0))
         if age_seconds <= CACHE_TTL_SECONDS and cached_days >= int(forecast_days):
             return _clone_result(cached)
@@ -140,6 +151,7 @@ def fetch_ensemble(
                 forecast_source_role=role,
             )
             parsed["forecast_days"] = int(forecast_days)
+            parsed[_CACHE_STORED_AT_KEY] = fetch_time
             _ENSEMBLE_CACHE[cache_key] = parsed
             return _clone_result(parsed)
         except (httpx.HTTPError, KeyError, ValueError) as e:
@@ -181,7 +193,7 @@ def _fetch_registered_ingest_ensemble(
     cache_key = _cache_key(city, model, past_days, role)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
-        age_seconds = (fetch_time - cached["fetch_time"]).total_seconds()
+        age_seconds = _cache_age_seconds(cached, fetch_time)
         cached_days = int(cached.get("forecast_days", 0))
         if age_seconds <= CACHE_TTL_SECONDS and cached_days >= int(forecast_days):
             return _clone_result(cached)
@@ -194,6 +206,7 @@ def _fetch_registered_ingest_ensemble(
     bundle = ingest.fetch(fetch_time, lead_hours)
     parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time, role=role)
     parsed["forecast_days"] = int(forecast_days)
+    parsed[_CACHE_STORED_AT_KEY] = fetch_time
     _ENSEMBLE_CACHE[cache_key] = parsed
     return _clone_result(parsed)
 

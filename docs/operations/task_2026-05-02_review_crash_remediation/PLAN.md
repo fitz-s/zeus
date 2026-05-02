@@ -88,7 +88,7 @@ Status update 2026-05-02: Slice 4 committed as `f1397022` (`Harden Claude hook p
 ### 5. Secrets and dependency scanner hardening
 - Files: `pre-commit-secrets.sh`, `.gitleaks.toml`, `SECURITY-FALSE-POSITIVES.md`, registry/checker tests.
 - What: remove broad review-safe catch-all or gate it behind registry validation; keep WU allowlist exact; audit staged requirements blobs for every requirements file; correct advisory wording or implement a true one-time marker.
-- Verify: staged unregistered `[REVIEW-SAFE: NEW_TAG]` blocks; staged requirements audit ignores unstaged working-tree changes.
+- Verify: staged unregistered `REVIEW-SAFE: NEW_TAG` blocks; staged requirements audit ignores unstaged working-tree changes.
 
 ### 6. `inv_prototype.py` citation semantics
 - Files: `architecture/inv_prototype.py`, `tests/test_inv_prototype.py`.

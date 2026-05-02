@@ -78,7 +78,8 @@ OBS_V2_DST_GAP_FILL_PARSER_VERSION = "obs_v2_dst_gap_fill_ogimet_v2"
 
 
 def _find_gaps(
-    conn: sqlite3.Connection, data_version: str
+    conn: sqlite3.Connection, data_version: str,
+    cities_filter: Optional[list[str]] = None,
 ) -> list[tuple[str, str, int]]:
     """Return [(city, target_date, hours_present)] for Tier 1 + Tier 2
     cities under threshold.
@@ -103,7 +104,10 @@ def _find_gaps(
         (data_version, _MIN_HOURS_PER_DAY),
     ).fetchall()
     out: list[tuple[str, str, int]] = []
+    cities_set = set(cities_filter) if cities_filter else None
     for city, td, h in rows:
+        if cities_set is not None and city not in cities_set:
+            continue
         t = tier_for_city(city)
         if t in (Tier.WU_ICAO, Tier.OGIMET_METAR):
             out.append((city, td, int(h)))
@@ -295,6 +299,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Fill observation_instants_v2 DST-day gaps via Ogimet",
     )
     p.add_argument("--data-version", required=True)
+    p.add_argument(
+        "--cities", nargs="+", default=None,
+        help="Optional city subset filter (default: all gap cities).",
+    )
     p.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     p.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)
     p.add_argument("--dry-run", action="store_true")
@@ -314,7 +322,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     conn = sqlite3.connect(str(args.db))
     try:
-        gaps = _find_gaps(conn, args.data_version)
+        gaps = _find_gaps(conn, args.data_version, cities_filter=args.cities)
         if not gaps:
             print(f"No Tier 1 gaps < {_MIN_HOURS_PER_DAY} hours/day for "
                   f"data_version={args.data_version!r}. Nothing to fill.")

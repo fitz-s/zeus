@@ -158,7 +158,7 @@ The durable workspace kernel is:
 - scoped `AGENTS.md` routers
 - `docs/reference/modules/**` for dense module books when a module router or
   manifest sends you there
-- `docs/operations/current_state.md`, `docs/operations/known_gaps.md`, and the
+- `docs/operations/current_state.md`, `docs/to-do-list/known_gaps.md`, and the
   active packet folder
 - derived context engines such as `topology_doctor`, source rationale, history
   lore, and Code Review Graph
@@ -188,7 +188,7 @@ parallel session merged 9 commits into `plan-pre5` without enough conflict
 surface inspection; 6 drift items resulted, including 815k mislabeled
 production rows. The antibody is conflict-first escalation, not making every
 clean merge pay a critic tax. (Evidence archived at
-`docs/operations/_archive/task_2026-04-28_contamination_remediation/`.)
+`docs/archives/packets/task_2026-04-28_contamination_remediation/`.)
 
 ## 3. Navigation & Task Routing
 

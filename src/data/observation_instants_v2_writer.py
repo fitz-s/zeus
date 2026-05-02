@@ -42,6 +42,7 @@ ADD CHECK); live tables rely on this module. Do not bypass.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -254,6 +255,8 @@ class ObsV2Row:
                 f"temp_unit={self.temp_unit!r} not in {sorted(_ALLOWED_TEMP_UNITS)}"
             )
 
+        self._validate_local_time_identity()
+
         # B4 antibody (2026-04-26): physical bounds on temp_current /
         # running_max / running_min. Skip None inputs (nullable per schema).
         # Bounds depend on temp_unit (validated to {"F", "C"} above).
@@ -286,6 +289,52 @@ class ObsV2Row:
             raise InvalidObsV2RowError(
                 f"utc_timestamp={self.utc_timestamp!r} must be ISO 8601 "
                 "(YYYY-MM-DDTHH:MM:SS[+TZ] or with 'Z')"
+            )
+
+    def _validate_local_time_identity(self) -> None:
+        """Require an explicit, self-consistent local-hour identity.
+
+        Any hourly backfill/capture row without local_hour is ambiguous at
+        DST boundaries and unsafe for diurnal/Day0 readers. Enforce this at
+        construction time so scripts using the typed writer cannot run with
+        local-time semantics missing or silently fabricated.
+        """
+        if self.local_hour is None:
+            raise InvalidObsV2RowError(
+                f"local_hour is required for hourly observation writes "
+                f"(city={self.city}, utc={self.utc_timestamp})."
+            )
+        try:
+            local_hour = float(self.local_hour)
+        except (TypeError, ValueError) as exc:
+            raise InvalidObsV2RowError(
+                f"local_hour={self.local_hour!r} must be a finite hour in [0, 24): {exc}"
+            ) from exc
+        if not math.isfinite(local_hour) or not (0.0 <= local_hour < 24.0):
+            raise InvalidObsV2RowError(
+                f"local_hour={self.local_hour!r} must be finite and in [0, 24)."
+            )
+
+        try:
+            local_dt = datetime.fromisoformat(str(self.local_timestamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise InvalidObsV2RowError(
+                f"local_timestamp={self.local_timestamp!r} is not parseable ISO 8601: {exc}"
+            ) from exc
+        if local_dt.tzinfo is None or local_dt.utcoffset() is None:
+            raise InvalidObsV2RowError(
+                f"local_timestamp={self.local_timestamp!r} must include a timezone offset."
+            )
+        if int(local_hour) != local_dt.hour:
+            raise InvalidObsV2RowError(
+                f"local_hour={self.local_hour!r} does not match local_timestamp hour "
+                f"{local_dt.hour} for city={self.city}, utc={self.utc_timestamp}."
+            )
+
+        if _looks_like_iso_date(self.target_date) and local_dt.date().isoformat() != self.target_date:
+            raise InvalidObsV2RowError(
+                f"target_date={self.target_date!r} must match local_timestamp local date "
+                f"{local_dt.date().isoformat()} for city={self.city}, utc={self.utc_timestamp}."
             )
 
 

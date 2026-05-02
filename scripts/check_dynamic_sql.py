@@ -82,9 +82,17 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 # Per-file baseline as of 2026-05-01 (74 sites across 22 files).
 # Update both this dict AND the `total` field below when a site is added or
 # removed. The test wrapper enforces both directions.
+#
+# 2026-05-02 (PR #37 follow-up): src/calibration/store.py registered with
+# 14 dynamic-SQL sites. All sites construct `FROM/JOIN <table>` and similar
+# table-name interpolations from a small internal whitelist defined in the
+# module; no user input is interpolated. Per the scanner contract
+# (interpolated identifier from internal whitelist → bump baseline), this
+# is an explicit registration, not a relaxation.
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
+    "src/calibration/store.py": 14,
     "src/contracts/world_schema_validator.py": 1,
     "src/data/daily_obs_append.py": 4,
     "src/data/daily_observation_writer.py": 6,
