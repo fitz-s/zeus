@@ -183,17 +183,10 @@ def _patch_evaluator(
 
 
 def _patch_point_in_time_oracle_evidence(monkeypatch, tmp_path):
-    evidence_path = tmp_path / "oracle_error_rates.json"
-    evidence_path.write_text(json.dumps({
-        "NYC": {
-            "high": {
-                "oracle_error_rate": 0.0,
-                "last_date": "2026-04-01",
-                "status": "OK",
-            }
-        }
-    }))
-    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
+    """Legacy no-op. Oracle fail-closed gate removed 2026-05-02 — file
+    presence/freshness is no longer a trade prerequisite. Kept as a stub
+    so existing call sites do not break."""
+    return None
 
 
 def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:

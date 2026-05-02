@@ -681,57 +681,6 @@ def test_day0_entry_rejects_nonfinite_observation_before_signal_path(monkeypatch
     assert "non-finite" in decisions[0].rejection_reasons[0]
 
 
-def test_oracle_evidence_gate_rejects_missing_and_stale_rows(monkeypatch, tmp_path):
-    evidence_path = tmp_path / "oracle_error_rates.json"
-    evidence_path.write_text(json.dumps({
-        "Dallas": {
-            "oracle_error_rate": 0.0,
-            "last_date": "2026-03-01",
-            "status": "OK",
-        }
-    }))
-    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
-
-    missing_metric = evaluator_module._oracle_evidence_rejection_reason(
-        "Dallas",
-        "low",
-        decision_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
-    )
-    stale_high = evaluator_module._oracle_evidence_rejection_reason(
-        "Dallas",
-        "high",
-        decision_time=datetime(2026, 4, 5, tzinfo=timezone.utc),
-    )
-
-    assert missing_metric is not None
-    assert "missing city/metric row" in missing_metric
-    assert stale_high is not None
-    assert "oracle evidence stale" in stale_high
-
-
-def test_oracle_evidence_gate_rejects_future_dated_rows(monkeypatch, tmp_path):
-    evidence_path = tmp_path / "oracle_error_rates.json"
-    evidence_path.write_text(json.dumps({
-        "Dallas": {
-            "high": {
-                "oracle_error_rate": 0.0,
-                "last_date": "2026-04-10",
-                "status": "OK",
-            }
-        }
-    }))
-    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
-
-    reason = evaluator_module._oracle_evidence_rejection_reason(
-        "Dallas",
-        "high",
-        decision_time=datetime(2026, 4, 5, tzinfo=timezone.utc),
-    )
-
-    assert reason is not None
-    assert "future-dated relative to decision" in reason
-
-
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -6381,18 +6330,6 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
         heats.append(kwargs["current_portfolio_heat"])
         projected = kwargs["current_portfolio_heat"] + (kwargs["size_usd"] / kwargs["bankroll"])
         return (projected <= 0.5, "portfolio_heat")
-
-    evidence_path = tmp_path / "oracle_error_rates.json"
-    evidence_path.write_text(json.dumps({
-        "NYC": {
-            "high": {
-                "oracle_error_rate": 0.0,
-                "last_date": "2026-04-01",
-                "status": "OK",
-            }
-        }
-    }))
-    monkeypatch.setattr(evaluator_module, "ORACLE_EVIDENCE_PATH", evidence_path)
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
