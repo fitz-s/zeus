@@ -111,6 +111,18 @@ if [ "${COMMIT_INVARIANT_TEST_SKIP:-0}" = "1" ]; then
     echo "[pre-commit-invariant-test] SKIPPED (env COMMIT_INVARIANT_TEST_SKIP=1) channel=${CHANNEL}" >&2
     exit 0
 fi
+# File-based skip sentinel: .claude/hooks/.invariant_skip (one-time, auto-deleted after use).
+# Use when env var cannot propagate to the PreToolUse subprocess (e.g. agent channel).
+SKIP_SENTINEL="${HOOK_DIR}/.invariant_skip"
+if [ -f "$SKIP_SENTINEL" ]; then
+    echo "[pre-commit-invariant-test] SKIPPED (sentinel file: .claude/hooks/.invariant_skip) channel=${CHANNEL}" >&2
+    # Only delete on the git channel (final commit); agent channel fires first as
+    # a pre-tool-use gate and must leave the sentinel for the git channel to read.
+    if [ "$CHANNEL" = "git" ]; then
+        rm -f "$SKIP_SENTINEL"
+    fi
+    exit 0
+fi
 
 # Bypass 2: one-shot sentinel file. Auto-delete in Channel B (git) only —
 # both channels fire for a single `git commit`, so if Channel A (agent
