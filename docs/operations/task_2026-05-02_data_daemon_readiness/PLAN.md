@@ -396,7 +396,7 @@ Mandatory tests:
 
 This work must not merge as one large implementation PR. Use stacked PRs:
 
-- PR45a: plan, evidence, relationship tests only.
+- PR45a: plan, evidence, and a test-only contract pack for every false-readiness seam named in this plan. PR45a must lock the behavior before schema/repo/source implementation begins.
 - PR45b: release calendar plus typed `job_run`, `source_run`, `readiness_state`, and `market_topology_state` schemas/repos; no live behavior change.
 - PR45c: provenance dual-writes in ingest jobs; no live behavior change.
 - PR45d: readiness builder plus hole/backfill/topology readiness in shadow mode.
@@ -404,6 +404,23 @@ This work must not merge as one large implementation PR. Use stacked PRs:
 - Separate or prerequisite PR: observation/settlement-time split, unless it lands before any settlement-capture readiness can be live.
 
 Until the observation/settlement-time split lands, `settlement_capture` readiness is forced `BLOCKED` or `SHADOW_ONLY`. Cycle consumption may launch for forecast-only strategies only.
+
+PR45a required failing/contract tests:
+
+- `test_fresh_scope_cannot_authorize_different_city_id_timezone_date_or_metric`
+- `test_utc_date_cannot_substitute_for_city_local_target_date`
+- `test_dst_spring_fall_local_day_hour_counts_are_required`
+- `test_naive_timestamp_ambiguity_blocks_live_readiness`
+- `test_source_health_fresh_cannot_authorize_live_without_source_run_and_coverage`
+- `test_data_coverage_written_cannot_authorize_live_without_source_run_and_release_provenance`
+- `test_failed_source_run_invalidates_prior_live_eligible`
+- `test_partial_run_overwrites_green_to_blocked`
+- `test_hole_detection_clears_green_scope`
+- `test_source_contract_mismatch_overwrites_green_scope`
+- `test_backfill_origin_defaults_shadow_only_without_causal_proof`
+- `test_market_topology_stale_or_empty_fallback_blocks_entry_scope`
+- `test_quote_freshness_is_not_entry_readiness`
+- `test_settlement_capture_forced_blocked_until_settlement_time_law`
 
 ## Phase Plan
 
@@ -430,9 +447,15 @@ Files:
 Tests:
 
 - Fresh City A cannot authorize City B.
+- Fresh target-local-date A cannot authorize target-local-date B.
+- Same display city cannot authorize a different `city_id` or IANA timezone.
+- UTC-date equality cannot substitute for city-local market date.
 - Fresh high cannot authorize low.
 - Recent `FAILED`/`MISSING` coverage cannot authorize readiness.
-- Naive timestamp is rejected or normalized at one boundary.
+- `source_health` fresh/reachable cannot authorize live without matching source-run and coverage provenance.
+- `data_coverage.WRITTEN` cannot authorize live without matching source-run and release provenance.
+- DST spring/fall local-day counts are required for readiness scope.
+- Naive source/fetch/capture/decision timestamps cannot produce `LIVE_ELIGIBLE`. The only allowed normalization boundary must receive an explicit timezone from source release calendar or city config, persist the normalized aware timestamp, and tests must prove assumed-UTC/assumed-local ambiguity blocks live readiness.
 - Scheduler timezone is explicit UTC.
 - Boot before source release records not-released, not fresh.
 - Backfill-origin row cannot produce live eligibility.
@@ -738,8 +761,8 @@ Per-PR closeout gates follow the split decision above. PR45e cannot merge unless
 
 - [ ] 2. Time-semantics relationship tests
   - Files: `tests/test_ingest_boot_time_semantics.py`, `tests/AGENTS.md`, `architecture/test_topology.yaml`
-  - What: prove global max cannot express city/date/metric readiness; add tests for stale city hidden by fresh city, stale low hidden by fresh high, naive timestamp handling, scheduler UTC, and `FAILED`/`MISSING` coverage rows.
-  - Gate: new tests carry lifecycle headers and topology registration.
+  - What: prove global max cannot express city/date/metric readiness; add PR45a contract tests for stale city hidden by fresh city, different `target_local_date`, same display city with different `city_id`/timezone, UTC-date versus city-local date, stale low hidden by fresh high, naive timestamp ambiguity, DST expected-hour counts, scheduler UTC, `FAILED`/`MISSING` coverage rows, `source_health.FRESH` alone exclusion, `data_coverage.WRITTEN` alone exclusion, prior-green invalidation, backfill shadow-only, topology mismatch, quote exclusion, and settlement-capture blocked/shadow until settlement-time law lands.
+  - Gate: new tests carry lifecycle headers and topology registration; schema/repo implementation does not begin until this full false-readiness test contract is reviewed.
 
 - [ ] 3. Source release-calendar contract
   - Files: `src/data/release_calendar.py`, `config/source_release_calendar.yaml`, `src/data/dissemination_schedules.py`, `src/data/AGENTS.md`, `architecture/source_rationale.yaml`, `architecture/module_manifest.yaml`, `tests/test_release_calendar.py`
