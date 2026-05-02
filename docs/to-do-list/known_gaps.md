@@ -1223,3 +1223,25 @@ to architect when the window opens.
 
 18 `scripts/backfill_*.py` scripts remain ad-hoc. No live trading impact.
 Scope a unification package when convenient.
+
+### [LOW] `hourly_observations` is dead — schedule deletion (2026-05-02)
+
+**Status:** OPEN, deletion candidate.
+**Location:** `state/zeus-world.db.hourly_observations`,
+`scripts/etl_hourly_observations.py`, view `v_evidence_hourly_observations`,
+`src/state/db.py:853-876`.
+**Finding:** Audit on 2026-05-02 confirmed `hourly_observations` has zero
+runtime consumers in `src/`. `scripts/semantic_linter.py:568-630` actively
+forbids any bare `SELECT FROM hourly_observations` (P0_unsafe_table). The
+canonical hourly truth path is `observation_instants_v2` (via direct queries
+or the `observation_instants_current` data-version view). The legacy table is
+populated only by `scripts/etl_hourly_observations.py`, which goes stale
+between backfill runs and creates cosmetic divergence vs `obs_v2`.
+**Impact:** None on live trading, calibration, monitor, exit, or settlement —
+all those read `observation_instants_v2`. Risk is purely cosmetic (audit/evidence
+trail divergence).
+**Proposed antibody:** Delete `hourly_observations` + `v_evidence_hourly_observations`
++ `etl_hourly_observations.py`, update `src/state/db.py` schema init, and
+remove the semantic-linter rule that guards the dead table. Defer until next
+schema-cleanup pass; audit any open evidence/audit packets that still cite
+`v_evidence_hourly_observations` first.

@@ -224,8 +224,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Inclusive local start date (default: 2024-01-01).",
     )
     p.add_argument(
-        "--end", type=date.fromisoformat, default=date(2026, 4, 21),
-        help="Inclusive local end date (default: 2026-04-21).",
+        "--end", type=date.fromisoformat, default=date.today(),
+        help="Inclusive local end date (default: today).",
     )
     p.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     p.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)

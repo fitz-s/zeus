@@ -572,11 +572,17 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="observation_instants_v2 multi-tier backfill driver",
     )
-    p.add_argument(
+    city_group = p.add_mutually_exclusive_group(required=True)
+    city_group.add_argument(
         "--cities",
         nargs="+",
-        required=True,
         help="City names from config/cities.json (e.g. Chicago London 'Sao Paulo').",
+    )
+    city_group.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_cities",
+        help="Run for ALL cities in config/cities.json.",
     )
     p.add_argument(
         "--start",
@@ -587,8 +593,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--end",
         type=date.fromisoformat,
-        required=True,
-        help="Inclusive end local date (YYYY-MM-DD).",
+        default=date.today(),
+        help="Inclusive end local date (YYYY-MM-DD). Defaults to today.",
     )
     p.add_argument(
         "--data-version",
@@ -645,6 +651,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # Resolve --all to city list
+    if args.all_cities:
+        args.cities = sorted(cities_by_name.keys())
     for name in args.cities:
         if name not in cities_by_name:
             print(
