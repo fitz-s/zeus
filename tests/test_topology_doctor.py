@@ -4726,6 +4726,63 @@ def test_claude_pre_commit_hook_detects_multi_space_git_commit_not_plumbing():
     assert plumbing.stderr == ""
 
 
+def test_claude_pre_commit_hook_marker_skips_channel_a_only():
+    payload = _json.dumps({"tool_input": {"command": "git commit -m '[skip-invariant] test'"}})
+
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input=payload,
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "marker [skip-invariant] in commit command" in result.stderr
+
+
+def test_git_pre_commit_hook_sentinel_uses_git_dir_and_auto_clears(tmp_path):
+    worktree = tmp_path / "linked-worktree"
+    repo = tmp_path / "repo"
+    _subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    git_dir = repo / ".git"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n")
+    sentinel = git_dir / "skip-invariant-once"
+    sentinel.write_text("1")
+
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input="",
+        text=True,
+        cwd=worktree,
+        capture_output=True,
+        env={**os.environ, "GIT_INDEX_FILE": "fake", "ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "SKIPPED (sentinel" in result.stderr
+    assert not sentinel.exists()
+
+
+def test_git_pre_commit_hook_env_skip_still_bypasses():
+    result = _subprocess.run(
+        [_PRE_COMMIT_INVARIANT_HOOK],
+        input="",
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        env={**os.environ, "GIT_INDEX_FILE": "fake", "COMMIT_INVARIANT_TEST_SKIP": "1"},
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "SKIPPED (env COMMIT_INVARIANT_TEST_SKIP=1)" in result.stderr
+
+
 def test_claude_pre_commit_hooks_detect_git_global_options_for_commit():
     payload = _json.dumps({"tool_input": {"command": "git -C . -c user.name=pytest commit -m test"}})
 

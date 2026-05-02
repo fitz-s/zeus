@@ -290,7 +290,22 @@ class PolymarketUserChannelIngestor:
         try:
             async with connect(self.endpoint) as ws:
                 await ws.send(json.dumps(self.subscription_message()))
-                self._record_subscribed_message()
+                # Codex P1 follow-up to PR #37: do NOT call
+                # _record_subscribed_message() here. ws.send() is outbound
+                # only; auth could still fail asynchronously, in which case
+                # the inbound auth-failure message arrives shortly after.
+                # Recording SUBSCRIBED + clearing the M5 latch on outbound
+                # alone races the auth-failure path: between the premature
+                # latch-clear and the AUTH_FAILED record_gap, submits could
+                # briefly slip through without confirmed venue-truth.
+                #
+                # The first INBOUND message proves auth succeeded:
+                #   - PING/PONG path (handle_raw_message line 325) calls
+                #     _record_subscribed_message().
+                #   - Data path (handle_message) checks for auth-failure
+                #     first; only on a non-auth-failure inbound message
+                #     does it transition to SUBSCRIBED + try the latch
+                #     auto-clear.
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
                 async for raw in ws:
                     await self.handle_raw_message(raw)
@@ -404,7 +419,13 @@ class PolymarketUserChannelIngestor:
             )
             self._emit_gap(status)
             return None
-        ws_gap_guard.record_message(subscription_state="SUBSCRIBED", stale_after_seconds=self.stale_after_seconds)
+        # Inbound non-auth-failure message: auth proven; record SUBSCRIBED and
+        # try to clear the M5 reconcile latch when local side-effect surface is
+        # empty. Bare record_message would skip the auto-clear path. (Codex P1
+        # follow-up to PR #37: ws.send() in start() no longer pre-clears, so
+        # the first inbound message is now the only place the latch can
+        # transition from True -> False after a genuine reconnect.)
+        self._record_subscribed_message()
         family = _event_family(message)
         if family in {"order", "placement", "update", "cancellation"}:
             return {"order_fact_id": self._handle_order(message)}

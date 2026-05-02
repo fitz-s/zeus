@@ -727,3 +727,100 @@ def test_resubscribe_recovery_records_messages_but_does_not_clear_m5_sweep_requi
     with pytest.raises(ws_gap_guard.WSGapSubmitBlocked):
         ws_gap_guard.assert_ws_allows_submit("condition-ws")
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["CONFIRMED"]
+
+
+def test_handle_message_clears_m5_when_first_inbound_is_non_auth_failure(conn):
+    """Codex P1 follow-up to PR #37: ws.send() in start() no longer pre-clears.
+
+    The first inbound non-auth-failure data message must now be the trigger
+    that transitions SUBSCRIBED + auto-clears the M5 latch when local surface
+    is empty. Previously this only fired via PING/PONG or the pre-clear at
+    line 293; the data path bypassed the auto-clear. Without this fix, after
+    the line-293 pre-clear is removed, latches set by genuine reconnects
+    would never lift on data-only flows.
+    """
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    _ingestor(conn).handle_message(_trade_message("CONFIRMED"))
+
+    status = ws_gap_guard.status()
+    assert status.subscription_state == "SUBSCRIBED"
+    assert status.m5_reconcile_required is False
+    assert status.gap_reason == "message_received_no_local_side_effects"
+
+
+def test_handle_message_auth_failure_does_not_clear_m5_latch(conn):
+    """Codex P1 follow-up to PR #37: even after the pre-clear at line 293 was
+    removed, an inbound auth-failure must still NOT transition to SUBSCRIBED
+    or clear the latch. The auth-failure check fires first in handle_message,
+    short-circuiting before the new self._record_subscribed_message() call.
+    Otherwise we would re-create the same race the fix is supposed to close.
+    """
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+    auth_failure = {
+        "event_type": "error",
+        "type": "AUTH_FAILED",
+        "message": "auth failed: invalid signature",
+    }
+
+    _ingestor(conn).handle_message(auth_failure)
+
+    status = ws_gap_guard.status()
+    assert status.subscription_state == "AUTH_FAILED"
+    assert status.m5_reconcile_required is True
+
+
+def test_record_subscribed_message_no_longer_called_in_start_outbound_path():
+    """Codex P1 follow-up to PR #37: structural antibody.
+
+    Documents that PolymarketUserChannelIngestor.start() must NOT call
+    _record_subscribed_message() between ws.send() and the inbound `async for`
+    loop. ws.send() is outbound only; auth could fail asynchronously and the
+    pre-clear would race the AUTH_FAILED record_gap. If a future change
+    re-introduces the pre-clear, this test fails — keep the call only inside
+    inbound paths (PING/PONG handler at handle_raw_message + handle_message
+    after the auth-failure check).
+    """
+    import inspect
+
+    from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor
+
+    source = inspect.getsource(PolymarketUserChannelIngestor.start)
+    # ws.send line MUST be present.
+    assert "ws.send" in source, "test out of date: start() no longer calls ws.send"
+    # The pre-clear pattern MUST NOT be present in start(). The exact regex
+    # avoids false-positive on docstring/comment mentions: we check that no
+    # actual non-comment, non-string call to self._record_subscribed_message
+    # exists in start().
+    code_lines = [ln for ln in source.splitlines() if not ln.strip().startswith("#")]
+    code_body = "\n".join(code_lines)
+    # Strip triple-quoted comment blocks.
+    while '"""' in code_body:
+        opening = code_body.index('"""')
+        closing = code_body.index('"""', opening + 3)
+        code_body = code_body[:opening] + code_body[closing + 3:]
+    assert "_record_subscribed_message(" not in code_body, (
+        "start() must not call _record_subscribed_message() — that re-creates "
+        "the race the codex P1 follow-up to PR #37 closed. Inbound-only paths "
+        "(PING/PONG handler + handle_message non-auth-failure branch) are the "
+        "only legitimate callers."
+    )

@@ -2867,6 +2867,33 @@ def _snapshot_identity_matches(
     )
 
 
+def _snapshot_identity_matches_conflict_key(
+    row,
+    *,
+    city,
+    target_date: str,
+    temperature_metric: str,
+    data_version: str,
+    issue_time: str | None,
+) -> bool:
+    """Identity check using ONLY ensemble_snapshots_v2's ON CONFLICT key.
+
+    Mirrors ON CONFLICT(city, target_date, temperature_metric, issue_time,
+    data_version) on the v2 table. Mutable fields (model_version, available_at,
+    fetch_time, valid_time, ...) are intentionally excluded so legacy
+    projection can mirror v2's UPDATE-on-conflict instead of fail-closing
+    when the same snapshot is refreshed in-cycle.
+    """
+    return (
+        row is not None
+        and row["city"] == city.name
+        and row["target_date"] == target_date
+        and row["temperature_metric"] == temperature_metric
+        and row["data_version"] == data_version
+        and row["issue_time"] == issue_time
+    )
+
+
 def _legacy_snapshot_projection_row(conn, legacy_table: str, snapshot_id: str):
     return conn.execute(f"""
         SELECT city, target_date, issue_time, valid_time, available_at,
@@ -2898,23 +2925,57 @@ def _ensure_legacy_snapshot_projection(
 ) -> None:
     existing = _legacy_snapshot_projection_row(conn, legacy_table, snapshot_id)
     if existing is not None:
-        if not _snapshot_identity_matches(
+        # Codex P1 follow-up to PR #37: ensemble_snapshots_v2 INSERT uses
+        #   ON CONFLICT(city, target_date, temperature_metric, issue_time,
+        #               data_version)
+        #   DO UPDATE SET model_version, available_at, fetch_time, valid_time,
+        #                 lead_hours, members_json, spread, is_bimodal, ...
+        # so the same snapshot_id is reused whenever a snapshot is refreshed
+        # in-cycle. The legacy projection must mirror that upsert. Otherwise
+        # any mid-cycle ensemble refresh raises a spurious identity mismatch
+        # and aborts ENS storage for the rest of the cycle — which is the
+        # same halt-class failure mode PR #40 removed for the oracle gate.
+        #
+        # Conflict-key fields stay immutable: a different city / target_date /
+        # temperature_metric / issue_time / data_version under the same
+        # snapshot_id is genuine row reuse and remains a fail-closed error.
+        if not _snapshot_identity_matches_conflict_key(
             existing,
             city=city,
             target_date=target_date,
             temperature_metric=temperature_metric,
             data_version=data_version,
-            model_version=model_version,
             issue_time=issue_time,
-            valid_time=valid_time,
-            available_at=available_at,
-            fetch_time=fetch_time,
         ):
             raise ValueError(
                 "legacy ensemble snapshot projection refused: snapshot_id "
                 f"{snapshot_id} already belongs to {existing['city']}/"
                 f"{existing['target_date']}/{existing['temperature_metric']}"
             )
+        conn.execute(f"""
+            UPDATE {legacy_table}
+            SET model_version = ?,
+                available_at = ?,
+                fetch_time = ?,
+                valid_time = ?,
+                lead_hours = ?,
+                members_json = ?,
+                spread = ?,
+                is_bimodal = ?,
+                authority = ?
+            WHERE snapshot_id = ?
+        """, (
+            model_version,
+            available_at,
+            fetch_time,
+            valid_time,
+            lead_hours,
+            members_json,
+            spread,
+            is_bimodal,
+            authority,
+            snapshot_id,
+        ))
         return
 
     conn.execute(f"""
