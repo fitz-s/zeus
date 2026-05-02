@@ -80,11 +80,11 @@ fi
 # Documented escape hatches (in priority order). Use the LIGHTEST one that
 # applies — they each leave a different audit trail.
 #
-# 1. Channel-A command marker `[skip-invariant]` (recommended for agent
-#    commits using `git commit -m`/heredoc). Visible in `git log` forever;
-#    an auditor can see why the agent-side gate skipped without reading shell
-#    history. Native git pre-commit cannot reliably read the final message;
-#    use sentinel (#2) for Channel B.
+# 1. Commit message marker `[skip-invariant]` (recommended — visible in
+#    git log forever). Works for BOTH Channel A (agent PreToolUse Bash) AND
+#    Channel B (git pre-commit). Channel B detects it by walking the parent
+#    process chain via `ps -o args= -p $PPID` (since COMMIT_EDITMSG is not
+#    written before pre-commit fires for `git commit -m "..."`).
 #       git commit -m "Reconcile main-side healthcheck regression
 #
 #       [skip-invariant] origin/main was already failing 7 healthcheck
@@ -152,6 +152,37 @@ if [ "$CHANNEL" = "agent" ]; then
             exit 0
             ;;
     esac
+else
+    # Channel B: git pre-commit fires BEFORE COMMIT_EDITMSG is written when
+    # invoked via `git commit -m "..."`, so reading that file alone is
+    # unreliable. Primary strategy: walk the parent process chain (max 4 hops)
+    # looking for the marker in the originating `git commit` argv. Fallback to
+    # COMMIT_EDITMSG for interactive editor commits where the file IS written.
+    _found_marker=0
+    _pid=$PPID
+    _hops=0
+    while [ "$_pid" -gt 1 ] && [ "$_hops" -lt 4 ]; do
+        _cmd=$(ps -o args= -p "$_pid" 2>/dev/null || true)
+        case "$_cmd" in
+            *"$SKIP_MARKER"*)
+                _found_marker=1
+                break
+                ;;
+        esac
+        _pid=$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d ' ' || echo 1)
+        _hops=$((_hops + 1))
+    done
+    # Fallback: COMMIT_EDITMSG exists for interactive editor commits.
+    if [ "$_found_marker" -eq 0 ]; then
+        COMMIT_MSG_FILE="${1:-.git/COMMIT_EDITMSG}"
+        if [ -f "$COMMIT_MSG_FILE" ] && grep -qF -- "$SKIP_MARKER" "$COMMIT_MSG_FILE" 2>/dev/null; then
+            _found_marker=1
+        fi
+    fi
+    if [ "$_found_marker" -eq 1 ]; then
+        echo "[pre-commit-invariant-test] SKIPPED (marker ${SKIP_MARKER} found in parent process args or COMMIT_EDITMSG) channel=${CHANNEL}" >&2
+        exit 0
+    fi
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -260,8 +291,17 @@ if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
 [pre-commit-invariant-test] BLOCKED: ${FAILED} failed + ${ERRORS} errors
 in ${TEST_FILES} (baseline: ${BASELINE_PASSED} passed / ${BASELINE_SKIPPED} skipped / 0 failed).
 
-Fix the failing tests OR explicitly opt out:
-  export COMMIT_INVARIANT_TEST_SKIP=1
+Fix the failing tests OR explicitly opt out (use the LIGHTEST option that applies):
+
+  1. Marker in commit message (recommended — visible in git log forever):
+       git commit -m "Your message [skip-invariant] reason for skip"
+     Works for BOTH Channel A (agent PreToolUse) and Channel B (git pre-commit).
+
+  2. One-shot sentinel file (works when message text is not controllable):
+       touch "\$(git rev-parse --git-dir)/skip-invariant-once" && git commit ...
+
+  3. Env var (operator shell only — agents cannot reliably propagate this):
+       export COMMIT_INVARIANT_TEST_SKIP=1
 
 Last 3 lines of pytest output:
 ${SUMMARY}
