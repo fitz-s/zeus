@@ -166,7 +166,7 @@ def test_quote_freshness_is_not_entry_readiness() -> None:
     assert stale_quote.reason_codes == ("QUOTE_NOT_APPLICABLE_AT_ENTRY",)
 
 
-def test_settlement_capture_forced_blocked_until_settlement_time_law() -> None:
+def test_settlement_capture_shadow_only_until_settlement_time_law() -> None:
     pending = _evaluate_reference_readiness(
         DependencyFacts(),
         strategy_key="settlement_capture",

@@ -65,6 +65,7 @@ Data does not set durable law, but it is the place where semantic category error
 | `hourly_instants_append.py` | Legacy hourly path; needs explicit status in rehydrated docs. |
 | `wu_hourly_client.py / ogimet_hourly_client.py / observation_instants_v2_writer.py / tier_resolver.py` | New same-source-as-settlement hourly migration stack. |
 | `forecast_source_registry.py / forecast_ingest_protocol.py` | R3 F1 typed forecast-source registry, dormant operator gates, and source-stamped bundle protocol. |
+| `release_calendar.py` | PR45b read-only source release-calendar query layer; answers safe-fetch/backfill-only decisions from `config/source_release_calendar.yaml` without live side effects. |
 | `tigge_client.py` | R3 F3 dormant TIGGE ingest adapter; construction is safe with gate closed, and open-gate fetch reads only an operator-approved local JSON payload configured by constructor, `ZEUS_TIGGE_PAYLOAD_PATH`, or `payload_path:` in the decision artifact. |
 | `forecasts_append.py / ensemble_client.py / ecmwf_open_data.py / openmeteo_client.py` | Forecast and forecast-support ingest family; new forecast rows stamp `source_id`, `raw_payload_hash`, `captured_at`, and `authority_tier`. |
 | `market_scanner.py / polymarket_client.py` | Venue/executable-context inputs; live order side effects route through the V2 venue adapter; balance compatibility configures CollateralLedger with pUSD. `polymarket_client.py` preserves A2-selected `order_type` on the adapter boundary. |
@@ -81,6 +82,7 @@ Data does not set durable law, but it is the place where semantic category error
 - tests/test_obs_v2_writer.py
 - tests/test_hk_rejects_vhhh_source.py
 - tests/test_hourly_clients_parse.py
+- tests/test_release_calendar.py
 
 ## 11. Invariants
 - Settlement source is not inferred from endpoint availability or nearest station convenience.

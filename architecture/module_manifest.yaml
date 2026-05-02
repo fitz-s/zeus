@@ -45,6 +45,10 @@ modules:
       - src/state/venue_command_repo.py
       - src/state/ledger.py
       - src/state/projection.py
+      - src/state/job_run_repo.py
+      - src/state/source_run_repo.py
+      - src/state/readiness_repo.py
+      - src/state/market_topology_repo.py
     public_entry_files:
       - src/state/db.py
       - src/state/portfolio.py
@@ -52,6 +56,10 @@ modules:
       - src/state/collateral_ledger.py
       - src/state/snapshot_repo.py
       - src/state/venue_command_repo.py
+      - src/state/job_run_repo.py
+      - src/state/source_run_repo.py
+      - src/state/readiness_repo.py
+      - src/state/market_topology_repo.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
@@ -74,6 +82,10 @@ modules:
       - tests/test_command_recovery.py
       - tests/test_venue_command_repo.py
       - tests/test_provenance_5_projections.py
+      - tests/test_job_run_schema.py
+      - tests/test_source_run_schema.py
+      - tests/test_readiness_state_schema.py
+      - tests/test_market_topology_state_schema.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:
@@ -110,6 +122,7 @@ modules:
       - tests/test_bug100_k1_k2_structural.py
       - tests/test_riskguard_red_durable_cmd.py
       - tests/test_risk_allocator.py
+      - tests/test_evaluator_strategy_key_failclosed.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   data:
@@ -131,6 +144,7 @@ modules:
       - src/data/forecast_ingest_protocol.py
       - src/data/tigge_client.py
       - src/data/forecasts_append.py
+      - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
     public_entry_files:
@@ -141,6 +155,7 @@ modules:
       - src/data/forecast_ingest_protocol.py
       - src/data/tigge_client.py
       - src/data/forecasts_append.py
+      - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
     law_dependencies:
@@ -164,6 +179,7 @@ modules:
       - tests/test_hk_rejects_vhhh_source.py
       - tests/test_hourly_clients_parse.py
       - tests/test_v2_adapter.py
+      - tests/test_release_calendar.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   execution:

@@ -1012,6 +1012,185 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_data_coverage_retry
             ON data_coverage(status, retry_after) WHERE status = 'FAILED';
 
+        -- PR45b data-daemon readiness provenance substrate. These tables are
+        -- behavior-neutral until later phases wire ingest writers and runtime
+        -- consumers through their repo modules.
+        CREATE TABLE IF NOT EXISTS job_run (
+            job_run_id TEXT PRIMARY KEY,
+            job_run_key TEXT NOT NULL UNIQUE,
+            job_name TEXT NOT NULL,
+            plane TEXT NOT NULL CHECK (plane IN (
+                'forecast','observation','solar_aux','market_topology',
+                'quote','settlement_truth','source_health','hole_backfill','telemetry_control'
+            )),
+            scheduled_for TEXT NOT NULL,
+            missed_from TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            lock_key TEXT,
+            lock_acquired_at TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED','SKIPPED_LOCK_HELD'
+            )),
+            reason_code TEXT,
+            rows_written INTEGER NOT NULL DEFAULT 0,
+            rows_failed INTEGER NOT NULL DEFAULT 0,
+            source_run_id TEXT,
+            source_id TEXT,
+            track TEXT,
+            release_calendar_key TEXT,
+            safe_fetch_not_before TEXT,
+            expected_scope_json TEXT NOT NULL DEFAULT '{}',
+            affected_scope_json TEXT NOT NULL DEFAULT '{}',
+            readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
+            readiness_recomputed_at TEXT,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(job_name, scheduled_for, source_id, track)
+        );
+        CREATE INDEX IF NOT EXISTS idx_job_run_job_window
+            ON job_run(job_name, scheduled_for);
+        CREATE INDEX IF NOT EXISTS idx_job_run_plane_status
+            ON job_run(plane, status, scheduled_for);
+        CREATE INDEX IF NOT EXISTS idx_job_run_source_run
+            ON job_run(source_run_id);
+
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL CHECK (ingest_mode IN (
+                'SCHEDULED_LIVE','BOOT_CATCHUP','HOLE_BACKFILL','ARCHIVE_BACKFILL'
+            )),
+            origin_mode TEXT NOT NULL CHECK (origin_mode IN (
+                'SCHEDULED_LIVE','BOOT_CATCHUP','HOLE_BACKFILL','ARCHIVE_BACKFILL'
+            )),
+            source_cycle_time TEXT NOT NULL,
+            source_issue_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            fetch_started_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            valid_time_start TEXT,
+            valid_time_end TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            expected_steps_json TEXT NOT NULL DEFAULT '[]',
+            observed_steps_json TEXT NOT NULL DEFAULT '[]',
+            expected_count INTEGER,
+            observed_count INTEGER,
+            completeness_status TEXT NOT NULL CHECK (completeness_status IN (
+                'COMPLETE','PARTIAL','MISSING','NOT_RELEASED'
+            )),
+            partial_run INTEGER NOT NULL DEFAULT 0 CHECK (partial_run IN (0,1)),
+            raw_payload_hash TEXT,
+            manifest_hash TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED'
+            )),
+            reason_code TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (partial_run = 0 OR completeness_status = 'PARTIAL')
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_run_source_cycle
+            ON source_run(source_id, track, source_cycle_time);
+        CREATE INDEX IF NOT EXISTS idx_source_run_scope
+            ON source_run(city_id, city_timezone, target_local_date, temperature_metric, data_version);
+        CREATE INDEX IF NOT EXISTS idx_source_run_status
+            ON source_run(status, completeness_status, source_cycle_time);
+
+        CREATE TABLE IF NOT EXISTS readiness_state (
+            readiness_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            scope_type TEXT NOT NULL CHECK (scope_type IN (
+                'global','source','city_metric','market','strategy','quote'
+            )),
+            city_id TEXT,
+            city TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            metric TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            source_id TEXT,
+            track TEXT,
+            source_run_id TEXT,
+            market_family TEXT,
+            event_id TEXT,
+            condition_id TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            strategy_key TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+            )),
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            dependency_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                scope_type, city_id, city_timezone, target_local_date,
+                temperature_metric, physical_quantity, observation_field,
+                data_version, strategy_key, market_family, source_id, track,
+                condition_id
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
+            ON readiness_state(city_id, city_timezone, target_local_date, temperature_metric, strategy_key, market_family, condition_id);
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
+            ON readiness_state(status, expires_at);
+
+        CREATE TABLE IF NOT EXISTS market_topology_state (
+            topology_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            market_family TEXT NOT NULL,
+            event_id TEXT,
+            condition_id TEXT NOT NULL,
+            question_id TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            bin_topology_hash TEXT,
+            gamma_captured_at TEXT,
+            gamma_updated_at TEXT,
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISMATCH','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            authority_status TEXT NOT NULL CHECK (authority_status IN (
+                'VERIFIED','STALE','EMPTY_FALLBACK','UNKNOWN'
+            )),
+            status TEXT NOT NULL CHECK (status IN (
+                'CURRENT','STALE','EMPTY_FALLBACK','MISMATCH','UNKNOWN'
+            )),
+            expires_at TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(market_family, condition_id, city_id, target_local_date, temperature_metric, data_version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_market_topology_scope
+            ON market_topology_state(city_id, city_timezone, target_local_date, temperature_metric, market_family, condition_id);
+        CREATE INDEX IF NOT EXISTS idx_market_topology_status_expiry
+            ON market_topology_state(status, expires_at);
+
         -- Availability/outage fact log (observability — kernel §availability_fact)
         CREATE TABLE IF NOT EXISTS availability_fact (
             availability_id TEXT PRIMARY KEY,

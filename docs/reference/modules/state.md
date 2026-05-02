@@ -61,6 +61,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 | `canonical_write.py / chronicler.py / truth_files.py` | Write discipline, chronicle, and derived compatibility surfaces. |
 | `collateral_ledger.py` | Z4 pUSD/CTF collateral snapshots and reservations; fail-closed pre-submit truth. |
 | `venue_command_repo.py` | Durable venue command/event journal plus R3 U2 raw provenance projections (`venue_submission_envelopes`, order facts, trade facts, position lots, provenance envelope events). R3 M1 keeps command-side transitions grammar-additive and leaves order/trade facts in U2. R3 M2 adds economic-intent duplicate lookup for unresolved `SUBMIT_UNKNOWN_SIDE_EFFECT` commands and persists acked `venue_order_id` from append-event payloads. |
+| `job_run_repo.py / source_run_repo.py / readiness_repo.py / market_topology_repo.py` | PR45b data-daemon readiness substrate: durable job/source run provenance, scoped readiness verdicts, and current market-topology authority state. Missing or expired readiness defaults to `UNKNOWN_BLOCKED`. |
 
 ## 10. Relevant tests
 - tests/test_db.py
@@ -78,6 +79,10 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - tests/test_unknown_side_effect.py
 - tests/test_exchange_reconcile.py
 - tests/test_settlement_commands.py
+- tests/test_job_run_schema.py
+- tests/test_source_run_schema.py
+- tests/test_readiness_state_schema.py
+- tests/test_market_topology_state_schema.py
 
 ## 11. Invariants
 - Append event before projection; never let derived JSON outrank canonical DB/event truth.

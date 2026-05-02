@@ -28,6 +28,10 @@ Derived surfaces may never become truth by being convenient.
 | `chain_reconciliation.py` | On-chain truth convergence | HIGH — Chain > local |
 | `collateral_ledger.py` | pUSD/CTF collateral snapshot + reservations | HIGH — live pre-submit fail-closed truth |
 | `venue_command_repo.py` | Durable venue command/event journal | HIGH — command state drives reservation release |
+| `job_run_repo.py` | Data-daemon job-run journal | HIGH — scheduler provenance and missed-window truth |
+| `source_run_repo.py` | Source-run provenance journal | HIGH — release/completeness truth for data feeds |
+| `readiness_repo.py` | Scoped readiness verdict store | CRITICAL — missing/expired readiness must fail closed |
+| `market_topology_repo.py` | Market topology authority state | HIGH — venue/source contract freshness |
 | `portfolio.py` | Runtime position read model | HIGH — what evaluator/executor see |
 | `portfolio_loader_policy.py` | DB-vs-fallback load discipline | HIGH — truth source selection |
 | `decision_chain.py` | Point-in-time decision lineage | MEDIUM |
@@ -89,6 +93,10 @@ Derived surfaces may never become truth by being convenient.
 - `tests/test_b070_control_overrides_history_v2.py`
 - `tests/test_chronicle_dedup.py`
 - `tests/test_cross_module_invariants.py`
+- `tests/test_job_run_schema.py`
+- `tests/test_source_run_schema.py`
+- `tests/test_readiness_state_schema.py`
+- `tests/test_market_topology_state_schema.py`
 
 ## Planning lock
 

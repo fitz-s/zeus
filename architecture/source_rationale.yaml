@@ -716,6 +716,16 @@ files:
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
+  src/data/release_calendar.py:
+    zone: K2_runtime
+    authority_role: source_release_calendar_query
+    why: PR45b read-only source release-calendar query layer; gates safe-fetch timing and backfill-only tracks without performing writes or live network I/O.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - NO_WRITE_PATH
+    downstream:
+    - src/state/job_run_repo.py
+    - future data daemon scheduler
   src/data/hole_scanner.py:
     zone: K2_runtime
     authority_role: data_hole_scanner
@@ -1472,6 +1482,40 @@ files:
     - src/data/hole_scanner.py
     - src/data/hourly_instants_append.py
     - src/data/solar_append.py
+  src/state/job_run_repo.py:
+    zone: K2_runtime
+    authority_role: data_daemon_job_run_journal
+    why: PR45b durable job-run provenance table API for scheduled, catch-up, skipped, failed, and partial data-daemon windows.
+    write_routes:
+    - data_daemon_job_run_write
+    downstream:
+    - future data daemon scheduler
+  src/state/source_run_repo.py:
+    zone: K2_runtime
+    authority_role: source_run_provenance_journal
+    why: PR45b source-run provenance API preserving source cycle, release timing, completeness, partial-run status, and scoped metric identity.
+    write_routes:
+    - data_daemon_source_run_write
+    downstream:
+    - future forecast/observation writers
+    - src/state/readiness_repo.py
+  src/state/readiness_repo.py:
+    zone: K1_governance
+    authority_role: readiness_verdict_store
+    why: PR45b scoped readiness verdict API that defaults missing/expired entry readiness to UNKNOWN_BLOCKED instead of assuming live eligibility.
+    write_routes:
+    - data_readiness_write
+    downstream:
+    - future runtime entry gates
+  src/state/market_topology_repo.py:
+    zone: K2_runtime
+    authority_role: market_topology_readiness_store
+    why: PR45b market topology state API preserving source-contract match status, authority freshness, token IDs, and venue-market provenance.
+    write_routes:
+    - market_topology_state_write
+    downstream:
+    - future market topology refresh daemon
+    - src/state/readiness_repo.py
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime

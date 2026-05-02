@@ -24,6 +24,7 @@ regardless of mathematical correctness.
 | `tier_resolver.py` | Source-tier routing (which provider for which role) | HIGH — wrong tier = wrong truth plane |
 | `forecast_source_registry.py` | Forecast-source registry + operator gates | HIGH — source activation/provenance |
 | `forecast_ingest_protocol.py` | Typed forecast bundle protocol | MEDIUM |
+| `release_calendar.py` | Source safe-fetch/backfill-only calendar query layer | HIGH — wrong release timing poisons readiness |
 | `tigge_client.py` | TIGGE ingest stub; construction allowed, fetch operator-gated/dormant | HIGH — source activation seam |
 | `hourly_instants_append.py` | Legacy hourly observation path | HIGH — extrema preservation |
 | `observation_instants_v2_writer.py` | V2 hourly write contract | HIGH — version/source tagging |
@@ -78,6 +79,7 @@ regardless of mathematical correctness.
 - `tests/test_obs_v2_writer.py`
 - `tests/test_hk_rejects_vhhh_source.py`
 - `tests/test_hourly_clients_parse.py`
+- `tests/test_release_calendar.py`
 
 ## Planning lock
 

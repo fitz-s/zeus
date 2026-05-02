@@ -10,7 +10,7 @@ Zeus live entries are blocked unless a machine-readable readiness contract prove
 - Worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus-pr44-data-daemon-readiness`.
 - Branch: `data-daemon-readiness-2026-05-02`, stacked on PR #44 head branch `live-blocker-fixes-2026-05-02`.
 - PR #44 baseline already includes the PR #42 emergency boot-staleness guard and follow-up fixes: pre-Phase-1 timestamp snapshot, `solar_daily` `WRITTEN` filter, boot-forced advisory locks, and `tests/test_ingest_main_boot_resilience.py`.
-- Review artifact read in full from sibling worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus/docs/artifacts/Zeus_May2_review_data_deamon.md`.
+- Review artifact read in full from sibling worktree: `/Users/leofitz/.openclaw/workspace-venus/zeus/docs/artifacts/Zeus_May2_review_data_daemon.md`.
 - Broad topology navigation for the full request was advisory-only (`risk_tier: T3`) and must be split into narrow typed phases before source edits.
 - Current reusable substrate: `src/control/freshness_gate.py`, `src/state/data_coverage.py`, `src/data/dual_run_lock.py`, `src/data/dissemination_schedules.py`, `src/data/forecast_source_registry.py`, `src/data/hole_scanner.py`, `src/data/market_scanner.py`, `src/types/metric_identity.py`, `src/engine/cycle_runner.py`.
 
@@ -149,11 +149,15 @@ The runtime read path should be small and boring:
 verdict = readiness_repo.get_entry_readiness(
     conn,
     city_id=candidate.city_id,
-    city=candidate.city,
     city_timezone=candidate.city_timezone,
     target_local_date=candidate.target_date,
-    metric_identity=candidate.metric_identity,
-    strategy=candidate.strategy_id,
+    temperature_metric=candidate.metric_identity.temperature_metric,
+    physical_quantity=candidate.metric_identity.physical_quantity,
+    observation_field=candidate.metric_identity.observation_field,
+    data_version=candidate.metric_identity.data_version,
+    source_id=candidate.source_id,
+    track=candidate.source_track,
+    strategy_key=candidate.strategy_id,
     market_family=MARKET_FAMILY_WEATHER_TEMPERATURE,
     condition_id=candidate.condition_id,
 )

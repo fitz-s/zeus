@@ -79,10 +79,10 @@ def _local_day_utc_duration_hours(local_day: date, timezone_name: str) -> float:
 
 
 def _local_day_wall_duration_hours(local_day: date, timezone_name: str) -> float:
-    local_timezone = ZoneInfo(timezone_name)
-    start_local = datetime.combine(local_day, time.min, tzinfo=local_timezone)
-    next_start_local = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=local_timezone)
-    return (next_start_local - start_local).total_seconds() / 3600
+    ZoneInfo(timezone_name)
+    start_wall = datetime.combine(local_day, time.min)
+    next_start_wall = datetime.combine(local_day + timedelta(days=1), time.min)
+    return (next_start_wall - start_wall).total_seconds() / 3600
 
 
 def _normalize_for_storage(timestamp: datetime, explicit_timezone: tzinfo | None = None) -> datetime:
