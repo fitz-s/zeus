@@ -300,3 +300,38 @@ def test_monthly_bounds_json_has_generation_provenance() -> None:
             assert "from" in tdr and "to" in tdr, (
                 f"{city_name} month={month_str}: tigge_date_range missing 'from' or 'to'"
             )
+
+
+# ---------------------------------------------------------------------------
+# #33 PhysicalBounds graceful fallback (audit #17 / 2026-05-02)
+# ---------------------------------------------------------------------------
+
+def test_guard_construct_with_missing_bounds_file_falls_back_to_lat_band(tmp_path) -> None:
+    """A missing city_monthly_bounds.json MUST NOT crash the constructor.
+
+    The runtime fallback _check_lat_band_bounds is reached because every
+    city lookup returns None from an empty self._bounds dict.
+    """
+    missing_path = tmp_path / "does_not_exist.json"
+    g = IngestionGuard(bounds_path=missing_path)  # no exception expected
+    assert g._bounds == {}
+
+    # Sanity: a known city goes through lat-band path, which raises only if
+    # the value is grossly out of band. A reasonable temperature must pass.
+    g.check_physical_bounds("NYC", value_f=72.0, month=5)
+
+
+def test_guard_construct_with_corrupt_bounds_file_falls_back_to_lat_band(tmp_path) -> None:
+    """A malformed JSON bounds file MUST NOT crash the constructor."""
+    corrupt_path = tmp_path / "corrupt.json"
+    corrupt_path.write_text("{not valid json at all")
+    g = IngestionGuard(bounds_path=corrupt_path)
+    assert g._bounds == {}
+
+
+def test_guard_construct_with_bounds_file_missing_cities_key_falls_back(tmp_path) -> None:
+    """A bounds file lacking the top-level 'cities' key MUST NOT crash."""
+    schema_drift_path = tmp_path / "no_cities_key.json"
+    schema_drift_path.write_text(json.dumps({"generated_at": "2026-05-02T00:00:00Z"}))
+    g = IngestionGuard(bounds_path=schema_drift_path)
+    assert g._bounds == {}

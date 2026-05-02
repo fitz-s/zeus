@@ -167,6 +167,7 @@ raw/**/*.h5
 .claude/**/transcripts/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/hooks/.invariant_skip
 
 .code-review-graph/*
 !.code-review-graph/.gitignore
