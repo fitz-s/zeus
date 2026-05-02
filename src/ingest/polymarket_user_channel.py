@@ -22,6 +22,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from src.control import ws_gap_guard
+from src.execution.command_bus import CommandState, IN_FLIGHT_STATES
 from src.state.db import get_trade_connection_with_world
 from src.state.venue_command_repo import (
     append_event,
@@ -36,6 +37,23 @@ logger = logging.getLogger(__name__)
 USER_CHANNEL_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 PING_INTERVAL_SECONDS = 10
 DEFAULT_STALE_AFTER_SECONDS = 30
+# M5 clean-reconnect proof is stricter than command recovery scanning:
+# recovery scans transient submit/cancel uncertainty, while the WS side-effect
+# surface must also treat active venue-side orders as unresolved because a gap
+# can hide fills/cancels after the venue acknowledged the order.
+UNRESOLVED_COMMAND_STATES = tuple(sorted({
+    *(state.value for state in IN_FLIGHT_STATES),
+    CommandState.SIGNED_PERSISTED.value,
+    CommandState.POST_ACKED.value,
+    CommandState.ACKED.value,
+    CommandState.PARTIAL.value,
+}))
+UNRESOLVED_LOT_STATES = (
+    "OPTIMISTIC_EXPOSURE",
+    "CONFIRMED_EXPOSURE",
+    "EXIT_PENDING",
+    "QUARANTINED",
+)
 
 
 class WSAuthMissing(RuntimeError):
@@ -324,19 +342,44 @@ class PolymarketUserChannelIngestor:
             )
             logger.info(
                 "M3 user-channel gap latch cleared after reconnect: "
-                "no local venue commands, position lots, or unresolved M5 findings exist"
+                "no unresolved local venue commands, position lots, or M5 findings exist"
             )
         return status
 
     def _local_side_effect_surface_empty(self) -> bool:
         conn = self.conn_factory()
         try:
-            checks = (
-                "SELECT COUNT(*) FROM venue_commands",
-                "SELECT COUNT(*) FROM position_lots",
-                "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL",
+            command_placeholders = ",".join("?" for _ in UNRESOLVED_COMMAND_STATES)
+            lot_placeholders = ",".join("?" for _ in UNRESOLVED_LOT_STATES)
+            checks: tuple[tuple[str, tuple[Any, ...]], ...] = (
+                (
+                    f"SELECT COUNT(*) FROM venue_commands WHERE state IN ({command_placeholders})",
+                    UNRESOLVED_COMMAND_STATES,
+                ),
+                (
+                    f"""
+                    SELECT COUNT(*)
+                      FROM position_lots lot
+                      JOIN (
+                        SELECT position_id, MAX(local_sequence) AS max_sequence
+                          FROM position_lots
+                         GROUP BY position_id
+                      ) latest
+                        ON latest.position_id = lot.position_id
+                       AND latest.max_sequence = lot.local_sequence
+                     WHERE lot.state IN ({lot_placeholders})
+                    """,
+                    UNRESOLVED_LOT_STATES,
+                ),
+                (
+                    "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL",
+                    (),
+                ),
             )
-            return all(int(conn.execute(sql).fetchone()[0] or 0) == 0 for sql in checks)
+            return all(
+                int(conn.execute(sql, params).fetchone()[0] or 0) == 0
+                for sql, params in checks
+            )
         except Exception as exc:
             logger.warning(
                 "M3 user-channel clean-reconnect proof unavailable; preserving M5 latch: %s",

@@ -2,8 +2,10 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-04-30
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
+# Last reused/audited: 2026-05-02
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
+#                  PR 37 review: clean-reconnect proof ignores resolved history
+#                  while preserving active side-effect state.
 """M3: user-channel WS messages become U2 facts; gaps block new submit."""
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from src.state.db import init_schema
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
     append_event,
+    append_position_lot,
     insert_command,
     insert_submission_envelope,
     load_calibration_trade_facts,
@@ -429,7 +432,135 @@ def test_subscribe_reconnect_with_empty_local_surface_clears_m5_requirement():
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
-def test_subscribe_reconnect_with_local_command_preserves_m5_requirement(conn):
+def test_subscribe_reconnect_with_active_acked_command_preserves_m5_requirement(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert _command_state(conn) == "ACKED"
+    assert status.m5_reconcile_required is True
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+
+
+def test_subscribe_reconnect_with_terminal_command_history_clears_m5_requirement(conn):
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert _command_state(conn) == "FILLED"
+    assert status.m5_reconcile_required is False
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+
+
+def test_subscribe_reconnect_with_in_flight_command_preserves_m5_requirement(conn):
+    conn.execute("UPDATE venue_commands SET state = 'SUBMITTING' WHERE command_id = 'cmd-ws'")
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert status.m5_reconcile_required is True
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+
+
+def test_subscribe_reconnect_with_settled_lot_history_clears_m5_requirement(conn):
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    append_position_lot(
+        conn,
+        position_id=99,
+        state="SETTLED",
+        shares=1,
+        entry_price_avg="0.50",
+        exit_price_avg="0.60",
+        source_command_id="cmd-ws",
+        captured_at=NOW,
+        state_changed_at=NOW,
+    )
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert status.m5_reconcile_required is False
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is True
+
+
+def test_subscribe_reconnect_with_confirmed_exposure_preserves_m5_requirement(conn):
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    append_position_lot(
+        conn,
+        position_id=99,
+        state="CONFIRMED_EXPOSURE",
+        shares=1,
+        entry_price_avg="0.50",
+        source_command_id="cmd-ws",
+        captured_at=NOW,
+        state_changed_at=NOW,
+    )
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionClosedError",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+
+    status = _ingestor(conn)._record_subscribed_message(observed_at=NOW)
+
+    assert status.m5_reconcile_required is True
+    assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
+
+
+def test_subscribe_reconnect_with_unresolved_lot_preserves_m5_requirement(conn):
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    append_position_lot(
+        conn,
+        position_id=99,
+        state="OPTIMISTIC_EXPOSURE",
+        shares=1,
+        entry_price_avg="0.50",
+        source_command_id="cmd-ws",
+        captured_at=NOW,
+        state_changed_at=NOW,
+    )
     ws_gap_guard.configure_status(
         ws_gap_guard.WSGapStatus(
             connected=False,

@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21 (extremum-preservation redesign per operator)
+# Last reused/audited: 2026-05-02 (PR 36 review: local UTC bounds + DST fold)
 # Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
 #                  correction 2026-04-21 (operator).
 """Networkless parse + aggregate tests for WU/Ogimet hourly clients.
@@ -21,12 +21,19 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.data.ogimet_hourly_client as ogimet_client
 from src.data.ogimet_hourly_client import (
     _aggregate as ogimet_aggregate,
+    _detect_missing_local_hour as ogimet_detect_missing_local_hour,
+    _local_date_range_to_utc_window,
     _parse_metar_csv_line,
     _parse_metar_temp_c,
 )
-from src.data.wu_hourly_client import HourlyObservation, _aggregate_hourly
+from src.data.wu_hourly_client import (
+    HourlyObservation,
+    _aggregate_hourly,
+    _detect_missing_local_hour as wu_detect_missing_local_hour,
+)
 
 
 # ----------------------------------------------------------------------
@@ -295,6 +302,44 @@ def test_ogimet_aggregate_filters_by_local_date_window():
     assert out[0].hour_max_temp == 10.0
 
 
+def test_ogimet_query_window_uses_local_date_midnight_in_utc():
+    start_utc, end_utc = _local_date_range_to_utc_window(
+        date(2024, 1, 15),
+        date(2024, 1, 15),
+        "Europe/Moscow",
+    )
+
+    assert start_utc == datetime(2024, 1, 14, 21, 0, tzinfo=timezone.utc)
+    assert end_utc == datetime(2024, 1, 15, 20, 59, 59, tzinfo=timezone.utc)
+
+
+def test_fetch_ogimet_requests_local_date_utc_bounds(monkeypatch):
+    calls: list[tuple[datetime, datetime]] = []
+
+    def fake_fetch_one_chunk(station, begin, end, timeout_seconds):
+        calls.append((begin, end))
+        return ogimet_client._ChunkResult()
+
+    monkeypatch.setattr(ogimet_client, "_fetch_one_chunk", fake_fetch_one_chunk)
+
+    result = ogimet_client.fetch_ogimet_hourly(
+        "UUWW",
+        date(2024, 1, 15),
+        date(2024, 1, 15),
+        city_name="Moscow",
+        timezone_name="Europe/Moscow",
+        source_tag="ogimet_metar_uuww",
+    )
+
+    assert result.failed is False
+    assert calls == [
+        (
+            datetime(2024, 1, 14, 21, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 15, 20, 59, 59, tzinfo=timezone.utc),
+        )
+    ]
+
+
 # ----------------------------------------------------------------------
 # DST regression
 # ----------------------------------------------------------------------
@@ -315,6 +360,18 @@ def test_wu_aggregate_handles_dst_spring_forward_correctly():
     assert bucket.local_hour == 3.0  # jumped from 01:00 CST to 03:00 CDT
     assert bucket.dst_active == 1
     assert bucket.is_missing_local_hour == 0  # UTC-first never hits 02:00 local
+
+
+def test_missing_local_hour_detection_preserves_fallback_fold():
+    """2024-11-03 07:00 UTC is Chicago's second 01:00 hour (fold=1)."""
+    tz = ZoneInfo("America/Chicago")
+    utc_dt = datetime(2024, 11, 3, 7, 0, tzinfo=timezone.utc)
+    local_dt = utc_dt.astimezone(tz)
+
+    assert local_dt.hour == 1
+    assert local_dt.fold == 1
+    assert wu_detect_missing_local_hour(utc_dt, tz) is False
+    assert ogimet_detect_missing_local_hour(utc_dt, tz) is False
 
 
 # ----------------------------------------------------------------------

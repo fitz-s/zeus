@@ -1,6 +1,7 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
-# Authority basis: live-blockers session 2026-05-01 — TIGGE DB-backed entry evidence relationship
+# Last reused/audited: 2026-05-02
+# Authority basis: live-blockers session 2026-05-01 — TIGGE DB-backed entry evidence relationship;
+#                  PR 37 review: registered-ingest cache TTL must not use source capture time.
 """Relationship antibody: TIGGE DB rows → trading-side ensemble evidence."""
 
 from __future__ import annotations
@@ -228,3 +229,44 @@ def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
     assert result["available_at"] == AVAILABLE_AT
     assert result["fetch_time"].isoformat() == DB_FETCH_TIME
     assert _entry_forecast_evidence_errors(result, "2026-05-03", DECISION_TIME) == []
+
+
+def test_fetch_ensemble_tigge_cache_uses_retrieval_time_not_source_capture(
+    fake_city, staged_world_db, monkeypatch
+):
+    import src.data.ensemble_client as ec
+    import src.data.tigge_client as tc
+    from src.data.tigge_client import TIGGEIngest
+
+    ec._clear_cache()
+    monkeypatch.setattr(
+        ec,
+        "gate_source",
+        lambda _source_id: SimpleNamespace(
+            source_id="tigge",
+            authority_tier="FORECAST",
+            degradation_level="OK",
+            ingest_class=TIGGEIngest,
+        ),
+    )
+    monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
+    monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
+    calls = {"count": 0}
+    original_fetch = TIGGEIngest.fetch
+
+    def counted_fetch(self, fetch_time, lead_hours):
+        calls["count"] += 1
+        return original_fetch(self, fetch_time, lead_hours)
+
+    monkeypatch.setattr(TIGGEIngest, "fetch", counted_fetch)
+
+    first = ec.fetch_ensemble(fake_city, forecast_days=4, model="tigge", role="entry_primary")
+    second = ec.fetch_ensemble(fake_city, forecast_days=4, model="tigge", role="entry_primary")
+
+    assert calls["count"] == 1
+    assert first is not None
+    assert second is not None
+    assert first["fetch_time"].isoformat() == DB_FETCH_TIME
+    assert first["captured_at"] == DB_FETCH_TIME
+    assert "_cache_stored_at" not in first
+    assert second["fetch_time"].isoformat() == DB_FETCH_TIME

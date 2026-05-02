@@ -28,6 +28,59 @@ if TYPE_CHECKING:
 # All other sources produce runtime-only observations; training_allowed is
 # forced to False regardless of what the caller passes.
 _TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
+_CALIBRATION_READ_TABLES = frozenset({
+    "calibration_pairs",
+    "platt_models",
+    "platt_models_v2",
+})
+
+
+def _qualified_calibration_read_table(conn: sqlite3.Connection, table_name: str) -> str:
+    """Return the authoritative read table for calibration runtime lookups.
+
+    Live cycle connections are trade DB handles with the world DB attached as
+    ``world``. Legacy/bootstrap left empty calibration tables in the trade DB,
+    so unqualified reads can silently hit ``main.platt_models_v2`` and miss
+    the populated authoritative rows in ``world.platt_models_v2``. Prefer the
+    attached world table whenever it exists; plain world-DB and test
+    connections continue to read their main schema.
+    """
+    if table_name not in _CALIBRATION_READ_TABLES:
+        raise ValueError(f"unsupported calibration read table: {table_name!r}")
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    except sqlite3.Error as exc:
+        raise RuntimeError("unable to enumerate attached databases for calibration read") from exc
+    if "world" not in attached:
+        return table_name
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM world.sqlite_master
+            WHERE name = ? AND type IN ('table', 'view')
+            LIMIT 1
+            """,
+            (table_name,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"attached world DB is unavailable for calibration read table {table_name!r}"
+        ) from exc
+    if row is not None:
+        return f"world.{table_name}"
+    return table_name
+
+
+def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
+    if table_ref.startswith("world."):
+        table_name = table_ref.removeprefix("world.")
+        if table_name not in _CALIBRATION_READ_TABLES:
+            raise ValueError(f"unsupported calibration read table: {table_name!r}")
+        return conn.execute(f"PRAGMA world.table_info({table_name})").fetchall()
+    if table_ref not in _CALIBRATION_READ_TABLES:
+        raise ValueError(f"unsupported calibration read table: {table_ref!r}")
+    return conn.execute(f"PRAGMA table_info({table_ref})").fetchall()
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:
@@ -200,7 +253,8 @@ def _has_authority_column(conn: sqlite3.Connection) -> bool:
     Used to gracefully handle pre-migration DBs in tests and production
     until migrate_add_authority_column.py has been run.
     """
-    rows = conn.execute("PRAGMA table_info(calibration_pairs)").fetchall()
+    table = _qualified_calibration_read_table(conn, "calibration_pairs")
+    rows = _table_info(conn, table)
     return any(row[1] == "authority" for row in rows)
 
 
@@ -249,6 +303,7 @@ def get_pairs_for_bucket(
             "column). LOW reads must use calibration_pairs_v2 via the v2 "
             "lookup API (load_platt_model_v2 / dedicated v2 readers)."
         )
+    table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == 'any':
         bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
         params = (
@@ -256,13 +311,13 @@ def get_pairs_for_bucket(
             if bin_source_filter is not None
             else (cluster, season)
         )
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT p_raw, lead_days, outcome, range_label, decision_group_id
-            FROM calibration_pairs
+            FROM {table}
             WHERE cluster = ? AND season = ?
             {bin_clause}
             ORDER BY target_date
-        """.format(bin_clause=bin_clause), params).fetchall()
+        """, params).fetchall()
     elif not _has_authority_column(conn):
         # M7 fix: pre-migration DB without authority column.
         # If caller requests UNVERIFIED, return empty list to prevent false-positive
@@ -277,13 +332,13 @@ def get_pairs_for_bucket(
             if bin_source_filter is not None
             else (cluster, season, authority_filter)
         )
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT p_raw, lead_days, outcome, range_label, decision_group_id
-            FROM calibration_pairs
+            FROM {table}
             WHERE cluster = ? AND season = ? AND authority = ?
             {bin_clause}
             ORDER BY target_date
-        """.format(bin_clause=bin_clause), params).fetchall()
+        """, params).fetchall()
 
     result = []
     for row in rows:
@@ -316,13 +371,14 @@ def get_pairs_count(
             "get_pairs_count reads legacy `calibration_pairs`, which is "
             "HIGH-only. For LOW counts use the calibration_pairs_v2 API."
         )
+    table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
-        return conn.execute("""
-            SELECT COUNT(*) FROM calibration_pairs
+        return conn.execute(f"""
+            SELECT COUNT(*) FROM {table}
             WHERE cluster = ? AND season = ?
         """, (cluster, season)).fetchone()[0]
-    return conn.execute("""
-        SELECT COUNT(*) FROM calibration_pairs
+    return conn.execute(f"""
+        SELECT COUNT(*) FROM {table}
         WHERE cluster = ? AND season = ? AND authority = ?
     """, (cluster, season, authority_filter)).fetchone()[0]
 
@@ -347,14 +403,15 @@ def get_decision_group_count(
             "get_decision_group_count reads legacy `calibration_pairs`, "
             "which is HIGH-only. For LOW counts use the calibration_pairs_v2 API."
         )
+    table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
-        row = conn.execute("""
-            SELECT COUNT(DISTINCT decision_group_id) FROM calibration_pairs
+        row = conn.execute(f"""
+            SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND decision_group_id IS NOT NULL
         """, (cluster, season)).fetchone()
     else:
-        row = conn.execute("""
-            SELECT COUNT(DISTINCT decision_group_id) FROM calibration_pairs
+        row = conn.execute(f"""
+            SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND authority = ?
               AND decision_group_id IS NOT NULL
         """, (cluster, season, authority_filter)).fetchone()
@@ -363,7 +420,8 @@ def get_decision_group_count(
 
 def canonical_pairs_ready_for_refit(conn: sqlite3.Connection) -> bool:
     """Check whether VERIFIED calibration pairs are exclusively canonical."""
-    row = conn.execute("""
+    table = _qualified_calibration_read_table(conn, "calibration_pairs")
+    row = conn.execute(f"""
         SELECT
             SUM(CASE WHEN authority = 'VERIFIED'
                       AND bin_source = 'canonical_v1'
@@ -375,7 +433,7 @@ def canonical_pairs_ready_for_refit(conn: sqlite3.Connection) -> bool:
                            OR decision_group_id IS NULL
                            OR decision_group_id = '')
                      THEN 1 ELSE 0 END) AS unsafe_rows
-        FROM calibration_pairs
+        FROM {table}
     """).fetchone()
     canonical_rows = int(row["canonical_rows"] or 0) if row else 0
     unsafe_rows = int(row["unsafe_rows"] or 0) if row else 0
@@ -490,10 +548,11 @@ def load_platt_model(
     bucket_key: str,
 ) -> Optional[dict]:
     """Load a fitted Platt model. Returns None if not found, inactive, or not VERIFIED."""
-    row = conn.execute("""
+    table = _qualified_calibration_read_table(conn, "platt_models")
+    row = conn.execute(f"""
         SELECT param_A, param_B, param_C, bootstrap_params_json,
                n_samples, brier_insample, fitted_at, input_space
-        FROM platt_models
+        FROM {table}
         WHERE bucket_key = ? AND is_active = 1 AND authority = 'VERIFIED'
     """, (bucket_key,)).fetchone()
 
@@ -564,12 +623,13 @@ def load_platt_model_v2(
     Returns:
         Same dict shape as load_platt_model, or None.
     """
+    table = _qualified_calibration_read_table(conn, "platt_models_v2")
     if data_version is not None:
         row = conn.execute(
-            """
+            f"""
             SELECT param_A, param_B, param_C, bootstrap_params_json,
                    n_samples, brier_insample, fitted_at, input_space
-            FROM platt_models_v2
+            FROM {table}
             WHERE temperature_metric = ?
               AND cluster = ?
               AND season = ?
@@ -584,10 +644,10 @@ def load_platt_model_v2(
         ).fetchone()
     else:
         row = conn.execute(
-            """
+                        f"""
             SELECT param_A, param_B, param_C, bootstrap_params_json,
                    n_samples, brier_insample, fitted_at, input_space
-            FROM platt_models_v2
+                        FROM {table}
             WHERE temperature_metric = ?
               AND cluster = ?
               AND season = ?
@@ -660,13 +720,14 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
     trajectories without re-reading the canonical surface row-by-row.
     """
     try:
+        table = _qualified_calibration_read_table(conn, "platt_models_v2")
         rows = conn.execute(
-            """
+            f"""
             SELECT temperature_metric, cluster, season, data_version,
                    input_space, model_key, param_A, param_B, param_C,
                    bootstrap_params_json, n_samples, brier_insample,
                    fitted_at, authority
-            FROM platt_models_v2
+            FROM {table}
             WHERE is_active = 1 AND authority = 'VERIFIED'
             ORDER BY temperature_metric, cluster, season, fitted_at DESC
             """
@@ -718,12 +779,13 @@ def list_active_platt_models_legacy(conn: sqlite3.Connection) -> list[dict]:
     Each result dict carries an explicit `source: 'legacy'` tag downstream.
     """
     try:
+        table = _qualified_calibration_read_table(conn, "platt_models")
         rows = conn.execute(
-            """
+            f"""
             SELECT bucket_key, param_A, param_B, param_C,
                    bootstrap_params_json, n_samples, brier_insample,
                    fitted_at, input_space, authority
-            FROM platt_models
+            FROM {table}
             WHERE is_active = 1 AND authority = 'VERIFIED'
             ORDER BY bucket_key, fitted_at DESC
             """

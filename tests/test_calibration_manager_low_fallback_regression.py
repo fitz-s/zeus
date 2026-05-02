@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-26
+# Last reused/audited: 2026-05-02
 # Authority basis: docs/operations/task_2026-04-26_full_data_midstream_fix_plan/plan.md
 #                  slice A2-fix1 (post-review BLOCKER from code-reviewer)
 """Slice A2 post-review regression test.
@@ -85,7 +85,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
     # The KEY thing this test guards is that L225 reads `level3` AT ALL —
     # pre-fix, that read crashed with UnboundLocalError before the
     # comparison could even evaluate.
-    def fake_v2(conn, *, temperature_metric, cluster, season):
+    def fake_v2(conn, *, temperature_metric, cluster, season, data_version=None):
         if cluster == fallback_cluster:
             return {
                 "n_samples": 0,

@@ -193,8 +193,11 @@ def fetch_ogimet_hourly(
 
     all_rows: list[tuple[datetime, float]] = []
     raw_count = 0
-    current = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
-    end_utc = datetime.combine(end_date, datetime.max.time().replace(microsecond=0), tzinfo=timezone.utc)
+    current, end_utc = _local_date_range_to_utc_window(
+        start_date,
+        end_date,
+        timezone_name,
+    )
 
     while current <= end_utc:
         chunk_end = min(current + timedelta(days=OGIMET_CHUNK_DAYS), end_utc)
@@ -242,6 +245,25 @@ def fetch_ogimet_hourly(
     return OgimetHourlyFetchResult(
         observations=observations,
         raw_metar_count=raw_count,
+    )
+
+
+def _local_date_range_to_utc_window(
+    start_date: date,
+    end_date: date,
+    timezone_name: str,
+) -> tuple[datetime, datetime]:
+    """Convert an inclusive local-date range to inclusive UTC query bounds."""
+    tz = ZoneInfo(timezone_name)
+    start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
+    end_exclusive_local = datetime.combine(
+        end_date + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=tz,
+    )
+    return (
+        start_local.astimezone(timezone.utc),
+        (end_exclusive_local - timedelta(seconds=1)).astimezone(timezone.utc),
     )
 
 
@@ -412,7 +434,7 @@ def _aggregate(
 
 
 def _detect_missing_local_hour(utc_dt: datetime, tz: ZoneInfo) -> bool:
-    """Round-trip test: local at this UTC then back to UTC — gap if mismatched."""
+    """Round-trip test preserving DST fold metadata from UTC-derived local time."""
     local_dt = utc_dt.astimezone(tz)
-    roundtrip_utc = local_dt.replace(tzinfo=tz).astimezone(timezone.utc)
+    roundtrip_utc = local_dt.astimezone(timezone.utc)
     return abs((roundtrip_utc - utc_dt).total_seconds()) >= 3600

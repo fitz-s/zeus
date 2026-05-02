@@ -347,10 +347,11 @@ def _aggregate_hourly(
 def _detect_missing_local_hour(utc_dt: datetime, tz: ZoneInfo) -> bool:
     """True if the local wall clock for *utc_dt* lands inside a DST gap.
 
-    Implementation: convert UTC → local, then convert local (with fold=0)
-    back to UTC. If the round-trip is off by the DST savings amount, the
-    local time isn't real.
+    Implementation: convert UTC → local, then round-trip that exact aware
+    value back to UTC. The direct ``astimezone`` path preserves ``fold=1`` for
+    valid fall-back hours; replacing ``tzinfo`` would normalize the second
+    ambiguous hour and falsely mark it as missing.
     """
     local_dt = utc_dt.astimezone(tz)
-    roundtrip_utc = local_dt.replace(tzinfo=tz).astimezone(timezone.utc)
+    roundtrip_utc = local_dt.astimezone(timezone.utc)
     return abs((roundtrip_utc - utc_dt).total_seconds()) >= 3600
