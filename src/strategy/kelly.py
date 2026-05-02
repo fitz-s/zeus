@@ -133,6 +133,9 @@ def dynamic_kelly_mult(
         m *= max(0.0, 1.0 - drawdown_pct / max_drawdown)
 
     # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
+    # Note: This check applies to the upstream Kelly computation before per-strategy
+    # gating. The final multiplier step (below) can legitimately produce 0.0 to
+    # disable shadow, dormant, or unknown strategies via STRATEGY_KELLY_MULTIPLIERS.
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
             f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "

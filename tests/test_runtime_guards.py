@@ -6,18 +6,17 @@
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
-from __future__ import annotations
-
+from dataclasses import dataclass
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+from pathlib import Path
+from datetime import date, datetime, timedelta, timezone
+import types
 import json
 import logging
 import sqlite3
 import sys
 import tempfile
-import types
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
-from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -5474,6 +5473,173 @@ def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():
     )
     assert evaluator_module._strategy_key_for(day0, center_edge) == "settlement_capture"
     assert evaluator_module._entry_ci_rejection_reason(opening, center_edge) is None
+
+
+def test_evaluate_candidate_rejects_unclassified_strategy_key():
+    from src.engine.evaluator import evaluate_candidate, MarketCandidate
+    from src.state.portfolio import PortfolioState
+    from src.config import City
+    from src.engine.discovery_mode import DiscoveryMode
+    import unittest.mock as mock
+
+    # Initial candidate for outer scope context
+    city = City(
+        name="Chicago", lat=41.8781, lon=-87.6298,
+        timezone="America/Chicago", cluster="US",
+        settlement_unit="F", wu_station="KORD",
+    )
+    # Patch fetch_ensemble to avoid real network calls
+    now = datetime.now(timezone.utc)
+    target_dt = now.date()
+    target_date = target_dt.isoformat()
+
+    # Ensure we have a full day of data for target_date by starting from its midnight
+    midnight = datetime.combine(target_dt, datetime.min.time(), tzinfo=timezone.utc)
+    mock_ens_result = {
+        "members_hourly": np.zeros((51, 168)),
+        "times": [(midnight + timedelta(hours=i)).isoformat() for i in range(168)],
+        "fetch_time": now,
+        "source_id": "tigge",
+        "model": "tigge",
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "raw_payload_hash": "a" * 64,
+        "issue_time": now - timedelta(hours=1),
+        "available_at": now - timedelta(minutes=30),
+        "first_valid_time": midnight,
+        "n_members": 51
+    }
+
+    candidate = MarketCandidate(
+        city=city,
+        target_date=target_date,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+        temperature_metric="high",
+        hours_since_open=2.0,
+        outcomes=[
+            {
+                "title": "39 or below°F",
+                "range_low": None,
+                "range_high": 39,
+                "executable": True,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "support_index": 0,
+            },
+            {
+                "title": "40-41°F",
+                "range_low": 40,
+                "range_high": 41,
+                "executable": True,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "support_index": 1,
+            },
+            {
+                "title": "42 or higher°F",
+                "range_low": 42,
+                "range_high": None,
+                "executable": True,
+                "token_id": "yes3",
+                "no_token_id": "no3",
+                "market_id": "m3",
+                "support_index": 2,
+            },
+        ],
+    )
+
+    portfolio = PortfolioState()
+    clob = mock.Mock()
+    clob.get_best_bid_ask.return_value = (0.54, 0.56, 100.0, 100.0)
+    limits = types.SimpleNamespace(
+        max_city_exposure_usd=1000.0,
+        max_cluster_exposure_usd=5000.0,
+        max_total_exposure_usd=10000.0,
+    )
+
+    from src.types import BinEdge, Bin
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.signal.ensemble_signal import EnsembleSignal
+    from src.types.temperature import TemperatureDelta
+
+    sem = SettlementSemantics.for_city(city)
+    ens = EnsembleSignal(
+        members_hourly=mock_ens_result["members_hourly"],
+        times=mock_ens_result["times"],
+        city=city,
+        target_date=datetime.strptime(target_date, "%Y-%m-%d").date(),
+        settlement_semantics=sem,
+        temperature_metric=HIGH_LOCALDAY_MAX,
+    )
+
+    # Mock AlphaDecision
+    mock_alpha_decision = mock.Mock()
+    mock_alpha_decision.value_for_consumer.return_value = 0.5
+
+    target_edge = BinEdge(
+        bin=Bin(low=40, high=41, label="40-41°F", unit="F"),
+        direction="buy_no",
+        edge=0.15,
+        ci_lower=0.10,
+        ci_upper=0.20,
+        p_model=0.70,
+        p_market=0.55,
+        p_posterior=0.70,
+        entry_price=0.55,
+        vwmp=0.55,
+        p_value=0.01,
+        support_index=1,
+    )
+
+    import src.engine.evaluator as eval_mod
+    import unittest.mock as mock
+
+    # Mock calibrator for the unclassified test
+    from src.calibration.platt import ExtendedPlattCalibrator
+    mock_cal = ExtendedPlattCalibrator()
+    mock_cal.predict_for_bin = lambda p, lead_days, bin_width=None: p
+
+    from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
+    mock_hypothesis = FullFamilyHypothesis(
+        index=1,
+        range_label="40-41°F",
+        direction="buy_no",
+        edge=0.15,
+        ci_lower=0.10,
+        ci_upper=0.20,
+        p_value=0.01,
+        p_model=0.70,
+        p_market=0.55,
+        p_posterior=0.70,
+        entry_price=0.55,
+        is_shoulder=False,
+        passed_prefilter=True,
+    )
+
+    with mock.patch("src.engine.evaluator.fetch_ensemble", return_value=mock_ens_result):
+        with mock.patch("src.engine.evaluator.scan_full_hypothesis_family", return_value=[mock_hypothesis]):
+            with mock.patch("src.engine.evaluator._filter_executable_selected_edges", return_value=[target_edge]):
+                with mock.patch("src.engine.evaluator._store_ens_snapshot", return_value="snap123"):
+                    with mock.patch("src.engine.evaluator._read_v2_snapshot_metadata", return_value={"boundary_ambiguous": False}):
+                        with mock.patch("src.engine.evaluator._store_snapshot_p_raw", return_value=True):
+                            with mock.patch("src.engine.evaluator.get_calibrator", return_value=(mock_cal, 1)):
+                                with mock.patch("src.engine.evaluator.ensemble_crosscheck_model", return_value="gfs025"):
+                                    with mock.patch("src.engine.evaluator.model_agreement", return_value="AGREE"):
+                                        with mock.patch("src.engine.evaluator._record_selection_family_facts", return_value=None):
+                                            with mock.patch("src.engine.evaluator.compute_alpha", return_value=mock_alpha_decision):
+                                                with mock.patch("src.engine.evaluator.edge_n_bootstrap", return_value=10):
+                                                    decisions = evaluate_candidate(candidate, None, portfolio, clob, limits, decision_time=now)
+
+    assert len(decisions) == 1
+    d = decisions[0]
+    assert d.should_trade is False
+    assert d.rejection_stage == "SIGNAL_QUALITY"
+    assert "strategy_key_unclassified" in d.rejection_reasons
+    assert d.strategy_key == ""
 
 
 def test_materialize_position_preserves_evaluator_strategy_key():

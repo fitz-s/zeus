@@ -2421,6 +2421,19 @@ def evaluate_candidate(
         tokens = token_map[bin_idx]
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
+        if strategy_key is None:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["strategy_key_unclassified"],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "strategy_key_classification"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+            ))
+            continue
         ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
         if ci_rejection_reason is not None:
             decisions.append(EdgeDecision(
