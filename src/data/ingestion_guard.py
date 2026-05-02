@@ -110,8 +110,21 @@ class IngestionGuard:
                 / "config"
                 / "city_monthly_bounds.json"
             )
-        with open(bounds_path) as f:
-            self._bounds: dict = json.load(f)["cities"]
+        # Resilience: missing/corrupt bounds file MUST NOT crash the ingest
+        # daemon at module-import time. check_physical_bounds() already falls
+        # through to _check_lat_band_bounds when self._bounds.get(city) is None,
+        # so an empty dict here gives every city the lat-band path.
+        try:
+            with open(bounds_path) as f:
+                self._bounds: dict = json.load(f)["cities"]
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError) as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "IngestionGuard: failed to load city bounds at %s (%s: %s); "
+                "falling back to lat-band heuristic for all cities",
+                bounds_path, type(exc).__name__, exc,
+            )
+            self._bounds = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
