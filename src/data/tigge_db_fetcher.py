@@ -55,6 +55,22 @@ _FRESHNESS_WINDOW_HOURS = 24
 _TIGGE_DATA_VERSION_PREFIX = "tigge_"
 
 
+def _coerce_utc_datetime(value: object, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def fetch_from_db(
     city: "City",
     temperature_metric: str,
@@ -81,6 +97,9 @@ def fetch_from_db(
         Returns None when no VERIFIED+OK rows exist within the freshness
         window, so the evaluator can skip the candidate without crashing.
     """
+    if fetch_time.tzinfo is None:
+        fetch_time = fetch_time.replace(tzinfo=timezone.utc)
+    fetch_time = fetch_time.astimezone(timezone.utc)
     cutoff = (fetch_time - timedelta(hours=freshness_hours)).isoformat()
 
     conn = get_world_connection()
@@ -91,6 +110,8 @@ def fetch_from_db(
                 target_date,
                 issue_time,
                 available_at,
+                fetch_time,
+                recorded_at,
                 members_json,
                 members_unit,
                 snapshot_id,
@@ -101,7 +122,7 @@ def fetch_from_db(
               AND authority = 'VERIFIED'
               AND causality_status = 'OK'
               AND data_version LIKE ?
-              AND recorded_at > ?
+              AND datetime(recorded_at) > datetime(?)
               AND snapshot_id = (
                   SELECT MAX(s2.snapshot_id)
                   FROM ensemble_snapshots_v2 s2
@@ -111,7 +132,7 @@ def fetch_from_db(
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'
                     AND s2.data_version LIKE ?
-                    AND s2.recorded_at > ?
+                    AND datetime(s2.recorded_at) > datetime(?)
               )
             ORDER BY target_date ASC
             """,
@@ -144,6 +165,8 @@ def fetch_from_db(
 
     latest_issue_time: Optional[str] = None
     latest_available_at: Optional[str] = None
+    latest_fetch_time: Optional[str] = None
+    latest_recorded_at: Optional[str] = None
     first_snapshot_id: Optional[int] = None
 
     for row in rows:
@@ -176,6 +199,12 @@ def fetch_from_db(
         avail = row["available_at"]
         if avail and (latest_available_at is None or avail > latest_available_at):
             latest_available_at = avail
+        source_fetch = row["fetch_time"]
+        if source_fetch and (latest_fetch_time is None or source_fetch > latest_fetch_time):
+            latest_fetch_time = source_fetch
+        recorded = row["recorded_at"]
+        if recorded and (latest_recorded_at is None or recorded > latest_recorded_at):
+            latest_recorded_at = recorded
 
     if not all_times:
         _log.warning(
@@ -211,24 +240,23 @@ def fetch_from_db(
     else:
         run_init_utc = fetch_time
 
-    # Parse available_at for later injection into parsed dict
     available_at_str: Optional[str] = latest_available_at
+    captured_at = _coerce_utc_datetime(latest_fetch_time or latest_recorded_at, fetch_time)
+    raw_payload["issue_time"] = run_init_utc.isoformat()
+    raw_payload["available_at"] = available_at_str or run_init_utc.isoformat()
+    raw_payload["fetch_time"] = captured_at.isoformat()
+    raw_payload["captured_at"] = captured_at.isoformat()
+    raw_payload["recorded_at"] = latest_recorded_at or ""
 
     bundle = ForecastBundle(
         source_id=SOURCE_ID,
         run_init_utc=run_init_utc,
         lead_hours=tuple(range(len(all_times))),
-        captured_at=fetch_time,
+        captured_at=captured_at,
         raw_payload_hash=stable_payload_hash(raw_payload),
         authority_tier=AUTHORITY_TIER,
         ensemble_members=tuple(members_hourly.tolist()),
         raw_payload=raw_payload,
     )
-
-    # Stash provenance extras for the evaluator evidence contract.
-    # _parse_ingest_bundle doesn't know about available_at; we inject it via
-    # a sentinel on the raw_payload so the evaluator can find it.
-    if available_at_str:
-        bundle.raw_payload["available_at"] = available_at_str  # type: ignore[index]
 
     return bundle
