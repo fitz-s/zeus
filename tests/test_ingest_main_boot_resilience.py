@@ -224,3 +224,158 @@ class TestSolarStalenessGuard:
             _call_startup_catch_up(conn)
 
         mock_stick.assert_called_once_with(conn)
+
+# ---------------------------------------------------------------------------
+# Advisory lock guard tests
+# ---------------------------------------------------------------------------
+
+
+from contextlib import contextmanager
+
+
+def _make_lock_mock(acquired: bool):
+    """Return a mock for acquire_lock that yields acquired (True/False)."""
+    @contextmanager
+    def _mock_acquire_lock(table_name, **kwargs):
+        yield acquired
+    return _mock_acquire_lock
+
+
+class TestAdvisoryLockGuard:
+    """Boot-forced daily_tick respects advisory lock — skips when lock held."""
+
+    def test_forecasts_boot_tick_skips_when_lock_held(self):
+        """When forecasts_daily lock is held, boot-forced daily_tick is NOT called."""
+        conn = _make_conn()
+        stale_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        _insert_forecast_row(conn, stale_ts)
+        fresh_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _insert_solar_coverage_row(conn, fresh_ts)
+
+        lock_not_acquired = _make_lock_mock(acquired=False)
+
+        with (
+            patch("src.data.daily_obs_append.catch_up_missing", return_value={}),
+            patch("src.data.hourly_instants_append.catch_up_missing", return_value={}),
+            patch("src.data.solar_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
+            patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
+            patch("src.state.db.get_world_connection", return_value=conn),
+            patch("src.data.dual_run_lock.acquire_lock", new=lock_not_acquired),
+        ):
+            _call_startup_catch_up(conn)
+
+        mock_ftick.assert_not_called()
+
+    def test_solar_boot_tick_skips_when_lock_held(self):
+        """When solar_daily lock is held, boot-forced solar daily_tick is NOT called."""
+        conn = _make_conn()
+        fresh_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _insert_forecast_row(conn, fresh_ts)
+        stale_ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+        _insert_solar_coverage_row(conn, stale_ts)
+
+        lock_not_acquired = _make_lock_mock(acquired=False)
+
+        with (
+            patch("src.data.daily_obs_append.catch_up_missing", return_value={}),
+            patch("src.data.hourly_instants_append.catch_up_missing", return_value={}),
+            patch("src.data.solar_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
+            patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
+            patch("src.state.db.get_world_connection", return_value=conn),
+            patch("src.data.dual_run_lock.acquire_lock", new=lock_not_acquired),
+        ):
+            _call_startup_catch_up(conn)
+
+        mock_stick.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Solar status filter: FAILED rows must not mask staleness
+# ---------------------------------------------------------------------------
+
+
+class TestSolarStatusFilter:
+    """data_coverage FAILED rows must not be counted as fresh solar data."""
+
+    def test_failed_solar_row_treated_as_stale(self):
+        """A recent FAILED coverage row must NOT suppress the solar boot-force fetch."""
+        conn = _make_conn()
+        fresh_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _insert_forecast_row(conn, fresh_ts)
+
+        # Insert a recent FAILED coverage row — should NOT count as fresh
+        recent_failed_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO data_coverage
+               (data_table, city, data_source, target_date, sub_key, status, fetched_at)
+               VALUES ('solar_daily', 'TestCity', 'open_meteo', '2026-05-01', '', 'FAILED', ?)""",
+            (recent_failed_ts,),
+        )
+        conn.commit()
+
+        fake_solar = {"cities_processed": 46, "inserted": 650}
+        lock_acquired = _make_lock_mock(acquired=True)
+
+        with (
+            patch("src.data.daily_obs_append.catch_up_missing", return_value={}),
+            patch("src.data.hourly_instants_append.catch_up_missing", return_value={}),
+            patch("src.data.solar_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.catch_up_missing", return_value={}),
+            patch("src.data.forecasts_append.daily_tick", return_value={}) as mock_ftick,
+            patch("src.data.solar_append.daily_tick", return_value=fake_solar) as mock_stick,
+            patch("src.state.db.get_world_connection", return_value=conn),
+            patch("src.data.dual_run_lock.acquire_lock", new=lock_acquired),
+        ):
+            _call_startup_catch_up(conn)
+
+        # Only WRITTEN rows count — no WRITTEN rows means infinite staleness → force fetch
+        mock_stick.assert_called_once_with(conn)
+        mock_ftick.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-1 timestamp capture: Phase 1 cannot mask overnight gap
+# ---------------------------------------------------------------------------
+
+
+class TestPrePhase1Snapshot:
+    """Phase 1 catch-up backfills cannot suppress a boot-force daily_tick."""
+
+    def test_phase1_catch_up_does_not_mask_stale_forecasts(self):
+        """Even if Phase 1 writes a fresh forecast row, the pre-boot staleness is used."""
+        conn = _make_conn()
+        # Pre-boot state: no forecast rows (infinite staleness)
+        fresh_solar = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _insert_solar_coverage_row(conn, fresh_solar)
+
+        fresh_row_ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
+        def _catch_up_forecasts_with_write(conn_arg, *, days_back):
+            """Simulates catch_up_missing writing a fresh historical row."""
+            _insert_forecast_row(conn_arg, fresh_row_ts)
+            return {"inserted": 1}
+
+        fake_result = {"cities_processed": 46, "inserted": 100}
+        lock_acquired = _make_lock_mock(acquired=True)
+
+        with (
+            patch("src.data.daily_obs_append.catch_up_missing", return_value={}),
+            patch("src.data.hourly_instants_append.catch_up_missing", return_value={}),
+            patch("src.data.solar_append.catch_up_missing", return_value={}),
+            patch(
+                "src.data.forecasts_append.catch_up_missing",
+                side_effect=_catch_up_forecasts_with_write,
+            ),
+            patch("src.data.forecasts_append.daily_tick", return_value=fake_result) as mock_ftick,
+            patch("src.data.solar_append.daily_tick", return_value={}) as mock_stick,
+            patch("src.state.db.get_world_connection", return_value=conn),
+            patch("src.data.dual_run_lock.acquire_lock", new=lock_acquired),
+        ):
+            _call_startup_catch_up(conn)
+
+        # The stale decision was made before Phase 1 wrote the fresh row
+        mock_ftick.assert_called_once_with(conn)

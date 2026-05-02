@@ -352,6 +352,28 @@ def _k2_startup_catch_up():
 
     conn = get_world_connection()
     try:
+        # ---- Phase 2 probe: capture staleness timestamps BEFORE Phase 1 ----
+        # Phase 1 (catch_up_missing) can introduce fresh rows for historical
+        # slots, causing MAX(captured_at/fetched_at) to look fresh even after
+        # an overnight outage where the *daily* tick was missed.  Snapshot now
+        # so Phase 2 can decide purely on pre-boot data.
+        now_utc = datetime.now(timezone.utc)
+        threshold_h = _BOOT_FRESHNESS_THRESHOLD_HOURS
+        from dateutil.parser import parse as _parse_dt
+
+        row = conn.execute(
+            "SELECT MAX(captured_at) FROM forecasts"
+        ).fetchone()
+        _pre_phase1_max_captured = row[0] if row else None
+
+        # Filter to status='WRITTEN' only — FAILED/MISSING rows also bump
+        # fetched_at, which can falsely mask real data staleness.
+        row = conn.execute(
+            "SELECT MAX(fetched_at) FROM data_coverage"
+            " WHERE data_table = 'solar_daily' AND status = 'WRITTEN'"
+        ).fetchone()
+        _pre_phase1_max_solar = row[0] if row else None
+
         # ---- Phase 1: hole filler (existing semantics, unchanged) -----------
         logger.info("K2 startup catch-up: observations")
         logger.info("  %s", catch_up_obs(conn, days_back=30))
@@ -363,26 +385,26 @@ def _k2_startup_catch_up():
         logger.info("  %s", catch_up_forecasts(conn, days_back=30))
 
         # ---- Phase 2: staleness guard for once-per-day tables ---------------
-        now_utc = datetime.now(timezone.utc)
-        threshold_h = _BOOT_FRESHNESS_THRESHOLD_HOURS
+        # Uses pre-Phase-1 timestamps so catch-up backfills cannot mask gaps.
 
         # forecasts — has captured_at column written by the appender
-        row = conn.execute(
-            "SELECT MAX(captured_at) FROM forecasts"
-        ).fetchone()
-        max_captured = row[0] if row else None
+        max_captured = _pre_phase1_max_captured
         if max_captured is None:
             staleness_h = float("inf")
         else:
-            from dateutil.parser import parse as _parse_dt
             staleness_h = (now_utc - _parse_dt(max_captured)).total_seconds() / 3600
         if staleness_h > threshold_h:
             logger.warning(
                 "forecasts stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
                 staleness_h, threshold_h,
             )
-            result = forecasts_daily_tick(conn)
-            logger.info("boot-forced forecasts daily_tick: %s", result)
+            from src.data.dual_run_lock import acquire_lock
+            with acquire_lock("forecasts_daily") as acquired:
+                if not acquired:
+                    logger.info("boot-forced forecasts daily_tick skipped_lock_held")
+                else:
+                    result = forecasts_daily_tick(conn)
+                    logger.info("boot-forced forecasts daily_tick: %s", result)
         else:
             logger.info(
                 "forecasts fresh (%.1fh <= %dh threshold) — skipping boot force-fetch",
@@ -390,14 +412,11 @@ def _k2_startup_catch_up():
             )
 
         # solar_daily — no captured_at column; use data_coverage.fetched_at
-        row = conn.execute(
-            "SELECT MAX(fetched_at) FROM data_coverage WHERE data_table = 'solar_daily'"
-        ).fetchone()
-        max_solar_fetched = row[0] if row else None
+        # (status='WRITTEN' only; FAILED/MISSING rows also bump fetched_at)
+        max_solar_fetched = _pre_phase1_max_solar
         if max_solar_fetched is None:
             solar_staleness_h = float("inf")
         else:
-            from dateutil.parser import parse as _parse_dt
             solar_staleness_h = (
                 (now_utc - _parse_dt(max_solar_fetched)).total_seconds() / 3600
             )
@@ -406,8 +425,13 @@ def _k2_startup_catch_up():
                 "solar_daily stale (%.1fh > %dh threshold) on boot — forcing daily_tick",
                 solar_staleness_h, threshold_h,
             )
-            result = solar_daily_tick(conn)
-            logger.info("boot-forced solar daily_tick: %s", result)
+            from src.data.dual_run_lock import acquire_lock
+            with acquire_lock("solar_daily") as acquired:
+                if not acquired:
+                    logger.info("boot-forced solar daily_tick skipped_lock_held")
+                else:
+                    result = solar_daily_tick(conn)
+                    logger.info("boot-forced solar daily_tick: %s", result)
         else:
             logger.info(
                 "solar_daily fresh (%.1fh <= %dh threshold) — skipping boot force-fetch",

@@ -10,7 +10,6 @@
 
 import os
 import subprocess
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -150,18 +149,24 @@ class TestChannelAMarker:
         assert "SKIPPED" in result.stderr
 
     def test_no_marker_does_not_skip(self):
-        """Channel A: absence of marker does NOT trigger SKIPPED (will run pytest)."""
+        """Channel A: absence of marker does NOT trigger SKIPPED (marker bypass not active).
+
+        Uses an invalid ZEUS_HOOK_PYTEST_BIN so the hook fails fast rather
+        than running the full pytest suite inside CI.
+        """
         cmd = 'git commit -m "normal commit without marker"'
-        result = _run_hook_channel_a(command=cmd)
-        # We don't assert exit code (pytest may pass or fail in test env)
-        # but we assert it did NOT skip via marker
+        result = _run_hook_channel_a(
+            command=cmd,
+            extra_env={"ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        )
+        # Hook must not have skipped via the marker path
         assert "SKIPPED (marker" not in result.stderr
 
     def test_non_commit_command_passes_through(self):
         """Channel A: non-git-commit commands exit 0 without running pytest."""
         result = _run_hook_channel_a(command="ls -la")
         assert result.returncode == 0
-        assert "SKIPPED" not in result.stderr or "BLOCKED" not in result.stderr
+        assert "SKIPPED" not in result.stderr and "BLOCKED" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +184,17 @@ class TestChannelBMarker:
         assert "channel=git" in result.stderr
 
     def test_commit_editmsg_without_marker_does_not_skip(self):
-        """Channel B: COMMIT_EDITMSG without marker does NOT trigger marker SKIPPED."""
+        """Channel B: COMMIT_EDITMSG without marker does NOT trigger marker SKIPPED.
+
+        Uses an invalid ZEUS_HOOK_PYTEST_BIN so the hook fails fast (BLOCKED)
+        rather than running the full pytest suite inside CI.  The important
+        assertion is that the marker skip path was NOT taken.
+        """
         content = "Fix something without the marker\n"
-        result = _run_hook_channel_b(commit_editmsg_content=content)
+        result = _run_hook_channel_b(
+            commit_editmsg_content=content,
+            extra_env={"ZEUS_HOOK_PYTEST_BIN": "/no/such/python"},
+        )
         assert "SKIPPED (marker" not in result.stderr
 
     def test_ps_walk_skips_when_marker_in_parent_argv(self):
