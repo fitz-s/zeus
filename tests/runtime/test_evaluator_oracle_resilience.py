@@ -14,10 +14,15 @@ _DEFAULT_OK for every (city, metric) → trades proceed at standard Kelly.
 """
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import datetime, timezone
 
 from src.engine import evaluator as evaluator_module
+from src.engine.discovery_mode import DiscoveryMode
+from src.state.portfolio import PortfolioState
 from src.strategy import oracle_penalty
+
+
+TEST_DECISION_TIME = datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)
 
 
 def test_evaluator_module_has_no_oracle_evidence_gate():
@@ -92,3 +97,29 @@ def test_oracle_penalty_reload_swallows_bad_value_types(monkeypatch, tmp_path):
     path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": "not-a-number"}}}))
     oracle_penalty.reload()
     assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
+
+
+def test_evaluate_candidate_produces_decision_when_oracle_file_missing(monkeypatch, tmp_path):
+    """Evaluator must not reject or raise when oracle artifact is absent."""
+    from tests.test_center_buy_repair import _candidate, _patch_evaluator
+
+    missing_path = tmp_path / "oracle_error_rates.json"
+    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", missing_path)
+    oracle_penalty.reload()
+    clob = _patch_evaluator(monkeypatch, entry_price=0.05)
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=None,
+        portfolio=PortfolioState(bankroll=150.0),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert decisions
+    assert all(decision.rejection_stage != "ORACLE_EVIDENCE_UNAVAILABLE" for decision in decisions)
+    assert all(
+        "oracle_penalty" not in getattr(decision, "applied_validations", [])
+        for decision in decisions
+    )

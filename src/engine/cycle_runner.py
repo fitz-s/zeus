@@ -59,6 +59,7 @@ from src.state.portfolio import (
     void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
+from src.strategy.oracle_penalty import reload as oracle_penalty_reload
 from src.strategy.risk_limits import RiskLimits
 
 logger = logging.getLogger(__name__)

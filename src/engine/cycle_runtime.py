@@ -1733,6 +1733,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     # auto-paused entries. P2-fix3 latent bug surfaced post-merge.
     from src.engine.evaluator import _normalize_temperature_metric
 
+    # Oracle is a sizing modifier, not a truth gate. Refresh once per discovery
+    # cycle so bridge writes are visible without per-candidate disk I/O.
+    oracle_penalty_reload = getattr(deps, "oracle_penalty_reload", None)
+    if callable(oracle_penalty_reload):
+        oracle_penalty_reload()
+
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
         try:
             from src.state.db import log_opportunity_fact

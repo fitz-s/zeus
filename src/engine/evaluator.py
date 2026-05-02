@@ -66,7 +66,7 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
-from src.strategy.oracle_penalty import get_oracle_info, OracleStatus, reload as oracle_penalty_reload
+from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import (
     apply_familywise_fdr,
@@ -2390,11 +2390,6 @@ def evaluate_candidate(
     projected_total_exposure_usd = current_heat * sizing_bankroll
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)
     projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
-    # Oracle is sizing modifier, not truth gate. Refresh per-cycle so daemon
-    # picks up new bridge writes without restart. graceful fallback (file
-    # missing → all cities OK) lives in oracle_penalty.py.
-    oracle_penalty_reload()
-
     decisions = []
     for edge in filtered:
         decision_validations = list(entry_validations)

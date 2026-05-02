@@ -185,14 +185,15 @@ PYTEST_BIN="${ZEUS_HOOK_PYTEST_BIN:-${REPO_ROOT}/.venv/bin/python}"
 #     test_replay_time_provenance, test_run_replay_cli, test_rebuild_pipeline,
 #     test_calibration_unification, test_p0_hardening, test_healthcheck,
 #     test_assumptions_validation, test_semantic_linter, test_runtime_guards.
-TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py tests/test_contract_source_fields_baseline.py tests/test_data_rebuild_relationships.py tests/test_phase10d_closeout.py tests/test_ensemble_snapshots_bias_corrected_schema.py tests/test_tigge_snapshot_p_raw_backfill.py tests/test_db.py tests/test_replay_time_provenance.py tests/test_run_replay_cli.py tests/test_rebuild_pipeline.py tests/test_calibration_unification.py tests/test_p0_hardening.py tests/test_healthcheck.py tests/test_assumptions_validation.py tests/test_semantic_linter.py tests/test_runtime_guards.py"
-# 2026-05-02 PR-B (oracle gate removal): 656 → 653.
+TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics.py tests/test_digest_profiles_equivalence.py tests/test_inv_prototype.py tests/test_edge_observation.py tests/test_edge_observation_weekly.py tests/test_attribution_drift.py tests/test_attribution_drift_weekly.py tests/test_ws_poll_reaction.py tests/test_ws_poll_reaction_weekly.py tests/test_calibration_observation.py tests/test_calibration_observation_weekly.py tests/test_learning_loop_observation.py tests/test_learning_loop_observation_weekly.py tests/test_invariant_citations.py tests/test_identity_column_defaults.py tests/test_truth_authority_enum.py tests/test_dynamic_sql_baseline.py tests/test_contract_source_fields_baseline.py tests/test_data_rebuild_relationships.py tests/test_phase10d_closeout.py tests/test_ensemble_snapshots_bias_corrected_schema.py tests/test_tigge_snapshot_p_raw_backfill.py tests/test_db.py tests/test_replay_time_provenance.py tests/test_run_replay_cli.py tests/test_rebuild_pipeline.py tests/test_calibration_unification.py tests/test_p0_hardening.py tests/test_healthcheck.py tests/test_assumptions_validation.py tests/test_semantic_linter.py tests/test_runtime_guards.py tests/runtime/test_evaluator_oracle_resilience.py"
+# 2026-05-02 PR-B (oracle gate removal): 656 → 658.
 # net = -2 deleted oracle-gate tests in test_runtime_guards (gate removed,
 # graceful fallback covers the path) + 7 fixed healthcheck tests (autouse
 # mock added, were failing on main against missing state/assumptions.json) -
 # 9 not-currently-passing baseline (7 healthcheck reclaimed; 1 test_day0
-# happens to pass; 1 test_live_assumptions_manifest xfailed pending fix).
-BASELINE_PASSED=653
+# happens to pass; 1 test_live_assumptions_manifest xfailed pending fix) +
+# 5 oracle resilience tests in tests/runtime/test_evaluator_oracle_resilience.py.
+BASELINE_PASSED=658
 BASELINE_SKIPPED=46
 
 if [ ! -x "$PYTEST_BIN" ]; then

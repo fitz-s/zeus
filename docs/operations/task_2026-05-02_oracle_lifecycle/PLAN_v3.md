@@ -106,7 +106,7 @@ PR-A 内部阶段:
 
 **缓存失效修复(sonnet 必修)**:
 - `oracle_penalty._cache` 当前 lazy-load + 永不刷新 → daemon 启动后即使 cron 每天写新数据,daemon 永远读不到
-- 修复:evaluator 每个 cycle 开头调用 `oracle_penalty.reload()`(函数已存在 src/strategy/oracle_penalty.py,无 caller)
+- 修复:cycle runtime 在每个 discovery cycle 开头调用 `oracle_penalty.reload()`(函数已存在 src/strategy/oracle_penalty.py),保持 evaluator per-candidate path 无磁盘 I/O
 - 成本:每 cycle 重读小 JSON,可忽略
 
 测试(sonnet 必修):
@@ -148,13 +148,13 @@ PR-A 内部阶段:
 
 ## 验证序列(live-trading 重启前必过)
 
-1. PR-A 提交并 merge
-2. 手动跑 listener → 写到新路径 ✓
-3. 手动跑 bridge → 写到新路径 ✓
-4. cron 显示新 entry 到位
-5. PR-B 提交并 merge
-6. 删除 `~/.openclaw/storage/zeus/oracle/error_rates.json` → 跑 evaluator 单测,必须产出决策不熔断
-7. 恢复文件 → 重新跑,行为正常
+1. PR-B 提交并 merge
+2. 删除 `~/.openclaw/storage/zeus/oracle/error_rates.json` → 跑 evaluator 单测,必须产出决策不熔断
+3. 恢复文件 → 重新跑,行为正常
+4. PR-A 提交并 merge
+5. 手动跑 listener → 写到新路径 ✓
+6. 手动跑 bridge → 写到新路径 ✓
+7. cron 显示新 entry 到位
 8. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.live-trading.plist`
 
 ## 仍待 haiku 确认的事项
