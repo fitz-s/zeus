@@ -938,6 +938,8 @@ def _record_selection_family_facts(
     else:
         for edge in edges:
             strategy_key = _strategy_key_for(candidate, edge)
+            if strategy_key is None:
+                continue
             # Slice A3 (PR #19 finding 7, 2026-04-26): canonical normalizer
             # eliminates silent HIGH fallback at the edge family-id seam.
             family_id = make_edge_family_id(

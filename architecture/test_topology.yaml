@@ -50,6 +50,7 @@ test_trust_policy:
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-04-30"}
+    tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -183,6 +184,13 @@ test_trust_policy:
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_source_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_market_topology_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_forecast_source_registry.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_tigge_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -211,6 +219,7 @@ categories:
     - tests/test_config.py
     - tests/test_runtime_n_mc_floor.py
     - tests/test_evaluator_explicit_n_mc.py
+    - tests/test_evaluator_strategy_key_failclosed.py
     - tests/test_cross_module_invariants.py
     - tests/test_cross_module_relationships.py
     - tests/test_data_rebuild_relationships.py
@@ -243,6 +252,13 @@ categories:
     - tests/test_strategy_benchmark.py
     - tests/test_risk_allocator.py
     - tests/test_live_readiness_gates.py
+    - tests/test_ingest_boot_time_semantics.py
+    - tests/test_readiness_state.py
+    - tests/test_release_calendar.py
+    - tests/test_job_run_schema.py
+    - tests/test_source_run_schema.py
+    - tests/test_readiness_state_schema.py
+    - tests/test_market_topology_state_schema.py
     - tests/test_discovery_idempotency.py
     - tests/test_hk_settlement_floor_rounding.py
     - tests/test_ingest_isolation.py
@@ -573,6 +589,24 @@ law_gate:
       - scripts/live_readiness_check.py
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/G1.md
+  DATA_DAEMON_READINESS_CONTRACT:
+    tests:
+      - tests/test_ingest_boot_time_semantics.py
+      - tests/test_readiness_state.py
+      - tests/test_release_calendar.py
+      - tests/test_job_run_schema.py
+      - tests/test_source_run_schema.py
+      - tests/test_readiness_state_schema.py
+      - tests/test_market_topology_state_schema.py
+    protects:
+      - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
+      - config/source_release_calendar.yaml
+      - src/data/release_calendar.py
+      - src/state/db.py
+      - src/state/job_run_repo.py
+      - src/state/source_run_repo.py
+      - src/state/readiness_repo.py
+      - src/state/market_topology_repo.py
   UNIT_BIN_TOPOLOGY:
     tests:
       - tests/test_temperature.py

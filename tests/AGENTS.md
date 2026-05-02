@@ -50,6 +50,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_harvester_split_independence.py` | Antibody #12: structural boundary between ingest-side settlement harvester and trading lane (created 2026-04-30) |
 | `test_heartbeat_dual_coverage.py` | Antibody #15: heartbeat sensor must monitor BOTH daemon heartbeat files (two-system independence; created 2026-04-30) |
 | `test_identity_column_defaults.py` | Pytest wrapper for check_identity_column_defaults.py; INV-14 identity-column DEFAULT antibody (created 2026-05-01) |
+| `test_ingest_boot_time_semantics.py` | PR45a relationship contract: city-local time, DST, scope identity, source-health, and data-coverage substrate facts cannot collapse into live readiness (created 2026-05-02) |
 | `test_ingest_provenance_contract.py` | Antibody #9: IngestionGuard provenance contract tests (two-system independence; created 2026-04-30) |
 | `test_inv_prototype.py` | Prototype evidence tests for @enforced_by INV decorator experiment; advisory only (created 2026-04-28) |
 | `test_invariant_citations.py` | Pytest wrapper for check_invariant_test_citations.py; two-ring invariant citation enforcement (created 2026-05-01) |
@@ -62,6 +63,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_opendata_mx2t6_not_2t.py` | Antibody for Invariant A: download_ecmwf_open_ens.py default param must be mx2t6+mn2t6, not 2t (created 2026-05-01) |
 | `test_opendata_writes_v2_table.py` | Antibody for Invariant A: Open Data ENS rows land in ensemble_snapshots_v2 with canonical data_versions (created 2026-05-01) |
 | `test_riskguard_cold_start.py` | Antibody: riskguard cold-start deadlock fix — empty outcome fact must not block startup (created 2026-05-01) |
+| `test_readiness_state.py` | PR45a relationship contract: readiness invalidation, backfill shadow-only, topology blocking, quote exclusion, and settlement-capture shadow boundary (created 2026-05-02) |
 | `test_scheduler_health_truthfulness.py` | Antibody for Invariant D: structural-failure job must produce status=FAILED in scheduler_jobs_health.json (created 2026-05-01) |
 | `test_settlements_physical_quantity_invariant.py` | Antibody for INV-14 identity spine: settlement metric identity correctness and migration residuals (created 2026-04-28) |
 | `test_source_health_probe.py` | Antibody #5: source health probe contract tests (two-system independence; created 2026-04-30) |

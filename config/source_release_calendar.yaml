@@ -1,0 +1,80 @@
+schema_version: 1
+entries:
+  - calendar_id: ecmwf_open_data_mx2t6_high
+    source_id: ecmwf_open_data
+    track: mx2t6_high
+    plane: forecast
+    timezone: UTC
+    cycle_hours_utc: [0, 6, 12, 18]
+    safe_fetch:
+      default_lag_minutes: 485
+      min_partial_lag_minutes: 400
+    max_source_lag_seconds: 108000
+    parameter: mx2t6
+    metric: high
+    period_semantics: max temperature at 2m in previous 6h ending at valid step
+    expected_members: 51
+    expected_step_rule: local_day_6h_windows_up_to_240h
+    partial_policy: BLOCK_LIVE
+    live_authorization: true
+    authority_tier: DERIVED_FROM_DISSEMINATION
+    authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
+    backfill_only: false
+  - calendar_id: ecmwf_open_data_mn2t6_low
+    source_id: ecmwf_open_data
+    track: mn2t6_low
+    plane: forecast
+    timezone: UTC
+    cycle_hours_utc: [0, 6, 12, 18]
+    safe_fetch:
+      default_lag_minutes: 485
+      min_partial_lag_minutes: 400
+    max_source_lag_seconds: 108000
+    parameter: mn2t6
+    metric: low
+    period_semantics: min temperature at 2m in previous 6h ending at valid step
+    expected_members: 51
+    expected_step_rule: local_day_6h_windows_up_to_240h
+    partial_policy: BLOCK_LIVE
+    live_authorization: true
+    authority_tier: DERIVED_FROM_DISSEMINATION
+    authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
+    backfill_only: false
+  - calendar_id: openmeteo_previous_runs_best_match
+    source_id: openmeteo_previous_runs
+    track: best_match
+    plane: forecast
+    timezone: UTC
+    cycle_hours_utc: [0, 6, 12, 18]
+    safe_fetch:
+      default_lag_minutes: 720
+    max_source_lag_seconds: 172800
+    parameter: previous_runs
+    metric: forecast
+    period_semantics: reconstructed previous-runs forecast availability
+    expected_members: 1
+    expected_step_rule: provider_previous_runs_default
+    partial_policy: SHADOW_ONLY
+    live_authorization: false
+    authority_tier: RECONSTRUCTED
+    authority_url: https://open-meteo.com/en/docs
+    backfill_only: false
+  - calendar_id: tigge_archive_backfill
+    source_id: tigge
+    track: archive
+    plane: forecast
+    timezone: UTC
+    cycle_hours_utc: [0, 12]
+    safe_fetch:
+      default_lag_minutes: 720
+    max_source_lag_seconds: 604800
+    parameter: 2t
+    metric: forecast
+    period_semantics: archive-only ensemble fetch without live-causal proof
+    expected_members: 51
+    expected_step_rule: archive_payload_manifest
+    partial_policy: SHADOW_ONLY
+    live_authorization: false
+    authority_tier: RECONSTRUCTED
+    authority_url: https://confluence.ecmwf.int/display/TIGGE
+    backfill_only: true
