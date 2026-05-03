@@ -48,6 +48,7 @@ test_trust_policy:
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -190,6 +191,7 @@ test_trust_policy:
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_source_run_coverage_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_source_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_market_topology_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -216,6 +218,7 @@ categories:
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_platt_bootstrap_equivalence.py
+    - tests/test_ensemble_snapshots_v2_executable_schema.py
     - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
@@ -260,6 +263,7 @@ categories:
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
     - tests/test_job_run_schema.py
+    - tests/test_source_run_coverage_schema.py
     - tests/test_source_run_schema.py
     - tests/test_readiness_state_schema.py
     - tests/test_market_topology_state_schema.py
@@ -607,6 +611,7 @@ law_gate:
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
       - tests/test_job_run_schema.py
+      - tests/test_source_run_coverage_schema.py
       - tests/test_source_run_schema.py
       - tests/test_readiness_state_schema.py
       - tests/test_market_topology_state_schema.py
