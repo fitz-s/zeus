@@ -77,6 +77,7 @@ def build_producer_readiness_for_scope(
         source_id=source_id,
         source_transport=source_transport,
         data_version=scope.data_version,
+        track=track,
     )
     identity = _metric_identity(scope.temperature_metric)
     if coverage is None:

@@ -158,6 +158,8 @@ def get_latest_source_run_coverage(
     source_id: str,
     source_transport: str,
     data_version: str,
+    track: str | None = None,
+    release_calendar_key: str | None = None,
 ) -> dict[str, Any] | None:
     row = conn.execute(
         """
@@ -169,6 +171,8 @@ def get_latest_source_run_coverage(
           AND source_id = ?
           AND source_transport = ?
           AND data_version = ?
+                    AND (? IS NULL OR track = ?)
+                    AND (? IS NULL OR release_calendar_key = ?)
         ORDER BY computed_at DESC, recorded_at DESC
         LIMIT 1
         """,
@@ -180,6 +184,10 @@ def get_latest_source_run_coverage(
             source_id,
             source_transport,
             data_version,
+            track,
+            track,
+            release_calendar_key,
+            release_calendar_key,
         ),
     ).fetchone()
     return dict(row) if row else None

@@ -217,7 +217,24 @@ def test_rollout_blocked_keeps_promoted_calibration_shadow_only() -> None:
     assert decision.live_eligible is False
 
 
-def test_live_rollout_and_promoted_calibration_can_be_live_eligible() -> None:
+def test_expired_producer_readiness_blocks_shadow_boundary() -> None:
+    conn = _conn()
+    _insert_snapshot(conn, linked=True)
+    _insert_producer_readiness(conn)
+
+    decision = evaluate_entry_forecast_shadow(
+        conn,
+        scope=_scope(),
+        config=entry_forecast_config(),
+        now_utc=_utc(2026, 5, 3, 13),
+        live_calibration_promotion_approved=True,
+    )
+
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == ("PRODUCER_READINESS_EXPIRED",)
+
+
+def test_live_rollout_and_promoted_calibration_still_requires_rollout_gate() -> None:
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn)
@@ -231,6 +248,6 @@ def test_live_rollout_and_promoted_calibration_can_be_live_eligible() -> None:
         live_calibration_promotion_approved=True,
     )
 
-    assert decision.status == "LIVE_ELIGIBLE"
-    assert decision.reason_codes == ("ENTRY_FORECAST_SHADOW_READY",)
-    assert decision.live_eligible is True
+    assert decision.status == "SHADOW_ONLY"
+    assert decision.reason_codes == ("ENTRY_FORECAST_ROLLOUT_GATE_REQUIRED",)
+    assert decision.live_eligible is False

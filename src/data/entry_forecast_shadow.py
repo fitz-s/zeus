@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from src.config import EntryForecastConfig, EntryForecastRolloutMode
+from src.config import EntryForecastConfig
 from src.data.calibration_transfer_policy import evaluate_calibration_transfer_policy
 from src.data.executable_forecast_reader import read_executable_forecast_snapshot
 from src.data.forecast_fetch_plan import track_for_metric
@@ -40,6 +40,15 @@ def _parse_reasons(value: object) -> tuple[str, ...]:
     if not isinstance(parsed, list):
         return ("READINESS_REASON_CODES_MALFORMED",)
     return tuple(str(item) for item in parsed if str(item))
+
+
+def _is_expired(value: object, *, now_utc: datetime) -> bool:
+    if not isinstance(value, str) or not value:
+        return True
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return True
+    return parsed.astimezone(timezone.utc) <= now_utc.astimezone(timezone.utc)
 
 
 def _latest_producer_readiness(
@@ -132,6 +141,15 @@ def evaluate_entry_forecast_shadow(
             producer_readiness_id=str(producer["readiness_id"]),
             calibration_data_version=None,
         )
+    if _is_expired(producer.get("expires_at"), now_utc=now_utc):
+        return EntryForecastShadowDecision(
+            status="BLOCKED",
+            reason_codes=("PRODUCER_READINESS_EXPIRED",),
+            snapshot_id=snapshot_result.snapshot.snapshot_id,
+            source_run_id=snapshot_result.snapshot.source_run_id,
+            producer_readiness_id=str(producer["readiness_id"]),
+            calibration_data_version=None,
+        )
 
     calibration = evaluate_calibration_transfer_policy(
         config=config,
@@ -148,18 +166,15 @@ def evaluate_entry_forecast_shadow(
             producer_readiness_id=str(producer["readiness_id"]),
             calibration_data_version=calibration.calibration_data_version,
         )
-    if config.rollout_mode is not EntryForecastRolloutMode.LIVE:
-        return EntryForecastShadowDecision(
-            status="SHADOW_ONLY",
-            reason_codes=(f"ENTRY_FORECAST_ROLLOUT_{config.rollout_mode.value.upper()}",),
-            snapshot_id=snapshot_result.snapshot.snapshot_id,
-            source_run_id=snapshot_result.snapshot.source_run_id,
-            producer_readiness_id=str(producer["readiness_id"]),
-            calibration_data_version=calibration.calibration_data_version,
-        )
     return EntryForecastShadowDecision(
-        status="LIVE_ELIGIBLE",
-        reason_codes=("ENTRY_FORECAST_SHADOW_READY",),
+        status="SHADOW_ONLY",
+        reason_codes=(
+            (
+                "ENTRY_FORECAST_ROLLOUT_BLOCKED"
+                if config.rollout_mode.value == "blocked"
+                else "ENTRY_FORECAST_ROLLOUT_GATE_REQUIRED"
+            ),
+        ),
         snapshot_id=snapshot_result.snapshot.snapshot_id,
         source_run_id=snapshot_result.snapshot.source_run_id,
         producer_readiness_id=str(producer["readiness_id"]),

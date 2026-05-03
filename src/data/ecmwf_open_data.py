@@ -120,6 +120,14 @@ def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDeci
     )
 
 
+def _status_for_ingest_summary(summary: dict) -> str:
+    written = int(summary.get("written", 0) or 0)
+    skipped = int(summary.get("skipped", 0) or 0)
+    if written == 0 and skipped == 0:
+        return "empty_ingest"
+    return "ok"
+
+
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     logger.info("ecmwf_open_data %s: %s", label, " ".join(args[:6]) + " ...")
     try:
@@ -316,8 +324,13 @@ def collect_open_ens_cycle(
         if own_conn:
             conn.close()
 
+    status = _status_for_ingest_summary(summary)
+    stages = [
+        *stages,
+        {"label": "ingest", "ok": status == "ok", "error": status if status != "ok" else None},
+    ]
     return {
-        "status": "ok",
+        "status": status,
         "track": track,
         "data_version": cfg["data_version"],
         "run_date": cycle_date.isoformat(),

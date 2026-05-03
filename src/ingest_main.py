@@ -58,6 +58,7 @@ def _graceful_shutdown(signum, frame) -> None:
 
 _TRUTHFUL_FAIL_STATUSES = frozenset({
     "download_failed",
+    "empty_ingest",
     "extract_failed",
     "paused_mars_credentials",
     "bad_target_date",

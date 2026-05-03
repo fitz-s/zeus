@@ -29,6 +29,7 @@ from src.config import (
     CONFIG_DIR,
     PROJECT_ROOT,
     City,
+    EntryForecastRolloutMode,
     day0_n_mc,
     edge_n_bootstrap,
     ensemble_crosscheck_member_count,
@@ -36,6 +37,8 @@ from src.config import (
     ensemble_member_count,
     ensemble_n_mc,
     ensemble_primary_model,
+    entry_forecast_config,
+    get_mode,
     settings,
 )
 from src.contracts import (
@@ -698,6 +701,18 @@ def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
     return MetricIdentity.from_raw(text)
 
 
+def _live_entry_forecast_legacy_path_blocker() -> str | None:
+    if get_mode() != "live":
+        return None
+    try:
+        cfg = entry_forecast_config()
+    except Exception as exc:
+        return f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
+    if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
+        return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
+    return "ENTRY_FORECAST_EXECUTABLE_PATH_NOT_WIRED"
+
+
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
     if conn is None:
         return {}
@@ -1208,6 +1223,18 @@ def evaluate_candidate(
     )
     if not entry_provenance_context.selected_method or not entry_provenance_context.entry_method:
         raise ValueError("entry provenance context is required before probability evaluation")
+
+    live_entry_forecast_blocker = _live_entry_forecast_legacy_path_blocker()
+    if live_entry_forecast_blocker is not None:
+        return [EdgeDecision(
+            False,
+            decision_id=_decision_id(),
+            rejection_stage="SIGNAL_QUALITY",
+            rejection_reasons=[live_entry_forecast_blocker],
+            availability_status="DATA_UNAVAILABLE",
+            selected_method=selected_method,
+            applied_validations=["entry_forecast_rollout", "legacy_entry_primary_fetch_blocked"],
+        )]
 
     if is_day0_mode and candidate.observation is None:
         return [EdgeDecision(

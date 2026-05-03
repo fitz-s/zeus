@@ -120,6 +120,16 @@ def test_source_run_coverage_unique_scope_keeps_transport_and_track_dimensions()
 def test_latest_source_run_coverage_filters_executable_identity() -> None:
     conn = _conn()
     write_source_run_coverage(conn, **_coverage_kwargs())
+    write_source_run_coverage(
+        conn,
+        **_coverage_kwargs(
+            coverage_id="coverage-short-cycle",
+            release_calendar_key="ecmwf_open_data_mx2t6_high:06z-short",
+            track="mx2t6_high_short_horizon",
+            computed_at=datetime(2026, 5, 3, 10, tzinfo=UTC),
+            expires_at=datetime(2026, 5, 3, 11, tzinfo=UTC),
+        ),
+    )
 
     row = get_latest_source_run_coverage(
         conn,
@@ -130,6 +140,8 @@ def test_latest_source_run_coverage_filters_executable_identity() -> None:
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_v2_db_reader",
         data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        track="mx2t6_high_full_horizon",
+        release_calendar_key="ecmwf_open_data_mx2t6_high:00z-full",
     )
 
     assert row is not None

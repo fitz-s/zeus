@@ -139,19 +139,42 @@ def test_live_eligible_data_still_blocks_when_rollout_mode_is_blocked() -> None:
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
 
-    status = build_live_entry_forecast_status(conn, config=entry_forecast_config())
+    status = build_live_entry_forecast_status(
+        conn,
+        config=entry_forecast_config(),
+        now_utc=_utc(2026, 5, 3, 10),
+    )
 
     assert status.producer_live_eligible_count == 1
     assert status.blockers == ("ENTRY_FORECAST_ROLLOUT_BLOCKED",)
 
 
-def test_live_mode_without_blockers_reports_live_eligible_status() -> None:
+def test_expired_live_eligible_producer_readiness_blocks_status() -> None:
+    conn = _conn()
+    _insert_snapshot(conn, linked=True)
+    _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
+
+    status = build_live_entry_forecast_status(
+        conn,
+        config=entry_forecast_config(),
+        now_utc=_utc(2026, 5, 3, 13),
+    )
+
+    assert status.producer_live_eligible_count == 0
+    assert "PRODUCER_READINESS_EXPIRED" in status.blockers
+
+
+def test_live_mode_without_executable_evaluator_wiring_still_blocks_status() -> None:
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 
-    status = build_live_entry_forecast_status(conn, config=cfg)
+    status = build_live_entry_forecast_status(
+        conn,
+        config=cfg,
+        now_utc=_utc(2026, 5, 3, 10),
+    )
 
-    assert status.status == "LIVE_ELIGIBLE"
-    assert status.blockers == ()
+    assert status.status == "BLOCKED"
+    assert status.blockers == ("ENTRY_FORECAST_EXECUTABLE_EVALUATOR_NOT_WIRED",)

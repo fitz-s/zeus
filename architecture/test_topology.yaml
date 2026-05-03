@@ -50,6 +50,7 @@ test_trust_policy:
     tests/test_calibration_transfer_policy.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_rollout.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -621,6 +622,7 @@ law_gate:
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
       - tests/test_calibration_transfer_policy.py
+      - tests/test_entry_forecast_evaluator_cutover.py
       - tests/test_entry_forecast_rollout.py
       - tests/test_entry_forecast_shadow.py
       - tests/test_executable_forecast_reader.py
@@ -642,6 +644,7 @@ law_gate:
       - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
       - config/source_release_calendar.yaml
       - src/control/entry_forecast_rollout.py
+      - src/engine/evaluator.py
       - src/data/calibration_transfer_policy.py
       - src/data/entry_forecast_shadow.py
       - src/data/executable_forecast_reader.py

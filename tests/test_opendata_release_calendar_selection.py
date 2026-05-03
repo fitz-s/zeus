@@ -50,3 +50,7 @@ def test_opendata_selection_rejects_unknown_track() -> None:
         assert "Unknown track" in str(exc)
     else:  # pragma: no cover - defensive assertion branch
         raise AssertionError("unknown Open Data track should fail closed")
+
+
+def test_opendata_zero_row_ingest_is_not_reported_ok() -> None:
+    assert ecmwf_open_data._status_for_ingest_summary({"written": 0, "skipped": 0}) == "empty_ingest"
