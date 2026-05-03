@@ -184,6 +184,7 @@ def collect_open_ens_cycle(
     gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
 
     now = now_utc or datetime.now(timezone.utc)
+    selection_metadata: dict[str, object] = {}
     if run_date is None or run_hour is None:
         selection, selection_metadata = _select_cycle_for_track(track=track, now_utc=now)
         if selection is not FetchDecision.FETCH_ALLOWED:
@@ -207,6 +208,12 @@ def collect_open_ens_cycle(
         cycle_date = run_date
     if run_hour is not None:
         cycle_hour = run_hour
+    source_cycle_time = datetime.combine(cycle_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=cycle_hour)
+    source_release_time = selection_metadata.get("next_safe_fetch_at")
+    if not isinstance(source_release_time, datetime):
+        source_release_time = source_cycle_time
+    source_run_id = f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
+    release_calendar_key = f"{SOURCE_ID}:{track}:{selection_metadata.get('horizon_profile', 'manual')}"
 
     output_path = _download_output_path(
         run_date=cycle_date, run_hour=cycle_hour, param=cfg["open_data_param"],
@@ -270,7 +277,7 @@ def collect_open_ens_cycle(
         # Make scripts/ importable so we can call ingest_track.
         if str(INGEST_SCRIPT_DIR) not in sys.path:
             sys.path.insert(0, str(INGEST_SCRIPT_DIR))
-        from ingest_grib_to_snapshots import ingest_track as _ingest  # type: ignore
+        from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
         from src.state.schema.v2_schema import apply_v2_schema
 
         apply_v2_schema(conn)
@@ -293,6 +300,15 @@ def collect_open_ens_cycle(
                 cities=None,
                 overwrite=False,
                 require_files=False,
+                source_run_context=SourceRunContext(
+                    source_id=SOURCE_ID,
+                    source_transport="ensemble_snapshots_v2_db_reader",
+                    source_run_id=source_run_id,
+                    release_calendar_key=release_calendar_key,
+                    source_cycle_time=source_cycle_time,
+                    source_release_time=source_release_time,
+                    source_available_at=source_release_time,
+                ),
             )
         finally:
             _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
@@ -306,6 +322,8 @@ def collect_open_ens_cycle(
         "data_version": cfg["data_version"],
         "run_date": cycle_date.isoformat(),
         "run_hour": cycle_hour,
+        "source_run_id": source_run_id,
+        "release_calendar_key": release_calendar_key,
         "source_id": SOURCE_ID,
         "forecast_source_role": FORECAST_SOURCE_ROLE,
         "degradation_level": source_spec.degradation_level,
