@@ -185,6 +185,7 @@ test_trust_policy:
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -253,6 +254,7 @@ categories:
     - tests/test_risk_allocator.py
     - tests/test_live_readiness_gates.py
     - tests/test_ingest_boot_time_semantics.py
+    - tests/test_opendata_future_target_contract.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
     - tests/test_job_run_schema.py
@@ -592,6 +594,7 @@ law_gate:
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
       - tests/test_ingest_boot_time_semantics.py
+      - tests/test_opendata_future_target_contract.py
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
       - tests/test_job_run_schema.py
