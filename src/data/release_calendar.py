@@ -23,11 +23,25 @@ DEFAULT_CALENDAR_PATH = PROJECT_ROOT / "config" / "source_release_calendar.yaml"
 class FetchDecision(str, Enum):
     FETCH_ALLOWED = "FETCH_ALLOWED"
     SKIPPED_NOT_RELEASED = "SKIPPED_NOT_RELEASED"
+    HORIZON_OUT_OF_RANGE = "HORIZON_OUT_OF_RANGE"
     CALENDAR_UNKNOWN_BLOCKED = "CALENDAR_UNKNOWN_BLOCKED"
     OFF_CYCLE_BLOCKED = "OFF_CYCLE_BLOCKED"
     BACKFILL_ONLY_BLOCKED = "BACKFILL_ONLY_BLOCKED"
     PARTIAL_EXPECTED_RETRY = "PARTIAL_EXPECTED_RETRY"
     STALE_BLOCKED = "STALE_BLOCKED"
+
+
+@dataclass(frozen=True)
+class ReleaseCycleProfile:
+    cycle_hours_utc: tuple[int, ...]
+    horizon_profile: str
+    max_step_hours: int
+    live_max_step_hours: int | None
+    default_lag_minutes: int
+    min_partial_lag_minutes: int | None
+    full_horizon_live_authorization: bool
+    live_authorization: bool
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +64,8 @@ class ReleaseCalendarEntry:
     live_authorization: bool
     authority_tier: str
     backfill_only: bool
+    cycle_profiles: tuple[ReleaseCycleProfile, ...]
+    source_transport_required: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -76,24 +92,78 @@ def _require_int(entry: Mapping[str, Any], field: str) -> int:
     return value
 
 
-def _parse_entry(raw_entry: object) -> ReleaseCalendarEntry:
-    entry = _require_mapping(raw_entry, context="release calendar entry")
-    safe_fetch = _require_mapping(entry.get("safe_fetch"), context="safe_fetch")
-    cycle_hours = entry.get("cycle_hours_utc")
-    if not isinstance(cycle_hours, list) or not cycle_hours:
+def _parse_cycle_hours(value: object) -> tuple[int, ...]:
+    if not isinstance(value, list) or not value:
         raise ValueError("cycle_hours_utc must be a non-empty list")
     normalized_cycle_hours: list[int] = []
-    for hour in cycle_hours:
+    for hour in value:
         if not isinstance(hour, int) or hour < 0 or hour > 23:
             raise ValueError(f"cycle hour must be 0..23; got {hour!r}")
         normalized_cycle_hours.append(hour)
+    return tuple(normalized_cycle_hours)
 
+
+def _parse_safe_fetch(safe_fetch: Mapping[str, Any]) -> tuple[int, int | None]:
     default_lag = safe_fetch.get("default_lag_minutes")
+    if default_lag is None:
+        default_lag = safe_fetch.get("conservative_not_before_minutes")
+    if default_lag is None:
+        default_lag = safe_fetch.get("derived_0_240_not_before_minutes")
     if not isinstance(default_lag, int) or default_lag < 0:
         raise ValueError("safe_fetch.default_lag_minutes must be a non-negative integer")
     min_partial_lag = safe_fetch.get("min_partial_lag_minutes")
     if min_partial_lag is not None and (not isinstance(min_partial_lag, int) or min_partial_lag < 0):
         raise ValueError("safe_fetch.min_partial_lag_minutes must be a non-negative integer")
+    return default_lag, min_partial_lag
+
+
+def _parse_cycle_profile(raw_profile: object) -> ReleaseCycleProfile:
+    profile = _require_mapping(raw_profile, context="cycle profile")
+    safe_fetch = _require_mapping(profile.get("safe_fetch"), context="cycle_profile.safe_fetch")
+    default_lag, min_partial_lag = _parse_safe_fetch(safe_fetch)
+    max_step_hours = _require_int(profile, "max_step_hours")
+    live_max_step_hours = profile.get("live_max_step_hours")
+    if live_max_step_hours is not None and (not isinstance(live_max_step_hours, int) or live_max_step_hours < 0):
+        raise ValueError("cycle profile live_max_step_hours must be a non-negative integer")
+    return ReleaseCycleProfile(
+        cycle_hours_utc=_parse_cycle_hours(profile.get("cycle_hours_utc")),
+        horizon_profile=_require_str(profile, "horizon_profile"),
+        max_step_hours=max_step_hours,
+        live_max_step_hours=live_max_step_hours,
+        default_lag_minutes=default_lag,
+        min_partial_lag_minutes=min_partial_lag,
+        full_horizon_live_authorization=bool(profile.get("full_horizon_live_authorization", False)),
+        live_authorization=bool(profile.get("live_authorization", profile.get("full_horizon_live_authorization", False))),
+        reason=profile.get("reason") if isinstance(profile.get("reason"), str) else None,
+    )
+
+
+def _parse_entry(raw_entry: object) -> ReleaseCalendarEntry:
+    entry = _require_mapping(raw_entry, context="release calendar entry")
+    safe_fetch = _require_mapping(entry.get("safe_fetch"), context="safe_fetch")
+    default_lag, min_partial_lag = _parse_safe_fetch(safe_fetch)
+    cycle_profiles_raw = entry.get("cycle_profiles")
+    if cycle_profiles_raw is not None:
+        if not isinstance(cycle_profiles_raw, list) or not cycle_profiles_raw:
+            raise ValueError("cycle_profiles must be a non-empty list")
+        cycle_profiles = tuple(_parse_cycle_profile(profile) for profile in cycle_profiles_raw)
+        normalized_cycle_hours = tuple(
+            dict.fromkeys(hour for profile in cycle_profiles for hour in profile.cycle_hours_utc)
+        )
+    else:
+        normalized_cycle_hours = _parse_cycle_hours(entry.get("cycle_hours_utc"))
+        cycle_profiles = (
+            ReleaseCycleProfile(
+                cycle_hours_utc=normalized_cycle_hours,
+                horizon_profile="legacy_flat",
+                max_step_hours=_require_int(entry, "max_step_hours") if "max_step_hours" in entry else 10_000,
+                live_max_step_hours=entry.get("live_max_step_hours") if isinstance(entry.get("live_max_step_hours"), int) else None,
+                default_lag_minutes=default_lag,
+                min_partial_lag_minutes=min_partial_lag,
+                full_horizon_live_authorization=bool(entry.get("live_authorization", False)),
+                live_authorization=bool(entry.get("live_authorization", False)),
+            ),
+        )
 
     return ReleaseCalendarEntry(
         calendar_id=_require_str(entry, "calendar_id"),
@@ -114,6 +184,12 @@ def _parse_entry(raw_entry: object) -> ReleaseCalendarEntry:
         live_authorization=bool(entry.get("live_authorization", False)),
         authority_tier=_require_str(entry, "authority_tier"),
         backfill_only=bool(entry.get("backfill_only", False)),
+        cycle_profiles=cycle_profiles,
+        source_transport_required=(
+            entry.get("source_transport_required")
+            if isinstance(entry.get("source_transport_required"), str)
+            else None
+        ),
     )
 
 
@@ -125,8 +201,8 @@ def load_calendar_config(path: Path = DEFAULT_CALENDAR_PATH) -> dict[tuple[str, 
 
     raw = yaml.safe_load(path.read_text()) or {}
     root = _require_mapping(raw, context="source release calendar")
-    if root.get("schema_version") != 1:
-        raise ValueError("source release calendar schema_version must be 1")
+    if root.get("schema_version") not in {1, 2}:
+        raise ValueError("source release calendar schema_version must be 1 or 2")
     entries_raw = root.get("entries")
     if not isinstance(entries_raw, list) or not entries_raw:
         raise ValueError("source release calendar must contain entries")
@@ -157,6 +233,13 @@ def _to_utc(value: datetime, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def cycle_profile_for_hour(entry: ReleaseCalendarEntry, cycle_hour_utc: int) -> ReleaseCycleProfile | None:
+    for profile in entry.cycle_profiles:
+        if cycle_hour_utc in profile.cycle_hours_utc:
+            return profile
+    return None
+
+
 def evaluate_safe_fetch(
     source_id: str,
     track: str,
@@ -164,6 +247,7 @@ def evaluate_safe_fetch(
     now_utc: datetime,
     *,
     allow_partial: bool = False,
+    required_max_step_hours: int | None = None,
     path: Path = DEFAULT_CALENDAR_PATH,
     entries: Mapping[tuple[str, str], ReleaseCalendarEntry] | None = None,
 ) -> tuple[FetchDecision, dict[str, object]]:
@@ -187,6 +271,26 @@ def evaluate_safe_fetch(
             "cycle_time": cycle_utc,
             "authority_tier": entry.authority_tier,
         }
+    profile = cycle_profile_for_hour(entry, cycle_utc.hour)
+    if profile is None:
+        return FetchDecision.OFF_CYCLE_BLOCKED, {
+            "reason": "source cycle time has no configured cycle profile",
+            "configured_cycle_hours_utc": entry.cycle_hours_utc,
+            "cycle_time": cycle_utc,
+            "authority_tier": entry.authority_tier,
+        }
+    if required_max_step_hours is not None:
+        live_max = profile.live_max_step_hours if profile.live_max_step_hours is not None else profile.max_step_hours
+        if required_max_step_hours > live_max:
+            return FetchDecision.HORIZON_OUT_OF_RANGE, {
+                "reason": profile.reason or "required target horizon exceeds cycle profile live horizon",
+                "required_max_step_hours": required_max_step_hours,
+                "max_step_hours": profile.max_step_hours,
+                "live_max_step_hours": live_max,
+                "horizon_profile": profile.horizon_profile,
+                "cycle_time": cycle_utc,
+                "authority_tier": entry.authority_tier,
+            }
     elapsed = now - cycle_utc
     max_lag = timedelta(seconds=entry.max_source_lag_seconds)
     if elapsed > max_lag:
@@ -196,9 +300,9 @@ def evaluate_safe_fetch(
             "elapsed_seconds": int(elapsed.total_seconds()),
         }
 
-    required_lag_minutes = entry.default_lag_minutes
-    if allow_partial and entry.min_partial_lag_minutes is not None:
-        required_lag_minutes = entry.min_partial_lag_minutes
+    required_lag_minutes = profile.default_lag_minutes
+    if allow_partial and profile.min_partial_lag_minutes is not None:
+        required_lag_minutes = profile.min_partial_lag_minutes
     next_safe_fetch_at = cycle_utc + timedelta(minutes=required_lag_minutes)
     if now < next_safe_fetch_at:
         return FetchDecision.SKIPPED_NOT_RELEASED, {
@@ -209,12 +313,12 @@ def evaluate_safe_fetch(
             "authority_tier": entry.authority_tier,
         }
 
-    full_safe_fetch_at = cycle_utc + timedelta(minutes=entry.default_lag_minutes)
+    full_safe_fetch_at = cycle_utc + timedelta(minutes=profile.default_lag_minutes)
     if allow_partial and now < full_safe_fetch_at and entry.partial_policy == "BLOCK_LIVE":
         return FetchDecision.PARTIAL_EXPECTED_RETRY, {
             "reason": "partial fetch window reached but live policy blocks partial data",
             "next_safe_fetch_at": full_safe_fetch_at,
-            "lag_minutes_required": entry.default_lag_minutes,
+            "lag_minutes_required": profile.default_lag_minutes,
             "lag_minutes_elapsed": int(elapsed.total_seconds() // 60),
             "authority_tier": entry.authority_tier,
         }
@@ -226,6 +330,81 @@ def evaluate_safe_fetch(
         "lag_minutes_elapsed": int(elapsed.total_seconds() // 60),
         "authority_tier": entry.authority_tier,
         "live_authorization": entry.live_authorization,
+        "horizon_profile": profile.horizon_profile,
+        "live_max_step_hours": profile.live_max_step_hours,
+    }
+
+
+def select_source_run_for_target_horizon(
+    *,
+    now_utc: datetime,
+    source_id: str,
+    track: str,
+    required_max_step_hours: int,
+    cycle_policy: str = "latest_complete_full_horizon",
+    path: Path = DEFAULT_CALENDAR_PATH,
+) -> tuple[FetchDecision, dict[str, object]]:
+    if cycle_policy != "latest_complete_full_horizon":
+        raise ValueError(f"unsupported source cycle policy: {cycle_policy}")
+    now = _to_utc(now_utc, "now_utc")
+    entry = get_entry(source_id, track, path=path)
+    if entry is None:
+        return FetchDecision.CALENDAR_UNKNOWN_BLOCKED, {"reason": "calendar entry missing"}
+    if entry.backfill_only:
+        return FetchDecision.BACKFILL_ONLY_BLOCKED, {"reason": "source track is backfill-only"}
+
+    live_profiles = tuple(profile for profile in entry.cycle_profiles if profile.live_authorization)
+    if not live_profiles:
+        return FetchDecision.HORIZON_OUT_OF_RANGE, {"reason": "no live-authorized cycle profile"}
+    max_live_step = max(
+        profile.live_max_step_hours if profile.live_max_step_hours is not None else profile.max_step_hours
+        for profile in live_profiles
+    )
+    if required_max_step_hours > max_live_step:
+        return FetchDecision.HORIZON_OUT_OF_RANGE, {
+            "reason": "required target horizon exceeds all live-authorized profiles",
+            "required_max_step_hours": required_max_step_hours,
+            "max_live_step_hours": max_live_step,
+        }
+
+    candidate_cycles: list[datetime] = []
+    for profile in live_profiles:
+        live_max = profile.live_max_step_hours if profile.live_max_step_hours is not None else profile.max_step_hours
+        if required_max_step_hours > live_max:
+            continue
+        for day_offset in (0, 1):
+            base_date = (now - timedelta(days=day_offset)).date()
+            for hour in profile.cycle_hours_utc:
+                cycle = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=hour)
+                if cycle <= now:
+                    candidate_cycles.append(cycle)
+    for cycle_time in sorted(candidate_cycles, reverse=True):
+        decision, metadata = evaluate_safe_fetch(
+            source_id,
+            track,
+            cycle_time,
+            now,
+            required_max_step_hours=required_max_step_hours,
+            path=path,
+        )
+        metadata["selected_cycle_time"] = cycle_time
+        if decision is FetchDecision.FETCH_ALLOWED:
+            return decision, metadata
+    if candidate_cycles:
+        cycle_time = sorted(candidate_cycles, reverse=True)[0]
+        decision, metadata = evaluate_safe_fetch(
+            source_id,
+            track,
+            cycle_time,
+            now,
+            required_max_step_hours=required_max_step_hours,
+            path=path,
+        )
+        metadata["selected_cycle_time"] = cycle_time
+        return decision, metadata
+    return FetchDecision.HORIZON_OUT_OF_RANGE, {
+        "reason": "no cycle profile can cover required target horizon",
+        "required_max_step_hours": required_max_step_hours,
     }
 
 

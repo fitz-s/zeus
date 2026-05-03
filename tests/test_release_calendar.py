@@ -1,6 +1,6 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
-# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b release-calendar contract.
+# Last reused/audited: 2026-05-03
+# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b + PLAN_v4 cycle-profile contract.
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ import pytest
 
 from src.data.release_calendar import (
     FetchDecision,
+    cycle_profile_for_hour,
     evaluate_safe_fetch,
     get_entry,
     load_calendar_config,
+    select_source_run_for_target_horizon,
     source_has_live_authorization,
 )
 
@@ -31,6 +33,53 @@ def test_calendar_loads_config_with_typed_entries() -> None:
     assert ecmwf_high.partial_policy == "BLOCK_LIVE"
 
 
+def test_cycle_profiles_exist_for_00_12_full_and_06_18_short() -> None:
+    entry = get_entry("ecmwf_open_data", "mx2t6_high")
+    assert entry is not None
+
+    full_profile = cycle_profile_for_hour(entry, 0)
+    short_profile = cycle_profile_for_hour(entry, 6)
+
+    assert full_profile is not None
+    assert full_profile.cycle_hours_utc == (0, 12)
+    assert full_profile.horizon_profile == "full"
+    assert full_profile.live_max_step_hours == 240
+    assert full_profile.live_authorization is True
+
+    assert short_profile is not None
+    assert short_profile.cycle_hours_utc == (6, 18)
+    assert short_profile.horizon_profile == "short"
+    assert short_profile.live_max_step_hours == 144
+    assert short_profile.live_authorization is False
+
+
+def test_full_horizon_selection_requires_00_or_12_cycle() -> None:
+    decision, metadata = select_source_run_for_target_horizon(
+        now_utc=_utc(9),
+        source_id="ecmwf_open_data",
+        track="mx2t6_high",
+        required_max_step_hours=240,
+    )
+
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["selected_cycle_time"] == _utc(0)
+    assert metadata["horizon_profile"] == "full"
+
+
+def test_06_18_cycle_blocks_target_requiring_step_over_144() -> None:
+    decision, metadata = evaluate_safe_fetch(
+        "ecmwf_open_data",
+        "mx2t6_high",
+        _utc(6),
+        _utc(12),
+        required_max_step_hours=150,
+    )
+
+    assert decision is FetchDecision.HORIZON_OUT_OF_RANGE
+    assert metadata["live_max_step_hours"] == 144
+    assert metadata["horizon_profile"] == "short"
+
+
 def test_safe_fetch_blocks_before_default_lag() -> None:
     decision, metadata = evaluate_safe_fetch(
         "ecmwf_open_data",
@@ -41,6 +90,52 @@ def test_safe_fetch_blocks_before_default_lag() -> None:
 
     assert decision is FetchDecision.SKIPPED_NOT_RELEASED
     assert metadata["lag_minutes_required"] == 485
+
+
+def test_safe_fetch_for_full_horizon_blocks_0730_before_0805() -> None:
+    decision, metadata = evaluate_safe_fetch(
+        "ecmwf_open_data",
+        "mx2t6_high",
+        _utc(0),
+        _utc(7, 30),
+        required_max_step_hours=240,
+    )
+
+    assert decision is FetchDecision.SKIPPED_NOT_RELEASED
+    assert metadata["next_safe_fetch_at"] == _utc(8, 5)
+
+
+def test_required_target_horizon_is_input_to_safe_fetch() -> None:
+    decision, metadata = evaluate_safe_fetch(
+        "ecmwf_open_data",
+        "mx2t6_high",
+        _utc(0),
+        _utc(9),
+        required_max_step_hours=246,
+    )
+
+    assert decision is FetchDecision.HORIZON_OUT_OF_RANGE
+    assert metadata["required_max_step_hours"] == 246
+    assert metadata["live_max_step_hours"] == 240
+
+
+def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:
+    entry = get_entry("ecmwf_open_data", "mx2t6_high")
+    assert entry is not None
+    profile = cycle_profile_for_hour(entry, 6)
+    assert profile is not None
+
+    decision, metadata = evaluate_safe_fetch(
+        "ecmwf_open_data",
+        "mx2t6_high",
+        _utc(6),
+        _utc(11),
+        required_max_step_hours=120,
+    )
+
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["horizon_profile"] == "short"
+    assert profile.live_authorization is False
 
 
 def test_safe_fetch_allows_after_default_lag() -> None:
