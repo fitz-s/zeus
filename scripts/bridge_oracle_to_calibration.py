@@ -144,6 +144,7 @@ def bridge(dry_run: bool = False) -> dict:
     snapshots = _load_snapshots()
     if not snapshots:
         logger.info("No shadow snapshots found in %s", SNAPSHOT_DIR)
+        conn.close()
         return {"cities": 0, "comparisons": 0}
 
     # Coverage check helper

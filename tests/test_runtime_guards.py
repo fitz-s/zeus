@@ -1463,8 +1463,8 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
             self.selected_method = "ens_member_counting"
             self.applied_validations = ["ens_fetch"]
             self.decision_snapshot_id = "snap-1"
-            self.edge_source = "center_buy"
-            self.strategy_key = "center_buy" if should_trade else ""
+            self.edge_source = "opening_inertia"
+            self.strategy_key = "opening_inertia" if should_trade else ""
             self.edge_context = None
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
@@ -1587,7 +1587,7 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
     assert opportunity_rows[0]["should_trade"] == 1
     assert opportunity_rows[0]["range_label"] == "39-40°F"
     assert opportunity_rows[0]["direction"] == "buy_yes"
-    assert opportunity_rows[0]["strategy_key"] == "center_buy"
+    assert opportunity_rows[0]["strategy_key"] == "opening_inertia"
     assert opportunity_rows[0]["snapshot_id"] == "snap-1"
     assert opportunity_rows[0]["availability_status"] == "ok"
     assert opportunity_rows[1]["should_trade"] == 0
@@ -2095,8 +2095,8 @@ def test_live_entry_requires_executable_market_identity_before_intent(tmp_path):
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="model-snap-1",
-        edge_source="center_buy",
-        strategy_key="center_buy",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
         edge_context=None,
     )
     deps = types.SimpleNamespace(
@@ -2109,7 +2109,7 @@ def test_live_entry_requires_executable_market_identity_before_intent(tmp_path):
         MarketCandidate=MarketCandidate,
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
-        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
         create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("missing executable identity must block before intent")
         ),
@@ -2179,8 +2179,8 @@ def test_live_entry_snapshot_capture_failure_blocks_before_intent(tmp_path):
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="model-snap-1",
-        edge_source="center_buy",
-        strategy_key="center_buy",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
         edge_context=None,
     )
     deps = types.SimpleNamespace(
@@ -2196,7 +2196,7 @@ def test_live_entry_snapshot_capture_failure_blocks_before_intent(tmp_path):
         MarketCandidate=MarketCandidate,
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
-        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
         create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("snapshot capture failure must block before intent")
         ),
@@ -3146,8 +3146,8 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="model-snap-wide-gap",
-        edge_source="center_buy",
-        strategy_key="center_buy",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
         edge_context=types.SimpleNamespace(p_posterior=0.47),
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
@@ -3177,7 +3177,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         MarketCandidate=MarketCandidate,
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
-        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
         create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("live final-intent path must not create legacy intent")
         ),
@@ -3274,8 +3274,8 @@ def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="model-snap-passive-mismatch",
-        edge_source="center_buy",
-        strategy_key="center_buy",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
         edge_context=types.SimpleNamespace(p_posterior=0.47),
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
@@ -3307,7 +3307,7 @@ def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
         MarketCandidate=MarketCandidate,
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
-        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
         create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("live final-intent path must not create legacy intent")
         ),
@@ -3423,8 +3423,8 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         selected_method="ens_member_counting",
         applied_validations=["ens_fetch"],
         decision_snapshot_id="model-snap-1",
-        edge_source="center_buy",
-        strategy_key="center_buy",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
         edge_context=types.SimpleNamespace(p_posterior=0.47),
         epistemic_context_json=json.dumps({"forecast_context": forecast_context}),
         sizing_bankroll=100.0,
@@ -3511,7 +3511,7 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         MarketCandidate=MarketCandidate,
         evaluate_candidate=lambda *args, **kwargs: [decision],
         is_strategy_enabled=lambda _strategy: True,
-        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        _classify_edge_source=lambda _mode, _edge: "opening_inertia",
         create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("live final-intent path must not create legacy intent")
         ),
@@ -4642,8 +4642,8 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
             self.selected_method = "ens_member_counting"
             self.applied_validations = ["ens_fetch"]
             self.decision_snapshot_id = "snap-reject"
-            self.edge_source = "center_buy"
-            self.strategy_key = "center_buy"
+            self.edge_source = "opening_inertia"
+            self.strategy_key = "opening_inertia"
             self.edge_context = None
             self.settlement_semantics_json = '{"measurement_unit":"F"}'
             self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
@@ -6791,13 +6791,22 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
                 "price": 0.35,
             },
             {
-                "title": "41°F or higher",
+                "title": "41-42°F",
                 "range_low": 41,
-                "range_high": None,
+                "range_high": 42,
                 "token_id": "yes3",
                 "no_token_id": "no3",
                 "market_id": "m3",
                 "price": 0.45,
+            },
+            {
+                "title": "43°F or higher",
+                "range_low": 43,
+                "range_high": None,
+                "token_id": "yes4",
+                "no_token_id": "no4",
+                "market_id": "m4",
+                "price": 0.10,
             },
         ],
         hours_since_open=30.0,
@@ -6812,7 +6821,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
             self.bias_corrected = False
 
         def p_raw_vector(self, bins, n_mc=3000):
-            return np.array([0.25, 0.50, 0.25])
+            return np.array([0.20, 0.40, 0.25, 0.15])
 
         def spread(self):
             from src.types.temperature import TemperatureDelta
@@ -6841,7 +6850,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
             support_index=0,
         ),
         BinEdge(
-            bin=Bin(low=41, high=None, label="41°F or higher", unit="F"),
+            bin=Bin(low=41, high=42, label="41-42°F", unit="F"),
             direction="buy_yes",
             edge=0.11,
             ci_lower=0.04,

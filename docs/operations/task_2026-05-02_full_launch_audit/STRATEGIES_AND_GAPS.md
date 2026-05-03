@@ -65,7 +65,7 @@ Critic review rejected adding a new runtime taxonomy rollback flag. The safer ro
 | `OPENING_HUNT` | every 15 min (was 30, lowered 2026-05-02) | `opening_inertia` | Always — when `hours_since_open < 24` AND `hours_to_resolution >= 24` |
 | `UPDATE_REACTION` | cron at **07:00 / 09:00 / 19:00 / 21:00 UTC** (4×/day) | `center_buy` | `edge.direction == "buy_yes"` AND `not edge.bin.is_shoulder` |
 | `UPDATE_REACTION` | (same cron) | `shoulder_sell` | `edge.direction == "buy_no"` AND `edge.bin.is_shoulder` |
-| `UPDATE_REACTION` | (same cron) | `opening_inertia` | Fallback when neither center_buy nor shoulder_sell matches |
+| `UPDATE_REACTION` | (same cron) | `unclassified` / no live `strategy_key` | Fail-closed when neither `center_buy` nor `shoulder_sell` matches; inverse/dormant quadrants must not masquerade as `opening_inertia` |
 | `DAY0_CAPTURE` | every 15 min | `settlement_capture` | when `hours_to_resolution < 6` (see gap §3.1) |
 
 ### 1.2 EntryMethod (2 wired)
