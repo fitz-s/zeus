@@ -88,7 +88,13 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool = True) -> None:
     )
 
 
-def _insert_producer_readiness(conn: sqlite3.Connection, *, status: str = "LIVE_ELIGIBLE", reasons: list[str] | None = None) -> None:
+def _insert_producer_readiness(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "LIVE_ELIGIBLE",
+    reasons: list[str] | None = None,
+    source_run_id: str = "source-run-1",
+) -> None:
     scope = _scope()
     reasons = reasons or ["PRODUCER_COVERAGE_READY"]
     conn.execute(
@@ -103,7 +109,7 @@ def _insert_producer_readiness(conn: sqlite3.Connection, *, status: str = "LIVE_
         ) VALUES (
             'producer-readiness-1', 'producer|london|high', 'city_metric', :city_id, :city, :city_timezone,
             :target_local_date, NULL, 'high', 'mx2t6_local_calendar_day_max',
-            'high_temp', :data_version, 'ecmwf_open_data', 'mx2t6_high_full_horizon', 'source-run-1',
+            'high_temp', :data_version, 'ecmwf_open_data', 'mx2t6_high_full_horizon', :source_run_id,
             NULL, NULL, NULL, '[]',
             :strategy_key, :status, :reason_codes_json, :computed_at, :expires_at,
             '{}', '{}'
@@ -116,6 +122,7 @@ def _insert_producer_readiness(conn: sqlite3.Connection, *, status: str = "LIVE_
             "target_local_date": scope.target_local_date.isoformat(),
             "data_version": scope.data_version,
             "strategy_key": PRODUCER_READINESS_STRATEGY_KEY,
+            "source_run_id": source_run_id,
             "status": status,
             "reason_codes_json": json.dumps(reasons),
             "computed_at": _utc(2026, 5, 3, 9).isoformat(),
@@ -155,6 +162,23 @@ def test_missing_producer_readiness_blocks_shadow_boundary() -> None:
     assert decision.status == "BLOCKED"
     assert decision.reason_codes == ("PRODUCER_READINESS_MISSING",)
     assert decision.snapshot_id is not None
+
+
+def test_source_run_mismatch_between_snapshot_and_producer_readiness_blocks_shadow_boundary() -> None:
+    conn = _conn()
+    _insert_snapshot(conn, linked=True)
+    _insert_producer_readiness(conn, source_run_id="older-source-run")
+
+    decision = evaluate_entry_forecast_shadow(
+        conn,
+        scope=_scope(),
+        config=entry_forecast_config(),
+        now_utc=_utc(2026, 5, 3, 9),
+    )
+
+    assert decision.status == "BLOCKED"
+    assert decision.reason_codes == ("PRODUCER_SOURCE_RUN_MISMATCH",)
+    assert decision.source_run_id == "source-run-1"
 
 
 def test_calibration_transfer_defaults_entry_forecast_to_shadow_only() -> None:

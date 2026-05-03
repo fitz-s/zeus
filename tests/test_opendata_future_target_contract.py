@@ -100,6 +100,31 @@ def test_dst_target_day_required_steps_are_not_24h_assumption() -> None:
     assert duration_hours == 23
 
 
+def test_dplus10_dst_transition_target_day_does_not_exceed_profile_silently() -> None:
+    contract = _contract_module()
+
+    window = contract.compute_target_local_day_window_utc(
+        city_timezone="Europe/London",
+        target_local_date=date(2026, 3, 29),
+    )
+    steps = contract.required_period_end_steps(
+        source_cycle_time=_utc(2026, 3, 19),
+        target_window_start_utc=window.start_utc,
+        target_window_end_utc=window.end_utc,
+        period_hours=6,
+    )
+    decision = contract.evaluate_horizon_coverage(
+        required_steps=steps,
+        live_max_step_hours=240,
+    )
+
+    duration_hours = int((window.end_utc - window.start_utc).total_seconds() // 3600)
+    assert duration_hours == 23
+    assert max(steps) > 240
+    assert decision.status == "BLOCKED"
+    assert "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in decision.reason_codes
+
+
 def test_dplus10_required_steps_utc_negative_city_do_not_exceed_profile_silently() -> None:
     contract = _contract_module()
 

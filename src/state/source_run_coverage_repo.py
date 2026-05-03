@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 COMPLETENESS_STATUSES = frozenset({"COMPLETE", "PARTIAL", "MISSING", "HORIZON_OUT_OF_RANGE", "NOT_RELEASED"})
@@ -17,6 +17,19 @@ def _to_iso(value: datetime | date | str | None) -> str | None:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
+
+
+def _timestamp_iso(value: datetime | str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware")
+        return value.astimezone(timezone.utc).isoformat()
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _json_text(value: Any, *, default: object) -> str:
@@ -116,8 +129,8 @@ def write_source_run_coverage(
                 "completeness_status": completeness_status,
                 "readiness_status": readiness_status,
                 "reason_code": reason_code,
-                "computed_at": _to_iso(computed_at),
-                "expires_at": _to_iso(expires_at),
+                "computed_at": _timestamp_iso(computed_at, "computed_at"),
+                "expires_at": _timestamp_iso(expires_at, "expires_at"),
             },
         )
         conn.execute("RELEASE SAVEPOINT source_run_coverage_write")

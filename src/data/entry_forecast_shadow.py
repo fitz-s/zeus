@@ -113,6 +113,15 @@ def evaluate_entry_forecast_shadow(
             producer_readiness_id=None,
             calibration_data_version=None,
         )
+    if producer.get("source_run_id") != snapshot_result.snapshot.source_run_id:
+        return EntryForecastShadowDecision(
+            status="BLOCKED",
+            reason_codes=("PRODUCER_SOURCE_RUN_MISMATCH",),
+            snapshot_id=snapshot_result.snapshot.snapshot_id,
+            source_run_id=snapshot_result.snapshot.source_run_id,
+            producer_readiness_id=str(producer["readiness_id"]),
+            calibration_data_version=None,
+        )
     producer_reasons = _parse_reasons(producer.get("reason_codes_json"))
     if producer.get("status") != "LIVE_ELIGIBLE":
         return EntryForecastShadowDecision(

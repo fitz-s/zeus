@@ -143,6 +143,41 @@ def test_live_eligible_source_run_coverage_requires_expiry() -> None:
         write_source_run_coverage(conn, **_coverage_kwargs(expires_at=None))
 
 
+def test_live_eligible_source_run_coverage_requires_timezone_aware_expiry() -> None:
+    conn = _conn()
+
+    with pytest.raises(ValueError, match="expires_at must be timezone-aware"):
+        write_source_run_coverage(
+            conn,
+            **_coverage_kwargs(expires_at=datetime(2026, 5, 3, 10)),
+        )
+
+
+def test_high_and_low_tracks_same_cycle_keep_independent_coverage_rows() -> None:
+    conn = _conn()
+    write_source_run_coverage(conn, **_coverage_kwargs())
+    write_source_run_coverage(
+        conn,
+        **_coverage_kwargs(
+            coverage_id="coverage-low-1",
+            source_run_id="src-run-20260503-00z-low",
+            track="mn2t6_low_full_horizon",
+            temperature_metric="low",
+            physical_quantity="mn2t6_local_calendar_day_min",
+            observation_field="low_temp",
+            data_version="ecmwf_opendata_mn2t6_local_calendar_day_min_v1",
+        ),
+    )
+
+    count = conn.execute("SELECT COUNT(*) FROM source_run_coverage").fetchone()[0]
+    tracks = {
+        row["track"]
+        for row in conn.execute("SELECT track FROM source_run_coverage")
+    }
+    assert count == 2
+    assert tracks == {"mx2t6_high_full_horizon", "mn2t6_low_full_horizon"}
+
+
 def test_source_run_coverage_rejects_unknown_completeness_status() -> None:
     conn = _conn()
 
