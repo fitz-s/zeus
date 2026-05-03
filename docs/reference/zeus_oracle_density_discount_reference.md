@@ -240,6 +240,53 @@ samples accumulate? Lagos LOW with 120 samples may be in that zone.
 Provisional rule: if `N_platt < 100`, `DDD_actual := max(0.05, DDD_raw)` —
 floor the discount because we cannot measure precisely what to discount.
 
+### Empirical finding 2026-05-03 — `k = 0` in v1 (noble failure recorded)
+
+Phase 1 §2.2 of the implementation plan tested the hypothesis "small N causes
+worse calibration" using three measures (Brier-all-rows, Brier-winning-rows,
+ECE) with operator's Ruling 1 time-window split. The result:
+
+| measure | R² | slope direction | verdict |
+|---|---|---|---|
+| Brier (all rows) | 0.036 | + | weak; dominated by non-winning bucket noise |
+| Brier (winning rows) | 0.000 | **−** | **opposes hypothesis** |
+| ECE (10-decile bins) | 0.077 | + | borderline; below 0.10 threshold |
+
+|Δk_train − k_test| / k_train = 62-172% across measures, well above the 50%
+time-window stability threshold. The hypothesis **failed** the operator's
+pre-committed kill-switch criterion (PLAN.md §1).
+
+**v1 spec**: `k = 0`. The multiplier `(1 + k/sqrt(N))` collapses to 1.0; small-
+sample amplification is disabled. The discount-floor rule
+`if N_platt < 100, DDD_actual := max(0.05, DDD_raw)` is preserved separately
+(it operates on a different mechanism — guard against zero-discount when the
+underlying calibration is unmeasurable, not regime-conditional bias compensation).
+
+**Why preserve the structural form `(1 + k/sqrt(N))` in code despite k=0?**
+Operator directive 2026-05-03:
+
+> "保留架构骨架，保留这个字段，但将其注释清楚 [...] 这不是为了留恋错误，
+> 而是为了记录一次高贵的失败。它向未来展示我们思考过这个问题，我们测试过，
+> 数据告诉我们目前不需要。"
+
+The structural placeholder lets future agents (or future operator decisions)
+revive the multiplier with empirical justification: re-run §2.2 every ~6
+months as more samples accumulate; if R² rises above 0.20 and time-window
+stability passes, set k > 0 with documented rationale.
+
+**Cold-start insight (load-bearing for future onboarding)**: the §2.2 result
+implies Platt's L2 regularization is much more robust than originally
+feared. The "borrowed strength" from the prior makes small-N (120-1000
+samples) calibration approximately as good as large-N (600,000 samples).
+Conventional wisdom that "we need 1+ year of data before a new city is
+trade-eligible" is therefore overstated. New "Shenzhen-class" cities can
+likely be onboarded with shorter warmup than previously assumed — empirical
+re-run of §2.2 on the new city's first month should confirm. **This is the
+single most valuable architectural insight surfaced in this Phase 1 work.**
+
+See `docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/p2_2_CONCLUSION.md`
+for the full evidence chain.
+
 **Note on `HARD_FLOOR_FOR_SETTLEMENT[city]`** (operator ruling 2026-05-03):
 the per-city hard floor must be **data-driven**, not pre-approved by operator
 intuition. Phase 1 §2.1 of the implementation plan sets each city's floor
@@ -265,9 +312,9 @@ DDD_actual(city, track, today) =
                            exclude=today)
   let shortfall   = max(0, floor - cov - 1*sigma)                             # §5.2
   let N           = count_calibration_pairs_v2(city, track, authority=VERIFIED)
-  let multiplier  = 1 + k / sqrt(max(N, 1))                                  # §5.3, k=2 initial
+  let multiplier  = 1 + k / sqrt(max(N, 1))                                  # §5.3, k=0 in v1 (failed §2.2 — see "noble failure" note); structure preserved for future revival
   let DDD_raw     = apply_discount_curve(shortfall)                          # below
-  let DDD_actual  = small_sample_floor(DDD_raw * multiplier, N)              # §5.3
+  let DDD_actual  = small_sample_floor(DDD_raw * multiplier, N)              # §5.3 (multiplier=1.0 at k=0; floor still applies at N<100)
   return DDD_actual
 ```
 
