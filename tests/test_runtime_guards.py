@@ -3676,7 +3676,8 @@ def test_day0_missing_observation_is_pre_vector_traceable(tmp_path):
     assert result["trace_status"] == "pre_vector_unavailable"
 
 
-def test_unparseable_bin_filter_is_pre_vector_traceable(tmp_path):
+def test_unparseable_bin_filter_is_pre_vector_traceable(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",
@@ -3732,6 +3733,7 @@ def test_ens_validation_failure_is_pre_vector_traceable(tmp_path, monkeypatch):
 
 
 def test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {
         "members_hourly": np.ones((51, 24)) * 40.0,
         "times": [f"2026-04-01T{hour:02d}:00:00Z" for hour in range(24)],
@@ -3765,6 +3767,7 @@ def test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector(tmp_pat
 
 def test_entry_primary_source_policy_exception_blocks_entry_before_vector(tmp_path, monkeypatch):
     from src.data.forecast_source_registry import SourceNotEnabled
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
 
     def _blocked_entry(*args, **kwargs):
         assert kwargs.get("role") == "entry_primary"
@@ -4206,6 +4209,7 @@ def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch
 
 
 def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     monkeypatch.setitem(settings["ensemble"], "primary", "tigge")
     monkeypatch.setitem(settings["ensemble"], "crosscheck", "gfs025")
     calls: list[dict[str, object]] = []
@@ -4301,6 +4305,7 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
 
 
 def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     captured: dict[str, object] = {}
     target_date = "2026-01-15"
     tz = ZoneInfo(NYC.timezone)
@@ -5825,12 +5830,13 @@ def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():
     assert evaluator_module._entry_ci_rejection_reason(opening, center_edge) is None
 
 
-def test_evaluate_candidate_rejects_unclassified_strategy_key():
+def test_evaluate_candidate_rejects_unclassified_strategy_key(monkeypatch):
     from src.engine.evaluator import evaluate_candidate, MarketCandidate
     from src.state.portfolio import PortfolioState
     from src.config import City
     from src.engine.discovery_mode import DiscoveryMode
     import unittest.mock as mock
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
 
     # Initial candidate for outer scope context
     city = City(
@@ -6768,6 +6774,7 @@ def test_lead_days_use_city_local_reference_time():
 
 
 def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",
@@ -6942,6 +6949,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
 
 
 def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",
@@ -7080,6 +7088,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
 
 
 def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     from src.contracts.alpha_decision import AlphaDecision
 
     candidate = MarketCandidate(
@@ -7195,6 +7204,7 @@ def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
 
 
 def test_day0_observation_path_reaches_day0_signal(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     calls: dict[str, object] = {}
 
     candidate = MarketCandidate(
@@ -7401,6 +7411,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
 
 
 def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date=str(date.today()),
@@ -7485,6 +7496,7 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
 
 
 def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     target_date = "2026-01-15"
     calls: dict[str, np.ndarray] = {}
 
@@ -7636,6 +7648,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
 
 
 def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-01-15",
@@ -10102,6 +10115,7 @@ def test_discovery_phase_records_rate_limited_decision_as_availability_fact(tmp_
 
 
 def test_evaluator_ens_fetch_exception_becomes_explicit_availability_truth(monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
         city=NYC,
         target_date="2026-04-01",

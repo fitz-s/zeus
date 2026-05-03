@@ -1109,6 +1109,49 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_source_run_status
             ON source_run(status, completeness_status, source_cycle_time);
 
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_transport TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            city_timezone TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low')),
+            physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+            target_window_start_utc TEXT NOT NULL,
+            target_window_end_utc TEXT NOT NULL,
+            completeness_status TEXT NOT NULL CHECK (completeness_status IN (
+                'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
+            )),
+            readiness_status TEXT NOT NULL CHECK (readiness_status IN (
+                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+            )),
+            reason_code TEXT,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                source_run_id, source_id, source_transport, release_calendar_key,
+                track, city_id, city_timezone, target_local_date,
+                temperature_metric, data_version
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_run_coverage_scope
+            ON source_run_coverage(city_id, city_timezone, target_local_date, temperature_metric, source_id, source_transport, data_version);
+        CREATE INDEX IF NOT EXISTS idx_source_run_coverage_status
+            ON source_run_coverage(readiness_status, completeness_status, computed_at);
+
         CREATE TABLE IF NOT EXISTS readiness_state (
             readiness_id TEXT PRIMARY KEY,
             scope_key TEXT NOT NULL UNIQUE,

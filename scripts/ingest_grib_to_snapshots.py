@@ -1,4 +1,7 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Created: 2026-03-26
+# Last reused/audited: 2026-05-03
+# Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
+# Lifecycle: created=2026-03-26; last_reviewed=2026-05-03; last_reused=2026-05-03
 # Purpose: Audited GRIB→ensemble_snapshots_v2 ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -33,6 +36,7 @@ import json
 import logging
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,6 +73,20 @@ _TRACK_CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 _UNIT_MAP = {"C": "degC", "F": "degF"}
+
+
+@dataclass(frozen=True)
+class SourceRunContext:
+    source_id: str
+    source_transport: str
+    source_run_id: str
+    release_calendar_key: str
+    source_cycle_time: datetime
+    source_release_time: datetime
+    source_available_at: datetime | None = None
+
+    def available_at_iso(self) -> str:
+        return (self.source_available_at or self.source_release_time).isoformat()
 
 
 def _normalize_unit(raw_unit: str) -> str:
@@ -146,6 +164,7 @@ def ingest_json_file(
     metric: MetricIdentity,
     model_version: str,
     overwrite: bool,
+    source_run_context: SourceRunContext | None = None,
 ) -> str:
     """Ingest one extracted JSON file into ensemble_snapshots_v2. Returns status string."""
     try:
@@ -226,6 +245,7 @@ def ingest_json_file(
     step_horizon_hours = payload.get("step_horizon_hours")
     step_horizon_hours = float(step_horizon_hours) if step_horizon_hours is not None else None
 
+    available_at = source_run_context.available_at_iso() if source_run_context else issue_time
     row = dict(
         city=city,
         target_date=target_date,
@@ -234,12 +254,19 @@ def ingest_json_file(
         observation_field=metric.observation_field,
         issue_time=issue_time,
         valid_time=target_date,
-        available_at=issue_time,
+        available_at=available_at,
         fetch_time=now,
         lead_hours=lead_hours,
         members_json=json.dumps(members),
         model_version=model_version,
         data_version=data_version,
+        source_id=source_run_context.source_id if source_run_context else None,
+        source_transport=source_run_context.source_transport if source_run_context else None,
+        source_run_id=source_run_context.source_run_id if source_run_context else None,
+        release_calendar_key=source_run_context.release_calendar_key if source_run_context else None,
+        source_cycle_time=(source_run_context.source_cycle_time.isoformat() if source_run_context else None),
+        source_release_time=(source_run_context.source_release_time.isoformat() if source_run_context else None),
+        source_available_at=(source_run_context.source_available_at.isoformat() if source_run_context and source_run_context.source_available_at else None),
         training_allowed=training_allowed,
         causality_status=causality_status,
         boundary_ambiguous=boundary_ambiguous,
@@ -259,13 +286,17 @@ def ingest_json_file(
             {insert_verb} INTO ensemble_snapshots_v2
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, training_allowed, causality_status,
+             members_json, model_version, data_version, source_id, source_transport,
+             source_run_id, release_calendar_key, source_cycle_time,
+             source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
              members_unit, local_day_start_utc, step_horizon_hours)
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
-             :members_json, :model_version, :data_version, :training_allowed, :causality_status,
+             :members_json, :model_version, :data_version, :source_id, :source_transport,
+             :source_run_id, :release_calendar_key, :source_cycle_time,
+             :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
              :members_unit, :local_day_start_utc, :step_horizon_hours)
             """,
@@ -286,6 +317,7 @@ def ingest_track(
     cities: set[str] | None,
     overwrite: bool,
     require_files: bool = True,
+    source_run_context: SourceRunContext | None = None,
 ) -> dict:
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
@@ -334,7 +366,14 @@ def ingest_track(
             except Exception:
                 pass
 
-        status = ingest_json_file(conn, path, metric=metric, model_version=model_version, overwrite=overwrite)
+        status = ingest_json_file(
+            conn,
+            path,
+            metric=metric,
+            model_version=model_version,
+            overwrite=overwrite,
+            source_run_context=source_run_context,
+        )
         if status in counters:
             counters[status] += 1
         elif status == "written":

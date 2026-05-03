@@ -1,5 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-03; last_reused=2026-05-03
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + PLAN_v4 Phase 5A source-run selection.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -58,6 +58,7 @@ def _graceful_shutdown(signum, frame) -> None:
 
 _TRUTHFUL_FAIL_STATUSES = frozenset({
     "download_failed",
+    "empty_ingest",
     "extract_failed",
     "paused_mars_credentials",
     "bad_target_date",
@@ -481,9 +482,9 @@ def _opendata_mn2t6_cycle():
 def _opendata_startup_catch_up():
     """Boot-time catch-up for both Open Data tracks.
 
-    Fires once at daemon start; pulls today's freshest run for both tracks.
-    Bounded by ``_default_cycle`` (single most-recent run) so re-runs after
-    a brief restart are nearly idempotent thanks to ``INSERT OR IGNORE``.
+    Fires once at daemon start; pulls the latest release-calendar-approved
+    full-horizon source run for both tracks. Re-runs after a brief restart are
+    nearly idempotent thanks to ``INSERT OR IGNORE``.
     """
     if _is_source_paused("ecmwf_open_data"):
         logger.info("_opendata_startup_catch_up: paused_by_control_plane")

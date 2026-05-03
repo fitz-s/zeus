@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 entries:
   - calendar_id: ecmwf_open_data_mx2t6_high
     source_id: ecmwf_open_data
@@ -17,9 +17,29 @@ entries:
     expected_step_rule: local_day_6h_windows_up_to_240h
     partial_policy: BLOCK_LIVE
     live_authorization: true
+    source_transport_required: ensemble_snapshots_v2_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION
     authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
     backfill_only: false
+    cycle_profiles:
+      - cycle_hours_utc: [0, 12]
+        horizon_profile: full
+        max_step_hours: 360
+        live_max_step_hours: 240
+        safe_fetch:
+          default_lag_minutes: 485
+          min_partial_lag_minutes: 400
+        full_horizon_live_authorization: true
+        live_authorization: true
+      - cycle_hours_utc: [6, 18]
+        horizon_profile: short
+        max_step_hours: 144
+        live_max_step_hours: 144
+        safe_fetch:
+          default_lag_minutes: 285
+        full_horizon_live_authorization: false
+        live_authorization: false
+        reason: 06/18 cycles cannot cover full configured future horizon
   - calendar_id: ecmwf_open_data_mn2t6_low
     source_id: ecmwf_open_data
     track: mn2t6_low
@@ -37,9 +57,29 @@ entries:
     expected_step_rule: local_day_6h_windows_up_to_240h
     partial_policy: BLOCK_LIVE
     live_authorization: true
+    source_transport_required: ensemble_snapshots_v2_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION
     authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
     backfill_only: false
+    cycle_profiles:
+      - cycle_hours_utc: [0, 12]
+        horizon_profile: full
+        max_step_hours: 360
+        live_max_step_hours: 240
+        safe_fetch:
+          default_lag_minutes: 485
+          min_partial_lag_minutes: 400
+        full_horizon_live_authorization: true
+        live_authorization: true
+      - cycle_hours_utc: [6, 18]
+        horizon_profile: short
+        max_step_hours: 144
+        live_max_step_hours: 144
+        safe_fetch:
+          default_lag_minutes: 285
+        full_horizon_live_authorization: false
+        live_authorization: false
+        reason: 06/18 cycles cannot cover full configured future horizon
   - calendar_id: openmeteo_previous_runs_best_match
     source_id: openmeteo_previous_runs
     track: best_match
