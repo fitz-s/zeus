@@ -38,18 +38,27 @@ import json
 import logging
 import subprocess
 import sys
-from datetime import date, datetime, timezone
+import hashlib
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from src.config import PROJECT_ROOT
+from src.config import PROJECT_ROOT, runtime_cities_by_name
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
 )
+from src.data.forecast_target_contract import (
+    build_forecast_target_scope,
+    evaluate_horizon_coverage,
+    evaluate_producer_coverage,
+)
+from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
 from src.state.db import get_world_connection as get_connection
+from src.state.source_run_coverage_repo import write_source_run_coverage
+from src.state.source_run_repo import write_source_run
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +137,292 @@ def _status_for_ingest_summary(summary: dict) -> str:
     return "ok"
 
 
+def _stable_id(prefix: str, *parts: object) -> str:
+    payload = json.dumps(parts, sort_keys=True, default=str, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:20]
+    return f"{prefix}:{digest}"
+
+
+def _horizon_profile_for_cycle(
+    *,
+    cycle_hour: int,
+    selection_metadata: dict[str, object],
+    manual_cycle_override: bool,
+) -> str:
+    if not manual_cycle_override:
+        profile = selection_metadata.get("horizon_profile")
+        if isinstance(profile, str) and profile:
+            return profile
+    if cycle_hour in (0, 12):
+        return "full"
+    if cycle_hour in (6, 18):
+        return "short"
+    return "manual"
+
+
+def _forecast_track_for_profile(*, ingest_track: str, horizon_profile: str) -> str:
+    if horizon_profile in {"full", "short"}:
+        return f"{ingest_track}_{horizon_profile}_horizon"
+    return f"{ingest_track}_{horizon_profile}"
+
+
+def _source_run_outcome(summary: dict, status: str) -> tuple[str, str, bool, str | None]:
+    written = int(summary.get("written", 0) or 0)
+    errors = int(summary.get("errors", 0) or 0)
+    if status == "ok" and written > 0 and errors == 0:
+        return "SUCCESS", "COMPLETE", False, None
+    if written > 0:
+        return "PARTIAL", "PARTIAL", True, status.upper()
+    return "FAILED", "MISSING", False, status.upper()
+
+
+def _json_list(value: object) -> list[Any]:
+    if not isinstance(value, str) or not value:
+        return []
+    parsed = json.loads(value)
+    return parsed if isinstance(parsed, list) else []
+
+
+def _parse_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT * FROM ensemble_snapshots_v2
+            WHERE source_id = ?
+              AND source_transport = ?
+              AND source_run_id = ?
+              AND data_version = ?
+            ORDER BY city, target_date, temperature_metric, snapshot_id
+            """,
+            (SOURCE_ID, "ensemble_snapshots_v2_db_reader", source_run_id, data_version),
+        ).fetchall()
+    ]
+
+
+def _observed_steps_for_snapshot(*, required_steps: tuple[int, ...], step_horizon_hours: object) -> tuple[int, ...]:
+    try:
+        horizon = float(step_horizon_hours)
+    except (TypeError, ValueError):
+        return ()
+    return tuple(step for step in required_steps if step <= horizon)
+
+
+def _write_source_authority_chain(
+    conn,
+    *,
+    summary: dict,
+    status: str,
+    source_run_id: str,
+    source_cycle_time: datetime,
+    source_release_time: datetime,
+    release_calendar_key: str,
+    forecast_track: str,
+    data_version: str,
+    computed_at: datetime,
+) -> dict[str, int | str | None]:
+    rows = _snapshot_rows_for_source_run(
+        conn,
+        source_run_id=source_run_id,
+        data_version=data_version,
+    )
+    source_run_status, source_run_completeness, partial_run, reason_code = _source_run_outcome(summary, status)
+    observed_member_counts = [len(_json_list(row.get("members_json"))) for row in rows]
+    observed_members = min(observed_member_counts) if observed_member_counts else 0
+    observed_step_horizons = [
+        float(row["step_horizon_hours"])
+        for row in rows
+        if row.get("step_horizon_hours") is not None
+    ]
+    observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
+
+    write_source_run(
+        conn,
+        source_run_id=source_run_id,
+        source_id=SOURCE_ID,
+        track=forecast_track,
+        release_calendar_key=release_calendar_key,
+        source_cycle_time=source_cycle_time,
+        source_issue_time=source_cycle_time,
+        source_release_time=source_release_time,
+        source_available_at=source_release_time,
+        fetch_started_at=computed_at,
+        fetch_finished_at=computed_at,
+        captured_at=computed_at,
+        imported_at=computed_at,
+        valid_time_start=min((str(row["target_date"]) for row in rows), default=None),
+        valid_time_end=max((str(row["target_date"]) for row in rows), default=None),
+        data_version=data_version,
+        expected_members=51,
+        observed_members=observed_members,
+        expected_steps_json=STEP_HOURS,
+        observed_steps_json=observed_steps,
+        expected_count=len(rows),
+        observed_count=len(rows),
+        completeness_status=source_run_completeness,
+        partial_run=partial_run,
+        status=source_run_status,
+        reason_code=reason_code,
+    )
+
+    cities_by_name = runtime_cities_by_name()
+    coverage_written = 0
+    readiness_written = 0
+    expires_at = computed_at + timedelta(hours=24)
+    for row in rows:
+        city = cities_by_name.get(str(row["city"]))
+        if city is None:
+            logger.warning("ecmwf_open_data authority chain: city not configured: %s", row["city"])
+            continue
+        target_local_date = date.fromisoformat(str(row["target_date"]))
+        scope = build_forecast_target_scope(
+            city_id=city.name.upper().replace(" ", "_"),
+            city_name=city.name,
+            city_timezone=city.timezone,
+            target_local_date=target_local_date,
+            temperature_metric=str(row["temperature_metric"]),
+            source_cycle_time=source_cycle_time,
+            data_version=data_version,
+        )
+        observed_steps_for_scope = _observed_steps_for_snapshot(
+            required_steps=scope.required_step_hours,
+            step_horizon_hours=row.get("step_horizon_hours"),
+        )
+        observed_members_for_scope = len(_json_list(row.get("members_json")))
+        horizon_decision = evaluate_horizon_coverage(
+            required_steps=scope.required_step_hours,
+            live_max_step_hours=int(float(row.get("step_horizon_hours") or 0)),
+        )
+        coverage_decision = evaluate_producer_coverage(
+            city_id=scope.city_id,
+            city_timezone=scope.city_timezone,
+            target_local_date=scope.target_local_date,
+            temperature_metric=scope.temperature_metric,
+            source_id=SOURCE_ID,
+            source_transport="ensemble_snapshots_v2_db_reader",
+            source_run_status=source_run_status,
+            source_run_completeness=source_run_completeness,
+            snapshot_target_date=target_local_date,
+            snapshot_metric=str(row["temperature_metric"]),
+            expected_steps=scope.required_step_hours,
+            observed_steps=observed_steps_for_scope,
+            expected_members=51,
+            observed_members=observed_members_for_scope,
+            has_source_linkage=all(
+                row.get(field)
+                for field in (
+                    "source_id",
+                    "source_transport",
+                    "source_run_id",
+                    "release_calendar_key",
+                    "source_cycle_time",
+                    "source_release_time",
+                    "source_available_at",
+                )
+            ),
+        )
+        reason_codes = list(
+            horizon_decision.reason_codes
+            if horizon_decision.status != "LIVE_ELIGIBLE"
+            else coverage_decision.reason_codes
+        )
+        snapshot_window_start = _parse_utc(row.get("local_day_start_utc"))
+        if snapshot_window_start != scope.target_window_start_utc:
+            reason_codes.append("SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
+        live_eligible = (
+            source_run_status == "SUCCESS"
+            and source_run_completeness == "COMPLETE"
+            and horizon_decision.status == "LIVE_ELIGIBLE"
+            and coverage_decision.status == "LIVE_ELIGIBLE"
+            and snapshot_window_start == scope.target_window_start_utc
+        )
+        if live_eligible:
+            completeness_status = "COMPLETE"
+            readiness_status = "LIVE_ELIGIBLE"
+            coverage_reason = None
+        elif "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in reason_codes:
+            completeness_status = "HORIZON_OUT_OF_RANGE"
+            readiness_status = "BLOCKED"
+            coverage_reason = "SOURCE_RUN_HORIZON_OUT_OF_RANGE"
+        else:
+            completeness_status = "PARTIAL"
+            readiness_status = "BLOCKED"
+            coverage_reason = next(
+                (reason for reason in reason_codes if reason != "FUTURE_TARGET_DATE_COVERED"),
+                "FUTURE_TARGET_DATE_COVERAGE_PARTIAL",
+            )
+
+        coverage_id = _stable_id(
+            "source_run_coverage",
+            source_run_id,
+            forecast_track,
+            scope.city_id,
+            scope.city_timezone,
+            scope.target_local_date.isoformat(),
+            scope.temperature_metric,
+            data_version,
+        )
+        write_source_run_coverage(
+            conn,
+            coverage_id=coverage_id,
+            source_run_id=source_run_id,
+            source_id=SOURCE_ID,
+            source_transport="ensemble_snapshots_v2_db_reader",
+            release_calendar_key=release_calendar_key,
+            track=forecast_track,
+            city_id=scope.city_id,
+            city=scope.city_name,
+            city_timezone=scope.city_timezone,
+            target_local_date=scope.target_local_date,
+            temperature_metric=scope.temperature_metric,
+            physical_quantity=str(row["physical_quantity"]),
+            observation_field=str(row["observation_field"]),
+            data_version=data_version,
+            expected_members=51,
+            observed_members=observed_members_for_scope,
+            expected_steps_json=scope.required_step_hours,
+            observed_steps_json=observed_steps_for_scope,
+            snapshot_ids_json=[int(row["snapshot_id"])],
+            target_window_start_utc=scope.target_window_start_utc,
+            target_window_end_utc=scope.target_window_end_utc,
+            completeness_status=completeness_status,
+            readiness_status=readiness_status,
+            reason_code=coverage_reason,
+            computed_at=computed_at,
+            expires_at=expires_at if readiness_status == "LIVE_ELIGIBLE" else None,
+        )
+        coverage_written += 1
+        build_producer_readiness_for_scope(
+            conn,
+            scope=scope,
+            source_id=SOURCE_ID,
+            source_transport="ensemble_snapshots_v2_db_reader",
+            track=forecast_track,
+            computed_at=computed_at,
+            release_calendar_key=release_calendar_key,
+        )
+        readiness_written += 1
+
+    return {
+        "source_run_status": source_run_status,
+        "source_run_completeness": source_run_completeness,
+        "coverage_written": coverage_written,
+        "producer_readiness_written": readiness_written,
+    }
+
+
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     logger.info("ecmwf_open_data %s: %s", label, " ".join(args[:6]) + " ...")
     try:
@@ -192,6 +487,7 @@ def collect_open_ens_cycle(
     gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
 
     now = now_utc or datetime.now(timezone.utc)
+    manual_cycle_override = run_date is not None or run_hour is not None
     selection_metadata: dict[str, object] = {}
     if run_date is None or run_hour is None:
         selection, selection_metadata = _select_cycle_for_track(track=track, now_utc=now)
@@ -217,11 +513,20 @@ def collect_open_ens_cycle(
     if run_hour is not None:
         cycle_hour = run_hour
     source_cycle_time = datetime.combine(cycle_date, datetime.min.time(), tzinfo=timezone.utc).replace(hour=cycle_hour)
+    horizon_profile = _horizon_profile_for_cycle(
+        cycle_hour=cycle_hour,
+        selection_metadata=selection_metadata,
+        manual_cycle_override=manual_cycle_override,
+    )
+    forecast_track = _forecast_track_for_profile(
+        ingest_track=cfg["ingest_track"],
+        horizon_profile=horizon_profile,
+    )
     source_release_time = selection_metadata.get("next_safe_fetch_at")
     if not isinstance(source_release_time, datetime):
         source_release_time = source_cycle_time
     source_run_id = f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
-    release_calendar_key = f"{SOURCE_ID}:{track}:{selection_metadata.get('horizon_profile', 'manual')}"
+    release_calendar_key = f"{SOURCE_ID}:{track}:{horizon_profile}"
 
     output_path = _download_output_path(
         run_date=cycle_date, run_hour=cycle_hour, param=cfg["open_data_param"],
@@ -286,9 +591,9 @@ def collect_open_ens_cycle(
         if str(INGEST_SCRIPT_DIR) not in sys.path:
             sys.path.insert(0, str(INGEST_SCRIPT_DIR))
         from ingest_grib_to_snapshots import SourceRunContext, ingest_track as _ingest  # type: ignore
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.db import init_schema
 
-        apply_v2_schema(conn)
+        init_schema(conn)
         # The opendata extract writes JSON files to a different subdir than
         # TIGGE — reuse the same ingester by passing the parent directory and
         # the matching track name, and override the json_subdir lookup via the
@@ -320,11 +625,25 @@ def collect_open_ens_cycle(
             )
         finally:
             _module._TRACK_CONFIGS[cfg["ingest_track"]]["json_subdir"] = original_subdir
+        status = _status_for_ingest_summary(summary)
+        authority_computed_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        authority_summary = _write_source_authority_chain(
+            conn,
+            summary=summary,
+            status=status,
+            source_run_id=source_run_id,
+            source_cycle_time=source_cycle_time,
+            source_release_time=source_release_time,
+            release_calendar_key=release_calendar_key,
+            forecast_track=forecast_track,
+            data_version=cfg["data_version"],
+            computed_at=authority_computed_at,
+        )
+        conn.commit()
     finally:
         if own_conn:
             conn.close()
 
-    status = _status_for_ingest_summary(summary)
     stages = [
         *stages,
         {"label": "ingest", "ok": status == "ok", "error": status if status != "ok" else None},
@@ -337,12 +656,14 @@ def collect_open_ens_cycle(
         "run_hour": cycle_hour,
         "source_run_id": source_run_id,
         "release_calendar_key": release_calendar_key,
+        "forecast_track": forecast_track,
         "source_id": SOURCE_ID,
         "forecast_source_role": FORECAST_SOURCE_ROLE,
         "degradation_level": source_spec.degradation_level,
         "download_path": str(output_path),
         "snapshots_inserted": int(summary.get("written", 0)),
         "snapshots_skipped": int(summary.get("skipped", 0)),
+        **authority_summary,
         "stages": stages,
     }
 
