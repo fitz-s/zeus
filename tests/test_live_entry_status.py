@@ -164,7 +164,7 @@ def test_expired_live_eligible_producer_readiness_blocks_status() -> None:
     assert "PRODUCER_READINESS_EXPIRED" in status.blockers
 
 
-def test_live_mode_without_executable_evaluator_wiring_still_blocks_status() -> None:
+def test_live_mode_without_blockers_reports_live_eligible_status() -> None:
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
@@ -176,5 +176,5 @@ def test_live_mode_without_executable_evaluator_wiring_still_blocks_status() -> 
         now_utc=_utc(2026, 5, 3, 10),
     )
 
-    assert status.status == "BLOCKED"
-    assert status.blockers == ("ENTRY_FORECAST_EXECUTABLE_EVALUATOR_NOT_WIRED",)
+    assert status.status == "LIVE_ELIGIBLE"
+    assert status.blockers == ()

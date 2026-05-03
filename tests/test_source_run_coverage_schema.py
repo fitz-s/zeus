@@ -165,6 +165,26 @@ def test_live_eligible_source_run_coverage_requires_timezone_aware_expiry() -> N
         )
 
 
+def test_source_run_coverage_requires_target_window_timestamps() -> None:
+    conn = _conn()
+
+    with pytest.raises(ValueError, match="target_window_start_utc is required"):
+        write_source_run_coverage(
+            conn,
+            **_coverage_kwargs(target_window_start_utc=None),
+        )
+
+
+def test_source_run_coverage_requires_timezone_aware_target_window() -> None:
+    conn = _conn()
+
+    with pytest.raises(ValueError, match="target_window_end_utc must be timezone-aware"):
+        write_source_run_coverage(
+            conn,
+            **_coverage_kwargs(target_window_end_utc=datetime(2026, 5, 8, 23)),
+        )
+
+
 def test_high_and_low_tracks_same_cycle_keep_independent_coverage_rows() -> None:
     conn = _conn()
     write_source_run_coverage(conn, **_coverage_kwargs())

@@ -134,8 +134,6 @@ def build_live_entry_forecast_status(
 
     if config.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         blockers.append("ENTRY_FORECAST_ROLLOUT_BLOCKED")
-    elif config.rollout_mode is EntryForecastRolloutMode.LIVE:
-        blockers.append("ENTRY_FORECAST_EXECUTABLE_EVALUATOR_NOT_WIRED")
     blockers = sorted(set(blockers))
     status = "LIVE_ELIGIBLE" if not blockers else "BLOCKED"
     return LiveEntryForecastStatus(

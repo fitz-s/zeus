@@ -144,7 +144,7 @@ def test_executable_reader_failure_blocks_shadow_boundary() -> None:
     )
 
     assert decision.status == "BLOCKED"
-    assert decision.reason_codes == ("FORECAST_SOURCE_LINKAGE_MISSING",)
+    assert decision.reason_codes == ("NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET",)
     assert decision.snapshot_id is None
 
 

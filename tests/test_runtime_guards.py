@@ -3564,6 +3564,7 @@ def test_ens_validation_failure_is_pre_vector_traceable(tmp_path, monkeypatch):
 
 
 def test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", lambda *args, **kwargs: {
         "members_hourly": np.ones((51, 24)) * 40.0,
         "times": [f"2026-04-01T{hour:02d}:00:00Z" for hour in range(24)],
@@ -3597,6 +3598,7 @@ def test_openmeteo_degraded_forecast_fallback_blocks_entry_before_vector(tmp_pat
 
 def test_entry_primary_source_policy_exception_blocks_entry_before_vector(tmp_path, monkeypatch):
     from src.data.forecast_source_registry import SourceNotEnabled
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
 
     def _blocked_entry(*args, **kwargs):
         assert kwargs.get("role") == "entry_primary"

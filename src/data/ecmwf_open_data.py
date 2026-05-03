@@ -306,7 +306,7 @@ def collect_open_ens_cycle(
                 date_from=None,
                 date_to=None,
                 cities=None,
-                overwrite=False,
+                overwrite=True,
                 require_files=False,
                 source_run_context=SourceRunContext(
                     source_id=SOURCE_ID,

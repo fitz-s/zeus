@@ -79,6 +79,18 @@ def write_source_run_coverage(
         raise ValueError("temperature_metric must be high or low")
     if readiness_status == "LIVE_ELIGIBLE" and expires_at is None:
         raise ValueError("LIVE_ELIGIBLE source_run_coverage requires expires_at")
+    target_window_start_utc_iso = _timestamp_iso(
+        target_window_start_utc,
+        "target_window_start_utc",
+    )
+    target_window_end_utc_iso = _timestamp_iso(
+        target_window_end_utc,
+        "target_window_end_utc",
+    )
+    if target_window_start_utc_iso is None:
+        raise ValueError("target_window_start_utc is required")
+    if target_window_end_utc_iso is None:
+        raise ValueError("target_window_end_utc is required")
 
     conn.execute("SAVEPOINT source_run_coverage_write")
     try:
@@ -124,8 +136,8 @@ def write_source_run_coverage(
                 "expected_steps_json": _json_text(expected_steps_json, default=[]),
                 "observed_steps_json": _json_text(observed_steps_json, default=[]),
                 "snapshot_ids_json": _json_text(snapshot_ids_json, default=[]),
-                "target_window_start_utc": _to_iso(target_window_start_utc),
-                "target_window_end_utc": _to_iso(target_window_end_utc),
+                "target_window_start_utc": target_window_start_utc_iso,
+                "target_window_end_utc": target_window_end_utc_iso,
                 "completeness_status": completeness_status,
                 "readiness_status": readiness_status,
                 "reason_code": reason_code,
