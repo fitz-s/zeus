@@ -1,5 +1,5 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-05-02
 # Authority basis: round3_verdict.md §1 #2 (R3 next packet) + ULTIMATE_PLAN.md
 # L305-308 (silent attribution drift detector). Per Fitz "test relationships,
 # not just functions" — these tests verify the CROSS-MODULE invariant that
@@ -13,8 +13,8 @@ Eight relationship tests covering:
   1. test_label_matches_when_all_clauses_align — center_buy + buy_yes + finite
   2. test_drift_detected_label_says_shoulder_but_bin_is_finite_range — canonical
      drift case from ULTIMATE_PLAN.md L305-308
-  3. test_drift_detected_label_says_center_buy_but_bin_is_shoulder — symmetric
-  4. test_drift_detected_label_says_center_buy_but_direction_is_buy_no — direction
+    3. test_shoulder_buy_quadrant_is_insufficient_signal — dormant inverse quadrant
+    4. test_center_sell_quadrant_is_insufficient_signal — dormant inverse quadrant
   5. test_insufficient_signal_when_bin_topology_unknown — conservative classifier
   6. test_insufficient_signal_when_label_is_settlement_capture_no_discovery_mode
      — the asymmetry between STRATEGIES enum + evaluator dispatch rule
@@ -110,26 +110,26 @@ def test_drift_detected_label_says_shoulder_but_bin_is_finite_range():
     assert "center_buy" in v.evidence["mismatch_summary"]
 
 
-def test_drift_detected_label_says_center_buy_but_bin_is_shoulder():
-    """RELATIONSHIP: symmetric drift — labeled center_buy but bin is a
-    shoulder. Dispatch rule clause 3 fires → would assign shoulder_sell.
-    Mismatch → drift_detected."""
+def test_shoulder_buy_quadrant_is_insufficient_signal():
+    """RELATIONSHIP: buy-YES shoulder is the dormant shoulder_buy quadrant,
+    not shoulder_sell. Attribution must fail closed instead of relabeling it."""
     row = _row(strategy="center_buy", bin_label="75°F+", direction="buy_yes")
     v = detect_attribution_drift(row)
-    assert v.kind == "drift_detected"
+    assert v.kind == "insufficient_signal"
     assert v.signature.label_strategy == "center_buy"
-    assert v.signature.inferred_strategy == "shoulder_sell"
+    assert v.signature.inferred_strategy is None
     assert v.signature.bin_topology == "open_shoulder"
+    assert v.evidence["reason"] == "cannot_infer_strategy_from_row"
 
 
-def test_drift_detected_label_says_center_buy_but_direction_is_buy_no():
-    """RELATIONSHIP: dispatch rule clause 4 only triggers center_buy when
-    direction=='buy_yes'. A position labeled center_buy with direction=buy_no
-    would have fallen through to clause 5 (opening_inertia). Drift."""
+def test_center_sell_quadrant_is_insufficient_signal():
+    """RELATIONSHIP: buy-NO center is the dormant center_sell quadrant,
+    not opening_inertia. Attribution must fail closed instead of falling back."""
     row = _row(strategy="center_buy", bin_label="50-51°F", direction="buy_no")
     v = detect_attribution_drift(row)
-    assert v.kind == "drift_detected"
-    assert v.signature.inferred_strategy == "opening_inertia"
+    assert v.kind == "insufficient_signal"
+    assert v.signature.inferred_strategy is None
+    assert v.evidence["reason"] == "cannot_infer_strategy_from_row"
 
 
 def test_insufficient_signal_when_bin_topology_unknown():
