@@ -39,6 +39,65 @@ _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bi
 _V2_FALLBACK_SEEN: set[tuple[str, str, str, str]] = set()
 
 
+# F1 forward-fix (RERUN_PLAN_v2.md §5, 2026-05-03): config-pinned
+# frozen-as-of + per-bucket model_key pins for live Platt loader. Read once
+# per process from config/settings.json::calibration::pin (best-effort —
+# absence preserves legacy behavior of "newest is_active=VERIFIED row wins").
+# Operator updates the config explicitly to bless a new calibrator generation
+# so future mass-refits don't silently take over live serving.
+_PIN_CONFIG_CACHE: Optional[dict] = None
+
+
+def get_calibration_pin_config() -> dict:
+    """Return cached calibration-pin config from settings.json.
+
+    Shape::
+
+        {
+          "frozen_as_of": "2026-05-03 12:00:00" | None,
+          "model_keys": { "<temperature_metric>:<cluster>:<season>": "<model_key>", ... }
+        }
+
+    Both keys default to safe values (None / empty dict) when settings.json
+    has no ``calibration.pin`` section. The cache is populated once per
+    process; tests that need to invalidate may set ``_PIN_CONFIG_CACHE``
+    back to None.
+    """
+    global _PIN_CONFIG_CACHE
+    if _PIN_CONFIG_CACHE is not None:
+        return _PIN_CONFIG_CACHE
+    pin: dict = {"frozen_as_of": None, "model_keys": {}}
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        # repo root: src/calibration/manager.py → ../../config/settings.json
+        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
+        if cfg_path.exists():
+            cfg = _json.loads(cfg_path.read_text())
+            pin_cfg = (cfg.get("calibration") or {}).get("pin") or {}
+            if isinstance(pin_cfg.get("frozen_as_of"), str):
+                pin["frozen_as_of"] = pin_cfg["frozen_as_of"]
+            if isinstance(pin_cfg.get("model_keys"), dict):
+                pin["model_keys"] = dict(pin_cfg["model_keys"])
+    except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
+        logger.warning("calibration pin config load failed: %s; using legacy unpinned behavior", exc)
+    _PIN_CONFIG_CACHE = pin
+    return pin
+
+
+def _resolve_pin_for_bucket(
+    temperature_metric: str, cluster: str, season: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Look up (frozen_as_of, model_key) for one bucket.
+
+    Returns (frozen_as_of, model_key) where either may be None to indicate
+    "no pin at this layer; default loader behavior applies".
+    """
+    pin = get_calibration_pin_config()
+    key = f"{temperature_metric}:{cluster}:{season}"
+    return pin.get("frozen_as_of"), pin.get("model_keys", {}).get(key)
+
+
 def _emit_v2_legacy_fallback_warning(
     path: str, cluster: str, season: str, metric: str
 ) -> None:
@@ -183,6 +242,12 @@ def get_calibrator(
         else LOW_LOCALDAY_MIN.data_version
     )
 
+    # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
+    # bucket. Both default to None → legacy behavior preserved.
+    primary_frozen, primary_model_key = _resolve_pin_for_bucket(
+        temperature_metric, cluster, season
+    )
+
     # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC)
     model_data = load_platt_model_v2(
         conn,
@@ -190,6 +255,8 @@ def get_calibrator(
         cluster=cluster,
         season=season,
         data_version=expected_data_version,
+        frozen_as_of=primary_frozen,
+        model_key=primary_model_key,
     )
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
@@ -254,12 +321,17 @@ def get_calibrator(
     for fallback_cluster in calibration_clusters():
         if fallback_cluster == cluster:
             continue
+        fb_frozen, fb_model_key = _resolve_pin_for_bucket(
+            temperature_metric, fallback_cluster, season
+        )
         model_data = load_platt_model_v2(
             conn,
             temperature_metric=temperature_metric,
             cluster=fallback_cluster,
             season=season,
             data_version=expected_data_version,
+            frozen_as_of=fb_frozen,
+            model_key=fb_model_key,
         )
         if model_data is None and temperature_metric == "high":
             bk_fb = bucket_key(fallback_cluster, season)

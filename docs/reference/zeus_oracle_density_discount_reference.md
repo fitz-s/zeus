@@ -5,6 +5,8 @@ Last reused/audited: 2026-05-03
 Authority basis: operator directive 2026-05-02/03 — three-part reasoning chain on
   Platt regime absorption + DDD as outage detector; verified against
   calibration_pairs_v2 residuals 2025-04-01 to 2026-04-19.
+  v2 redesign 2026-05-03: Two-Rail trigger + continuous linear curve + p05 hardened floor.
+  See §X for full v2 rationale.
 
 ## Status
 
@@ -299,57 +301,87 @@ ratchet the floor up later when local infrastructure improves. Pre-setting
 hardcoded 0.65 would trigger penalty on every routine cloudy day and starve
 the market of all alpha.
 
-## §6 Canonical DDD formula (corrected — this is the spec)
+## §6 Canonical DDD formula — v2 Two-Rail design (operator-approved 2026-05-03)
+
+**Note on σ**: σ is computed and available for monitoring/diagnostics but does NOT
+enter the trigger or floor selection. See §X for the v2 redesign rationale.
+
+**Note on asymmetric loss preferences**: city-specific asymmetric loss preferences
+(e.g. Denver conservative sizing) belong in the Kelly multiplier layer, NOT in
+the floor. See `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
 
 ```
-DDD_actual(city, track, today) =
+DDD_v2(city, track, today) =
 
-  let cov         = directional_coverage_today_in_window(city, track)        # §3
-  let floor_soft  = median(directional_coverage_last_90d, exclude=today)
-  let floor_hard  = HARD_FLOOR_FOR_SETTLEMENT[city]                          # §5.1
-  let floor       = max(floor_hard, floor_soft)
-  let sigma       = stddev(directional_coverage_last_60d_normal,
-                           exclude=today)
-  let shortfall   = max(0, floor - cov - 1*sigma)                             # §5.2
-  let N           = count_calibration_pairs_v2(city, track, authority=VERIFIED)
-  let multiplier  = 1 + k / sqrt(max(N, 1))                                  # §5.3, k=0 in v1 (failed §2.2 — see "noble failure" note); structure preserved for future revival
-  let DDD_raw     = apply_discount_curve(shortfall)                          # below
-  let DDD_actual  = small_sample_floor(DDD_raw * multiplier, N)              # §5.3 (multiplier=1.0 at k=0; floor still applies at N<100)
-  return DDD_actual
+  let cov          = directional_coverage_today_in_window(city, track)        # §3
+  let city_floor   = CITY_FLOORS_CONFIG[city]                                 # pre-computed per §6.1; p05-based + safety minimum
+  let N            = N_platt_samples(city, track)
+  let N_star       = N_STAR_CONFIG[city][track]                               # from p2_5 calibration
+
+  # ── RAIL 1: Absolute hard kill ───────────────────────────────────────
+  # Physics: below 0.35, no probability claim about daily extreme is defensible.
+  if cov < 0.35 AND window_elapsed > 0.50:
+      return DDDResult(action='HALT', discount=0.0, rail=1)
+
+  # ── RAIL 2: Continuous linear discount ──────────────────────────────
+  shortfall = max(0.0, city_floor - cov)
+  discount  = min(0.09, 0.20 * shortfall)
+
+  # Small-sample amplification (1.25× when N < N*)
+  if N < N_star:
+      discount = min(0.09, discount * 1.25)
+
+  return DDDResult(action='DISCOUNT', discount=max(mismatch_rate, discount), rail=2)
 ```
 
-Discount curve (unchanged from initial proposal — operator-tunable):
+### §6.1 Floor selection
 
 ```
-shortfall range | DDD value
-0               | 0.00
-0.0  - 0.10     | linear 0% → 2%
-0.10 - 0.25     | linear 2% → 5%
-0.25 - 0.40     | linear 5% → 8%
-> 0.40          | 9% (cap; never blacklist)
+city_floor = max(0.35, p05_train_directional_coverage)
 ```
+
+Policy overrides:
+- Lagos 0.45: PHYSICAL_OVERRIDE (vendor archive has documented gaps; Ruling B)
+- Denver: override REMOVED (Ruling A — asymmetric loss moved to Kelly layer)
+- Paris: EXCLUDED pending workstream A DB resync
+
+### §6.2 Continuous linear curve
+
+```
+shortfall | discount
+0.00      | 0.0%
+0.10      | 2.0%
+0.20      | 4.0%
+0.30      | 6.0%
+0.40      | 8.0%
+≥ 0.45    | 9.0% (cap — never exceeds 9%; stays in CAUTION, never BLACKLIST)
+```
+
+Formula: `D = min(0.09, 0.20 × shortfall)`
+
+This replaces the v1 5-segment curve. Phase 1 v2 bootstrap CIs showed
+adjacent mid-bins [0.10–0.20), [0.20–0.30), [0.30–0.50) are statistically
+indistinguishable — the 5-segment parameterization implied false precision.
 
 Combined with mismatch (existing oracle penalty signal):
 
 ```
-oracle_error_rate(city, track) = max(mismatch_rate, DDD_actual)
+oracle_error_rate(city, track) = max(mismatch_rate, DDD_discount)
 ```
 
 `oracle_penalty._classify_rate(oracle_error_rate)` returns OK/INCIDENTAL/CAUTION
 unchanged. **DDD is bounded at 9%** — it stays in CAUTION, never auto-blacklists.
 Pipeline drift (mismatch >10%) IS a kill-switch trigger; thinness alone is NOT.
 
-## §7 Day-0 dynamic circuit breaker — composite two-rail (operator ruling 2026-05-03)
+## §7 Day-0 dynamic circuit breaker — Two-Rail (v2 design, operator ruling 2026-05-03)
 
 In addition to the historical-baseline DDD above, a real-time intraday circuit
-breaker is required for catastrophic same-day dropouts. Per operator ruling
-2026-05-03, this is a **two-rail composite**: a per-city scaled relative rail
-that fires CAUTION/dynamic-down sizing, and an absolute uniform hard-kill rail
-that halts all entries for the day regardless of city.
+breaker is required for catastrophic same-day dropouts. The v2 design unifies
+this into the same Two-Rail framework as §6.
 
-### Why composite (operator reasoning)
+### Why Two-Rail (operator reasoning)
 
-A uniform 0.40 floor is wrong both ways:
+A uniform 0.40 absolute floor is wrong both ways:
 - **Too lax for healthy stations**: Tokyo runs at 1.00 daily. If it drops to
   0.45 (still above a uniform 0.40 floor), the system would let trades fire —
   but Tokyo at 0.45 means the station is broken for HALF a day. Catastrophe.
@@ -357,34 +389,25 @@ A uniform 0.40 floor is wrong both ways:
   baseline floats around 0.40. A uniform floor would penalize every cloudy
   day, starving the market.
 
-Both rails together: relative rail catches "abnormal for this city" without
-false positives on chronic-thin cities; absolute rail catches "physically
-indefensible" regardless of city baseline.
+Both rails together: Rail 2 relative discount catches "abnormal for this city"
+without false positives on chronic-thin cities; Rail 1 absolute kill catches
+"physically indefensible" regardless of city baseline.
 
-### The two rails
+### The two rails (v2 aligned with §6)
 
 ```
-def today_directional_coverage_so_far(city, track, now_utc) -> float:
-    target_window = peak_window(city, track)
-    target_hours_so_far = [h for h in target_window if h <= now_local.hour]
-    if not target_hours_so_far:
-        return 1.0  # too early to judge
-    distinct_hours_so_far = count_distinct_hours_in(target_hours_so_far)
-    return distinct_hours_so_far / len(target_hours_so_far)
+cov = current_directional_coverage(city, track)  # partial-day view
 
-cov_today = today_directional_coverage_so_far(city, track, now_utc)
+# RAIL 1 — Absolute hard kill (fires HALT_TRADING_FOR_DAY):
+#   if cov < 0.35 AND window_elapsed > 0.50:
+#     return DDDResult(action='HALT', discount=0.0, rail=1)
+#     → blocks all entries for the day; auto-clears next day
 
-# RAIL 1 — Relative (per-city scaled) — fires CAUTION / dynamic size-down:
-#   if cov_today < city_floor[city] - 2 * sigma_window[city]
-#       AND target_window_elapsed >= 50%:
-#     emit risk-event "day0_relative_drop" with kelly_mult ≈ 0.7-0.9
-#     (NOT a hard halt — this is a position-shrink signal)
-
-# RAIL 2 — Absolute (uniform) — fires HARD BLACKLIST for the day:
-#   if cov_today < 0.35 AND target_window_elapsed >= 50%:
-#     reject ALL entries today with entries_blocked_reason=
-#       "day0_observation_gap_absolute"
-#     This is unconditional and does not care about city_floor.
+# RAIL 2 — Continuous linear discount (relative, per-city floor):
+#   shortfall = max(0.0, city_floor - cov)
+#   discount  = min(0.09, 0.20 * shortfall)
+#   if N < N_star: discount = min(0.09, discount * 1.25)
+#   return DDDResult(action='DISCOUNT', discount=max(mismatch_rate, discount), rail=2)
 ```
 
 **Physics grounding for the 0.35 absolute floor**: if a day has lost more than
@@ -392,23 +415,25 @@ cov_today = today_directional_coverage_so_far(city, track, now_utc)
 hours has statistical significance. Below this floor, regardless of historical
 baseline, no probability claim about daily max/min is defensible.
 
+**Note on σ in Day-0 context**: the v1 Rail 1 used `city_floor - 2σ` as the
+relative-drop threshold. In v2, σ is diagnostic-only and does NOT enter the
+trigger. The relative trigger is simply `cov < city_floor` (Rail 2), and the
+absolute kill is `cov < 0.35` (Rail 1). σ is logged as telemetry for regime-shift
+detection (see §X).
+
 ### Relationship to §6 DDD
 
-The historical DDD in §6 is **bounded at 9% and never auto-blacklists**
-(thinness alone never kills the city long-term). The Day-0 absolute hard
-kill is a **separate, today-only mechanism** — it pauses trading for that
-day specifically, then auto-clears the next day. They are conceptually
-distinct:
+The §6 formula and §7 circuit breaker share the same Two-Rail structure.
+They are conceptually the same mechanism applied at different time horizons:
 
 | Mechanism | Time horizon | Action ceiling |
 |---|---|---|
-| §6 historical DDD | Rolling baseline, persists | Max 9% kelly down (CAUTION) |
-| §7 rail 1 (relative) | Same-day partial-window | Dynamic size-down |
-| §7 rail 2 (absolute) | Same-day, < 0.35 only | Hard blacklist for today |
+| §6/§7 Rail 1 (absolute) | Same-day, cov < 0.35 + window > 50% | Hard HALT for today |
+| §6/§7 Rail 2 (relative) | Continuous, per-city floor | Max 9% kelly down (CAUTION) |
 
-The §7 mechanisms cite Ruling 2 (2026-05-03) as authority basis. The 0.35 and
-2σ thresholds are operator-set initial values; Phase 1 §2.6 of the
-implementation plan must validate them empirically on time-window holdout.
+The §7 mechanisms cite Ruling 2 (2026-05-03) as authority basis. The 0.35
+threshold is operator-set; the 0.20 linear coefficient (α) requires backtest
+validation deferred to operator.
 
 ## §8 The reasoning chain (preserve this for future agents)
 
@@ -448,13 +473,81 @@ Step 8: "Does linear shortfall over-react to noise?"
 
 Step 9: "Should small-sample cities have stricter DDD?"
         → yes — Platt regime convergence requires N
-        → fix: 1+k/sqrt(N) multiplier
+        → fix: 1+k/sqrt(N) multiplier (k=0 in v1 — noble failure; structure preserved)
+
+Step 10: "Does σ-band trigger have an inverted incentive?"
+         → yes — worse infra (higher σ) causes algorithm to LOWER floor to maintain
+           FP rate, giving LESS DDD protection to bad stations (H1 / Denver empirical proof)
+         → fix (v2): remove σ from trigger; floor = max(p05, 0.35) only
+         → σ retained as diagnostic / regime-shift telemetry
+
+Step 11: "Does 5-segment curve imply false precision?"
+         → yes — Phase 1 v2 bootstrap CIs show mid-bins [0.10–0.50) are
+           statistically indistinguishable
+         → fix (v2): replace with continuous linear D = min(0.09, 0.20 × shortfall)
+
+Step 12: "Does Denver 0.85 asymmetric-loss policy override belong in floor?"
+         → no — asymmetric loss is a sizing preference, not a physical coverage baseline
+         → fix (v2): remove Denver override from floor; move to Kelly multiplier layer
+         → Lagos 0.45 retained as PHYSICAL_OVERRIDE (documented infrastructure gap)
 ```
 
-Each step's discovery overturns or refines the previous. The final formula is
+Each step's discovery overturns or refines the previous. The final v2 formula is
 not arrived at by intuition — it is forced by empirical evidence at every
 step. Future implementations that drop any element should re-run the
 verification audit before doing so.
+
+## §X v2 Redesign Rationale (2026-05-03)
+
+**Operator-approved 2026-05-03. Authority: `MATH_REALITY_OPTIMUM_ANALYSIS.md`.**
+
+### What changed from v1
+
+| Aspect | v1 | v2 |
+|---|---|---|
+| Trigger | `fire if cov < floor - σ` | Two-Rail: Rail 1 absolute kill `cov < 0.35`, Rail 2 `cov < floor` |
+| σ role | In trigger formula | Diagnostic-only; NOT in trigger or floor selection |
+| Curve | 5-segment linear table | Continuous `D = min(0.09, 0.20 × shortfall)` |
+| Floor basis | p05 + σ-aware adjustment | p05 only: `max(p05_train_directional_cov, 0.35)` |
+| Denver override | 0.85 (asymmetric loss) | REMOVED — algorithm output stands (p05 ≈ 0.879) |
+| Lagos override | 0.45 PHYSICAL_OVERRIDE | Retained (Ruling B — documented vendor archive gaps) |
+| Small-sample amp | `1 + k/sqrt(N)`, k=0 | Same structure; 1.25× amplifier when `N < N_star` |
+
+### Why σ was removed from the trigger (structural bug)
+
+The σ-band formula `fire if cov < floor - σ` has an inverted incentive:
+higher σ (worse infrastructure, more outages) forces the algorithm to LOWER
+the floor to maintain the FP constraint. A city with bad infrastructure
+therefore gets LESS DDD protection. Denver's H1 result (4 zero-cov training
+days → σ 0.064 → 0.158 → algorithm recommends floor 0.35) is the empirical proof.
+
+**σ is kept as out-of-band diagnostic**. It is logged and monitored to detect
+regime shifts (vendor flapping, infrastructure degradation), but it never enters
+the critical sizing path.
+
+### Why Denver override was removed (Ruling A)
+
+Denver's 0.85 floor was a policy override for asymmetric loss preference
+(operators prefer conservative sizing on Denver LOW due to convective risk).
+This is a correct preference but the wrong mechanism. A floor override lies
+about the physical baseline. The right place for sizing preferences is the
+Kelly multiplier layer. See `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
+
+### Why the 5-segment curve was replaced
+
+Phase 1 v2 bootstrap CIs (95% confidence intervals grouped by `decision_group_id`)
+showed that adjacent shortfall bins [0.10–0.20), [0.20–0.30), and [0.30–0.50)
+have statistically indistinguishable mean error rates. The only significant
+discontinuity is the tail bin [0.50+]. A 5-segment curve with distinct
+breakpoints at 0.10, 0.25, 0.40 implies empirical precision the data does not
+support. A single-parameter linear formula is more defensible.
+
+### What is deferred
+
+- **Comprehensive backtest validation of α=0.20**: operator will run separately.
+- **Kelly layer implementation**: hand-off at `docs/reference/zeus_kelly_asymmetric_loss_handoff.md`.
+- **Live wiring into `src/engine/evaluator.py`**: separate workstream.
+- **Paris floor**: pending workstream A DB resync.
 
 ## §9 Implementation order (for the executor agent)
 
