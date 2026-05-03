@@ -34,17 +34,17 @@ CONTROL_PATH = state_path("control_plane.json")
 DEFAULT_EDGE_THRESHOLD_MULTIPLIER = 1.0
 TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 
-# G6 antibody (2026-04-26): typed allowlist of strategies permitted to execute
-# in the live runtime. Universe of buildable strategies lives in
-# src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries); this set is the
-# subset operator-approved for live execution. Expansion REQUIRES an explicit
-# packet — accidental drift caught by tests/test_live_safe_strategies.py.
+# G6 antibody (2026-04-26): typed boot/catalog allowlist of strategies that
+# may be enabled when the live-only daemon starts. Universe of buildable
+# strategies lives in src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries).
+# This set is not the runtime live-entry authority; that boundary is
+# _LIVE_ALLOWED_STRATEGIES plus is_strategy_enabled(). Expansion REQUIRES an
+# explicit packet — accidental drift caught by tests/test_live_safe_strategies.py.
 #
-# 2026-04-29: Operator authorized expansion to ALL 4 KNOWN_STRATEGIES post-
-# calibration-rebuild. Justification: refit_platt_v2 produced 395 active models
-# (200 HIGH + 195 LOW) on 40.4M-pair calibration_pairs_v2; settings.json
-# n_mc=10000 lifted runtime to LAW 4 preferred precision; live_safety_cap_usd=$5
-# canary rail still hard-clips Kelly per-trade. Test pin updated in same commit.
+# 2026-04-29: Operator authorized boot/catalog expansion to ALL 4
+# KNOWN_STRATEGIES post-calibration-rebuild. Runtime live-entry stayed narrower:
+# shoulder_sell remains blocked by _LIVE_ALLOWED_STRATEGIES until a promotion
+# packet updates execution, sizing, evidence, and tests together.
 LIVE_SAFE_STRATEGIES: frozenset[str] = frozenset({
     "opening_inertia",
     "center_buy",

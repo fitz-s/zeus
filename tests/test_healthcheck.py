@@ -212,6 +212,13 @@ def test_healthcheck_parses_launchctl_kv_output(monkeypatch, tmp_path):
     assert result["healthy"] is True
 
 
+def test_healthcheck_defaults_live_riskguard_label(monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.delenv("ZEUS_RISKGUARD_LABEL", raising=False)
+
+    assert healthcheck._riskguard_label() == "com.zeus.riskguard-live"
+
+
 def test_healthcheck_falls_back_to_launchctl_print_when_list_fails(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"

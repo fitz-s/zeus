@@ -56,7 +56,13 @@ def _zeus_db_path() -> Path:
 
 
 def _riskguard_label() -> str:
-    return os.environ.get("ZEUS_RISKGUARD_LABEL", "com.zeus.riskguard")
+    configured = os.environ.get("ZEUS_RISKGUARD_LABEL")
+    if configured:
+        return configured
+    mode = _mode()
+    if mode == "live":
+        return "com.zeus.riskguard-live"
+    return "com.zeus.riskguard"
 
 
 def _status_age_seconds(timestamp: str) -> float | None:

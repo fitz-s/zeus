@@ -8,6 +8,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from dataclasses import is_dataclass, replace
@@ -34,12 +35,18 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
 )
 
+logger = logging.getLogger(__name__)
 
 CANONICAL_STRATEGY_KEYS = {
     "settlement_capture",
     "shoulder_sell",
     "center_buy",
     "opening_inertia",
+}
+STRATEGY_KEYS_BY_DISCOVERY_MODE = {
+    "day0_capture": frozenset({"settlement_capture"}),
+    "opening_hunt": frozenset({"opening_inertia"}),
+    "update_reaction": frozenset({"center_buy", "shoulder_sell"}),
 }
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 
@@ -72,6 +79,20 @@ _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
 def _resolve_strategy_key(decision) -> str:
     strategy_key = str(getattr(decision, "strategy_key", "") or "").strip()
     return strategy_key if strategy_key in CANONICAL_STRATEGY_KEYS else ""
+
+
+def _discovery_mode_value(mode) -> str:
+    return str(getattr(mode, "value", mode) or "").strip()
+
+
+def _strategy_phase_rejection_reason(strategy_key: str, mode) -> str | None:
+    mode_value = _discovery_mode_value(mode)
+    allowed = STRATEGY_KEYS_BY_DISCOVERY_MODE.get(mode_value)
+    if allowed is None:
+        return f"strategy_phase_unknown_mode:{mode_value or 'unknown'}"
+    if strategy_key not in allowed:
+        return f"strategy_phase_mismatch:{strategy_key}:{mode_value}"
+    return None
 
 
 def _forward_price_linkage_status_degraded(status: str) -> bool:
@@ -2207,6 +2228,53 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         )
                         continue
                     strategy_name = strategy_key
+                    phase_rejection_reason = _strategy_phase_rejection_reason(strategy_name, mode)
+                    if phase_rejection_reason:
+                        edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
+                        summary["no_trades"] += 1
+                        summary["strategy_phase_rejections"] = summary.get("strategy_phase_rejections", 0) + 1
+                        rejection_stage = "SIGNAL_QUALITY"
+                        rejection_reasons = [phase_rejection_reason]
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
+                        artifact.add_no_trade(
+                            deps.NoTradeCase(
+                                decision_id=d.decision_id,
+                                city=city.name,
+                                target_date=candidate.target_date,
+                                range_label=d.edge.bin.label if d.edge else "",
+                                direction=d.edge.direction if d.edge else "",
+                                rejection_stage=rejection_stage,
+                                strategy=strategy_name,
+                                strategy_key=strategy_name,
+                                edge_source=edge_source,
+                                availability_status=getattr(d, "availability_status", ""),
+                                rejection_reasons=rejection_reasons,
+                                best_edge=d.edge.edge if d.edge else 0.0,
+                                model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                market_price=d.edge.entry_price if d.edge else 0.0,
+                                decision_snapshot_id=d.decision_snapshot_id,
+                                selected_method=d.selected_method,
+                                settlement_semantics_json=d.settlement_semantics_json,
+                                epistemic_context_json=d.epistemic_context_json,
+                                edge_context_json=d.edge_context_json,
+                                applied_validations=list(d.applied_validations),
+                                bin_labels=parseable_labels,
+                                p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
+                                agreement=getattr(d, "agreement", ""),
+                                timestamp=decision_time.isoformat(),
+                            )
+                        )
+                        continue
                     if not deps.is_strategy_enabled(strategy_name):
                         edge_source = d.edge_source or deps._classify_edge_source(mode, d.edge)
                         summary["no_trades"] += 1

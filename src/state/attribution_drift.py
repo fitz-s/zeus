@@ -1,7 +1,7 @@
 """ATTRIBUTION_DRIFT packet — BATCH 1: per-position attribution-drift detector.
 
 Created: 2026-04-28
-Last reused/audited: 2026-04-28
+Last reused/audited: 2026-05-02
 Authority basis: round3_verdict.md §1 #2 (R3 next packet) + ULTIMATE_PLAN.md
 L305-308 (silent attribution drift detector). Per AGENTS.md L114-126:
 "strategy_key is the sole governance identity for attribution, risk policy,
@@ -22,15 +22,15 @@ K1 contract (mirrors src/state/edge_observation.py):
 Ground-truth dispatch rule (mirrored from src/engine/evaluator.py L420-441):
   1. discovery_mode == 'day0_capture'   → 'settlement_capture'
   2. discovery_mode == 'opening_hunt'   → 'opening_inertia'
-  3. bin.is_shoulder                     → 'shoulder_sell'
-  4. direction == 'buy_yes'              → 'center_buy'
-  5. fallback                            → 'opening_inertia'
+    3. direction == 'buy_no' AND shoulder  → 'shoulder_sell'
+    4. direction == 'buy_yes' AND center   → 'center_buy'
+    5. otherwise                           → insufficient_signal
 
 Known limitations (per BATCH 1 boot §1 + dispatch GO_BATCH_1 note):
   - `discovery_mode` is NOT surfaced by `_normalize_position_settlement_event`
     in the row dict. Without it, clauses 1-2 of the dispatch rule cannot be
     applied. Positions whose persisted `strategy` is `settlement_capture` OR
-    `opening_inertia` (which require clause 1 or 2 OR fall through clause 5)
+    `opening_inertia` (which requires clause 2)
     are therefore not definitively classifiable from row alone — the
     detector emits `insufficient_signal` for them rather than risk a false
     `drift_detected`.
@@ -43,7 +43,7 @@ Known limitations (per BATCH 1 boot §1 + dispatch GO_BATCH_1 note):
   - Result: the detector is RECALL-LIMITED (some real drifts may not be
     detected because the input data lacks discovery_mode or the bin label
     is ambiguous) but PRECISION-FAVORED (every drift it reports is a real
-    label/semantics mismatch on at least one of clauses 3-5).
+    label/semantics mismatch on clauses 3-4).
 """
 from __future__ import annotations
 
@@ -136,17 +136,17 @@ def _infer_strategy_from_signature(sig: AttributionSignature) -> str | None:
     if sig.discovery_mode is None and sig.label_strategy in {"settlement_capture", "opening_inertia"}:
         return None
 
-    # Clause 3: shoulder bin → shoulder_sell.
+    # Clauses 3-4: only the two live/shadow update quadrants are classifiable.
     if sig.bin_topology == "open_shoulder":
-        return "shoulder_sell"
+        if sig.direction == "buy_no":
+            return "shoulder_sell"
+        return None
     if sig.bin_topology == "unknown":
-        # Cannot rule out shoulder; not safe to assert center_buy/opening_inertia.
         return None
 
-    # Clauses 4-5: direction-based fallthrough.
     if sig.direction == "buy_yes":
         return "center_buy"
-    return "opening_inertia"
+    return None
 
 
 # ----- Per-position drift detector -----------------------------------------

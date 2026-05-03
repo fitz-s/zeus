@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-02; last_reused=2026-05-02
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-02
 # Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -2559,7 +2559,7 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
     _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
     conn = get_connection(tmp_path / "live-buy-no-flag.db")
     init_schema(conn)
-    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
     market = {
         "city": NYC,
@@ -2607,7 +2607,7 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
     )
 
     deps = types.SimpleNamespace(
-        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
         find_weather_markets=lambda **kwargs: [market],
         get_last_scan_authority=lambda: "VERIFIED",
         DiscoveryMode=DiscoveryMode,
@@ -2628,7 +2628,7 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
         artifact=artifact,
         tracker=StrategyTracker(),
         limits=types.SimpleNamespace(),
-        mode=DiscoveryMode.OPENING_HUNT,
+        mode=DiscoveryMode.UPDATE_REACTION,
         summary=summary,
         entry_bankroll=100.0,
         decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
@@ -2650,7 +2650,7 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
     _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
     conn = get_connection(tmp_path / "live-binary-buy-no-flag.db")
     init_schema(conn)
-    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
+    artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
     market = {
         "city": NYC,
@@ -2697,7 +2697,7 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
     )
 
     deps = types.SimpleNamespace(
-        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
         find_weather_markets=lambda **kwargs: [market],
         get_last_scan_authority=lambda: "VERIFIED",
         DiscoveryMode=DiscoveryMode,
@@ -2718,7 +2718,7 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
         artifact=artifact,
         tracker=StrategyTracker(),
         limits=types.SimpleNamespace(),
-        mode=DiscoveryMode.OPENING_HUNT,
+        mode=DiscoveryMode.UPDATE_REACTION,
         summary=summary,
         entry_bankroll=100.0,
         decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
@@ -4637,6 +4637,180 @@ def test_strategy_gate_blocks_trade_execution(monkeypatch, tmp_path):
     assert payload["no_trade_cases"][0]["market_hours_open"] == 1.0
 
 
+def test_strategy_phase_gate_blocks_key_mode_mismatch(monkeypatch, tmp_path):
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    portfolio = PortfolioState(bankroll=150.0)
+
+    class DummyClob:
+        def __init__(self):
+            pass
+        def get_positions_from_api(self):
+            return []
+        def get_open_orders(self):
+            return []
+        def get_balance(self):
+            return 100.0
+
+    class DummyDecision:
+        def __init__(self):
+            self.should_trade = True
+            self.edge = _edge()
+            self.tokens = {"market_id": "m1", "token_id": "yes1", "no_token_id": "no1"}
+            self.size_usd = 5.0
+            self.decision_id = "d-phase-mismatch"
+            self.rejection_stage = ""
+            self.rejection_reasons = []
+            self.selected_method = "ens_member_counting"
+            self.applied_validations = ["ens_fetch"]
+            self.decision_snapshot_id = "snap-phase-mismatch"
+            self.edge_source = "center_buy"
+            self.strategy_key = "center_buy"
+            self.edge_context = None
+            self.settlement_semantics_json = '{"measurement_unit":"F"}'
+            self.epistemic_context_json = '{"decision_time_utc":"2026-04-01T00:00:00Z"}'
+            self.edge_context_json = '{"forward_edge":0.12}'
+
+    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
+    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
+    monkeypatch.setattr(cycle_runner, "get_last_scan_authority", lambda: "VERIFIED")
+    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 1.0,
+        "hours_to_resolution": 24.0,
+        "temperature_metric": "high",
+        "outcomes": [{"title": "39-40°F", "range_low": 39, "range_high": 40, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1", "price": 0.35}],
+    }])
+    monkeypatch.setattr(cycle_runner, "evaluate_candidate", lambda *args, **kwargs: [DummyDecision()])
+    monkeypatch.setattr(cycle_runner, "is_strategy_enabled", lambda strategy: True)
+    monkeypatch.setattr(cycle_runner, "create_execution_intent", lambda **kwargs: (_ for _ in ()).throw(AssertionError("phase-mismatched strategy must not execute")))
+    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", lambda conn, clob, pos: (_ for _ in ()).throw(AssertionError("monitor not expected")))
+    monkeypatch.setattr(cycle_runner, "get_force_exit_review", lambda: False)
+    monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
+    _allow_entry_gates_for_runtime_test(monkeypatch)
+
+    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
+    conn = get_connection(db_path)
+    artifact = conn.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    payload = json.loads(artifact["artifact_json"])
+
+    assert summary["strategy_phase_rejections"] == 1
+    assert payload["trade_cases"] == []
+    assert payload["no_trade_cases"][0]["rejection_stage"] == "SIGNAL_QUALITY"
+    assert payload["no_trade_cases"][0]["strategy"] == "center_buy"
+    assert payload["no_trade_cases"][0]["edge_source"] == "center_buy"
+    assert payload["no_trade_cases"][0]["rejection_reasons"] == [
+        "strategy_phase_mismatch:center_buy:opening_hunt"
+    ]
+    assert payload["no_trade_cases"][0]["market_hours_open"] == 1.0
+
+
+def test_shoulder_sell_is_phase_compatible_but_runtime_live_blocked(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    monkeypatch.setattr(control_plane_module, "_control_state", {})
+    conn = get_connection(tmp_path / "shoulder-sell-runtime-live-blocked.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 30.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-shoulder-sell-gate",
+        "slug": "slug-shoulder-sell-gate",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39°F or lower", "range_low": None, "range_high": 39, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
+            {"title": "40°F or higher", "range_low": 40, "range_high": None, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+        ],
+    }
+    shoulder_no_edge = replace(
+        _edge(),
+        bin=Bin(low=None, high=39, label="39°F or lower", unit="F"),
+        direction="buy_no",
+        p_market=0.35,
+        entry_price=0.35,
+        vwmp=0.35,
+        p_posterior=0.62,
+        edge=0.27,
+        forward_edge=0.27,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=shoulder_no_edge,
+        tokens={"market_id": "m0", "token_id": "yes0", "no_token_id": "no0"},
+        size_usd=5.0,
+        decision_id="d-shoulder-sell-runtime-blocked",
+        selected_method="ens_member_counting",
+        applied_validations=["native_buy_no_quote_available"],
+        decision_snapshot_id="model-snap-shoulder-sell-runtime-blocked",
+        edge_source="shoulder_sell",
+        strategy_key="shoulder_sell",
+        settlement_semantics_json='{"measurement_unit":"F"}',
+        epistemic_context_json='{"decision_time_utc":"2026-04-01T00:00:00Z"}',
+        edge_context_json='{"forward_edge":0.27}',
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=control_plane_module.is_strategy_enabled,
+        _classify_edge_source=lambda _mode, _edge: "shoulder_sell",
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not submit shoulder_sell")),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not execute shoulder_sell")),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.UPDATE_REACTION,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert cycle_runtime._strategy_phase_rejection_reason("shoulder_sell", DiscoveryMode.UPDATE_REACTION) is None
+    assert summary["no_trades"] == 1
+    assert summary.get("strategy_phase_rejections", 0) == 0
+    assert summary["strategy_gate_rejections"] == 1
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].strategy == "shoulder_sell"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "strategy_gate_disabled:shoulder_sell"
+    ]
+
+
 @pytest.mark.parametrize("risk_level", [RiskLevel.YELLOW, RiskLevel.ORANGE])
 def test_elevated_risk_still_runs_monitoring_and_reports_block_reason(monkeypatch, tmp_path, risk_level):
     db_path = tmp_path / "zeus.db"
@@ -5402,6 +5576,14 @@ def test_strategy_classification_preserves_day0_and_update_semantics():
         shoulder_no,
     ) == "shoulder_sell"
     assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
+    assert cycle_runtime._strategy_phase_rejection_reason("settlement_capture", DiscoveryMode.DAY0_CAPTURE) is None
+    assert cycle_runtime._strategy_phase_rejection_reason("opening_inertia", DiscoveryMode.OPENING_HUNT) is None
+    assert cycle_runtime._strategy_phase_rejection_reason("center_buy", DiscoveryMode.UPDATE_REACTION) is None
+    assert cycle_runtime._strategy_phase_rejection_reason("shoulder_sell", DiscoveryMode.UPDATE_REACTION) is None
+    assert (
+        cycle_runtime._strategy_phase_rejection_reason("center_buy", DiscoveryMode.OPENING_HUNT)
+        == "strategy_phase_mismatch:center_buy:opening_hunt"
+    )
 
 
 def test_settlement_sensitive_entry_ci_guard_rejects_degenerate_bands_by_mode():

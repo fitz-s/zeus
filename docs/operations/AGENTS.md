@@ -112,6 +112,11 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-01_ultrareview25_remediation/PLAN.md` | deferred planning packet | Operator-deferred governance/remediation residue |
 | `task_2026-05-02_review_crash_remediation/` | plan packet | Dedupe and remediation plan for crashed review findings (#38 merged 2026-05-02) |
 | `task_2026-05-02_review_crash_remediation/PLAN.md` | active planning packet | Crashed-review remediation plan |
+| `task_2026-05-02_full_launch_audit/` | active planning/evidence container | May 2 launch audit strategy and non-strategy task surfaces; evidence, not authority |
+| `task_2026-05-02_full_launch_audit/STRATEGIES_AND_GAPS.md` | strategy design dossier | Current strategy catalog, Stage 0 evidence lock, and design gaps; hypothesis/evidence, not authority |
+| `task_2026-05-02_full_launch_audit/REMAINING_TASKS.md` | non-strategy task tracker | May 2 non-strategy launch blockers, resolved receipts, structural debt, and sub-agent eligible work |
+| `task_2026-05-02_strategy_update_execution_plan/` | plan packet | May 2 strategy update execution plan and critic amendments |
+| `task_2026-05-02_strategy_update_execution_plan/PLAN.md` | active planning packet | Stage 0-6 execution sequence with review line references and critic amendments |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When

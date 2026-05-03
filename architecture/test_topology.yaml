@@ -94,10 +94,10 @@ test_trust_policy:
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
-    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-29"}
+    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-05-02"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -141,7 +141,7 @@ test_trust_policy:
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-04-29"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-04-30"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-04-29"}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -151,7 +151,7 @@ test_trust_policy:
     tests/test_sigma_floor_evaluation.py: {created: "2026-04-07", last_used: "2026-04-28"}
     tests/test_edge_observation.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_edge_observation_weekly.py: {created: "2026-04-28", last_used: "2026-04-28"}
-    tests/test_attribution_drift.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_attribution_drift.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_attribution_drift_weekly.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ws_poll_reaction.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ws_poll_reaction_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
