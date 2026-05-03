@@ -187,6 +187,7 @@ test_trust_policy:
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -613,6 +614,7 @@ law_gate:
       - src/config.py
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
+      - tests/test_executable_forecast_reader.py
       - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
       - tests/test_ingest_grib_source_run_context.py
@@ -629,6 +631,7 @@ law_gate:
     protects:
       - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
       - config/source_release_calendar.yaml
+      - src/data/executable_forecast_reader.py
       - scripts/ingest_grib_to_snapshots.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py
