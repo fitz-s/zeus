@@ -203,11 +203,12 @@ def test_rollout_blocked_keeps_promoted_calibration_shadow_only() -> None:
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn)
+    blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
 
     decision = evaluate_entry_forecast_shadow(
         conn,
         scope=_scope(),
-        config=entry_forecast_config(),
+        config=blocked_cfg,
         now_utc=_utc(2026, 5, 3, 9),
         live_calibration_promotion_approved=True,
     )

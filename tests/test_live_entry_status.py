@@ -103,7 +103,8 @@ def _insert_producer_readiness(conn: sqlite3.Connection, *, status: str, reasons
 
 
 def test_empty_world_db_surfaces_zero_rows_and_no_future_coverage() -> None:
-    status = build_live_entry_forecast_status(_conn(), config=entry_forecast_config())
+    blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
+    status = build_live_entry_forecast_status(_conn(), config=blocked_cfg)
 
     assert status.status == "BLOCKED"
     assert "ZERO_EXECUTABLE_OPENDATA_ROWS" in status.blockers
@@ -138,10 +139,11 @@ def test_live_eligible_data_still_blocks_when_rollout_mode_is_blocked() -> None:
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn, status="LIVE_ELIGIBLE", reasons=["PRODUCER_COVERAGE_READY"])
+    blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
 
     status = build_live_entry_forecast_status(
         conn,
-        config=entry_forecast_config(),
+        config=blocked_cfg,
         now_utc=_utc(2026, 5, 3, 10),
     )
 

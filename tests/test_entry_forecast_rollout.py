@@ -38,8 +38,10 @@ def _evidence(**overrides):
 
 
 def test_blocked_rollout_mode_never_promotes() -> None:
+    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
+
     decision = evaluate_entry_forecast_rollout_gate(
-        config=entry_forecast_config(),
+        config=cfg,
         evidence=_evidence(),
     )
 

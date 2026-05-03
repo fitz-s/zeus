@@ -115,6 +115,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-02_full_launch_audit/` | active planning/evidence container | May 2 launch audit strategy and non-strategy task surfaces; evidence, not authority |
 | `task_2026-05-02_full_launch_audit/STRATEGIES_AND_GAPS.md` | strategy design dossier | Current strategy catalog, Stage 0 evidence lock, and design gaps; hypothesis/evidence, not authority |
 | `task_2026-05-02_full_launch_audit/REMAINING_TASKS.md` | non-strategy task tracker | May 2 non-strategy launch blockers, resolved receipts, structural debt, and sub-agent eligible work |
+| `task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md` | active remediation plan | PR46+PR47 post-multi-angle-review deep plan; Phase A (docs/tests/registries) + Phase B (src/ structural completion, no daemon imports) + Phase C deferred |
+| `task_2026-05-02_full_launch_audit/HANDOFF_PR46_PR47_2026-05-03.md` | handoff record | Branch + HEAD + commit-list snapshot; superseded by REMEDIATION_PLAN_2026-05-03.md once Phase A lands |
+| `task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md` | single-source-of-truth | Operator-authored declared rollout_mode; canary `test_settings_json_rollout_mode_matches_plan_declaration` asserts agreement with `config/settings.json:entry_forecast.rollout_mode` |
+| `task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md` | erratum record | DB-probe resolution of cb4beb6c per-track 204+51 vs aggregate 408+102 figure mismatch |
 | `task_2026-05-02_strategy_update_execution_plan/` | plan packet | May 2 strategy update execution plan and critic amendments |
 | `task_2026-05-02_strategy_update_execution_plan/PLAN.md` | active planning packet | Stage 0-6 execution sequence with review line references and critic amendments |
 

@@ -75,7 +75,9 @@ def _candidate_with_outcomes() -> evaluator_module.MarketCandidate:
 
 
 def test_live_mode_blocked_entry_forecast_stops_before_legacy_entry_primary_fetch(monkeypatch) -> None:
+    blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: blocked_cfg)
 
     def forbidden_fetch(*args, **kwargs):
         raise AssertionError("legacy fetch_ensemble should not be called")

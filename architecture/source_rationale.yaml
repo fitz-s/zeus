@@ -572,6 +572,15 @@ files:
     downstream:
     - src/control/control_plane.py
     - src/observability/status_summary.py
+  src/control/entry_forecast_rollout.py:
+    zone: K1_governance
+    authority_role: entry_forecast_promotion_gate
+    why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. NOT YET INVOKED FROM DAEMON; activation deferred to Phase C operator-controlled flag rollout per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - tests/test_entry_forecast_rollout.py
   src/riskguard/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -884,6 +893,79 @@ files:
     why: Computes per-city WU collection schedule from local peak time with DST-aware conversion.
     downstream:
     - src/data/daily_obs_append.py
+  src/data/forecast_target_contract.py:
+    zone: K2_runtime
+    authority_role: forecast_target_scope_contract
+    why: PR47 typed scope (city, target_date, metric, horizon, local-day window UTC, required period-end steps) for live-entry forecast targets. Pure value object; no I/O, no DB.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - src/data/forecast_fetch_plan.py
+    - src/data/executable_forecast_reader.py
+    - src/data/entry_forecast_shadow.py
+    - tests/test_opendata_future_target_contract.py
+  src/data/forecast_fetch_plan.py:
+    zone: K2_runtime
+    authority_role: forecast_fetch_plan_builder
+    why: PR47 builds the (target scope, source cycle, release calendar key) plan a producer must fetch to populate executable forecasts. Read-only planner; no fetch side effects.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - NO_WRITE_PATH
+    downstream:
+    - src/data/ecmwf_open_data.py
+    - tests/test_forecast_fetch_plan.py
+  src/data/executable_forecast_reader.py:
+    zone: K2_runtime
+    authority_role: live_entry_forecast_reader
+    why: PR47 read path that joins ensemble_snapshots_v2 + readiness_state (strategy_key='entry_forecast') to produce live-entry-eligible forecast bundles. Multi-stage timing/identity checks; emits BLOCKED reason codes when any stage fails.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/evaluator.py
+    - tests/test_executable_forecast_reader.py
+  src/data/producer_readiness.py:
+    zone: K2_runtime
+    authority_role: producer_readiness_writer
+    why: PR47 writer that converts source_run_coverage rows into readiness_state rows with strategy_key='producer_readiness' and per-track LIVE_ELIGIBLE / BLOCKED status. Currently the only daemon-invoked writer in the entry-forecast chain.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/live_entry_status.py
+    - src/data/executable_forecast_reader.py
+    - tests/test_producer_readiness_builder.py
+  src/data/live_entry_status.py:
+    zone: K2_runtime
+    authority_role: live_entry_blocker_summary
+    why: PR47 read-only status surface that summarizes producer-readiness rows + rollout_mode into a {LIVE_ELIGIBLE, BLOCKED} verdict with blocker codes. Consumed by healthcheck and operator dashboards; never writes.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/healthcheck.py
+    - tests/test_live_entry_status.py
+  src/data/calibration_transfer_policy.py:
+    zone: K2_runtime
+    authority_role: calibration_transfer_gate
+    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/entry_forecast_shadow.py
+    - tests/test_calibration_transfer_policy.py
+  src/data/entry_forecast_shadow.py:
+    zone: K2_runtime
+    authority_role: entry_forecast_shadow_evaluator
+    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - CALIBRATION_FAMILY_MIXING
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - tests/test_entry_forecast_shadow.py
   src/engine/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1694,6 +1776,17 @@ files:
     downstream:
     - src/observability/status_summary.py
     - src/state/portfolio.py
+  src/state/source_run_coverage_repo.py:
+    zone: K2_runtime
+    authority_role: source_run_coverage_repository
+    why: PR47 canonical-DB repository for source_run_coverage rows linking source-run identity to (city, target_date, metric, track) coverage facts. Pre-condition for producer_readiness writes. SAVEPOINT-wrapped INSERTs preserve INV-17 DB-before-derived authority.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/producer_readiness.py
+    - src/data/executable_forecast_reader.py
+    - src/data/ecmwf_open_data.py
+    - tests/test_source_run_coverage_schema.py
   src/observability/AGENTS.md:
     zone: docs
     authority_role: registry

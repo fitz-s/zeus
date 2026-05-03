@@ -1,9 +1,19 @@
 # Zeus Remaining Tasks (non-strategy)
 
-**Last refreshed**: 2026-05-02 21:05 CDT
+**Last refreshed**: 2026-05-03 PM CDT (post PR47 + cb4beb6c live-flip + multi-angle review)
 **Scope**: Everything that is NOT a trading-strategy design decision. For strategy-design decisions, see `STRATEGIES_AND_GAPS.md` in this folder.
 
 > Categorized by priority and theme. Each task has a current task ID for cross-reference with the in-session task list.
+
+## Live-readiness state snapshot (2026-05-03 PM CDT)
+
+- Branch `healthcheck-riskguard-live-label-2026-05-02` is at HEAD `11bbc8b2`; origin matches.
+- `config/settings.json:entry_forecast.rollout_mode = "live"` (operator-authorized via cb4beb6c).
+- Live-entry forecast path is **fail-closed by construction**: `read_executable_forecast` calls `get_entry_readiness(strategy_key='entry_forecast')`; no daemon code writes those rows. DB probe 2026-05-03 PM: `SELECT COUNT(*) FROM readiness_state WHERE strategy_key='entry_forecast' = 0`.
+- Three orphaned gates exist as code + tests but are uncalled in src/ runtime: `evaluate_entry_forecast_rollout_gate`, `evaluate_calibration_transfer_policy`, `evaluate_entry_forecast_shadow`.
+- Multi-angle review verdict: REVERT-AND-RESPLIT cb4beb6c (code-reviewer), DEMAND-REVERT cb4beb6c rollout flip (critic-opus), SUSPECT (scientist).
+- Operator decision: keep `rollout_mode=live` (operator authority on unblock), continue deep plan within this PR, do NOT add new daemon import sites.
+- Active remediation plan: `docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md` Phases A and B (within-PR), Phase C (deferred to operator-authorized future PR).
 
 ---
 
@@ -53,7 +63,8 @@ These directly prevent or degrade live trading right now or imminently.
 | PR #43 (pre-commit hook skip-invariant marker) | **MERGED** | `07658bbb` |
 | PR #44 (P0/P1 live blockers) | **MERGED** | `6e3b6a53` |
 | PR #45 (data daemon readiness) | **MERGED** | `47d11d45` |
-| PR #46 (healthcheck-riskguard-live-label) | OPEN | Operator's own PR |
+| PR #46 (healthcheck-riskguard-live-label) | OPEN, +24 ahead of origin/main | Operator's own PR. Now contains the full PR47 live-entry data-chain stack + cb4beb6c live-flip + 11bbc8b2 docs. Phase A/B remediation lands inside this PR per `REMEDIATION_PLAN_2026-05-03.md`. |
+| PR #47 (live entry data contract) | LANDED INTO PR46 | Stack `c858ed93..bd29a88f` (22 commits, 41 files) merged into PR46 via merge commit `bd29a88f`. No separate PR opened. |
 | Local-only integration branch `live-restart-integration-2026-05-02` | **CLOSED** | Reconciled into main via PR #40-45 |
 
 ---

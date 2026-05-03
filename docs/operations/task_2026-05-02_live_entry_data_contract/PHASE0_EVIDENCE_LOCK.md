@@ -138,7 +138,7 @@ Conclusion: source-run identity exists, but per city/date/metric future coverage
 
 ## Current Risk: Open Data Cycle Selection Still Source-Run Centered
 
-Evidence:
+Evidence (as locked at Phase 0 close, 2026-05-02):
 
 ```text
 src/data/ecmwf_open_data.py:110:def _default_cycle(now: datetime) -> tuple[date, int]:
@@ -153,7 +153,51 @@ src/data/ecmwf_open_data.py:310:    Use this in any reader that wants "freshest 
 src/ingest_main.py:484:    Fires once at daemon start; pulls today's freshest run for both tracks.
 ```
 
-Conclusion: current producer language and cycle selection still center source-run freshness, not future target-local-date coverage. Phase 1 tests must make this category fail before implementation changes.
+Conclusion (Phase 0): current producer language and cycle selection still
+center source-run freshness, not future target-local-date coverage.
+Phase 1 tests must make this category fail before implementation changes.
+
+### Post-Phase-5 evidence refresh (2026-05-03 — append-only)
+
+> **Status of the original line citations above**: ROTTED by Phase 5.
+> `_default_cycle` was replaced by `select_source_run_for_target_horizon`;
+> `src/ingest_main.py:484` text was reflowed by Phase 6. The Phase 0
+> citations no longer resolve at HEAD `11bbc8b2`. Original block is
+> preserved unchanged so the audit trail can compare "what we said at
+> lock" vs "what actually shipped".
+>
+> The Phase 0 risk itself ("source-run-centered selection") is **CLOSED**
+> — Phase 5 introduced horizon-aware selection that retired the
+> freshness-centric model. This append does not rewrite the Phase 0
+> conclusion; it adds the post-fix evidence at HEAD.
+
+Symbol-anchored evidence at HEAD (grep by name, not line — line-number
+drift inside the named function is acceptable, structural removal is
+not):
+
+```text
+src/data/release_calendar.py: select_source_run_for_target_horizon(...)
+src/data/release_calendar.py: load_calendar_config(...) and evaluate_safe_fetch(...)
+src/data/ecmwf_open_data.py: imports select_source_run_for_target_horizon
+src/data/ecmwf_open_data.py: invokes the selector for cycle selection
+src/state/source_run_coverage_repo.py: write_source_run_coverage(...) /
+                                       get_latest_source_run_coverage(...)
+src/ingest_main.py: _k2_startup_catch_up()  (driven by horizon-aware
+                    release calendar via
+                    select_source_run_for_target_horizon, not freshness)
+```
+
+Each symbol grep-verified at HEAD `11bbc8b2` on 2026-05-03 PM CDT.
+
+## How to refresh this doc
+
+This file is a Phase 0 evidence lock — it captures the world as it was
+when Phase 0 closed. **Do not retroactively edit historical evidence to
+match later phases.** When code drifts under Phase 0 citations, append a
+dated note (like the 2026-05-03 audit refresh above) and convert the
+citation from line-numbered to symbol-anchored. If a cited symbol is
+deleted, mark the citation `[REMOVED IN PHASE N]` rather than rewriting
+the historical claim.
 
 ## Phase 0 Verdict
 

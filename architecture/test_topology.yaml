@@ -196,6 +196,7 @@ test_trust_policy:
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_opendata_writes_v2_table.py: {created: "2026-05-02", last_used: "2026-05-03"}
     tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_producer_readiness_builder.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -271,6 +272,7 @@ categories:
     - tests/test_entry_forecast_config.py
     - tests/test_ingest_boot_time_semantics.py
     - tests/test_opendata_release_calendar_selection.py
+    - tests/test_opendata_writes_v2_table.py
     - tests/test_opendata_future_target_contract.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
@@ -631,6 +633,7 @@ law_gate:
       - tests/test_ingest_grib_source_run_context.py
       - tests/test_live_entry_status.py
       - tests/test_opendata_release_calendar_selection.py
+      - tests/test_opendata_writes_v2_table.py
       - tests/test_opendata_future_target_contract.py
       - tests/test_producer_readiness_builder.py
       - tests/test_readiness_state.py
