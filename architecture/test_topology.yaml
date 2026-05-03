@@ -191,6 +191,7 @@ test_trust_policy:
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_producer_readiness_builder.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -617,6 +618,7 @@ law_gate:
       - tests/test_ingest_grib_source_run_context.py
       - tests/test_opendata_release_calendar_selection.py
       - tests/test_opendata_future_target_contract.py
+      - tests/test_producer_readiness_builder.py
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
       - tests/test_job_run_schema.py
@@ -629,6 +631,7 @@ law_gate:
       - config/source_release_calendar.yaml
       - scripts/ingest_grib_to_snapshots.py
       - src/data/ecmwf_open_data.py
+      - src/data/producer_readiness.py
       - src/data/release_calendar.py
       - src/state/db.py
       - src/state/job_run_repo.py
