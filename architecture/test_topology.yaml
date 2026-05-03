@@ -141,7 +141,7 @@ test_trust_policy:
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-04-29"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-04-30"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-04-29"}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
