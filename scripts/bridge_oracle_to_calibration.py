@@ -34,6 +34,18 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
+# Fitz Rule: Authority before reuse. Scripts must import existing laws.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# _MIN_HOURS_PER_DAY = 22
+from scripts.fill_obs_v2_dst_gaps import _MIN_HOURS_PER_DAY
+from src.data.tier_resolver import (
+    allowed_sources_for_city,
+    expected_source_for_city,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(message)s",
@@ -128,12 +140,41 @@ def bridge(dry_run: bool = False) -> dict:
     """
     conn = sqlite3.connect(str(DB_PATH))
     settlements = _load_settlements(conn)
-    conn.close()
 
     snapshots = _load_snapshots()
     if not snapshots:
         logger.info("No shadow snapshots found in %s", SNAPSHOT_DIR)
         return {"cities": 0, "comparisons": 0}
+
+    # Coverage check helper
+    def _get_day_coverage(city: str, target_date: str) -> tuple[int, int]:
+        """Return (primary_hours, max_fallback_hours)."""
+        primary_source = expected_source_for_city(city)
+        allowed_sources = allowed_sources_for_city(city)
+        fallback_sources = [s for s in allowed_sources if s != primary_source]
+
+        # Count distinct hours for primary source
+        p_count = conn.execute("""
+            SELECT COUNT(DISTINCT utc_timestamp)
+            FROM observation_instants_v2
+            WHERE city = ? AND target_date = ? AND source = ?
+        """, (city, target_date, primary_source)).fetchone()[0]
+
+        # Count distinct hours for fallbacks (if primary is too thin)
+        f_max = 0
+        if p_count < _MIN_HOURS_PER_DAY and fallback_sources:
+            placeholders = ",".join(["?"] * len(fallback_sources))
+            f_max = conn.execute(f"""
+                SELECT MAX(h) FROM (
+                    SELECT COUNT(DISTINCT utc_timestamp) as h
+                    FROM observation_instants_v2
+                    WHERE city = ? AND target_date = ? AND source IN ({placeholders})
+                      AND authority = 'VERIFIED'
+                    GROUP BY source
+                )
+            """, (city, target_date, *fallback_sources)).fetchone()[0] or 0
+
+        return p_count, f_max
 
     # Existing oracle error rates (to preserve historical data)
     existing: dict[str, dict] = {}
@@ -146,12 +187,23 @@ def bridge(dry_run: bool = False) -> dict:
     for city_name, date_snaps in sorted(snapshots.items()):
         matches = 0
         mismatches = 0
+        skipped_low_coverage = 0
         mismatch_dates = []
         dates_compared = []
 
         for target_date, snap in sorted(date_snaps.items()):
             key = (city_name, target_date)
             if key not in settlements:
+                continue
+
+            # S2 R4 P10C: Coverage filter. Ignore thin days to keep oracle stats clean.
+            p_hours, f_hours = _get_day_coverage(city_name, target_date)
+            if p_hours < _MIN_HOURS_PER_DAY and f_hours < _MIN_HOURS_PER_DAY:
+                skipped_low_coverage += 1
+                logger.info(
+                    "SKIP_LOW_COVERAGE %s %s: primary_h=%d, fallback_max_h=%d (threshold=%d)",
+                    city_name, target_date, p_hours, f_hours, _MIN_HOURS_PER_DAY,
+                )
                 continue
 
             settle = settlements[key]
@@ -194,13 +246,14 @@ def bridge(dry_run: bool = False) -> dict:
                 "snapshot_comparisons": total,
                 "snapshot_match": matches,
                 "snapshot_mismatch": mismatches,
+                "skipped_low_coverage": skipped_low_coverage,
                 "snapshot_error_rate": round(error_rate, 4),
                 "snapshot_mismatch_dates": mismatch_dates,
                 "snapshot_dates": dates_compared,
             }
             logger.info(
-                "%s: %d/%d match (error=%.1f%%)",
-                city_name, matches, total, error_rate * 100,
+                "%s: %d/%d match, %d skipped (error=%.1f%%)",
+                city_name, matches, total, skipped_low_coverage, error_rate * 100,
             )
 
     # Merge snapshot results into existing oracle error rates.
@@ -264,6 +317,7 @@ def bridge(dry_run: bool = False) -> dict:
     else:
         logger.info("[DRY RUN] Would update %s with %d cities", ORACLE_FILE, len(city_stats))
 
+    conn.close()
     return {
         "cities": len(city_stats),
         "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
