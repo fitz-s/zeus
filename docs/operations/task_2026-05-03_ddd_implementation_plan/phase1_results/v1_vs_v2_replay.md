@@ -7,9 +7,9 @@ Excluded: Paris (workstream A pending); HK/Istanbul/Moscow/Tel Aviv (no train da
 
 ## Headline
 
-- Total decisions: **11,040**
-- v2 differs from v1 on: **635** decisions (5.8%)
-  - v2 stricter discount (DISCOUNT-mode, Δ>0): **518**
+- Total decisions: **11,280**
+- v2 differs from v1 on: **636** decisions (5.6%)
+  - v2 stricter discount (DISCOUNT-mode, Δ>0): **519**
   - v2 genuinely looser (DISCOUNT-mode, Δ<0): **13**
   - v2 HALT where v1 would have discounted: **104**
   - v2 HALT where v1 emitted 0%: **16**
@@ -19,11 +19,11 @@ Excluded: Paris (workstream A pending); HK/Istanbul/Moscow/Tel Aviv (no train da
 
 ## Kelly Notional Proxy
 
-- decisions with winning-bucket Platt prob: **7,353**
-- sum(1 - discount_v1) = **7347.47**
-- sum(1 - discount_v2)  [HALT → 0] = **7291.82**
-- v2 Kelly notional vs v1: **-0.76%**
-- p-weighted (signed by p−0.5) v1 = **-2550.42**, v2 = **-2530.20**
+- decisions with winning-bucket Platt prob: **7,543**
+- sum(1 - discount_v1) = **7537.38**
+- sum(1 - discount_v2)  [HALT → 0] = **7481.70**
+- v2 Kelly notional vs v1: **-0.74%**
+- p-weighted (signed by p−0.5) v1 = **-2608.58**, v2 = **-2588.36**
 
 ## Per-city Breakdown
 
@@ -62,6 +62,7 @@ Excluded: Paris (workstream A pending); HK/Istanbul/Moscow/Tel Aviv (no train da
 | Munich | 240 | 0 | 1 | 0.0000 | 0.0001 | +0.0001 | +0.0286 | +0.0000 |
 | NYC | 240 | 3 | 15 | 0.0012 | 0.0018 | +0.0006 | +0.0571 | -0.0900 |
 | Panama City | 240 | 12 | 17 | 0.0052 | 0.0008 | -0.0043 | +0.0286 | -0.0900 |
+| Paris | 240 | 0 | 1 | 0.0004 | 0.0005 | +0.0001 | +0.0286 | +0.0000 |
 | San Francisco | 240 | 2 | 28 | 0.0011 | 0.0043 | +0.0032 | +0.0544 | -0.0900 |
 | Sao Paulo | 240 | 0 | 14 | 0.0005 | 0.0019 | +0.0015 | +0.0286 | -0.0036 |
 | Seattle | 240 | 2 | 45 | 0.0018 | 0.0079 | +0.0060 | +0.0571 | -0.0900 |

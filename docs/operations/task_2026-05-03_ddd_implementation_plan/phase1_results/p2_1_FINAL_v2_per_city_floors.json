@@ -4,7 +4,7 @@
     "authority": "RERUN_PLAN_v2.md C1",
     "algorithm": "final_floor = max(p05_train, 0.35); policy overrides on top",
     "trigger": "fire if cov < floor  [NO sigma-band]",
-    "paris_note": "Paris pending workstream A resync; rerun for Paris after A completes.",
+    "paris_note": "Paris workstream A resync COMPLETED 2026-05-03 (agent a4c238d864a25ed71); Paris now empirical p05=1.0 floor.",
     "schema_version": "2",
     "design_version": "v2-two-rail-2026-05-03",
     "last_updated": "2026-05-03",
@@ -426,8 +426,17 @@
       "floor_source": "empirical_p05"
     },
     "Paris": {
-      "status": "EXCLUDED_WORKSTREAM_A",
-      "floor_source": "excluded_workstream_a_pending"
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0564,
+      "floor_source": "empirical_p05",
+      "_workstream_a_resync": "Paris LFPB historical resync completed 2026-05-03 (agent a4c238d864a25ed71). 762 LFPB rows backfilled 2024-01-01..2026-01-31, 747,150 LFPG QUARANTINED pairs deleted, 8/8 Platt buckets refit. Train n=184/184, test n=120/120, mean cov 0.993/0.999, p05=1.0 → empirical floor=1.0 (joins the healthy-40 cluster). Ruling A NOT re-applied; asymmetric loss preference now lives in Kelly multiplier (per-city 0.7×, src/strategy/kelly.py)."
     },
     "San Francisco": {
       "p05": 1.0,

@@ -57,7 +57,9 @@ SIGMA_LOOKBACK_DAYS = 90
 WINDOW_RADIUS = 3  # ±3 hours (HIGH/LOW directional window)
 
 EXCLUDE_NULL_FLOOR = {"Hong Kong", "Istanbul", "Moscow", "Tel Aviv"}
-EXCLUDE_PARIS = {"Paris"}
+# Paris was excluded pre-2026-05-03 pending workstream A LFPB resync;
+# resync completed (agent a4c238d864a25ed71) → Paris included from now on.
+EXCLUDE_PARIS: set[str] = set()
 
 # v2 constants (mirror src/oracle/data_density_discount.py)
 ABSOLUTE_KILL_FLOOR = 0.35

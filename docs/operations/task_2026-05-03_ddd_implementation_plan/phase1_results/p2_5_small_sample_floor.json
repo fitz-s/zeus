@@ -906,6 +906,26 @@
       "final_brier": 0.088243,
       "final_ece": 0.219427,
       "status": "OK"
+    },
+    "Paris_high": {
+      "city": "Paris",
+      "metric": "high",
+      "total_N_dates": 840,
+      "N_star": 110,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_WORKSTREAM_A_DEFAULT",
+      "_note": "Paris re-included 2026-05-03 after workstream A resync. N* set to median across healthy cities pending dedicated calibration recompute."
+    },
+    "Paris_low": {
+      "city": "Paris",
+      "metric": "low",
+      "total_N_dates": 840,
+      "N_star": 113,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_WORKSTREAM_A_DEFAULT",
+      "_note": "Paris re-included 2026-05-03 after workstream A resync. N* set to median across healthy cities pending dedicated calibration recompute."
     }
   }
 }

@@ -249,6 +249,83 @@ def test_fail_closed_excluded_workstream_a(conn, floors_and_nstar):
     assert excinfo.value.code == "DDD_EXCLUDED_WORKSTREAM_A"
 
 
+def test_paris_no_longer_fail_closed_after_workstream_a(tmp_path, monkeypatch):
+    """Regression guard: once Paris's status is replaced with an empirical
+    floor entry (workstream A complete), DDD must evaluate normally and NOT
+    raise DDDFailClosed.
+
+    Authority: 11_paris_resync_log.md (2026-05-03 agent a4c238d864a25ed71).
+    Paris transitioned from EXCLUDED_WORKSTREAM_A to empirical_p05.
+    """
+    floors = {
+        "_metadata": {"schema_version": "2"},
+        "policy_overrides": {},
+        "per_city": {
+            "Paris": {
+                "p05": 1.0, "p10": 1.0, "p25": 1.0,
+                "recommended_floor_empirical": 1.0,
+                "policy_override": None, "final_floor": 1.0,
+                "floor_source": "empirical_p05",
+                "train_FP_rate": 0.0054, "n_zero_train": 0,
+                "sigma_diagnostic": 0.0564,
+            },
+        },
+    }
+    nstar = {
+        "_metadata": {},
+        "per_city_metric": {
+            "Paris_high": {
+                "city": "Paris", "metric": "high",
+                "N_star": 110, "status": "POST_WORKSTREAM_A_DEFAULT",
+            },
+        },
+    }
+    fp = tmp_path / "floors.json"
+    np = tmp_path / "nstar.json"
+    fp.write_text(json.dumps(floors))
+    np.write_text(json.dumps(nstar))
+
+    from src.oracle import data_density_discount as ddd_mod
+    monkeypatch.setattr(ddd_mod, "_DEFAULT_FLOORS_PATH", fp)
+    monkeypatch.setattr(ddd_mod, "_DEFAULT_NSTAR_PATH", np)
+    reset_caches()
+
+    # Empty conn — Paris has no observations seeded, so cov=0 and Rail 1 fires.
+    # The point of THIS test is: it should NOT raise DDDFailClosed.
+    c = sqlite3.connect(":memory:")
+    c.execute("""
+        CREATE TABLE observation_instants_v2 (
+            city TEXT, target_date TEXT, local_hour TEXT,
+            source TEXT, data_version TEXT,
+            running_max REAL, running_min REAL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE platt_models_v2 (
+            model_key TEXT PRIMARY KEY, temperature_metric TEXT,
+            cluster TEXT, season TEXT, data_version TEXT,
+            input_space TEXT DEFAULT 'width_normalized_density',
+            n_samples INTEGER, fitted_at TEXT,
+            is_active INTEGER DEFAULT 1, authority TEXT DEFAULT 'VERIFIED'
+        )
+    """)
+    decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+    # Should NOT raise DDDFailClosed; should return a HALT (cov=0 < 0.35)
+    result = evaluate_ddd_for_decision(
+        conn=c,
+        city="Paris",
+        target_date="2026-05-02",
+        metric="high",
+        peak_hour=14.5,
+        season="MAM",
+        mismatch_rate=0.0,
+        decision_time=decision,
+    )
+    assert result.action == "HALT"  # no observations seeded → Rail 1
+    c.close()
+    reset_caches()
+
+
 def test_fail_closed_unconfigured_city(conn, floors_and_nstar):
     with pytest.raises(DDDFailClosed) as excinfo:
         evaluate_ddd_for_decision(

@@ -266,3 +266,35 @@ recommended by `MATH_REALITY_OPTIMUM_ANALYSIS.md` are validated by the
 historical replay. v2 is ready for the operator's full backtest.
 The remaining gates (F1 / F2 / Paris / Kelly multiplier / live wiring) are
 mechanical follow-ons, not algorithmic redesigns.
+
+---
+
+## §10 Paris addendum (2026-05-03, post-workstream A)
+
+Workstream A completed (agent `a4c238d864a25ed71`); Paris LFPB historical
+data resync is at parity (853 VERIFIED `observations`, 840,174 VERIFIED
+`calibration_pairs_v2`, 8/8 active Platt buckets). Paris re-included in
+the floors JSON with empirical `final_floor: 1.0` (joins the healthy-40
+cluster). Replay re-ran with Paris in place.
+
+| Metric | Pre-Paris (46 cities) | With Paris (47 cities) | Δ |
+|---|---|---|---|
+| Total decisions | 11,040 | **11,280** | +240 |
+| n_diff | 635 | 636 | +1 |
+| HALT count | 120 | 120 | 0 |
+| v2 stricter discount | 518 | 519 | +1 |
+| Kelly notional delta | −0.76 % | −0.74 % | +0.02 pp |
+
+**Paris-specific**: 240 decisions, **0 HALTs**, **1 difference** (one HIGH
+day with cov=0.857 → v2 emits 2.86% discount where v1's σ-band absorbed
+it), mean discount essentially zero (0.0004 / 0.0005).
+
+Paris is now a clean healthy city under v2. No Ruling A re-applied;
+asymmetric loss preference for Paris lives in the Kelly multiplier
+(`src/strategy/kelly.py::DEFAULT_CITY_KELLY_MULTIPLIERS`, 0.7×) per the
+D-A migration. DDD evaluation of Paris no longer raises `DDDFailClosed`;
+regression guarded by `tests/test_ddd_wiring.py::test_paris_no_longer_fail_closed_after_workstream_a`.
+
+Live wiring already deployed (commit `03bfcf0c`); Paris will be evaluated
+through the Two-Rail path on the next live cycle now that the floors JSON
+no longer carries the EXCLUDED_WORKSTREAM_A status.

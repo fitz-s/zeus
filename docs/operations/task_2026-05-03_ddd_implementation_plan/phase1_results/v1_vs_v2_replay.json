@@ -9,27 +9,26 @@
     "v1_curve": "5-segment piecewise (0/2/5/8/9% at break 0.05/0.10/0.20/0.30)",
     "v2_curve": "linear D = min(0.09, 0.20 × shortfall) + Two-Rail kill",
     "skipped_reasons": {
-      "null_floor": 4,
-      "paris_pending": 1
+      "null_floor": 4
     },
-    "n_rows": 11040
+    "n_rows": 11280
   },
   "aggregate": {
-    "n_total": 11040,
-    "n_diff": 635,
+    "n_total": 11280,
+    "n_diff": 636,
     "n_halt_v2": 120,
-    "n_v2_stricter_discount": 518,
+    "n_v2_stricter_discount": 519,
     "n_v2_genuinely_looser": 13,
     "n_v2_halt_v1_would_discount": 104,
     "n_v2_halt_v1_was_zero": 16,
-    "mean_abs_delta_when_diff": 0.03653472125984252,
+    "mean_abs_delta_when_diff": 0.03652219968553459,
     "median_abs_delta_when_diff": 0.028571,
-    "n_with_winner": 7353,
-    "sum_kelly_v1": 7347.470391,
-    "sum_kelly_v2": 7291.821296,
-    "kelly_delta_pct": -0.7573912113775235,
-    "sum_signed_kelly_v1": -2550.416977045012,
-    "sum_signed_kelly_v2": -2530.200554557905
+    "n_with_winner": 7543,
+    "sum_kelly_v1": 7537.380391,
+    "sum_kelly_v2": 7481.702725,
+    "kelly_delta_pct": -0.7386872243635394,
+    "sum_signed_kelly_v1": -2608.582704935012,
+    "sum_signed_kelly_v2": -2588.355514238002
   },
   "per_city": [
     {
@@ -394,6 +393,17 @@
       "mean_delta": -0.004318175,
       "max_pos_delta": 0.028563,
       "max_neg_delta": -0.09
+    },
+    {
+      "city": "Paris",
+      "n": 240,
+      "n_halt": 0,
+      "n_diff": 1,
+      "mean_d_v1": 0.000375,
+      "mean_d_v2": 0.0004940458333333334,
+      "mean_delta": 0.00011904583333333332,
+      "max_pos_delta": 0.028571,
+      "max_neg_delta": 0.0
     },
     {
       "city": "San Francisco",
