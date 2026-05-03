@@ -463,6 +463,10 @@ def read_executable_forecast(
         return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_TARGET_DATE_MISMATCH")
     if snapshot.temperature_metric != temperature_metric:
         return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_METRIC_MISMATCH")
+    coverage_window_start = _parse_utc(coverage.get("target_window_start_utc"))
+    snapshot_window_start = _parse_utc(snapshot.local_day_start_utc)
+    if coverage_window_start is None or snapshot_window_start != coverage_window_start:
+        return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
     if len(snapshot.members) < expected_members:
         return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
     coverage_snapshot_ids = tuple(int(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item).isdigit())

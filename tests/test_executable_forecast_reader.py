@@ -60,6 +60,7 @@ def _insert_snapshot(
     authority: str = "VERIFIED",
     causality_status: str = "OK",
     boundary_ambiguous: int = 0,
+    local_day_start_utc: str | None = None,
 ) -> None:
     scope = _scope()
     conn.execute(
@@ -113,7 +114,7 @@ def _insert_snapshot(
             "provenance_json": "{}",
             "authority": authority,
             "members_unit": "degC",
-            "local_day_start_utc": scope.target_window_start_utc.isoformat(),
+            "local_day_start_utc": local_day_start_utc or scope.target_window_start_utc.isoformat(),
             "step_horizon_hours": 144.0,
         },
     )
@@ -499,3 +500,28 @@ def test_full_reader_blocks_source_available_after_capture() -> None:
 
     assert not result.ok
     assert result.reason_code == "SOURCE_AVAILABLE_AFTER_CAPTURE"
+
+
+def test_full_reader_blocks_snapshot_local_day_window_mismatch() -> None:
+    conn = _conn()
+    _insert_snapshot(conn, local_day_start_utc="2026-05-07T00:00:00+00:00")
+    _insert_source_run(conn)
+    _insert_coverage(conn)
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH"
