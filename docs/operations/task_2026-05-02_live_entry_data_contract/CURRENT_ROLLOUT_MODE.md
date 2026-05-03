@@ -9,30 +9,33 @@
 ## Declared rollout mode
 
 ```yaml
-rollout_mode: live
+rollout_mode: blocked
 declared_on: 2026-05-03
-declared_by: operator (Fitz)
+declared_by: PR #47 default (no operator unblock on this branch)
 unblock_authority_basis: |
-  Operator manual unblock. PR46+PR47 stack landed structural data-chain
-  pieces; operator authorized live runtime activation in commit
-  cb4beb6c "fix: riskguard proxy bypass + unblock entry forecast rollout".
+  Default safe state. The PR47 stack lands the structural data-chain
+  with rollout_mode='blocked' so the live entry-forecast path cannot
+  size or submit until an explicit operator unblock commit lands.
+  Any operator unblock (e.g. PR46's cb4beb6c) lives on a different
+  branch and does not flow into this PR's settings.json.
 runtime_safety_today: |
-  System is fail-closed by construction: get_entry_readiness() in
-  src/data/executable_forecast_reader.py queries readiness_state rows
-  with strategy_key='entry_forecast' that no daemon path writes (only
-  strategy_key='producer_readiness' is written, by
-  src/data/producer_readiness.py:97 and :137). The live path therefore
-  recurrently blocks at ENTRY_READINESS_MISSING. Verified 2026-05-03 PM
-  CDT: SELECT COUNT(*) FROM readiness_state WHERE
-  strategy_key='entry_forecast' = 0.
+  System is fail-closed by construction. With rollout_mode='blocked',
+  evaluate_entry_forecast_rollout_gate returns BLOCKED with reason
+  ENTRY_FORECAST_ROLLOUT_BLOCKED before any forecast read happens.
+  Belt-and-suspenders: even if the rollout flag flipped to LIVE,
+  get_entry_readiness() in src/data/executable_forecast_reader.py
+  queries readiness_state rows with strategy_key='entry_forecast'
+  that no daemon path writes (only strategy_key='producer_readiness'
+  is written, by src/data/producer_readiness.py:97 and :137), so the
+  live path would recurrently block at ENTRY_READINESS_MISSING anyway
+  until Phase C wires the writer.
 operator_acknowledgement: |
-  Operator authorized this state explicitly. The full deep plan in
-  docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md
   Phases A and B land structural completion in this PR with zero new
   daemon import sites. Phase C (operator-controlled activation: env
   flags ZEUS_ENTRY_FORECAST_ROLLOUT_GATE / _CALIBRATION_GATE /
-  _READINESS_WRITER / _HEALTHCHECK_BLOCKERS) is deferred to a separate
-  authorized PR.
+  _READINESS_WRITER / _HEALTHCHECK_BLOCKERS, plus dead-knob deletion
+  per B9, plus flock + try/except per critic-opus required items) is
+  authorized to begin in this PR per operator directive 2026-05-03.
 ```
 
 ## Allowed values
