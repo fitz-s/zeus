@@ -72,6 +72,7 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size, strategy_kelly_multiplier
+from src.engine.ddd_wiring import DDDFailClosed, evaluate_ddd_for_decision
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import (
@@ -2729,6 +2730,80 @@ def evaluate_candidate(
             ))
             continue
 
+        # ── DDD v2 gate (RERUN_PLAN_v2.md §5 D-E live wiring, 2026-05-03) ──
+        # Two-Rail Data Density Discount: Rail 1 HALT for catastrophic-coverage
+        # days, Rail 2 produces a sizing discount. F2 fail-CLOSED on
+        # NO_TRAIN_DATA / EXCLUDED / unconfigured cities. Feature-flagged so
+        # operator can disable without redeploying code. Skipped entirely when
+        # conn is None (legacy test paths exercise evaluate_candidate without
+        # a DB; production always passes a live connection).
+        ddd_discount = 0.0
+        if conn is not None and _strict_feature_flag("ddd_v2_enabled", default=True):
+            metric_name = temperature_metric.temperature_metric
+            if metric_name == "high":
+                peak_hour_for_metric = city.historical_peak_hour
+            else:
+                # LOW peak heuristic: 12h offset from HIGH peak (mirrors
+                # p2_consolidated_v2.py heuristic_fallback path). Cities
+                # configured with a dedicated LOW hour can add it later.
+                peak_hour_for_metric = (city.historical_peak_hour - 12) % 24
+
+            try:
+                ddd_result = evaluate_ddd_for_decision(
+                    conn=conn,
+                    city=city.name,
+                    target_date=target_date,
+                    metric=metric_name,
+                    peak_hour=peak_hour_for_metric,
+                    season=season,
+                    mismatch_rate=oracle.error_rate,
+                    decision_time=decision_time,
+                )
+            except DDDFailClosed as exc:
+                decisions.append(EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage=exc.code,
+                    rejection_reasons=[str(exc)],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "ddd_v2_fail_closed"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                ))
+                continue
+
+            if ddd_result.action == "HALT":
+                decisions.append(EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage="DDD_HALT",
+                    rejection_reasons=[
+                        f"DDD Rail 1 HALT: cov={ddd_result.diagnostic.get('current_cov'):.3f} "
+                        f"< 0.35 with window_elapsed="
+                        f"{ddd_result.diagnostic.get('window_elapsed'):.2f}"
+                    ],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "ddd_v2_halt"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                ))
+                continue
+
+            # Rail 2 DISCOUNT path — keep the discount value; applied to km below.
+            # Note: result.discount is already max(mismatch_rate, raw_discount)
+            # so it composes oracle penalty cleanly. We subtract the
+            # mismatch_rate component because oracle.penalty_multiplier already
+            # encodes that gate; only the *additional* DDD-derived shortfall
+            # discount layers on top of Kelly here.
+            raw_ddd = ddd_result.diagnostic.get("final_discount_pre_mismatch") or 0.0
+            ddd_discount = float(raw_ddd)
+            if ddd_discount > 0.0:
+                decision_validations.append(f"ddd_v2_discount_{ddd_discount:.4f}")
+
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
         if oracle.status == OracleStatus.CAUTION:
@@ -2758,6 +2833,7 @@ def evaluate_candidate(
                 lead_days=lead_days_for_calibration,
                 portfolio_heat=current_heat,
                 strategy_key=strategy_key,
+                city=city.name,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -2801,6 +2877,12 @@ def evaluate_candidate(
         if oracle.penalty_multiplier < 1.0:
             km *= oracle.penalty_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
+
+        # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
+        # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
+        # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
+        if ddd_discount > 0.0:
+            km *= max(0.0, 1.0 - ddd_discount)
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:

@@ -163,6 +163,8 @@
     "_HOLD_VALUE_EXIT_COSTS_note": "T6.4 flag-gates HoldValue.compute_with_exit_costs at _buy_yes_exit + _buy_no_exit seams in src/state/portfolio.py. Default OFF to preserve pre-T6.4 zero-cost behavior during shadow validation; flip ON after operator reviews should_exit rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a pre-requisite). When ON, exit decisions include fee + time opportunity cost (not yet correlation — that lives in T6.4-phase2 requiring portfolio context in ExitContext).",
     "NATIVE_MULTIBIN_BUY_NO_SHADOW": false,
     "NATIVE_MULTIBIN_BUY_NO_LIVE": false,
-    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization of multi-bin buy_no only from native NO-token quotes; live additionally gates live entry submission and must remain false until operator promotion evidence exists."
+    "_NATIVE_MULTIBIN_BUY_NO_note": "Default OFF. Shadow enables source/test materialization of multi-bin buy_no only from native NO-token quotes; live additionally gates live entry submission and must remain false until operator promotion evidence exists.",
+    "ddd_v2_enabled": true,
+    "_ddd_v2_enabled_note": "Two-Rail Data Density Discount (RERUN_PLAN_v2.md §5 D-E live wiring 2026-05-03). Rail 1 HALT for cov<0.35; Rail 2 linear discount D=min(0.09, 0.20×shortfall). F2 fail-CLOSED on NO_TRAIN_DATA / EXCLUDED / unconfigured cities → rejection_stage='DDD_NO_TRAIN_DATA' / 'DDD_EXCLUDED_WORKSTREAM_A' / 'DDD_CITY_UNCONFIGURED'. Default ON. Disable to revert to pre-DDD-v2 behavior (oracle_penalty.py only) without code change."
   }
 }
