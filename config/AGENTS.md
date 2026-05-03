@@ -7,7 +7,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | File | Purpose |
 |------|---------|
 | `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
-| `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster. **Routine check needed** — see discipline note below |
+| `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster; `_source_contract_pending_conversions` blocks config-only source migrations until release evidence exists. **Routine check needed** — see discipline note below |
 | `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
 | `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |
@@ -41,5 +41,7 @@ Volatile external city/station evidence lives under `docs/artifacts/polymarket_c
 **Downstream consequence**: any station-ICAO change invalidates prior `observations` rows for that city (wrong station = wrong temperatures). Delete the stale rows and re-backfill before running calibration.
 
 **Coordinate invariant**: `lat`/`lon` MUST correspond to the same physical station as `wu_station` / `hko_station` / CWA id. Do not use city-center or approximate coordinates — this drives ENS grid-point selection.
+
+**Pending conversion invariant**: a city listed in `_source_contract_pending_conversions` with `status="pending_release"` remains blocked for new entries even if its current market `resolutionSource` matches `cities.json`. Release requires complete `state/source_contract_quarantine.json` transition-history evidence refs for config, source-validity, backfill, settlements, calibration, and verification.
 
 Use generated/audit evidence for dated city exception lists. Do not encode volatile city/station snapshots directly in this routing file.

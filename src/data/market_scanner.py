@@ -156,6 +156,7 @@ SOURCE_CONVERSION_EVIDENCE_DESCRIPTIONS = {
     "calibration_rebuilt": "affected calibration pairs and Platt calibration buckets have been rebuilt.",
     "verification_passed": "focused scanner/watch/rebuild/calibration verification has passed.",
 }
+PENDING_SOURCE_CONVERSIONS_CONFIG_KEY = "_source_contract_pending_conversions"
 
 
 def source_contract_quarantine_path(path: str | Path | None = None) -> Path:
@@ -224,10 +225,66 @@ def active_source_contract_quarantines(path: str | Path | None = None) -> dict[s
     return active
 
 
+def _configured_pending_source_conversions() -> dict[str, dict]:
+    try:
+        payload = json.loads(
+            (runtime_config.CONFIG_DIR / "cities.json").read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return {}
+    entries = payload.get(PENDING_SOURCE_CONVERSIONS_CONFIG_KEY, [])
+    if not isinstance(entries, list):
+        raise ValueError(
+            f"config/cities.json field {PENDING_SOURCE_CONVERSIONS_CONFIG_KEY!r} must be a list"
+        )
+    pending: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"config/cities.json field {PENDING_SOURCE_CONVERSIONS_CONFIG_KEY!r} must contain objects"
+            )
+        city_name = str(entry.get("city") or "").strip()
+        status = str(entry.get("status") or "").strip()
+        if not city_name or status != "pending_release":
+            continue
+        pending[_canonical_city_name(city_name)] = dict(entry)
+    return pending
+
+
+def _source_conversion_release_complete(city_name: str, path: str | Path | None = None) -> bool:
+    for record in source_contract_transition_history(city_name, path=path):
+        completed = record.get("completed_release_evidence")
+        if not isinstance(completed, dict):
+            continue
+        if all(
+            isinstance(completed.get(key), dict)
+            and completed[key].get("completed") is True
+            and _evidence_ref_present(completed[key].get("evidence_ref"))
+            for key in REQUIRED_SOURCE_CONVERSION_EVIDENCE
+        ):
+            return True
+    return False
+
+
+def pending_source_contract_conversion(
+    city_name: str,
+    path: str | Path | None = None,
+) -> dict | None:
+    canonical = _canonical_city_name(city_name)
+    pending = _configured_pending_source_conversions().get(canonical)
+    if pending is None:
+        return None
+    if _source_conversion_release_complete(canonical, path=path):
+        return None
+    return pending
+
+
 def is_city_source_quarantined(city_name: str, path: str | Path | None = None) -> bool:
     try:
         canonical = _canonical_city_name(city_name)
-        return canonical in active_source_contract_quarantines(path)
+        if canonical in active_source_contract_quarantines(path):
+            return True
+        return pending_source_contract_conversion(canonical, path=path) is not None
     except Exception as exc:
         logger.error(
             "Source-contract quarantine state unreadable; blocking new entries fail-closed: %s",
