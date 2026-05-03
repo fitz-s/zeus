@@ -47,6 +47,7 @@ test_trust_policy:
     tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_transfer_policy.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -368,6 +369,7 @@ categories:
     - tests/test_calibration_manager_low_fallback_regression.py
     - tests/test_calibration_pairs_v2_metric_linter.py
     - tests/test_calibration_store_metric_required.py
+    - tests/test_calibration_transfer_policy.py
     - tests/test_calibration_v2_fallback_alerting.py
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
@@ -614,6 +616,7 @@ law_gate:
       - src/config.py
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
+      - tests/test_calibration_transfer_policy.py
       - tests/test_executable_forecast_reader.py
       - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
@@ -631,6 +634,7 @@ law_gate:
     protects:
       - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
       - config/source_release_calendar.yaml
+      - src/data/calibration_transfer_policy.py
       - src/data/executable_forecast_reader.py
       - scripts/ingest_grib_to_snapshots.py
       - src/data/ecmwf_open_data.py
