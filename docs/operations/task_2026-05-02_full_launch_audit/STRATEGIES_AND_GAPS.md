@@ -49,6 +49,10 @@ The phrase "strategy catalog" is overloaded. Stage 0 must keep these surfaces di
 
 Critic review rejected adding a new runtime taxonomy rollback flag. The safer rollback surface already exists in `src/control/control_plane.py::_LIVE_ALLOWED_STRATEGIES`: only `settlement_capture`, `center_buy`, and `opening_inertia` are runtime-live, while `LIVE_SAFE_STRATEGIES` remains the boot/catalog superset that includes `shoulder_sell`. A negative feature flag such as `DISABLE_NEW_TAXONOMY` would create a second authority surface whose default or typo behavior could live-open the taxonomy. Stage 1 therefore treats `is_strategy_enabled()` as the execution seam: `shoulder_sell` can be phase-compatible and reportable, but still cannot reach live intent until a future promotion packet updates the runtime-live allowlist, sizing, evidence, and tests together.
 
+### 0.5 Stage 1 native buy-NO live verdict (2026-05-02)
+
+`NATIVE_MULTIBIN_BUY_NO_LIVE=true` is necessary but not sufficient for live buy-NO. Runtime now also requires canonical native NO quote evidence on the decision and explicit promotion authority for the `(strategy_key, discovery_mode, direction)` context. The default approved context set is empty, so Day0 `settlement_capture` buy-NO remains hard-blocked even if an operator flips the live flag locally. A future promotion packet must add the context, promotion evidence validation, execution tests, sizing evidence, and reporting cohort together.
+
 ---
 
 ## 1. Current strategies (what's actually running)

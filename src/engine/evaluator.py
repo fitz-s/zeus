@@ -108,6 +108,8 @@ DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
 NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
 NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
+NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION = "buy_no_native_quote_available"
+NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
 
 
 class FeeRateUnavailableError(RuntimeError):
@@ -2194,9 +2196,9 @@ def evaluate_candidate(
     entry_validations.append("alpha_posterior")
     if probe_native_no_quotes:
         if native_no_quote_unavailable_labels:
-            entry_validations.append("buy_no_native_quote_unavailable")
+            entry_validations.append(NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION)
         else:
-            entry_validations.append("buy_no_native_quote_available")
+            entry_validations.append(NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION)
 
     forecast_source = _forecast_source_key(
         source_id=ens_result.get("source_id"),

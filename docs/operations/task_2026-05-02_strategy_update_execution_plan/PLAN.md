@@ -87,7 +87,7 @@ Do:
 
 1. Enforce no live unknown/fallback quadrant.
 2. Audit and reconcile every classifier surface: `_classify_edge_source`, `_edge_source_for`, `_strategy_key_for`, `_strategy_key_for_hypothesis`, `cycle_runtime` strategy resolution, DB writes, edge observation, attribution drift, and reports.
-3. Block native buy-NO live unless the live flag and required evidence gates are explicitly true.
+3. Block native buy-NO live unless the live flag, canonical native NO quote evidence, and explicit strategy/phase/direction promotion authority are all true.
 4. Keep `shoulder_sell` shadow-only by default unless a later promotion packet reconciles all live authority surfaces.
 5. Require executable snapshot/reprice before live order intent.
 6. Add source-contract quarantine checks by city/date/metric; Paris must remain blocked for new entries until conversion release evidence is complete.

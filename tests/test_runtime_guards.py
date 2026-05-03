@@ -132,6 +132,106 @@ def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool =
     monkeypatch.setitem(settings._data, "feature_flags", flags)
 
 
+def _run_live_buy_no_authorization_case(
+    monkeypatch,
+    tmp_path,
+    *,
+    mode: DiscoveryMode,
+    strategy_key: str,
+    applied_validations: list[str],
+):
+    from dataclasses import replace
+
+    monkeypatch.setattr(control_plane_module, "_control_state", {})
+    conn = get_connection(tmp_path / f"live-buy-no-{strategy_key}-{mode.value}.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=mode.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "hours_since_open": 30.0,
+        "hours_to_resolution": 2.0 if mode is DiscoveryMode.DAY0_CAPTURE else 24.0,
+        "event_id": f"evt-live-buy-no-{strategy_key}",
+        "slug": f"slug-live-buy-no-{strategy_key}",
+        "temperature_metric": "high",
+        "outcomes": [
+            {"title": "39°F or lower", "range_low": None, "range_high": 39, "token_id": "yes0", "no_token_id": "no0", "market_id": "m0"},
+            {"title": "40°F or higher", "range_low": 40, "range_high": None, "token_id": "yes1", "no_token_id": "no1", "market_id": "m1"},
+        ],
+    }
+    buy_no_edge = replace(
+        _edge(),
+        bin=Bin(low=None, high=39, label="39°F or lower", unit="F"),
+        direction="buy_no",
+        p_market=0.35,
+        entry_price=0.35,
+        vwmp=0.35,
+        p_posterior=0.62,
+        edge=0.27,
+        forward_edge=0.27,
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=buy_no_edge,
+        tokens={"market_id": "m0", "token_id": "yes0", "no_token_id": "no0"},
+        size_usd=5.0,
+        decision_id=f"d-live-buy-no-{strategy_key}",
+        selected_method="ens_member_counting",
+        applied_validations=applied_validations,
+        decision_snapshot_id=f"model-snap-live-buy-no-{strategy_key}",
+        edge_source=strategy_key,
+        strategy_key=strategy_key,
+        settlement_semantics_json='{"measurement_unit":"F"}',
+        epistemic_context_json='{"decision_time_utc":"2026-04-01T00:00:00Z"}',
+        edge_context_json='{"forward_edge":0.27}',
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        safety_cap_usd=None,
+    )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={mode: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        get_current_observation=lambda *args, **kwargs: Day0ObservationContext(
+            high_so_far=70.0,
+            low_so_far=62.0,
+            current_temp=69.0,
+            source="wu_api",
+            observation_time="2026-04-03T00:00:00+00:00",
+            unit="F",
+        ),
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=control_plane_module.is_strategy_enabled,
+        _classify_edge_source=lambda _mode, _edge: strategy_key,
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not submit live buy_no")),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not execute live buy_no")),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=mode,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 3, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+    return summary, artifact
+
+
 def _patch_mature_calibration(monkeypatch, *, level: int = 1) -> None:
     from src.contracts.alpha_decision import AlphaDecision
 
@@ -2593,7 +2693,7 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
         size_usd=5.0,
         decision_id="d-buy-no-live-disabled",
         selected_method="ens_member_counting",
-        applied_validations=["native_buy_no_quote_available"],
+        applied_validations=[evaluator_module.NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION],
         decision_snapshot_id="model-snap-buy-no",
         edge_source="shoulder_sell",
         strategy_key="shoulder_sell",
@@ -2683,7 +2783,7 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
         size_usd=5.0,
         decision_id="d-binary-buy-no-live-disabled",
         selected_method="ens_member_counting",
-        applied_validations=["native_buy_no_quote_available"],
+        applied_validations=[evaluator_module.NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION],
         decision_snapshot_id="model-snap-binary-buy-no",
         edge_source="shoulder_sell",
         strategy_key="shoulder_sell",
@@ -2731,6 +2831,74 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
     assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
     assert artifact.no_trade_cases[0].rejection_reasons == [
         "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    ]
+
+
+def test_live_buy_no_requires_canonical_quote_evidence_even_when_flags_true(monkeypatch, tmp_path):
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+
+    summary, artifact = _run_live_buy_no_authorization_case(
+        monkeypatch,
+        tmp_path,
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        strategy_key="settlement_capture",
+        applied_validations=[],
+    )
+
+    assert summary["no_trades"] == 1
+    assert summary.get("strategy_phase_rejections", 0) == 0
+    assert summary.get("strategy_gate_rejections", 0) == 0
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].strategy == "settlement_capture"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "NATIVE_BUY_NO_QUOTE_EVIDENCE_MISSING"
+    ]
+
+
+def test_day0_live_buy_no_requires_promotion_even_when_flags_and_quote_true(monkeypatch, tmp_path):
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+
+    summary, artifact = _run_live_buy_no_authorization_case(
+        monkeypatch,
+        tmp_path,
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        strategy_key="settlement_capture",
+        applied_validations=[evaluator_module.NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION],
+    )
+
+    assert summary["no_trades"] == 1
+    assert summary.get("strategy_phase_rejections", 0) == 0
+    assert summary.get("strategy_gate_rejections", 0) == 0
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].strategy == "settlement_capture"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "NATIVE_BUY_NO_LIVE_PROMOTION_MISSING:settlement_capture:day0_capture:buy_no"
+    ]
+
+
+def test_live_buy_no_approved_context_still_requires_promotion_evidence(monkeypatch, tmp_path):
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS",
+        frozenset({("settlement_capture", "day0_capture", "buy_no")}),
+    )
+
+    summary, artifact = _run_live_buy_no_authorization_case(
+        monkeypatch,
+        tmp_path,
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        strategy_key="settlement_capture",
+        applied_validations=[evaluator_module.NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION],
+    )
+
+    assert summary["no_trades"] == 1
+    assert summary.get("strategy_phase_rejections", 0) == 0
+    assert summary.get("strategy_gate_rejections", 0) == 0
+    assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
+    assert artifact.no_trade_cases[0].strategy == "settlement_capture"
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "NATIVE_BUY_NO_LIVE_PROMOTION_EVIDENCE_MISSING"
     ]
 
 
@@ -4756,7 +4924,7 @@ def test_shoulder_sell_is_phase_compatible_but_runtime_live_blocked(monkeypatch,
         size_usd=5.0,
         decision_id="d-shoulder-sell-runtime-blocked",
         selected_method="ens_member_counting",
-        applied_validations=["native_buy_no_quote_available"],
+        applied_validations=[evaluator_module.NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION],
         decision_snapshot_id="model-snap-shoulder-sell-runtime-blocked",
         edge_source="shoulder_sell",
         strategy_key="shoulder_sell",

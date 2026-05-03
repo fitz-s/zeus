@@ -48,6 +48,8 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = {
     "opening_hunt": frozenset({"opening_inertia"}),
     "update_reaction": frozenset({"center_buy", "shoulder_sell"}),
 }
+NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
+NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
 
 
@@ -92,6 +94,25 @@ def _strategy_phase_rejection_reason(strategy_key: str, mode) -> str | None:
         return f"strategy_phase_unknown_mode:{mode_value or 'unknown'}"
     if strategy_key not in allowed:
         return f"strategy_phase_mismatch:{strategy_key}:{mode_value}"
+    return None
+
+
+def _native_buy_no_live_authorization_rejection_reason(decision, strategy_key: str, mode) -> str | None:
+    from src.engine.evaluator import NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION
+
+    applied_validations = {
+        str(value).strip()
+        for value in (getattr(decision, "applied_validations", None) or [])
+        if str(value).strip()
+    }
+    if NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION not in applied_validations:
+        return "NATIVE_BUY_NO_QUOTE_EVIDENCE_MISSING"
+    mode_value = _discovery_mode_value(mode)
+    approval_context = (strategy_key, mode_value, "buy_no")
+    if approval_context not in NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS:
+        return f"NATIVE_BUY_NO_LIVE_PROMOTION_MISSING:{strategy_key}:{mode_value}:buy_no"
+    if NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION not in applied_validations:
+        return "NATIVE_BUY_NO_LIVE_PROMOTION_EVIDENCE_MISSING"
     return None
 
 
@@ -2335,12 +2356,20 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             native_buy_no_live_enabled = False
                             live_flag_error = str(exc)
                         if not native_buy_no_live_enabled:
-                            summary["no_trades"] += 1
-                            rejection_stage = "RISK_REJECTED"
-                            rejection_reasons = [
+                            buy_no_live_rejection_reason = (
                                 live_flag_error
                                 or "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
-                            ]
+                            )
+                        else:
+                            buy_no_live_rejection_reason = _native_buy_no_live_authorization_rejection_reason(
+                                d,
+                                strategy_name,
+                                mode,
+                            )
+                        if buy_no_live_rejection_reason:
+                            summary["no_trades"] += 1
+                            rejection_stage = "RISK_REJECTED"
+                            rejection_reasons = [buy_no_live_rejection_reason]
                             _record_opportunity_fact(
                                 candidate,
                                 d,
