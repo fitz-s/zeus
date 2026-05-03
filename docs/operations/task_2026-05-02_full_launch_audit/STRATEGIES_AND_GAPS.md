@@ -45,6 +45,10 @@ The phrase "strategy catalog" is overloaded. Stage 0 must keep these surfaces di
 3. Stage 4 reporting remains necessary, but minimum evidence representation (`discovery_mode`, direction, bin role, phase, execution mode, shadow/live status) must be available before Stage 1/2 taxonomy acceptance.
 4. `STRATEGIES_AND_GAPS.md` remains a design dossier. It is now patched with this evidence lock so future implementation starts from current repo truth rather than the older draft dependency order.
 
+### 0.4 Stage 1 rollback/allowlist verdict (2026-05-02)
+
+Critic review rejected adding a new runtime taxonomy rollback flag. The safer rollback surface already exists in `src/control/control_plane.py::_LIVE_ALLOWED_STRATEGIES`: only `settlement_capture`, `center_buy`, and `opening_inertia` are runtime-live, while `LIVE_SAFE_STRATEGIES` remains the boot/catalog superset that includes `shoulder_sell`. A negative feature flag such as `DISABLE_NEW_TAXONOMY` would create a second authority surface whose default or typo behavior could live-open the taxonomy. Stage 1 therefore treats `is_strategy_enabled()` as the execution seam: `shoulder_sell` can be phase-compatible and reportable, but still cannot reach live intent until a future promotion packet updates the runtime-live allowlist, sizing, evidence, and tests together.
+
 ---
 
 ## 1. Current strategies (what's actually running)

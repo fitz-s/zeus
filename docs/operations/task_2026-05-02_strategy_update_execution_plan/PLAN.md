@@ -92,7 +92,7 @@ Do:
 5. Require executable snapshot/reprice before live order intent.
 6. Add source-contract quarantine checks by city/date/metric; Paris must remain blocked for new entries until conversion release evidence is complete.
 7. Add phase tags where needed so a candidate cannot be live merely because its strategy key exists.
-8. Preserve rollback as a feature-flag route that re-blocks all new taxonomy while keeping the existing three live-allowed keys.
+8. Preserve rollback through the existing runtime-live allowlist. A new negative taxonomy flag is rejected for Stage 1 because it would create a second authority surface; `_LIVE_ALLOWED_STRATEGIES` plus `is_strategy_enabled()` is the rollback boundary that keeps the existing three live-allowed keys while blocking `shoulder_sell` and dormant inverse taxonomy.
 
 Review references:
 
@@ -123,7 +123,7 @@ Exit criteria:
 
 Rollback:
 
-- Re-block new taxonomy with a feature flag while preserving old safe live keys. Source lines: [`L952-L954`](../../artifacts/Zeus_May2_review_%20strategy_update.md#L952-L954).
+- Re-block new taxonomy by keeping `_LIVE_ALLOWED_STRATEGIES == {settlement_capture, center_buy, opening_inertia}` and using `set_strategy_gate` only to disable those already-live keys. Do not add a negative `DISABLE_NEW_TAXONOMY` flag; critic review found that a second flag surface is more live-open than the existing control-plane boundary. Source lines: [`L952-L954`](../../artifacts/Zeus_May2_review_%20strategy_update.md#L952-L954).
 
 ## Stage 2 — Minimal Launch Strategy Portfolio
 

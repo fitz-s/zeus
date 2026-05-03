@@ -2,12 +2,13 @@
 # Last reused/audited: 2026-05-02
 # Lifecycle: created=2026-04-26; last_reviewed=2026-05-02; last_reused=2026-05-02
 # Purpose: G6 antibody — pin LIVE_SAFE_STRATEGIES typed frozenset + boot-time
-#          refusal to launch live daemon when any non-allowlisted strategy is
-#          enabled. Closes the gap between universe-of-strategies (KNOWN_STRATEGIES,
-#          4 entries) and live-execution-permitted-strategies (1 entry today).
+#          refusal to launch live daemon when any non-boot-safe strategy is
+#          enabled. Keeps the buildable universe, boot/catalog-safe set, and
+#          runtime-live execution boundary named separately.
 # Reuse: Covers src/control/control_plane.py public LIVE_SAFE_STRATEGIES + helper
 #        assert_live_safe_strategies_under_live_mode. If a future refactor
-#        broadens the allowlist or removes the boot guard, these tests fire.
+#        broadens the boot/catalog allowlist, confuses it with runtime live
+#        entry, or removes the boot guard, these tests fire.
 # Authority basis: docs/operations/task_2026-04-26_g6_live_safe_strategies/plan.md
 #   §4 antibody design + parent packet
 #   docs/operations/task_2026-04-26_live_readiness_completion/plan.md §5 K1.G6.
@@ -18,12 +19,16 @@
 
 Cross-module relationship pinned:
     KNOWN_STRATEGIES (cycle_runner.py)  ⊇  LIVE_SAFE_STRATEGIES (control_plane.py)
-    (every name in the live allowlist exists in the engine's universe)
+    (every name in the boot/catalog set exists in the engine's universe)
 
 Behavioral pin:
     LIVE_SAFE_STRATEGIES == {"opening_inertia", "center_buy",
     "settlement_capture", "shoulder_sell"} after the 2026-04-29
-    operator-approved expansion.
+    operator-approved boot/catalog expansion.
+
+Runtime live-entry authority:
+    _LIVE_ALLOWED_STRATEGIES == {"opening_inertia", "center_buy",
+    "settlement_capture"}; shoulder_sell remains blocked at is_strategy_enabled().
 
 Boot guard:
     Runtime is live-only. Any enabled strategy outside LIVE_SAFE_STRATEGIES
@@ -61,7 +66,7 @@ def test_live_safe_strategies_is_frozenset_of_str():
 
 
 def test_live_safe_strategies_pins_current_allowlist():
-    """Pin current operator-approved set (2026-04-29 expansion).
+    """Pin current operator-approved boot/catalog set (2026-04-29 expansion).
 
     Future expansion REQUIRES an explicit packet — accidental list growth
     via copy/paste is caught here. See parent packet
@@ -79,12 +84,12 @@ def test_live_safe_strategies_pins_current_allowlist():
 
 
 def test_live_safe_strategies_subset_of_known_strategies():
-    """Cross-module invariant: every live-safe name must exist in the engine's universe.
+    """Cross-module invariant: every boot-safe name must exist in the engine's universe.
 
     KNOWN_STRATEGIES (src/engine/cycle_runner.py) is the buildable universe.
-    LIVE_SAFE_STRATEGIES is the live-execution subset. A name in the allowlist
-    that the engine doesn't recognize would silently never run — appearing
-    safe but providing no live coverage. This test fires before that drift.
+    LIVE_SAFE_STRATEGIES is the boot/catalog-safe subset. A name in the
+    allowlist that the engine doesn't recognize would silently never run —
+    appearing safe but providing no coverage. This test fires before that drift.
     """
     from src.control.control_plane import LIVE_SAFE_STRATEGIES
     from src.engine.cycle_runner import KNOWN_STRATEGIES
@@ -131,6 +136,42 @@ def test_stage0_strategy_authority_surfaces_are_explicitly_split():
     assert STRATEGY_KELLY_MULTIPLIERS["shoulder_sell"] == 0.0
     assert STRATEGY_KELLY_MULTIPLIERS["shoulder_buy"] == 0.0
     assert STRATEGY_KELLY_MULTIPLIERS["center_sell"] == 0.0
+
+
+def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
+    """Stage 1 rollback verdict: do not create a second taxonomy feature flag.
+
+    The rollback boundary is the runtime-live strategy allowlist. Adding a
+    separate negative flag such as DISABLE_NEW_TAXONOMY would create a second
+    authority surface whose typo/default behavior can live-open the taxonomy.
+    """
+    from src.config import settings
+    from src.control import control_plane
+    from src.strategy.kelly import STRATEGY_KELLY_MULTIPLIERS
+
+    flags = settings["feature_flags"]
+
+    assert "DISABLE_NEW_TAXONOMY" not in flags
+    assert "ENABLE_NEW_TAXONOMY" not in flags
+    assert "NEW_TAXONOMY_LIVE" not in flags
+    assert control_plane._LIVE_ALLOWED_STRATEGIES == {
+        "settlement_capture",
+        "center_buy",
+        "opening_inertia",
+    }
+    assert control_plane.is_strategy_enabled("settlement_capture") is True
+    assert control_plane.is_strategy_enabled("center_buy") is True
+    assert control_plane.is_strategy_enabled("opening_inertia") is True
+    assert control_plane.is_strategy_enabled("shoulder_sell") is False
+    assert control_plane.is_strategy_enabled("shoulder_buy") is False
+    assert control_plane.is_strategy_enabled("center_sell") is False
+
+    positive_sizing = {
+        strategy_key
+        for strategy_key, multiplier in STRATEGY_KELLY_MULTIPLIERS.items()
+        if multiplier > 0.0
+    }
+    assert positive_sizing == control_plane._LIVE_ALLOWED_STRATEGIES
 
 
 # ---------------------------------------------------------------------------
