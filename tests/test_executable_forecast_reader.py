@@ -317,7 +317,41 @@ def test_reader_blocks_legacy_rows_without_source_linkage() -> None:
     )
 
     assert not result.ok
+    # Phase B7: reason now distinguishes "row exists but unlinked" from
+    # "no row at all" instead of collapsing both into NO_EXECUTABLE_*.
+    # SQL filters on source_id/source_transport prevent legacy NULL rows
+    # from matching; row-exists-with-mismatch is the new shape this test
+    # should verify, but the legacy fixture (source_id=None) still falls
+    # to NO_ROWS because source_id="ecmwf_open_data" never matches NULL.
     assert result.reason_code == "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET"
+    assert result.snapshot is None
+
+
+def test_reader_blocks_when_linked_columns_are_partially_null() -> None:
+    """Phase B7: legacy row with source_id+transport set but later linkage
+    columns NULL is now caught by the post-check as
+    FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code) rather than
+    being silently filtered out by the SQL pre-filter.
+    """
+
+    conn = _conn()
+    _insert_snapshot(
+        conn,
+        source_run_id=None,
+        release_calendar_key=None,
+        source_cycle_time=None,
+        source_release_time=None,
+    )
+
+    result = read_executable_forecast_snapshot(
+        conn,
+        scope=_scope(),
+        source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_v2_db_reader",
+    )
+
+    assert not result.ok
+    assert result.reason_code == "FORECAST_SOURCE_LINKAGE_MISSING"
     assert result.snapshot is None
 
 

@@ -281,6 +281,12 @@ def read_executable_forecast_snapshot(
         dict(row)
         for row in conn.execute(
             f"""
+            -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
+            -- on source_run_id/release_calendar_key/source_cycle_time/
+            -- source_release_time/source_available_at removed so legacy rows
+            -- with missing linkage land here and are rejected by the post-check
+            -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
+            -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
             SELECT * FROM ensemble_snapshots_v2
             WHERE city = ?
               AND target_date = ?
@@ -288,11 +294,6 @@ def read_executable_forecast_snapshot(
               AND data_version = ?
               AND source_id = ?
               AND source_transport = ?
-              AND source_run_id IS NOT NULL
-              AND release_calendar_key IS NOT NULL
-              AND source_cycle_time IS NOT NULL
-              AND source_release_time IS NOT NULL
-              AND source_available_at IS NOT NULL
               {source_run_filter}
             ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1

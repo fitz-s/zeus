@@ -251,4 +251,36 @@ def test_live_rollout_and_promoted_calibration_still_requires_rollout_gate() -> 
 
     assert decision.status == "SHADOW_ONLY"
     assert decision.reason_codes == ("ENTRY_FORECAST_ROLLOUT_GATE_REQUIRED",)
-    assert decision.live_eligible is False
+
+
+def test_live_rollout_with_passing_rollout_decision_returns_live_eligible() -> None:
+    """Phase B6: when caller provides a rollout decision that permits
+    live submission, the shadow function returns LIVE_ELIGIBLE so the
+    ``live_eligible`` property is reachable. Without this branch the
+    property is unreachable and the dataclass field is dead code.
+    """
+
+    from src.control.entry_forecast_rollout import EntryForecastRolloutDecision
+
+    conn = _conn()
+    _insert_snapshot(conn, linked=True)
+    _insert_producer_readiness(conn)
+    cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+
+    rollout_decision = EntryForecastRolloutDecision(
+        status="LIVE_ELIGIBLE",
+        reason_codes=("ENTRY_FORECAST_LIVE_APPROVED",),
+    )
+
+    decision = evaluate_entry_forecast_shadow(
+        conn,
+        scope=_scope(),
+        config=cfg,
+        now_utc=_utc(2026, 5, 3, 9),
+        live_calibration_promotion_approved=True,
+        rollout_decision=rollout_decision,
+    )
+
+    assert decision.status == "LIVE_ELIGIBLE"
+    assert decision.live_eligible is True
+    assert decision.reason_codes == ("ENTRY_FORECAST_LIVE_APPROVED",)

@@ -1,4 +1,13 @@
-"""Shadow evaluation boundary for executable entry forecasts."""
+"""Shadow evaluation boundary for executable entry forecasts.
+
+DAEMON ACTIVATION: NOT YET WIRED. This module is importable but is not
+imported from any daemon hot-path file (``src/main.py``,
+``src/ingest_main.py``, ``src/engine/*``, ``src/execution/*``,
+``src/state/db.py`` runtime callers, ``scripts/healthcheck.py``
+``result["healthy"]`` predicate). Phase C will register a single import
+site behind an operator-controlled feature flag. See
+``docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md``.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config import EntryForecastConfig
+from src.control.entry_forecast_rollout import EntryForecastRolloutDecision
 from src.data.calibration_transfer_policy import evaluate_calibration_transfer_policy
 from src.data.executable_forecast_reader import read_executable_forecast_snapshot
 from src.data.forecast_fetch_plan import track_for_metric
@@ -93,7 +103,18 @@ def evaluate_entry_forecast_shadow(
     config: EntryForecastConfig,
     now_utc: datetime,
     live_calibration_promotion_approved: bool = False,
+    rollout_decision: EntryForecastRolloutDecision | None = None,
 ) -> EntryForecastShadowDecision:
+    """Evaluate the calibration + producer-readiness side of the live cutover.
+
+    When ``rollout_decision`` is omitted (default), the function returns
+    ``SHADOW_ONLY`` even on a clean producer + calibration alignment —
+    the rollout gate must clear separately before live sizing is
+    authorized. Pass an :class:`EntryForecastRolloutDecision` to let the
+    function fold the rollout verdict into the final status; this is the
+    path the entry-readiness writer composes (see
+    :mod:`src.data.entry_readiness_writer`).
+    """
     track = track_for_metric(config, scope.temperature_metric)
     snapshot_result = read_executable_forecast_snapshot(
         conn,
@@ -161,6 +182,16 @@ def evaluate_entry_forecast_shadow(
         return EntryForecastShadowDecision(
             status="SHADOW_ONLY" if calibration.status == "SHADOW_ONLY" else calibration.status,
             reason_codes=calibration.reason_codes,
+            snapshot_id=snapshot_result.snapshot.snapshot_id,
+            source_run_id=snapshot_result.snapshot.source_run_id,
+            producer_readiness_id=str(producer["readiness_id"]),
+            calibration_data_version=calibration.calibration_data_version,
+        )
+    if rollout_decision is not None and rollout_decision.may_submit_live_orders:
+        return EntryForecastShadowDecision(
+            status="LIVE_ELIGIBLE",
+            reason_codes=tuple(rollout_decision.reason_codes)
+            or ("ENTRY_FORECAST_LIVE_APPROVED",),
             snapshot_id=snapshot_result.snapshot.snapshot_id,
             source_run_id=snapshot_result.snapshot.source_run_id,
             producer_readiness_id=str(producer["readiness_id"]),

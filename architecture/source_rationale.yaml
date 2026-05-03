@@ -15,6 +15,7 @@ hazard_badges:
   WMO_ROUNDING_LAW: Settlement-aligned values must use WMO half-up.
   ORACLE_TRUNCATION_BIAS: HKO/Oracle truncation differences must stay explicit and may not be silently mixed with WMO half-up.
   CALIBRATION_FAMILY_MIXING: Calibration rows must keep metric, cluster, season, source identity, and promotion evidence explicit.
+  NOT_DAEMON_WIRED: Module exists in src/ but is not imported from any daemon hot-path file (src/main.py, src/ingest_main.py, src/engine/*, src/execution/*, src/state/db.py runtime callers, scripts/healthcheck.py healthy predicate). Daemon activation happens in a separate operator-controlled commit, not by anyone who happens to need the module.
 write_routes:
   canonical_position_write:
     owner: src/state/ledger.py
@@ -577,10 +578,23 @@ files:
     authority_role: entry_forecast_promotion_gate
     why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. NOT YET INVOKED FROM DAEMON; activation deferred to Phase C operator-controlled flag rollout per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
     hazards:
+    - NOT_DAEMON_WIRED
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
     downstream:
+    - src/control/entry_forecast_promotion_evidence_io.py
+    - src/data/entry_readiness_writer.py
     - tests/test_entry_forecast_rollout.py
+  src/control/entry_forecast_promotion_evidence_io.py:
+    zone: K1_governance
+    authority_role: entry_forecast_promotion_evidence_persistence
+    why: Phase B1 atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json. Strict schema, treats corruption as EVIDENCE_MISSING. NOT YET INVOKED FROM DAEMON; Phase C activates via single import site behind feature flag.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - tests/test_entry_forecast_promotion_evidence_io.py
+    - tests/test_entry_forecast_chain_relationship.py
   src/riskguard/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -951,21 +965,34 @@ files:
     authority_role: calibration_transfer_gate
     why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
     hazards:
+    - NOT_DAEMON_WIRED
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
     downstream:
     - src/data/entry_forecast_shadow.py
+    - src/data/entry_readiness_writer.py
     - tests/test_calibration_transfer_policy.py
   src/data/entry_forecast_shadow.py:
     zone: K2_runtime
     authority_role: entry_forecast_shadow_evaluator
-    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
+    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. Phase B6 adds optional rollout_decision parameter so the LIVE_ELIGIBLE branch is reachable when caller supplies a permitting rollout decision (tested only). NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
     hazards:
+    - NOT_DAEMON_WIRED
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_entry_forecast_shadow.py
+  src/data/entry_readiness_writer.py:
+    zone: K2_runtime
+    authority_role: entry_forecast_readiness_writer
+    why: Phase B3 pure writer that turns rollout + calibration + promotion-evidence verdicts into readiness_state rows with strategy_key='entry_forecast'. Refuses to land LIVE_ELIGIBLE unless every gate is aligned at write time. NOT YET INVOKED FROM DAEMON; Phase C activates via single import site behind feature flag.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - tests/test_entry_readiness_writer.py
+    - tests/test_entry_forecast_chain_relationship.py
   src/engine/AGENTS.md:
     zone: docs
     authority_role: registry
