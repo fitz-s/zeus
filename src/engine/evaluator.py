@@ -728,11 +728,11 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if edge.bin.is_shoulder:
+    if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
-    if edge.direction == "buy_yes":
+    if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
-    return "opening_inertia"
+    return "unclassified"
 
 
 def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -740,23 +740,23 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if edge.bin.is_shoulder:
+    if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
-    if edge.direction == "buy_yes":
+    if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return None
 
 
-def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str:
+def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if hypothesis.is_shoulder:
+    if hypothesis.direction == "buy_no" and hypothesis.is_shoulder:
         return "shoulder_sell"
-    if hypothesis.direction == "buy_yes":
+    if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"
-    return "opening_inertia"
+    return None
 
 
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -1053,7 +1053,7 @@ def _record_selection_family_facts(
             recorded_at=recorded_at,
             meta={
                 "active_fdr_selected": bool(row.get("active_fdr_selected")),
-                "hypothesis_strategy_key": row.get("hypothesis_strategy_key", row.get("strategy_key", "")),
+                "hypothesis_strategy_key": row.get("hypothesis_strategy_key") or row.get("strategy_key", ""),
                 "p_model": row["p_model"],
                 "p_market": row["p_market"],
                 "p_posterior": row["p_posterior"],

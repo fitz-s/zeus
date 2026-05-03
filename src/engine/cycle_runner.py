@@ -323,7 +323,7 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
-    return "opening_inertia"
+    return "unclassified"
 
 
 def _classify_strategy(mode: DiscoveryMode, edge, edge_source: str = "") -> str:
