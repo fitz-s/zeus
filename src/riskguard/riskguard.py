@@ -1237,6 +1237,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger.info("RiskGuard starting (60s tick)")
 
+    from src.data.proxy_health import bypass_dead_proxy_env_vars
+    bypass_dead_proxy_env_vars()
+
     while True:
         try:
             level = tick()
