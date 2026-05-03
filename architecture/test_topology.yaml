@@ -94,7 +94,7 @@ test_trust_policy:
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-29"}
