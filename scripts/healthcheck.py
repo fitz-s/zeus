@@ -1,3 +1,6 @@
+# Created: 2026-03-26
+# Last reused/audited: 2026-05-03
+# Authority basis: live healthcheck contract + PLAN_v4 Phase 10 live-entry blocker status surface.
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -53,6 +56,10 @@ def _risk_state_path() -> Path:
 
 def _zeus_db_path() -> Path:
     return state_path("zeus.db").parent / "zeus.db"
+
+
+def _world_db_path() -> Path:
+    return state_path("zeus-world.db")
 
 
 def _riskguard_label() -> str:
@@ -277,6 +284,31 @@ def check() -> dict:
             result["recent_no_trade_stage_counts"] = stage_counts
         except Exception:
             result["recent_no_trade_stage_counts"] = {}
+
+    world_db_path = _world_db_path()
+    result["world_db_path"] = str(world_db_path)
+    if world_db_path.exists():
+        try:
+            import sqlite3
+
+            from src.config import entry_forecast_config
+            from src.data.live_entry_status import build_live_entry_forecast_status
+
+            conn = sqlite3.connect(str(world_db_path))
+            conn.row_factory = sqlite3.Row
+            entry_forecast_status = build_live_entry_forecast_status(
+                conn,
+                config=entry_forecast_config(),
+            )
+            conn.close()
+            result["entry_forecast_status"] = entry_forecast_status.to_dict()
+            result["entry_forecast_blockers"] = list(entry_forecast_status.blockers)
+        except Exception as exc:
+            result["entry_forecast_status"] = {"status": "UNKNOWN_BLOCKED", "error": str(exc)}
+            result["entry_forecast_blockers"] = ["ENTRY_FORECAST_STATUS_UNAVAILABLE"]
+    else:
+        result["entry_forecast_status"] = {"status": "UNKNOWN_BLOCKED", "error": "world_db_missing"}
+        result["entry_forecast_blockers"] = ["ENTRY_FORECAST_WORLD_DB_MISSING"]
 
     try:
         from scripts.validate_assumptions import run_validation

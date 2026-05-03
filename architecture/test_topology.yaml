@@ -191,6 +191,7 @@ test_trust_policy:
     tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_producer_readiness_builder.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -621,6 +622,7 @@ law_gate:
       - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
       - tests/test_ingest_grib_source_run_context.py
+      - tests/test_live_entry_status.py
       - tests/test_opendata_release_calendar_selection.py
       - tests/test_opendata_future_target_contract.py
       - tests/test_producer_readiness_builder.py
@@ -636,7 +638,9 @@ law_gate:
       - config/source_release_calendar.yaml
       - src/data/calibration_transfer_policy.py
       - src/data/executable_forecast_reader.py
+      - src/data/live_entry_status.py
       - scripts/ingest_grib_to_snapshots.py
+      - scripts/healthcheck.py
       - src/data/ecmwf_open_data.py
       - src/data/producer_readiness.py
       - src/data/release_calendar.py
