@@ -67,6 +67,7 @@ def build_producer_readiness_for_scope(
     source_transport: str,
     track: str,
     computed_at: datetime,
+    release_calendar_key: str | None = None,
 ) -> ProducerReadinessDecision:
     coverage = get_latest_source_run_coverage(
         conn,
@@ -78,6 +79,7 @@ def build_producer_readiness_for_scope(
         source_transport=source_transport,
         data_version=scope.data_version,
         track=track,
+        release_calendar_key=release_calendar_key,
     )
     identity = _metric_identity(scope.temperature_metric)
     if coverage is None:
@@ -114,6 +116,7 @@ def build_producer_readiness_for_scope(
                 "coverage_id": None,
                 "source_run_id": None,
                 "source_transport": source_transport,
+                "release_calendar_key": release_calendar_key,
                 "required_step_hours": scope.required_step_hours,
             },
             provenance_json={

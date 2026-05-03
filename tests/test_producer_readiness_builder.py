@@ -51,15 +51,18 @@ def _write_coverage(
     reason_code: str | None = None,
     coverage_id: str = "coverage-live-1",
     expires_at: datetime | None = _utc(2026, 5, 3, 12),
+    source_run_id: str = "source-run-1",
+    release_calendar_key: str = "ecmwf_open_data:mx2t6_high:full",
+    computed_at: datetime = _utc(2026, 5, 3, 9),
 ) -> None:
     scope = _scope()
     write_source_run_coverage(
         conn,
         coverage_id=coverage_id,
-        source_run_id="source-run-1",
+        source_run_id=source_run_id,
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_v2_db_reader",
-        release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+        release_calendar_key=release_calendar_key,
         track="mx2t6_high_full_horizon",
         city_id=scope.city_id,
         city=scope.city_name,
@@ -79,7 +82,7 @@ def _write_coverage(
         completeness_status=completeness_status,
         readiness_status=readiness_status,
         reason_code=reason_code,
-        computed_at=_utc(2026, 5, 3, 9),
+        computed_at=computed_at,
         expires_at=expires_at,
     )
 
@@ -108,6 +111,32 @@ def test_complete_live_coverage_writes_live_eligible_producer_readiness() -> Non
     dependency = json.loads(row["dependency_json"])
     assert dependency["coverage_id"] == "coverage-live-1"
     assert dependency["source_transport"] == "ensemble_snapshots_v2_db_reader"
+
+
+def test_release_calendar_key_keeps_same_track_coverage_from_crossing_profiles() -> None:
+    conn = _conn()
+    _write_coverage(conn)
+    _write_coverage(
+        conn,
+        coverage_id="coverage-short-newer",
+        source_run_id="source-run-short",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        computed_at=_utc(2026, 5, 3, 11),
+        expires_at=_utc(2026, 5, 3, 13),
+    )
+
+    decision = build_producer_readiness_for_scope(
+        conn,
+        scope=_scope(),
+        source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_v2_db_reader",
+        track="mx2t6_high_full_horizon",
+        computed_at=_utc(2026, 5, 3, 11),
+        release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+    )
+
+    assert decision.status == "LIVE_ELIGIBLE"
+    assert decision.coverage_id == "coverage-live-1"
 
 
 def test_missing_future_target_coverage_writes_blocked_producer_readiness() -> None:
