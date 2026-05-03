@@ -135,6 +135,8 @@ def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:
 
     assert decision is FetchDecision.FETCH_ALLOWED
     assert metadata["horizon_profile"] == "short"
+    assert metadata["live_authorization"] is False
+    assert metadata["profile_live_authorization"] is False
     assert profile.live_authorization is False
 
 

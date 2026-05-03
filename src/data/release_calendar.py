@@ -329,7 +329,9 @@ def evaluate_safe_fetch(
         "lag_minutes_required": required_lag_minutes,
         "lag_minutes_elapsed": int(elapsed.total_seconds() // 60),
         "authority_tier": entry.authority_tier,
-        "live_authorization": entry.live_authorization,
+        "entry_live_authorization": entry.live_authorization,
+        "profile_live_authorization": profile.live_authorization,
+        "live_authorization": entry.live_authorization and profile.live_authorization,
         "horizon_profile": profile.horizon_profile,
         "live_max_step_hours": profile.live_max_step_hours,
     }
