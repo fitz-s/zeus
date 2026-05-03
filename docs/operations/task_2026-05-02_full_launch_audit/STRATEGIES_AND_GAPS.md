@@ -15,7 +15,8 @@
 
 | Surface | Current observation | Stage 0 consequence |
 |---|---|---|
-| Branch / HEAD | `healthcheck-riskguard-live-label-2026-05-02` at `95dc0257` (`Fix live riskguard label in healthcheck`) | The review artifact's `pr37-followup-2026-05-02` branch claim is historical evidence, not current branch truth. |
+| Branch / initial Stage 0 HEAD | `healthcheck-riskguard-live-label-2026-05-02` at `95dc0257` (`Fix live riskguard label in healthcheck`) | Historical Stage 0 starting point. The review artifact's `pr37-followup-2026-05-02` branch claim is historical evidence, not current branch truth. |
+| Branch / Stage 1 full-PR review head | Pushed through `97bd37e9` (`Require promotion evidence for live buy-no`) before full-PR review fixes | Later implementation commits are authoritative via git history; this evidence-lock section is not a live HEAD pointer. |
 | Dirty / untracked evidence | `REMAINING_TASKS.md` is modified; May 2 review artifacts and the strategy execution plan packet are untracked local evidence | Do not treat uncommitted packet docs as accepted authority. |
 | Active router status | `task_2026-05-02_full_launch_audit/` and `task_2026-05-02_strategy_update_execution_plan/` are now registered in `docs/operations/AGENTS.md` | Future agents can route these packet surfaces without topology hidden-doc failures. |
 | Current data fact drift | `current_data_state.md` still describes harvester live writes as dormant, while `REMAINING_TASKS.md` records `ZEUS_HARVESTER_LIVE_ENABLED=1` propagated | Any settlement/learning/harvester claim requires fresh current-data reconciliation before implementation. |

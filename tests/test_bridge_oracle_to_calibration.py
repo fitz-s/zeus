@@ -1,5 +1,5 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
+# Last reused/audited: 2026-05-03
 # Authority basis: Operator directive; skip-thin-days-for-oracle-bridge
 """Tests for oracle bridge coverage filtering."""
 
@@ -88,10 +88,23 @@ def test_bridge_coverage_filtering(mock_oracle_file, mock_snap_dir, mock_db_path
     assert stats["comparisons"] == 1
     assert stats["cities"] == 1
 
-    # Case 3: Day with primary_hours >= 22 -> COUNTED (regression)
+    # Case 3: Day with primary_hours >= 22 but UNVERIFIED authority -> SKIPPED
     conn.execute("DELETE FROM observation_instants_v2 WHERE source = 'ogimet_metar_kord'")
-    conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
-                 ('Chicago', '2026-05-01', 'wu_icao_history', '2026-05-01T21:00:00Z', 'VERIFIED'))
+    conn.execute("DELETE FROM observation_instants_v2")
+    for i in range(22):
+        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+                     ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'UNVERIFIED'))
+    conn.commit()
+
+    stats = bridge(dry_run=True)
+    assert stats["comparisons"] == 0
+    assert stats["cities"] == 0
+
+    # Case 4: Day with VERIFIED primary_hours >= 22 -> COUNTED (regression)
+    conn.execute("DELETE FROM observation_instants_v2")
+    for i in range(22):
+        conn.execute("INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+                     ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
     stats = bridge(dry_run=True)

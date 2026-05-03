@@ -1404,6 +1404,27 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: code_and_manifest
+- path: docs/reference/zeus_oracle_density_discount_reference.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: Data Density Discount and oracle penalty design reference
+  canonical_replaced_by:
+  - src/strategy/oracle_penalty.py
+  - scripts/bridge_oracle_to_calibration.py
+  - tests/test_bridge_oracle_to_calibration.py
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: slow_changing
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
 - path: docs/artifacts/zeus_architecture_deep_map_2026-04-16.md
   doc_class: artifact
   default_read: false
@@ -1411,6 +1432,25 @@ entries:
   current_role: demoted legacy architecture deep-map snapshot; evidence only
   canonical_replaced_by:
   - docs/reference/zeus_architecture_reference.md
+  next_action: retain_as_evidence
+  lifecycle_state: historical
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: artifact_evidence
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: n/a
+- path: docs/artifacts/Zeus_May2_review_ strategy_update.md
+  doc_class: artifact
+  default_read: false
+  direct_reference_allowed: true
+  current_role: May 2 strategy update review evidence for Stage 0/1 plan
+  canonical_replaced_by:
+  - docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
   next_action: retain_as_evidence
   lifecycle_state: historical
   coverage_scope: exact

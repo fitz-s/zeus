@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-16; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-03; last_reused=2026-05-03
 # Purpose: Bridge oracle shadow snapshots into the reviewed oracle error-rate config artifact.
 # Reuse: Review source snapshots and high-track settlement filtering before applying output.
 """Bridge oracle shadow snapshots to calibration data.
@@ -158,6 +158,7 @@ def bridge(dry_run: bool = False) -> dict:
             SELECT COUNT(DISTINCT utc_timestamp)
             FROM observation_instants_v2
             WHERE city = ? AND target_date = ? AND source = ?
+              AND authority = 'VERIFIED'
         """, (city, target_date, primary_source)).fetchone()[0]
 
         # Count distinct hours for fallbacks (if primary is too thin)

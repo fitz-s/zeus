@@ -24,6 +24,13 @@ machine manifests, tests, and executable source.
   binary→continuous training_allowed→precision_weight transition; per-city
   opt-out for coastal/monsoon physics; forbids ΔT-magnitude weighting in
   production)
+- `zeus_oracle_density_discount_reference.md` when working on oracle penalty,
+  Data Density Discount, source-thinness handling, or the
+  `Mismatch ↔ DDD ↔ Platt-regime-absorption` relationship; encodes the
+  three-stage refinement (track-aware coverage → Platt regime absorption
+  verified empirically → hardened-baseline + σ-band + small-sample multiplier);
+  any change to `oracle_penalty.py`, DDD, or `bridge_oracle_to_calibration.py`
+  MUST cite §6 of that doc as authority basis
 - `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
   book route
 - `modules/state.md`, `modules/engine.md`, `modules/data.md`,
