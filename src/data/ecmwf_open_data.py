@@ -1,6 +1,6 @@
 # Created: prior; restructured 2026-05-01
-# Last reused/audited: 2026-05-01
-# Authority basis: Operator directive 2026-05-01 — daemon-correctness fix.
+# Last reused/audited: 2026-05-03
+# Authority basis: Operator directive 2026-05-01 + PLAN_v4 Phase 5A release-calendar source-run selection.
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
 #   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
@@ -38,7 +38,7 @@ import json
 import logging
 import subprocess
 import sys
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +48,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_DATA_VERSION,
 )
 from src.data.forecast_source_registry import gate_source, gate_source_role
+from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
 from src.state.db import get_world_connection as get_connection
 
 logger = logging.getLogger(__name__)
@@ -107,22 +108,16 @@ def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
     )
 
 
-def _default_cycle(now: datetime) -> tuple[date, int]:
-    """Pick the most-recent run hour whose forecast is likely available.
-
-    Open Data runs at 00, 06, 12, 18 UTC with ~6-8h latency. Choose the
-    latest run whose latency window has elapsed.
-    """
-    if now.hour >= 18 + 7:
-        return now.date(), 18
-    if now.hour >= 12 + 7:
-        return now.date(), 12
-    if now.hour >= 6 + 7:
-        return now.date(), 6
-    if now.hour >= 7:
-        return now.date(), 0
-    # Pre-07Z: yesterday's 18Z is the freshest fully-available run.
-    return (now - timedelta(days=1)).date(), 18
+def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDecision, dict[str, object]]:
+    """Select a release-calendar-approved source run for the configured horizon."""
+    if track not in TRACKS:
+        raise ValueError(f"Unknown track {track!r}; expected one of {sorted(TRACKS)}")
+    return select_source_run_for_target_horizon(
+        now_utc=now_utc,
+        source_id=SOURCE_ID,
+        track=track,
+        required_max_step_hours=max(STEP_HOURS),
+    )
 
 
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
@@ -159,6 +154,7 @@ def collect_open_ens_cycle(
     skip_extract: bool = False,
     conn=None,
     _runner=None,
+    now_utc: datetime | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
 
@@ -187,10 +183,26 @@ def collect_open_ens_cycle(
     source_spec = gate_source(SOURCE_ID)
     gate_source_role(source_spec, FORECAST_SOURCE_ROLE)
 
-    now = datetime.now(timezone.utc)
-    cycle_date, cycle_hour = (
-        _default_cycle(now) if run_date is None or run_hour is None else (run_date, run_hour)
-    )
+    now = now_utc or datetime.now(timezone.utc)
+    if run_date is None or run_hour is None:
+        selection, selection_metadata = _select_cycle_for_track(track=track, now_utc=now)
+        if selection is not FetchDecision.FETCH_ALLOWED:
+            return {
+                "status": selection.value.lower(),
+                "track": track,
+                "data_version": cfg["data_version"],
+                "source_id": SOURCE_ID,
+                "forecast_source_role": FORECAST_SOURCE_ROLE,
+                "selection": selection_metadata,
+                "stages": [],
+                "snapshots_inserted": 0,
+            }
+        selected_cycle = selection_metadata["selected_cycle_time"]
+        if not isinstance(selected_cycle, datetime):
+            raise TypeError("release calendar selected_cycle_time must be datetime")
+        cycle_date, cycle_hour = selected_cycle.date(), selected_cycle.hour
+    else:
+        cycle_date, cycle_hour = run_date, run_hour
     if run_date is not None:
         cycle_date = run_date
     if run_hour is not None:
