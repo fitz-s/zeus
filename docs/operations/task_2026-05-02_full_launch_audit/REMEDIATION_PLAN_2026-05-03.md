@@ -101,10 +101,32 @@ Listed for handoff completeness; do **not** implement now.
 - **Relationship tests precede behavior changes** (per Fitz universal: "test relationships, not just functions"). B4 and B5 land before any daemon-wire work in Phase C.
 - **Co-tenant write awareness**: this branch has had concurrent operator pushes. Before each commit, `git status -sb` + `git --no-pager log --oneline origin/<branch>..HEAD` to confirm linear history. Use `--force-with-lease` only if explicitly authorized (operator-only per AGENTS.md §git safety).
 
-## Open questions for operator
+## Open questions for operator (resolved 2026-05-03)
 
-1. Phase B item B8 (`evaluator.py` exception scope tightening) requires touching a daemon hot-path file. Approve, defer, or skip?
-2. Phase B item B9 (dead knobs `allow_short_horizon_06_18` / `require_active_market_future_coverage`): delete (Option 1, recommended) or assert (Option 2)?
-3. Where should `EntryForecastPromotionEvidence` live? `state/entry_forecast_promotion_evidence.json` (recommended — atomic, file-system-visible) or a new DB table? Atomic JSON keeps ops simple and matches OpenClaw conventions; DB table fits Zeus authority order.
-4. Should Phase A and Phase B land as one PR (single push to `origin/healthcheck-riskguard-live-label-2026-05-02`) or as two stacked commits with operator review between them?
-5. Premise erratum (A11): is the 408+102 vs 204+51 ratio confirmed as high+low track double-count, or is one of the two probes wrong? Need a one-time DB probe to confirm before writing the erratum doc.
+1. B8 → DEFERRED to Phase C (touches daemon hot-path).
+2. B9 → DEFERRED to Phase C (deletion changes daemon-imported config shape).
+3. Promotion evidence storage → atomic JSON at `state/entry_forecast_promotion_evidence.json`.
+4. Phase A and B landed as separate commits on PR #47 (`8c7a009e` Phase A, `45d9a974` Phase B), not on PR #46. Operator directive 2026-05-03.
+5. Erratum confirmed: per-track 204+51 × 2 tracks = aggregate 408+102. Both numbers correct, scope differs.
+
+## Phase C — operator-controlled activation (AUTHORIZED 2026-05-03)
+
+Operator authorized Phase C activation on PR #47 in the same session as the Phase A+B push. Phase C wires the orphan modules into daemon hot-path files behind env flags; **all flags default OFF** so daemon behavior at flag-default is byte-equal to pre-Phase-C. Operator flips flags one at a time as activation evidence accumulates.
+
+| ID | File | Action | Risk |
+|---|---|---|---|
+| C-flock | `src/control/entry_forecast_promotion_evidence_io.py` | Add `fcntl.flock(LOCK_EX)` around write so concurrent writers cannot lose updates. Atomic JSON already prevents partial reads. Critic-opus required. | Filesystem-call addition; macOS + Linux both support `fcntl.flock`. |
+| C-tryexcept | activation site | Wrap `read_promotion_evidence` in try/except for `PromotionEvidenceCorruption`; emit blocker code `ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT` rather than crashing the cycle. Critic-opus required. | Defense-in-depth at single call site. |
+| C1 | `src/engine/evaluator.py` `_live_entry_forecast_rollout_blocker` | When `os.environ.get("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE") == "1"`, defer to `evaluate_entry_forecast_rollout_gate(config, evidence)`. Default OFF preserves rollout-mode-only check. | First daemon import-site for the gate. |
+| C2 | `src/engine/evaluator.py` (post-C1) | When `ZEUS_ENTRY_FORECAST_CALIBRATION_GATE=1`, evaluate `evaluate_calibration_transfer_policy` after C1's gate passes; require `live_promotion_approved=True` before allowing live read. Default OFF. | Second daemon import-site. |
+| C3 | `src/data/producer_readiness.py` (or new `entry_readiness_step.py` in `src/ingest_main.py`) | When `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1`, after producer-readiness write, also call `write_entry_readiness` for each scope. Default OFF means writer is unreachable from daemon as today. | Daemon write-path addition. |
+| C4 | `scripts/healthcheck.py:330-340` | When `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS=1`, include `entry_forecast_blockers` in `result["healthy"]` predicate. Default OFF preserves current "GREEN even if entry-forecast blocked" behavior. | Operator-visible signal change when ON. |
+| C5 (B9 carry) | `src/config.py`, `config/settings.json`, `tests/test_entry_forecast_config.py` | Delete dead knobs `allow_short_horizon_06_18` and `require_active_market_future_coverage` from `EntryForecastConfig` + settings.json + test assertions. Real safety enforcement is in `config/source_release_calendar.yaml:live_authorization=false` for 06/18 cycles. | Daemon-imported config shape change. |
+| C6 | `src/engine/evaluator.py:1466-1478` | Replace `ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED` blanket rejection with a real Day0 reader path OR keep the rejection but add a test that asserts the reason fires when expected. Phase C will add the test only; full Day0 cutover deferred. | Untested rejection branch today. |
+| C7 | `docs/operations/task_2026-05-02_full_launch_audit/PR47_RETROSPECTIVE.md` (new) | Post-merge retrospective: what worked, what to do differently, next-cycle antibodies. Written after PR #47 lands to main. | Pure docs. |
+
+**Phase C acceptance**:
+- Each flag default OFF: existing pytest suite unchanged (361 → ≥361 passed).
+- Each flag ON: new unit tests assert gate-fires and blocker-codes match the orphan module contracts.
+- `topology_doctor --planning-lock --plan-evidence` passes for daemon-hot-path edits (this plan IS the evidence).
+- Commit per gate; critic-opus review at end of all C-commits (operator directive: critic-only Phase C).

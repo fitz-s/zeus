@@ -1,31 +1,36 @@
 # Created: 2026-05-03
 # Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md Phase B1 atomic JSON I/O for EntryForecastPromotionEvidence.
+# Authority basis: docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md Phase B1 atomic JSON I/O + Phase C-flock concurrent-writer protection for EntryForecastPromotionEvidence.
 """Atomic JSON read/write for ``EntryForecastPromotionEvidence``.
 
-DAEMON ACTIVATION: NOT YET WIRED. This module is importable but is not
-imported from any daemon hot-path file (``src/main.py``,
-``src/ingest_main.py``, ``src/engine/*``, ``src/execution/*``,
-``src/state/db.py`` runtime callers, ``scripts/healthcheck.py``
-``result["healthy"]`` predicate). Phase C will register a single import
-site behind an operator-controlled feature flag. See
-``docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md``.
+Phase C activation status: read-side wired into ``src/engine/evaluator.py``
+behind ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` env flag (default OFF).
+Write-side remains operator-script-only — no daemon writer in the
+default activation path.
 
 The promotion evidence carries the operator approval, G1 attestation,
 calibration promotion approval, and canary-success attestation that
 ``evaluate_entry_forecast_rollout_gate`` requires before authorizing
 canary or live entry-forecast orders. Storage on disk so an operator
 script can populate it atomically without taking the daemon down.
+
+Concurrent-writer protection: writes hold an exclusive ``fcntl.flock``
+on a sidecar lock file at ``<path>.lock`` for the duration of the
+write. Atomic JSON via tempfile + ``os.replace`` already prevents the
+reader from observing a partial file; the flock prevents two
+concurrent writers from racing and clobbering each other's payloads.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
 from src.data.live_entry_status import LiveEntryForecastStatus
@@ -44,19 +49,42 @@ class PromotionEvidenceCorruption(ValueError):
     """
 
 
+@contextlib.contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive ``fcntl.flock`` on ``<path>.lock`` for write coordination.
+
+    Uses a sidecar ``.lock`` file rather than locking the target file
+    directly because the target is replaced (different inode) on each
+    write. Lock-file inode is stable across writes.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        os.replace(tmp_path, str(path))
-    except Exception:
+    with _exclusive_lock(path):
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _serialize_status(status: LiveEntryForecastStatus) -> dict[str, Any]:

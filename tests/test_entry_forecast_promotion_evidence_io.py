@@ -164,3 +164,53 @@ def test_evidence_to_dict_for_audit_logging() -> None:
     assert payload["operator_approval_id"] == "operator-1"
     assert payload["status_snapshot"]["status"] == "LIVE_ELIGIBLE"
     assert isinstance(payload["status_snapshot"]["blockers"], list)
+
+
+def test_write_creates_sidecar_lock_file(tmp_path: Path) -> None:
+    """Phase C-flock: writer must hold an exclusive flock on a sidecar
+    file so two concurrent writers cannot race and clobber payloads.
+    The lock file is the inode-stable companion of the target;
+    persistence after the write is acceptable (next write reuses it).
+    """
+
+    target = tmp_path / "evidence.json"
+    write_promotion_evidence(_evidence(), path=target)
+
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    assert lock_path.exists(), "expected sidecar .lock file to exist after write"
+
+
+def test_concurrent_writes_serialize_and_last_write_wins(tmp_path: Path) -> None:
+    """With flock in place, two threads writing serialized payloads
+    cannot interleave at the JSON-write step. The final on-disk file
+    must be a complete payload from one of the writers — never a
+    partial mix. Atomic ``os.replace`` guarantees this even without
+    flock; flock additionally guarantees no lost-update race against
+    the lock file.
+    """
+
+    import threading
+
+    target = tmp_path / "evidence.json"
+    evidence_a = _evidence(operator_approval_id="op-A")
+    evidence_b = _evidence(operator_approval_id="op-B")
+
+    barrier = threading.Barrier(2)
+
+    def writer(payload):
+        def run():
+            barrier.wait(timeout=5.0)
+            write_promotion_evidence(payload, path=target)
+        return run
+
+    t1 = threading.Thread(target=writer(evidence_a))
+    t2 = threading.Thread(target=writer(evidence_b))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    assert not t1.is_alive() and not t2.is_alive()
+
+    parsed = read_promotion_evidence(path=target)
+    assert parsed is not None
+    assert parsed.operator_approval_id in {"op-A", "op-B"}

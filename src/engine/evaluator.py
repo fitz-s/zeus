@@ -8,6 +8,7 @@ import json
 import logging
 import hashlib
 import math
+import os
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -42,6 +43,11 @@ from src.config import (
     get_mode,
     settings,
 )
+from src.control.entry_forecast_promotion_evidence_io import (
+    PromotionEvidenceCorruption,
+    read_promotion_evidence,
+)
+from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.contracts import (
     EntryMethod,
@@ -708,13 +714,62 @@ def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
 
 
 def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None, str | None]:
+    """Load entry-forecast config; surface a typed blocker on parse failure.
+
+    Phase C tightening (per code-reviewer MED-3 / B8 deferred): catch only
+    the parse-failure exception classes. Letting unrelated exceptions
+    (KeyboardInterrupt, OOM, programmer errors raising
+    ``RuntimeError``/``AttributeError``) propagate is the correct
+    behavior — masking them as ``ENTRY_FORECAST_CONFIG_INVALID:...``
+    would pollute the operator's blocker stream and hide real bugs.
+    """
+
     try:
         return entry_forecast_config(), None
-    except Exception as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         return None, f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
 
 
+ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
+
+
+def _entry_forecast_rollout_gate_flag_on() -> bool:
+    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG) == "1"
+
+
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
+    """Return a blocker reason or ``None`` for the live entry-forecast cutover.
+
+    Phase C-1 activation: when ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=1``,
+    defer to ``evaluate_entry_forecast_rollout_gate`` which checks
+    operator approval, G1 evidence, calibration promotion approval,
+    canary success evidence, and the bundled status snapshot. The
+    promotion-evidence file is read at every cycle from
+    ``state/entry_forecast_promotion_evidence.json``.
+
+    Default OFF preserves the legacy rollout-mode-only check so this
+    Phase-C wiring is byte-equal to pre-Phase-C behavior at flag
+    default; operator flips the flag to enforce the full gate.
+
+    ``PromotionEvidenceCorruption`` (raised when the on-disk file
+    fails strict parsing) is caught here and surfaced as the explicit
+    ``ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT`` blocker rather than
+    propagating up and crashing the cycle. This is the single
+    activation site the critic-opus review demanded; future call sites
+    must re-implement the same try/except discipline or factor out a
+    shared helper.
+    """
+
+    if _entry_forecast_rollout_gate_flag_on():
+        try:
+            evidence = read_promotion_evidence()
+        except PromotionEvidenceCorruption as exc:
+            return f"ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:{exc}"
+        decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
+        if decision.may_submit_live_orders:
+            return None
+        return decision.reason_codes[0] if decision.reason_codes else "ENTRY_FORECAST_ROLLOUT_GATE_BLOCKED"
+
     if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
     if cfg.rollout_mode is EntryForecastRolloutMode.SHADOW:
