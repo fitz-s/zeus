@@ -90,6 +90,28 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
 
 
+def _ens_result_phase2_keys(ens_result: dict) -> tuple[
+    str | None, str | None, str | None
+]:
+    """Extract (cycle, source_id, horizon_profile) from a live ens_result.
+
+    Phase 2.6 hardening (2026-05-04, critic-opus MAJOR 4): monitor exit
+    lanes were silently loading the schema-default Platt bucket because
+    get_calibrator was called WITHOUT cycle/source_id/horizon_profile
+    args. This helper mirrors the evaluator's extraction logic so both
+    entry and exit paths route through the same stratified bucket.
+
+    Copilot review #5 + Codex P1 #7 (2026-05-04): delegated to the shared
+    forecast_calibration_domain.derive_phase2_keys_from_ens_result helper
+    so datetime issue_time and horizon_profile derivation behave the same
+    way in monitor and evaluator paths.
+    """
+    from src.calibration.forecast_calibration_domain import (
+        derive_phase2_keys_from_ens_result,
+    )
+    return derive_phase2_keys_from_ens_result(ens_result)
+
+
 def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     """Expose degraded forecast authority in monitor/exit evidence."""
 
@@ -198,6 +220,7 @@ def _refresh_ens_member_counting(
         forecast_days=int(requested_lead_days) + 2,
         model=ensemble_primary_model(),
         role="monitor_fallback",
+        temperature_metric=temperature_metric.temperature_metric,
     )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
@@ -247,9 +270,15 @@ def _refresh_ens_member_counting(
     # silently). Post-fix, the resolver still defaults to HIGH for
     # backward compat, but emits a DEBUG log identifying the position so
     # operators can audit silent-HIGH events.
+    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): thread Phase 2 stratification
+    # axes so monitor exit calibration uses the same bucket the entry side did.
+    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
         temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
+        cycle=_mr_cycle,
+        source_id=_mr_source_id,
+        horizon_profile=_mr_horizon,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -516,6 +545,7 @@ def _refresh_day0_observation(
         forecast_days=2,
         model=ensemble_primary_model(),
         role="monitor_fallback",
+        temperature_metric=temperature_metric.temperature_metric,
     )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
@@ -600,9 +630,15 @@ def _refresh_day0_observation(
     # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
     # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
     # already fired audit log at function entry).
+    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): same Phase 2 stratification
+    # threading as the ensemble exit lane above.
+    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
         temperature_metric=_position_metric_str,
+        cycle=_mr_cycle,
+        source_id=_mr_source_id,
+        horizon_profile=_mr_horizon,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(

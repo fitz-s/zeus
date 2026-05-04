@@ -119,12 +119,14 @@ def _fetch_affected_bucket_keys(
     cluster_filter: str | None = None,
     season_filter: str | Sequence[str] | None = None,
     data_version_filter: str | None = None,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str, str, str, str]]:
     """Return bucket identities touched by a city/date scoped rebuild.
 
-    Platt models are bucket-scoped, not city/date-scoped. A source conversion
-    should discover which buckets were affected by the changed city/date rows,
-    then refit those complete buckets using all eligible pairs in each bucket.
+    Bucket key (Phase 2 — 2026-05-04): (cluster, season, data_version, cycle,
+    source_id, horizon_profile). Cycle and source_id stratification per
+    DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION.md and may4math.md Finding 1.
+    Legacy rows pre-Phase-2 default to cycle='00', source_id='tigge_mars',
+    horizon_profile='full'.
     """
 
     where = [
@@ -154,18 +156,28 @@ def _fetch_affected_bucket_keys(
         params.append(data_version_filter)
 
     rows = conn.execute(f"""
-        SELECT DISTINCT cluster, season, data_version
+        SELECT DISTINCT cluster, season, data_version, cycle, source_id, horizon_profile
         FROM calibration_pairs_v2
         WHERE {" AND ".join(where)}
-        ORDER BY cluster, season, data_version
+        ORDER BY cluster, season, data_version, cycle, source_id, horizon_profile
     """, tuple(params)).fetchall()
-    return [(str(row["cluster"]), str(row["season"]), str(row["data_version"])) for row in rows]
+    return [
+        (
+            str(row["cluster"]),
+            str(row["season"]),
+            str(row["data_version"]),
+            str(row["cycle"]),
+            str(row["source_id"]),
+            str(row["horizon_profile"]),
+        )
+        for row in rows
+    ]
 
 
 def _append_bucket_key_filter(
     where: list[str],
     params: list[object],
-    bucket_keys: list[tuple[str, str, str]] | None,
+    bucket_keys: list[tuple[str, str, str, str, str, str]] | None,
 ) -> None:
     if bucket_keys is None:
         return
@@ -173,9 +185,12 @@ def _append_bucket_key_filter(
         where.append("1 = 0")
         return
     clauses = []
-    for cluster, season, data_version in bucket_keys:
-        clauses.append("(cluster = ? AND season = ? AND data_version = ?)")
-        params.extend([cluster, season, data_version])
+    for cluster, season, data_version, cycle, source_id, horizon_profile in bucket_keys:
+        clauses.append(
+            "(cluster = ? AND season = ? AND data_version = ? "
+            "AND cycle = ? AND source_id = ? AND horizon_profile = ?)"
+        )
+        params.extend([cluster, season, data_version, cycle, source_id, horizon_profile])
     where.append("(" + " OR ".join(clauses) + ")")
 
 
@@ -222,11 +237,11 @@ def _fetch_buckets(
     _append_bucket_key_filter(where, params, affected_keys)
     params.append(MIN_DECISION_GROUPS)
     return conn.execute(f"""
-        SELECT cluster, season, data_version,
+        SELECT cluster, season, data_version, cycle, source_id, horizon_profile,
                COUNT(DISTINCT decision_group_id) AS n_eff
         FROM calibration_pairs_v2
         WHERE {" AND ".join(where)}
-        GROUP BY cluster, season, data_version
+        GROUP BY cluster, season, data_version, cycle, source_id, horizon_profile
         HAVING n_eff >= ?
     """, tuple(params)).fetchall()
 
@@ -236,6 +251,9 @@ def _fetch_pairs_for_bucket(
     cluster: str,
     season: str,
     data_version: str,
+    cycle: str,
+    source_id: str,
+    horizon_profile: str,
     metric_identity: MetricIdentity,
 ) -> list[sqlite3.Row]:
     return conn.execute("""
@@ -245,10 +263,14 @@ def _fetch_pairs_for_bucket(
           AND training_allowed = 1
           AND authority = 'VERIFIED'
           AND cluster = ? AND season = ? AND data_version = ?
+          AND cycle = ? AND source_id = ? AND horizon_profile = ?
           AND decision_group_id IS NOT NULL
           AND decision_group_id != ''
           AND p_raw IS NOT NULL
-    """, (metric_identity.temperature_metric, cluster, season, data_version)).fetchall()
+    """, (
+        metric_identity.temperature_metric,
+        cluster, season, data_version, cycle, source_id, horizon_profile,
+    )).fetchall()
 
 
 def _assert_platt_refit_preflight_ready(db_path: Path) -> None:
@@ -266,14 +288,23 @@ def _fit_bucket(
     cluster: str,
     season: str,
     data_version: str,
+    cycle: str,
+    source_id: str,
+    horizon_profile: str,
     *,
     metric_identity: MetricIdentity,
     dry_run: bool,
     stats: RefitStatsV2,
 ) -> None:
-    pairs = _fetch_pairs_for_bucket(conn, cluster, season, data_version, metric_identity)
+    pairs = _fetch_pairs_for_bucket(
+        conn, cluster, season, data_version,
+        cycle, source_id, horizon_profile, metric_identity,
+    )
     n_eff = len({p["decision_group_id"] for p in pairs})
-    bucket_key = f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}"
+    bucket_key = (
+        f"{metric_identity.temperature_metric}:{cluster}:{season}:"
+        f"{data_version}:{cycle}:{source_id}:{horizon_profile}"
+    )
 
     if n_eff < MIN_DECISION_GROUPS:
         stats.buckets_skipped_maturity += 1
@@ -326,6 +357,9 @@ def _fit_bucket(
         cluster=cluster,
         season=season,
         data_version=data_version,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
         input_space=cal.input_space,
     )
     stats.deactivated_rows += deactivated
@@ -336,6 +370,9 @@ def _fit_bucket(
         cluster=cluster,
         season=season,
         data_version=data_version,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
         param_A=cal.A,
         param_B=cal.B,
         param_C=cal.C,
@@ -418,14 +455,24 @@ def refit_v2(
             cluster = bucket["cluster"]
             season = bucket["season"]
             data_version = bucket["data_version"]
-            bucket_key = f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}"
+            cycle = bucket["cycle"]
+            source_id = bucket["source_id"]
+            horizon_profile = bucket["horizon_profile"]
+            bucket_key = (
+                f"{metric_identity.temperature_metric}:{cluster}:{season}:"
+                f"{data_version}:{cycle}:{source_id}:{horizon_profile}"
+            )
             print(
                 f"[{bucket_idx}/{len(buckets)}] starting bucket {bucket_key}",
                 flush=True,
             )
             t0 = time.monotonic()
             try:
-                _fit_bucket(conn, cluster, season, data_version, metric_identity=metric_identity, dry_run=dry_run, stats=stats)
+                _fit_bucket(
+                    conn, cluster, season, data_version,
+                    cycle, source_id, horizon_profile,
+                    metric_identity=metric_identity, dry_run=dry_run, stats=stats,
+                )
                 elapsed = time.monotonic() - t0
                 cumulative = time.monotonic() - overall_start
                 print(

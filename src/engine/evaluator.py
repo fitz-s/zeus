@@ -1746,6 +1746,7 @@ def evaluate_candidate(
                 forecast_days=ens_forecast_days,
                 model=primary_model,
                 role="entry_primary",
+                temperature_metric=temperature_metric.temperature_metric,
             )
         except SourceNotEnabled as e:
             return [EdgeDecision(
@@ -2238,10 +2239,112 @@ def evaluate_candidate(
     # L3 Phase 9C: metric-aware calibrator lookup. `temperature_metric` is
     # MetricIdentity (normalized at L662 via _normalize_temperature_metric);
     # pull the string attribute for the kwarg.
+    #
+    # Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): derive
+    # cycle/source_id/horizon_profile from forecast provenance (ens_result)
+    # for cycle-stratified Platt bucket selection. None defaults preserve
+    # legacy behavior — load_platt_model_v2 hits schema-default bucket
+    # ('00','tigge_mars','full') when any field is unavailable.
+    #
+    # Phase 2.6 (2026-05-04, may4math.md F2): if ens_result carries an
+    # explicit data_version, it MUST resolve to a registered source_family
+    # (tigge / ecmwf_opendata). Unknown data_versions cannot be routed to
+    # a Platt bucket safely — manager.get_calibrator would derive a wrong
+    # expected_data_version from the source_family registry, silently
+    # mis-matching the bucket. Reject upfront with a structured stage so
+    # operators see the unknown provenance instead of getting a degraded
+    # uncalibrated path. Missing/None data_version still falls through
+    # for legacy snapshots that predate the provenance contract.
+    _phase2_data_version: Optional[str] = None
+    try:
+        if isinstance(ens_result, dict):
+            _dv = ens_result.get("data_version")
+            if isinstance(_dv, str) and _dv:
+                _phase2_data_version = _dv
+    except Exception:
+        pass
+    if _phase2_data_version is not None:
+        from src.types.metric_identity import (
+            source_family_from_data_version,
+            source_family_from_source_id,
+        )
+        _dv_family = source_family_from_data_version(_phase2_data_version)
+        if _dv_family is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="UNKNOWN_FORECAST_SOURCE_FAMILY",
+                rejection_reasons=[
+                    f"forecast data_version {_phase2_data_version!r} does not "
+                    "resolve to a registered source_family (tigge/ecmwf_opendata); "
+                    "calibrator routing would silently mis-match the bucket"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
+        # Phase 2.6 (2026-05-04, critic-opus MAJOR 8): cross-field consistency.
+        # If ens_result carries BOTH source_id and data_version, their
+        # source_family must agree. A misconfigured ingest writer that set
+        # source_id='ecmwf_open_data' but data_version='tigge_*' would
+        # otherwise route the (wrong) Platt bucket via source_id while the
+        # gate sees the (right) family via data_version. This guard catches
+        # the divergence at evaluator entry.
+        _sid_for_consistency: Optional[str] = None
+        try:
+            if isinstance(ens_result, dict):
+                _candidate_sid = ens_result.get("source_id")
+                if isinstance(_candidate_sid, str) and _candidate_sid:
+                    _sid_for_consistency = _candidate_sid
+        except (TypeError, AttributeError):
+            _sid_for_consistency = None
+        if _sid_for_consistency is not None:
+            _sid_family = source_family_from_source_id(_sid_for_consistency)
+            if _sid_family is not None and _sid_family != _dv_family:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="FORECAST_PROVENANCE_INCONSISTENT",
+                    rejection_reasons=[
+                        f"ens_result source_id={_sid_for_consistency!r} "
+                        f"(family={_sid_family!r}) disagrees with "
+                        f"data_version={_phase2_data_version!r} "
+                        f"(family={_dv_family!r}); ingest writer mismatch"
+                    ],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=entry_validations,
+                    decision_snapshot_id=snapshot_id,
+                    p_raw=p_raw,
+                )]
+    # Copilot review #4 + Codex P1 #7 (2026-05-04): use shared helper that
+    # handles datetime issue_time AND derives horizon_profile from cycle when
+    # ens_result producers don't populate it. Pre-fix this block silently
+    # left horizon_profile=None (axis dead) and stripped 12z datetime
+    # issue_times to None (silent misroute to 00z TIGGE bucket).
+    from src.calibration.forecast_calibration_domain import (
+        derive_phase2_keys_from_ens_result,
+    )
+    _phase2_cycle, _phase2_source_id, _phase2_horizon_profile = (
+        derive_phase2_keys_from_ens_result(ens_result if isinstance(ens_result, dict) else None)
+    )
+
+    # Phase 2 (2026-05-04, may4math.md F1): cycle-stratified Platt bucket
+    # selection. None defaults preserve legacy behavior — load_platt_model_v2
+    # hits schema-default bucket ('00','tigge_mars','full') when any field is
+    # unavailable.  Phase 2.5 transfer gate (PR #55) replaced by PR #56's
+    # MarketPhaseEvidence + oracle_evidence_status — see docs/operations/
+    # task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md.
     cal, cal_level = get_calibrator(
         conn, city, target_date,
         temperature_metric=temperature_metric.temperature_metric,
+        cycle=_phase2_cycle,
+        source_id=_phase2_source_id,
+        horizon_profile=_phase2_horizon_profile,
     )
+
     if cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
@@ -2434,6 +2537,7 @@ def evaluate_candidate(
                 forecast_days=ens_forecast_days,
                 model=crosscheck_model,
                 role="diagnostic",
+                temperature_metric=temperature_metric.temperature_metric,
             )
         except Exception as e:
             return [EdgeDecision(

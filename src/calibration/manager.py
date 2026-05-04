@@ -194,15 +194,29 @@ def get_calibrator(
     city: City,
     target_date: str,
     temperature_metric: Literal["high", "low"] = "high",
+    *,
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> tuple[Optional[ExtendedPlattCalibrator], int]:
     """Get the best available calibrator for a city+date+metric.
+
+    Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): added
+    cycle/source_id/horizon_profile keyword params for cycle-stratified Platt
+    bucket selection. When all three are None (default), legacy behavior is
+    preserved — load_platt_model_v2 hits the schema-default bucket (00z TIGGE
+    full horizon). Production callers (evaluator) MUST thread non-None values
+    derived from the forecast's actual provenance (issue_time → cycle,
+    data_version → source_id, registry → horizon_profile) so that 12z OpenData
+    forecasts no longer silently use 00z TIGGE-trained calibration.
 
     Phase 9C L3 CRITICAL (2026-04-18): added `temperature_metric` param +
     metric-aware hierarchical fallback. Pre-P9C, this function was metric-
     blind and read exclusively from legacy `platt_models` table — a LOW
     candidate would silently receive a HIGH Platt model. Post-P9C:
 
-      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season)
+      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season,
+         data_version, cycle, source_id, horizon_profile)
       2. If v2 miss, fall back to legacy platt_models (HIGH historical continuity)
       3. Remaining hierarchical fallback (pool clusters / seasons / global) is
          preserved; v2 lookup is tried first at each tier.
@@ -235,12 +249,53 @@ def get_calibrator(
     # in MetricIdentity (metric_identity.py:78-90) and are imported lazily to
     # avoid pulling the typed-atom module into every test that touches the
     # calibration manager.
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-    expected_data_version = (
-        HIGH_LOCALDAY_MAX.data_version
-        if temperature_metric == "high"
-        else LOW_LOCALDAY_MIN.data_version
+    #
+    # Phase 2.6 (2026-05-04): source-family-aware data_version resolution.
+    # When caller passes ``source_id``, derive the matching data_version per
+    # the source-family registry — so OpenData live forecasts hit OpenData
+    # Platt buckets, not TIGGE-trained ones (BLOCKER 3 fix). Fallback to
+    # legacy TIGGE-only constants when source_id is None (back-compat).
+    from src.types.metric_identity import (
+        HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity,
     )
+    if source_id is not None:
+        # Map source_id back to a source_family that MetricIdentity knows about.
+        if source_id == "tigge_mars":
+            _source_family = "tigge"
+        elif source_id == "ecmwf_open_data":
+            _source_family = "ecmwf_opendata"
+        else:
+            _source_family = None
+        if _source_family is not None:
+            try:
+                expected_data_version = (
+                    MetricIdentity.for_metric_with_source_family(
+                        temperature_metric, _source_family
+                    ).data_version
+                )
+            except ValueError:
+                # Unknown family at this layer → fall back to legacy TIGGE
+                # constants. Caller should still rule out unknown sources at
+                # an earlier rejection gate (UNKNOWN_FORECAST_SOURCE_FAMILY).
+                expected_data_version = (
+                    HIGH_LOCALDAY_MAX.data_version
+                    if temperature_metric == "high"
+                    else LOW_LOCALDAY_MIN.data_version
+                )
+        else:
+            # source_id provided but unknown — legacy fallback (no live route
+            # for this source through cycle-stratified Platt).
+            expected_data_version = (
+                HIGH_LOCALDAY_MAX.data_version
+                if temperature_metric == "high"
+                else LOW_LOCALDAY_MIN.data_version
+            )
+    else:
+        expected_data_version = (
+            HIGH_LOCALDAY_MAX.data_version
+            if temperature_metric == "high"
+            else LOW_LOCALDAY_MIN.data_version
+        )
 
     # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
     # bucket. Both default to None → legacy behavior preserved.
@@ -248,7 +303,8 @@ def get_calibrator(
         temperature_metric, cluster, season
     )
 
-    # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC)
+    # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
+    # Phase 2 (2026-05-04): thread cycle/source_id/horizon_profile into v2 load.
     model_data = load_platt_model_v2(
         conn,
         temperature_metric=temperature_metric,
@@ -257,6 +313,9 @@ def get_calibrator(
         data_version=expected_data_version,
         frozen_as_of=primary_frozen,
         model_key=primary_model_key,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
     )
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
@@ -357,7 +416,16 @@ def get_calibrator(
 
 
 def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
-    """Reconstruct calibrator from stored model data."""
+    """Reconstruct calibrator from stored model data.
+
+    Codex P1 #6 (2026-05-04): also attach the bucket identity attrs from
+    load_platt_model_v2 — evaluator's transfer gate reads these via
+    ``getattr(cal, '_bucket_*', None)`` to construct the actual
+    calibrator_domain instead of hardcoding TIGGE.  Legacy
+    load_platt_model populates them as None (no Phase 2 stratification on
+    the legacy table) so the gate falls back correctly to the
+    cross-domain rejection path.
+    """
     cal = ExtendedPlattCalibrator()
     cal.A = model_data["A"]
     cal.B = model_data["B"]
@@ -368,6 +436,10 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
         tuple(p) for p in model_data["bootstrap_params"]
     ]
     cal.input_space = model_data.get("input_space", "raw_probability")
+    cal._bucket_cycle = model_data.get("bucket_cycle")
+    cal._bucket_source_id = model_data.get("bucket_source_id")
+    cal._bucket_horizon_profile = model_data.get("bucket_horizon_profile")
+    cal._bucket_data_version = model_data.get("bucket_data_version")
     return cal
 
 

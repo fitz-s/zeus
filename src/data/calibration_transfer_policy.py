@@ -1,9 +1,26 @@
-"""Calibration transfer policy for Open Data live-entry forecasts."""
+"""Calibration transfer policy for Open Data live-entry forecasts.
+
+Houses ``evaluate_calibration_transfer_policy`` — the legacy string-mapping
+policy used by ``entry_forecast_shadow.py`` and ``evaluator.py`` to gate
+OpenData live-entry decisions on operator opt-in
+(``live_promotion_approved=True``).
+
+PR #55 introduced an OOS-evidence-based ``evaluate_calibration_transfer``
+backed by a ``validated_calibration_transfers`` table — that approach was
+replaced by PR #56's ``MarketPhaseEvidence`` + ``oracle_evidence_status``
+stack on main, so the new function and its dataclass were removed during
+the merge.  The legacy policy below remains the live-eligibility gate
+until PR #56's evidence stack fully covers the OpenData transfer surface.
+"""
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
 
+from src.calibration.forecast_calibration_domain import ForecastCalibrationDomain
 from src.config import EntryForecastCalibrationPolicyId, EntryForecastConfig
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
@@ -12,12 +29,6 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1 = "ecmwf_open_data_uses_tigge_localday_cal_v1"
-
-_TRANSFER_SOURCE_BY_OPENDATA_VERSION = {
-    ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX.data_version,
-    ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN.data_version,
-}
-
 
 @dataclass(frozen=True)
 class CalibrationTransferDecision:
