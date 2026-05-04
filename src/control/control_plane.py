@@ -7,6 +7,7 @@ Narrow-by-intent: each command does exactly one thing.
 import json
 import logging
 import sys
+import traceback as _traceback
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
@@ -261,8 +262,17 @@ def pause_entries(
         )
         conn.commit()
         conn.close()
+        # SF6 antibody (2026-05-04): pause_entries was silent on success for the
+        # entire 16-day live-block loop — only DB rows were left, no stderr trace.
+        # Every successful auto-pause MUST leave a greppable footprint with the
+        # full caller stack so future "mystery pauses" can be traced to their raise site.
+        _caller_frames = "".join(_traceback.format_stack()[-6:-1])
+        logger.warning(
+            "ENTRIES_AUTO_PAUSED_DB_WRITTEN reason=%s issued_by=%s effective_until=%s\nCaller stack (most recent last):\n%s",
+            reason_code, issued_by, effective_until, _caller_frames,
+        )
     except Exception as exc:
-        logger.error("Failed to persist auto-pause to DB: %s", exc)
+        logger.error("Failed to persist auto-pause to DB: %s", exc, exc_info=True)
         _control_state["control_db_fault"] = True
         try:
             with open(state_path("auto_pause_failclosed.tombstone"), "w") as f:
