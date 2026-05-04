@@ -277,6 +277,8 @@ def bridge(dry_run: bool = False) -> dict:
     # This bridge only measures HIGH track (daily_high snapshots), so only
     # the "high" subkey is updated here. LOW starts empty and is populated
     # when LOW oracle snapshot infrastructure is added (future phase).
+    from src.strategy.oracle_penalty import summarize_oracle_posterior
+
     for city_name, snap_stats in city_stats.items():
         if city_name not in existing:
             existing[city_name] = {}
@@ -322,6 +324,23 @@ def bridge(dry_run: bool = False) -> dict:
         # likelihood estimate; the posterior_mean lives in the reader.
         snap_rate = snap_stats["snapshot_error_rate"]
         city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
+        posterior = summarize_oracle_posterior(
+            n=n,
+            mismatches=m,
+            metric="high",
+            source_role="oracle_shadow_snapshot",
+            last_date=city_entry["high"]["last_observed_date"] or "",
+            city=city_name,
+        )
+        city_entry["high"].update({
+            "metric": "high",
+            "source_role": posterior.source_role,
+            "posterior_mean": round(posterior.posterior_mean, 6),
+            "posterior_upper_95": round(posterior.posterior_upper_95, 6),
+            "posterior_prob_gt_03": round(posterior.posterior_prob_gt_03, 6),
+            "posterior_prob_gt_10": round(posterior.posterior_prob_gt_10, 6),
+            "penalty_multiplier": round(posterior.penalty_multiplier, 6),
+        })
 
         # Status field is now informational. The reader recomputes
         # status via oracle_estimator.classify(m, n, age) on each

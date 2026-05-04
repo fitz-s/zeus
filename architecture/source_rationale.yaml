@@ -132,6 +132,13 @@ package_defaults:
     authority_role: calibration_math
     gates:
     - pytest -q tests/test_platt.py tests/test_calibration_manager.py
+  src/oracle:
+    zone: K3_extension
+    authority_role: oracle_uncertainty_math
+    hazards:
+    - DERIVED_ONLY
+    gates:
+    - pytest -q tests/test_data_density_discount_v2.py tests/test_oracle_posterior.py
   src/strategy:
     zone: K3_extension
     authority_role: strategy_math
@@ -1033,6 +1040,13 @@ files:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
     - src/engine/replay.py
+  src/engine/ddd_wiring.py:
+    zone: K2_K3_coordination
+    authority_role: oracle_density_discount_wiring
+    why: Computes decision-time DDD inputs and routes fail-closed oracle-density outcomes into evaluator decisions.
+    downstream:
+    - src/engine/evaluator.py
+    - src/oracle/data_density_discount.py
   src/engine/lifecycle_events.py:
     zone: K2_runtime
     authority_role: lifecycle_event_builder
@@ -1270,6 +1284,12 @@ files:
     zone: K3_extension
     authority_role: package_marker
     why: Marks calibration namespace.
+  src/calibration/forecast_calibration_domain.py:
+    zone: K3_extension
+    authority_role: calibration_domain_identity_contract
+    why: Immutable source/cycle/metric/domain identity object preventing 00Z/12Z/OpenData/TIGGE calibration-domain mixing.
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
   src/calibration/blocked_oos.py:
     zone: K3_extension
     authority_role: shadow_calibration_eval
@@ -1347,6 +1367,18 @@ files:
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
     - src/execution/harvester.py
+  src/oracle/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks oracle uncertainty namespace.
+  src/oracle/data_density_discount.py:
+    zone: K3_extension
+    authority_role: oracle_density_discount_math
+    why: Pure DDD two-rail coverage/uncertainty discount math for sizing and decision rejection.
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - src/engine/ddd_wiring.py
   src/strategy/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1472,6 +1504,13 @@ files:
     zone: K3_extension
     authority_role: backtest_economics_tombstone
     why: ECONOMICS purpose tombstone — refuses to run until market_events_v2 + parity contracts unblock.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/executable_ev_replay.py:
+    zone: K3_extension
+    authority_role: executable_ev_replay_verifier
+    why: Pure read-only replay verifier for decision-time executable EV math; compares frozen replay inputs against recorded decisions without live evaluator calls or DB writes.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH

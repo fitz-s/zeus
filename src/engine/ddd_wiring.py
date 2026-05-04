@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo
 
 from src.oracle.data_density_discount import (
     DDDResult,
@@ -142,33 +143,35 @@ def compute_window_elapsed(
     *,
     decision_time: Optional[datetime] = None,
     radius: int = WINDOW_RADIUS,
+    timezone_name: str | None = None,
 ) -> float:
     """Fraction of the directional observation window elapsed at decision_time.
 
     The window for a (city, target_date, metric) is the local-time span
-    ``[peak_hour - radius, peak_hour + radius]``. We approximate it in UTC by
-    treating ``target_date`` as the date the window centers on, and reading
-    decision_time in UTC. Window elapsed = (decision_time_utc - window_start) /
-    window_length, clipped to [0, 1].
+    ``[peak_hour - radius, peak_hour + radius]``. When ``timezone_name`` is
+    provided, ``target_date`` and ``peak_hour`` are interpreted in that city's
+    local timezone, then converted to UTC for comparison with decision time.
+    Window elapsed = (decision_time_utc - window_start_utc) / window_length,
+    clipped to [0, 1].
 
     ``decision_time`` defaults to ``datetime.now(timezone.utc)``. The function
-    deliberately uses UTC for both endpoints; per-city local-time precision
-    isn't required because the caller only uses the result against the
-    Rail 1 threshold (0.5) — accuracy ±0.05 is plenty.
-
-    Note: this approximation treats the window as if it started 0:00 UTC on
-    target_date. For cities far from UTC (Tokyo, LA), there's a phase offset
-    of up to ±9 hours. The Rail 1 trigger requires `> 0.5`, so for typical
-    decision times near peak local hour the result is well past 0.5
-    regardless. If the operator wants tighter window semantics later, this
-    helper can be extended to take city.tz_offset_hours.
+    defaults to ``datetime.now(timezone.utc)``. If ``timezone_name`` is absent,
+    the helper preserves the legacy UTC approximation for compatibility with
+    old tests and tooling.
     """
     if decision_time is None:
         decision_time = datetime.now(timezone.utc)
-    # window: [peak - radius, peak + radius] hours of target_date local
-    # Approximate as UTC: window_start = target_date 00:00 UTC + (peak - radius)h
-    target_dt = datetime.fromisoformat(target_date).replace(tzinfo=timezone.utc)
+    if decision_time.tzinfo is None:
+        decision_time = decision_time.replace(tzinfo=timezone.utc)
+    decision_time = decision_time.astimezone(timezone.utc)
+
+    if timezone_name:
+        tz = ZoneInfo(timezone_name)
+        target_dt = datetime.fromisoformat(target_date).replace(tzinfo=tz)
+    else:
+        target_dt = datetime.fromisoformat(target_date).replace(tzinfo=timezone.utc)
     window_start = target_dt + timedelta(hours=(peak_hour - radius))
+    window_start = window_start.astimezone(timezone.utc)
     window_length_hours = 2 * radius + 1
     elapsed_hours = (decision_time - window_start).total_seconds() / 3600.0
     if elapsed_hours <= 0.0:
@@ -176,6 +179,16 @@ def compute_window_elapsed(
     if elapsed_hours >= window_length_hours:
         return 1.0
     return elapsed_hours / window_length_hours
+
+
+def _timezone_name_for_city(city: str) -> str | None:
+    try:
+        from src.config import runtime_cities_by_name
+    except Exception as exc:  # noqa: BLE001 — DDD can still use legacy fallback.
+        logger.warning("DDD timezone lookup unavailable: %s", exc)
+        return None
+    city_cfg = runtime_cities_by_name().get(city)
+    return getattr(city_cfg, "timezone", None) if city_cfg is not None else None
 
 
 def fetch_n_platt_samples(
@@ -306,7 +319,10 @@ def evaluate_ddd_for_decision(
     cov = fetch_directional_coverage(conn, city, hours, target_date)
     n_platt = fetch_n_platt_samples(conn, city, metric, season, data_version=data_version)
     window_elapsed = compute_window_elapsed(
-        target_date, peak_hour, decision_time=decision_time
+        target_date,
+        peak_hour,
+        decision_time=decision_time,
+        timezone_name=_timezone_name_for_city(city),
     )
 
     # Sigma is monitoring-only; not required for the call. The DDD module

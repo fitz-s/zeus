@@ -67,6 +67,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from scipy.stats import beta as beta_dist
+
 from src.state.paths import oracle_error_rates_path
 from src.strategy.oracle_estimator import (
     classify as _estimator_classify,
@@ -86,6 +88,7 @@ __all__ = [
     "get_oracle_info",
     "is_blacklisted",
     "reload",
+    "summarize_oracle_posterior",
 ]
 
 
@@ -164,6 +167,8 @@ class OracleInfo:
     artifact_age_hours: Optional[float]
     evidence_quality: str
     penalty_multiplier: float
+    posterior_prob_gt_03: float = 0.0
+    posterior_prob_gt_10: float = 0.0
     block_reason: Optional[str] = None
     # Internal: not part of the dataclass equality contract; used only
     # so MALFORMED carry-over knows what the prior multiplier was.
@@ -175,6 +180,53 @@ class OracleInfo:
         the canonical name post-A3 is ``posterior_mean``. Both refer to
         the same quantity (Bayes-corrected mean of the error rate)."""
         return self.posterior_mean
+
+
+def _posterior_tail_probability(threshold: float, mismatches: int, n: int) -> float:
+    alpha = 1 + mismatches
+    beta = 1 + n - mismatches
+    return float(beta_dist.sf(threshold, alpha, beta))
+
+
+def summarize_oracle_posterior(
+    *,
+    n: int,
+    mismatches: int,
+    metric: str = "",
+    source_role: str = "oracle_shadow_snapshot",
+    last_date: str = "",
+    city: str = "",
+) -> OracleInfo:
+    """Build an evidence-grade posterior summary without reading the cache.
+
+    Bridge and tests use this as the may4math F3 compatibility surface; the
+    underlying policy remains the target branch's oracle_estimator classifier.
+    """
+    status = _estimator_classify(mismatches, n, artifact_age_hours=None)
+    p_mean = _posterior_mean(mismatches, n)
+    p95 = _posterior_upper_95(mismatches, n)
+    mult = _resolve_multiplier(status, posterior_upper_95=p95)
+    block_reason: Optional[str] = None
+    if status == OracleStatus.BLACKLIST:
+        block_reason = f"posterior_upper_95={p95:.3f} > 0.10 (n={n}, m={mismatches})"
+    return OracleInfo(
+        city=city,
+        metric=metric,
+        source_role=source_role,
+        status=status,
+        n=n,
+        mismatches=mismatches,
+        posterior_mean=p_mean,
+        posterior_upper_95=p95,
+        last_observed_date=last_date or None,
+        artifact_age_hours=None,
+        evidence_quality=_estimator_evidence_quality(n),
+        penalty_multiplier=mult,
+        posterior_prob_gt_03=_posterior_tail_probability(0.03, mismatches, n),
+        posterior_prob_gt_10=_posterior_tail_probability(0.10, mismatches, n),
+        block_reason=block_reason,
+        _prev_multiplier=mult,
+    )
 
 
 # ── load + cache ────────────────────────────────────────────────────── #
@@ -274,6 +326,8 @@ def _info_from_record(
         artifact_age_hours=artifact_age_hours,
         evidence_quality=_estimator_evidence_quality(n),
         penalty_multiplier=mult,
+        posterior_prob_gt_03=_posterior_tail_probability(0.03, mismatches, n),
+        posterior_prob_gt_10=_posterior_tail_probability(0.10, mismatches, n),
         block_reason=block_reason,
         _prev_multiplier=mult,
     )

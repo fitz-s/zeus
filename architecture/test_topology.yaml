@@ -50,6 +50,7 @@ test_trust_policy:
     tests/test_backtest_skill_economics.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-04"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -61,6 +62,9 @@ test_trust_policy:
     tests/test_calibration_transfer_policy.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_executable_ev_replay.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_forecast_calibration_domain.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_readiness_writer.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -243,8 +247,12 @@ categories:
     - tests/test_backtest_trade_subject_identity.py
     - tests/test_backtest_training_eligibility.py
     - tests/test_dissemination_schedules.py
+    - tests/test_ddd_wiring.py
     - tests/test_forecasts_writer_provenance_required.py
     - tests/test_forecast_fetch_plan.py
+    - tests/test_forecast_calibration_domain.py
+    - tests/test_oracle_posterior.py
+    - tests/test_executable_ev_replay.py
     - tests/test_replay_skill_eligibility_filter.py
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py

@@ -2966,7 +2966,7 @@ def evaluate_candidate(
                     metric=metric_name,
                     peak_hour=peak_hour_for_metric,
                     season=season,
-                    mismatch_rate=oracle.error_rate,
+                    mismatch_rate=oracle.posterior_upper_95,
                     decision_time=decision_time,
                 )
             except DDDFailClosed as exc:
