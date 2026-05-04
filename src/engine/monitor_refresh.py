@@ -90,6 +90,41 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
 
 
+def _ens_result_phase2_keys(ens_result: dict) -> tuple[
+    str | None, str | None, str | None
+]:
+    """Extract (cycle, source_id, horizon_profile) from a live ens_result.
+
+    Phase 2.6 hardening (2026-05-04, critic-opus MAJOR 4): monitor exit
+    lanes were silently loading the schema-default Platt bucket because
+    get_calibrator was called WITHOUT cycle/source_id/horizon_profile
+    args. This helper mirrors the evaluator's extraction logic so both
+    entry and exit paths route through the same stratified bucket.
+
+    Returns (None, None, None) if ens_result is malformed — manager.py
+    then falls into its legacy lookup, preserving backward compat for
+    legacy callers but no longer silently mis-routing OpenData forecasts
+    to the TIGGE bucket once cycle/source_id are populated.
+    """
+    cycle: str | None = None
+    source_id: str | None = None
+    horizon_profile: str | None = None
+    try:
+        if isinstance(ens_result, dict):
+            it = ens_result.get("issue_time")
+            if isinstance(it, str) and len(it) >= 13:
+                cycle = it[11:13]
+            sid = ens_result.get("source_id")
+            if isinstance(sid, str) and sid:
+                source_id = sid
+            hp = ens_result.get("horizon_profile")
+            if isinstance(hp, str) and hp:
+                horizon_profile = hp
+    except (TypeError, AttributeError, KeyError):
+        return None, None, None
+    return cycle, source_id, horizon_profile
+
+
 def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     """Expose degraded forecast authority in monitor/exit evidence."""
 
@@ -248,9 +283,15 @@ def _refresh_ens_member_counting(
     # silently). Post-fix, the resolver still defaults to HIGH for
     # backward compat, but emits a DEBUG log identifying the position so
     # operators can audit silent-HIGH events.
+    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): thread Phase 2 stratification
+    # axes so monitor exit calibration uses the same bucket the entry side did.
+    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
         temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
+        cycle=_mr_cycle,
+        source_id=_mr_source_id,
+        horizon_profile=_mr_horizon,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -602,9 +643,15 @@ def _refresh_day0_observation(
     # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
     # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
     # already fired audit log at function entry).
+    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): same Phase 2 stratification
+    # threading as the ensemble exit lane above.
+    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
     cal, cal_level = get_calibrator(
         conn, city, position.target_date,
         temperature_metric=_position_metric_str,
+        cycle=_mr_cycle,
+        source_id=_mr_source_id,
+        horizon_profile=_mr_horizon,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
