@@ -1,8 +1,16 @@
 # Unlock Sequence — End-to-End Order of Operations
 
 **Created:** 2026-05-04
-**Last reused or audited:** 2026-05-04
+**Last reused or audited:** 2026-05-04 (post-merge — superseded by REALIGNMENT)
 **Purpose:** Operator-facing single-page summary of every action that must happen between the 2026-05-04 lock and the live-trading unlock. Cross-reference for `LIVE_TRADING_LOCKED_2026-05-04.md`.
+
+> **Status (2026-05-04 post-merge):** Phases 1, 2, 2.6, and 3 of this
+> sequence landed on main via PR #55.  Phase 2.5 (calibration transfer
+> policy) and Phase 2.75 (robust Kelly) were replaced by PR #56's
+> `MarketPhaseEvidence` + `oracle_evidence_status` +
+> `phase_aware_kelly_live` stack.  Read
+> `POST_PR55_PR56_REALIGNMENT.md` for the current
+> what-landed / what-still-pending split.
 
 ---
 

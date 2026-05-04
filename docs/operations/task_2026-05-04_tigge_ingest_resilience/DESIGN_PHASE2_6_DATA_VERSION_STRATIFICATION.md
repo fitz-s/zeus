@@ -1,9 +1,17 @@
 # Phase 2.6 Design: Data-Version Stratification — TIGGE vs ECMWF Open Data Source Asymmetry
 
 **Created:** 2026-05-04
-**Last reused or audited:** 2026-05-04
+**Last reused or audited:** 2026-05-04 (post-merge — PR #55 + #56 both landed)
 **Author:** Claude Opus 4.7
 **Authority basis:** critic-opus BLOCKER 3 (2026-05-04) — "Training/serving data-source asymmetry is deeper than 00z/12z; Phase 2 does not solve it."
+
+> **Status (2026-05-04 post-merge):** Phase 2.6 source_family +
+> data_version stratification landed on main via PR #55 (schema,
+> `MetricIdentity.source_family`, `derive_phase2_keys_from_ens_result`,
+> `UNKNOWN_FORECAST_SOURCE_FAMILY` rejection gate).  References to
+> **Phase 2.5 transfer policy** in this doc are historical — that
+> piece was replaced by PR #56's `MarketPhaseEvidence` +
+> `oracle_evidence_status`.  See `POST_PR55_PR56_REALIGNMENT.md`.
 
 ---
 

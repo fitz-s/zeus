@@ -1,9 +1,15 @@
 # Phase 2 Design: Platt v2 Cycle Stratification
 
 **Created:** 2026-05-04
-**Last reused or audited:** 2026-05-04
+**Last reused or audited:** 2026-05-04 (post-merge — PR #55 + #56 both landed)
 **Author:** Claude Opus 4.7
 **Authority basis:** Operator directive 2026-05-04 — option C (cycle as stratifier, not lead-bin) chosen for math-architectural reasons (cycles are discrete, leads are continuous and would explode bucket count).
+
+> **Status (2026-05-04 post-merge):** Phase 2 schema + writer + reader
+> landed on main via PR #55. References to **Phase 2.5 transfer policy**
+> below are historical — that piece was replaced by PR #56's
+> `MarketPhaseEvidence` + `oracle_evidence_status` stack.  See
+> `POST_PR55_PR56_REALIGNMENT.md` for the up-to-date status.
 
 ---
 
