@@ -29,6 +29,20 @@ Cross-gate invariants enforced at write time:
    succeeded). Mismatch → ``BLOCKED``.
 3. ``BLOCKED`` is the safe fallthrough; any failure in 1 or 2 → BLOCKED
    with merged ``reason_codes`` from both gates.
+
+**Auditing semantics**: ``readiness_state.status='LIVE_ELIGIBLE'`` for
+``strategy_key='entry_forecast'`` rows is **necessary but not sufficient**
+for live submission. ``read_executable_forecast`` further validates
+producer-readiness alignment (``source_run_id``, ``expires_at``)
+downstream of the readiness row. Operators inspecting ``readiness_state``
+directly should treat ``LIVE_ELIGIBLE`` rows as "passed the writer's
+3-input gate combinator at write time" — actual live submission requires
+the read-side validation to also pass. The shadow function
+:func:`src.data.entry_forecast_shadow.evaluate_entry_forecast_shadow`
+runs the stricter producer-readiness alignment check; the writer's
+``_decide_status_and_reasons`` is intentionally subsumption-not-equivalent
+to the shadow function for performance reasons (writer runs per-candidate;
+shadow runs as a separate verifier).
 """
 
 from __future__ import annotations

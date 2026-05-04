@@ -163,3 +163,95 @@ EOF
 ### Pending exit stuck
 
 If a position is stuck in `pending_exit` or `sell_placed`, check exit_lifecycle logs for the trade_id. The retry/backoff mechanism handles transient failures automatically.
+
+## Phase C: live entry-forecast activation flags
+
+Phase C of `docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md`
+wires the previously-orphan rollout/calibration/readiness/healthcheck
+machinery into the daemon hot-path behind four env flags. **All flags
+default OFF**; daemon behavior at flag-default is byte-equal to
+pre-Phase-C.
+
+### Flags
+
+| Env var | Effect when `=1` |
+|---|---|
+| `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` | `evaluate_entry_forecast_rollout_gate` enforces operator approval / G1 / calibration approval / canary success evidence at the rollout-blocker site (legacy rollout-mode-only check is bypassed). Reads `state/entry_forecast_promotion_evidence.json` per cycle. |
+| `ZEUS_ENTRY_FORECAST_READINESS_WRITER` | `_write_entry_readiness_for_candidate` writes a `readiness_state` row with `strategy_key='entry_forecast'` per candidate per cycle. Required for `read_executable_forecast` to find a row instead of returning `READINESS_MISSING`. |
+| `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` | `entry_forecast_blockers` participates in `result["healthy"]` predicate in `scripts/healthcheck.py`. Surfaces entry-forecast block in launchctl/dashboards. |
+| `ZEUS_ENTRY_FORECAST_CALIBRATION_GATE` | RESERVED — Phase C-3 subsumed C-2's calibration check via writer-side enforcement; this flag is currently unused. |
+
+### Recommended flip order
+
+1. **`ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` first.** Without it, the
+   reader returns `ENTRY_READINESS_MISSING` regardless of other flags
+   because no daemon path writes the rows. The writer enforces all
+   three gates (rollout / calibration / promotion-evidence) at write
+   time, so flipping it first is fail-closed: missing evidence ⇒
+   BLOCKED row ⇒ reader emits typed blocker.
+2. **`ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=1` second.** Adds the
+   rollout-gate enforcement at the upstream blocker site for
+   defense-in-depth. Required if `rollout_mode='live'` so the gate
+   actually checks evidence.
+3. **`ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS=1` last.** Surfaces
+   any blockers in `result["healthy"]` so the operator dashboard
+   reflects entry-forecast state. Flip last so the dashboard signal
+   matches the system's actual gating posture.
+
+**Out-of-order risk**: flipping `_HEALTHCHECK_BLOCKERS=1` before
+`_READINESS_WRITER=1` will pull `result["healthy"]` to False with
+`ENTRY_READINESS_MISSING` everywhere — alarms but no actual issue.
+Flipping `_ROLLOUT_GATE=1` without `_READINESS_WRITER=1` and
+`rollout_mode='live'` means the gate checks pass (if evidence is
+populated) but the reader still finds no row — silent recurrent
+BLOCKED on `ENTRY_READINESS_MISSING`. Neither out-of-order combination
+opens an unsafe path; both stay fail-closed.
+
+### Required prerequisite: populate promotion evidence
+
+Before flipping `_ROLLOUT_GATE=1`, write the operator-attested evidence
+to `state/entry_forecast_promotion_evidence.json`:
+
+```python
+from src.control.entry_forecast_promotion_evidence_io import write_promotion_evidence
+from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
+from src.data.live_entry_status import LiveEntryForecastStatus
+
+write_promotion_evidence(EntryForecastPromotionEvidence(
+    operator_approval_id="op-YYYY-MM-DD",
+    g1_evidence_id="g1-YYYY-MM-DD",
+    status_snapshot=LiveEntryForecastStatus(
+        status="LIVE_ELIGIBLE", blockers=(),
+        executable_row_count=N, producer_readiness_count=N,
+        producer_live_eligible_count=N,
+    ),
+    calibration_promotion_approved=True,
+    canary_success_evidence_id="canary-YYYY-MM-DD",
+))
+```
+
+The writer holds `fcntl.flock(LOCK_EX)` on a sidecar
+`state/entry_forecast_promotion_evidence.json.lock` file (Phase C-flock).
+The lock file persists between writes — that is intentional and not a
+leak. Atomic JSON via `tempfile.mkstemp` + `os.replace` already
+prevents readers from observing partial files.
+
+### Auditing readiness rows
+
+`readiness_state.status='LIVE_ELIGIBLE'` for `strategy_key='entry_forecast'`
+rows is **necessary but not sufficient** for live submission.
+`read_executable_forecast` further validates producer-readiness
+alignment (`source_run_id`, `expires_at`) downstream of the readiness
+row. Operators inspecting the `readiness_state` table directly should
+treat `LIVE_ELIGIBLE` rows as "passed the gate combinator at write
+time" — actual live submission requires the read-side validation to
+also pass.
+
+### Performance note (deferred)
+
+When both `_ROLLOUT_GATE=1` and `_READINESS_WRITER=1`, the daemon reads
+`entry_forecast_promotion_evidence.json` 2× per candidate per cycle
+(~200 file reads/cycle uncached). On local APFS this is negligible
+(<10ms/cycle); on a network filesystem this could matter. A future
+performance commit will add `lru_cache(maxsize=1)` keyed by mtime to
+`read_promotion_evidence`. Not required for initial activation.

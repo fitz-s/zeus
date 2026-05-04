@@ -180,13 +180,19 @@ def test_write_creates_sidecar_lock_file(tmp_path: Path) -> None:
     assert lock_path.exists(), "expected sidecar .lock file to exist after write"
 
 
-def test_concurrent_writes_serialize_and_last_write_wins(tmp_path: Path) -> None:
-    """With flock in place, two threads writing serialized payloads
-    cannot interleave at the JSON-write step. The final on-disk file
-    must be a complete payload from one of the writers — never a
-    partial mix. Atomic ``os.replace`` guarantees this even without
-    flock; flock additionally guarantees no lost-update race against
-    the lock file.
+def test_concurrent_in_process_writes_serialize_and_last_write_wins(tmp_path: Path) -> None:
+    """Two in-process threads writing serialized payloads cannot
+    interleave at the JSON-write step. The final on-disk file must be
+    a complete payload from one of the writers — never a partial mix.
+    Atomic ``os.replace`` guarantees this even without flock.
+
+    Scope note: this test exercises in-process threads (shared GIL,
+    same interpreter). It does NOT validate cross-process flock
+    semantics on the deployed filesystem. ``fcntl.flock`` is
+    documented unreliable on NFS without ``lockd``; the Zeus state
+    directory lives on local APFS so this is not an active risk, but
+    a subprocess-based test would be required to fully validate
+    cross-process serialization.
     """
 
     import threading
