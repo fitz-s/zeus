@@ -1635,6 +1635,32 @@ def harvest_settlement(
     )
     resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
+    # Phase 2.6 (2026-05-04): derive cycle/source_id/horizon_profile from the
+    # forecast issue_time + data_version so calibration_pairs_v2 rows land in
+    # the correct stratified bucket. Falls back to None when issue_time is
+    # missing or data_version doesn't resolve to a registered source_family —
+    # the writer's schema-default branch handles that case.
+    _phase2_cycle: Optional[str] = None
+    _phase2_source_id_field: Optional[str] = None
+    _phase2_horizon_profile: Optional[str] = None
+    try:
+        if isinstance(issue_time, str) and len(issue_time) >= 13:
+            _phase2_cycle = issue_time[11:13]
+        from src.calibration.forecast_calibration_domain import (
+            derive_source_id_from_data_version,
+        )
+        _src_id = derive_source_id_from_data_version(resolved_pair_data_version)
+        if _src_id is not None:
+            _phase2_source_id_field = _src_id
+        if _phase2_cycle is not None:
+            _phase2_horizon_profile = (
+                "full" if _phase2_cycle in ("00", "12") else "short"
+            )
+    except Exception:  # noqa: BLE001 — never block harvest on stratification derivation
+        _phase2_cycle = None
+        _phase2_source_id_field = None
+        _phase2_horizon_profile = None
+
     count = 0
     for i, label in enumerate(bin_labels):
         outcome = 1 if label == winning_bin_label else 0
@@ -1667,6 +1693,9 @@ def harvest_settlement(
             training_allowed=training_requested,
             causality_status=causality_status or "OK",
             snapshot_id=resolved_snapshot_id,
+            cycle=_phase2_cycle,
+            source_id=_phase2_source_id_field,
+            horizon_profile=_phase2_horizon_profile,
         )
         count += 1
 

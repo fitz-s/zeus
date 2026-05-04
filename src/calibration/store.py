@@ -209,6 +209,9 @@ def add_calibration_pair_v2(
     causality_status: str = "OK",
     snapshot_id: Optional[int] = None,
     city_obj: "City",
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> None:
     """Insert a calibration pair into calibration_pairs_v2.
 
@@ -229,22 +232,51 @@ def add_calibration_pair_v2(
             "src.calibration.decision_group.compute_id() to generate it"
         )
     effective_training_allowed = _resolve_training_allowed(source, data_version, training_allowed)
-    conn.execute("""
-        INSERT INTO calibration_pairs_v2
-        (city, target_date, temperature_metric, observation_field, range_label,
-         p_raw, outcome, lead_days, season, cluster, forecast_available_at,
-         settlement_value, decision_group_id, bias_corrected, authority,
-         bin_source, data_version, training_allowed, causality_status, snapshot_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        city, target_date,
-        metric_identity.temperature_metric,
-        metric_identity.observation_field,
-        range_label, p_raw, outcome, lead_days, season, cluster,
-        forecast_available_at, settlement_value, decision_group_id,
-        int(bool(bias_corrected)), authority, bin_source, data_version,
-        int(effective_training_allowed), causality_status, snapshot_id,
-    ))
+    # Phase 2.6 (2026-05-04): cycle/source_id/horizon_profile are stratification
+    # axes added by the Phase 2 schema migration. When the caller provides them
+    # we INSERT explicitly; when None we let the schema defaults apply
+    # ('00','tigge_mars','full') so legacy callers that haven't been migrated
+    # yet still produce well-formed rows. The migration script backfilled
+    # historical rows from snapshot_id linkage; this writer is the new-row
+    # path.
+    if cycle is None and source_id is None and horizon_profile is None:
+        conn.execute("""
+            INSERT INTO calibration_pairs_v2
+            (city, target_date, temperature_metric, observation_field, range_label,
+             p_raw, outcome, lead_days, season, cluster, forecast_available_at,
+             settlement_value, decision_group_id, bias_corrected, authority,
+             bin_source, data_version, training_allowed, causality_status, snapshot_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city, target_date,
+            metric_identity.temperature_metric,
+            metric_identity.observation_field,
+            range_label, p_raw, outcome, lead_days, season, cluster,
+            forecast_available_at, settlement_value, decision_group_id,
+            int(bool(bias_corrected)), authority, bin_source, data_version,
+            int(effective_training_allowed), causality_status, snapshot_id,
+        ))
+    else:
+        conn.execute("""
+            INSERT INTO calibration_pairs_v2
+            (city, target_date, temperature_metric, observation_field, range_label,
+             p_raw, outcome, lead_days, season, cluster, forecast_available_at,
+             settlement_value, decision_group_id, bias_corrected, authority,
+             bin_source, data_version, training_allowed, causality_status, snapshot_id,
+             cycle, source_id, horizon_profile)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city, target_date,
+            metric_identity.temperature_metric,
+            metric_identity.observation_field,
+            range_label, p_raw, outcome, lead_days, season, cluster,
+            forecast_available_at, settlement_value, decision_group_id,
+            int(bool(bias_corrected)), authority, bin_source, data_version,
+            int(effective_training_allowed), causality_status, snapshot_id,
+            cycle if cycle is not None else "00",
+            source_id if source_id is not None else "tigge_mars",
+            horizon_profile if horizon_profile is not None else "full",
+        ))
 
 
 def _has_authority_column(conn: sqlite3.Connection) -> bool:
