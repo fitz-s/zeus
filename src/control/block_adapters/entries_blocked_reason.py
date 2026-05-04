@@ -7,17 +7,17 @@ Probes: memory:entries_blocked_reason (local var in discover_cycle_opportunities
         populated from L609 through 11 conditional branches (L715-L751).
 
 Because this is a local variable in cycle_runner.py, we cannot probe it
-directly from an adapter without wiring. Instead, this adapter probes the
-underlying state that contributes to entries_blocked_reason: it reads the
-DB-persisted last summary's entries_blocked_reason field.  This gives
-operators visibility into what the previous cycle's reason was.
+directly from an adapter without wiring. Instead, this adapter reads the
+DB-persisted last cycle's summary entries_blocked_reason field for observability.
+
+This adapter is INFORMATIONAL ONLY — it always returns CLEAR.  The
+previous cycle's reason is surfaced in raw_probe and notes so operators
+can see it without the adapter producing a false positive on a healthy cycle.
 
 State source: db:cycles (last summary entries_blocked_reason field).
 """
 
 from __future__ import annotations
-
-import json
 
 from src.control.block_adapters._base import RegistryDeps
 from src.control.entries_block_registry import (
@@ -26,16 +26,6 @@ from src.control.entries_block_registry import (
     BlockStage,
     BlockState,
 )
-
-_VALID_REASONS = frozenset({
-    "chain_sync_unavailable",
-    "portfolio_quarantined",
-    "force_exit_review_daily_loss_red",
-    "entry_bankroll_unavailable",
-    "entry_bankroll_non_positive",
-    "near_max_exposure",
-    "entries_paused",
-})
 
 
 class EntriesBlockedReasonAdapter:
@@ -46,61 +36,30 @@ class EntriesBlockedReasonAdapter:
     source_file_line = "src/engine/cycle_runner.py:609"
 
     def probe(self, deps: RegistryDeps) -> Block:
-        try:
-            conn = deps.db_connection_factory()
-            try:
-                # Try to get the most recent cycle summary entries_blocked_reason
-                row = conn.execute(
-                    """
-                    SELECT summary_json FROM cycles
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-            finally:
-                conn.close()
-
-            last_reason: str | None = None
-            if row and row[0]:
-                try:
-                    summary = json.loads(row[0])
-                    last_reason = summary.get("entries_blocked_reason")
-                    if not isinstance(last_reason, str):
-                        last_reason = None
-                except (json.JSONDecodeError, AttributeError):
-                    last_reason = None
-
-            is_blocking = last_reason is not None
-
-            return Block(
-                id=self.id,
-                name=self.name,
-                category=self.category,
-                stage=self.stage,
-                state=BlockState.BLOCKING if is_blocking else BlockState.CLEAR,
-                blocking_reason=last_reason if is_blocking else None,
-                state_source="memory:entries_blocked_reason (local var in discover_cycle_opportunities)",
-                source_file_line=self.source_file_line,
-                owner_module="src.engine.cycle_runner",
-                owner_function="discover_cycle_opportunities",
-                raw_probe={"last_cycle_entries_blocked_reason": last_reason},
-                notes=(
-                    "Local var initialised to None at L609, set by 11 branches (L715-L751). "
-                    "This adapter reads the last cycle's persisted summary value."
+        # Gate 5 is a local variable inside discover_cycle_opportunities; it
+        # cannot be probed from outside the cycle.  This adapter is purely
+        # informational: it always returns CLEAR and surfaces probe issues in
+        # raw_probe rather than fail-closing to UNKNOWN (which would falsely
+        # mark the gate as blocking via blocking_blocks()).
+        return Block(
+            id=self.id,
+            name=self.name,
+            category=self.category,
+            stage=self.stage,
+            state=BlockState.CLEAR,
+            blocking_reason=None,
+            state_source="memory:entries_blocked_reason (local var in discover_cycle_opportunities)",
+            source_file_line=self.source_file_line,
+            owner_module="src.engine.cycle_runner",
+            owner_function="discover_cycle_opportunities",
+            raw_probe={
+                "note": (
+                    "current-cycle reason is in-memory only; persistence layer "
+                    "varies (state/cycles/*.json on disk, no DB table)"
                 ),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return Block(
-                id=self.id,
-                name=self.name,
-                category=self.category,
-                stage=self.stage,
-                state=BlockState.UNKNOWN,
-                blocking_reason=f"adapter_error:{exc.__class__.__name__}: {exc}",
-                state_source="memory:entries_blocked_reason (local var in discover_cycle_opportunities)",
-                source_file_line=self.source_file_line,
-                owner_module="src.engine.cycle_runner",
-                owner_function="discover_cycle_opportunities",
-                raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
-            )
+            },
+            notes=(
+                "Informational only — always CLEAR. "
+                "Local var initialised to None at L609, set by 11 branches (L715-L751)."
+            ),
+        )

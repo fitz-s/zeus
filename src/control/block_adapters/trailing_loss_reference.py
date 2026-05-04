@@ -4,8 +4,14 @@
 """Gate 7: trailing_loss_reference_limit100_scan adapter.
 
 Probes: db:risk_state ORDER BY checked_at DESC LIMIT 100 (same SQL as audit)
-Blocks when: no qualifying row found → insufficient_history / no_reference_row
-             → DATA_DEGRADED risk level.
+
+This adapter is INFORMATIONAL ONLY — it always returns CLEAR.  RiskGuard
+explicitly treats no_reference_row and insufficient_history as
+bootstrap-allowlisted GREEN (not an entry block), so the registry must not
+claim entries are blocked during cold-start or history-bootstrap windows.
+
+The scan status and qualifying row counts are surfaced in raw_probe for
+operator visibility.
 
 Re-uses the same SQL query cited in GATE_AUDIT.yaml:
   SELECT id, checked_at, details_json FROM risk_state
@@ -75,15 +81,13 @@ class TrailingLossReferenceAdapter:
             finally:
                 conn.close()
 
-            blocking = not has_qualifying_rows
-
             return Block(
                 id=self.id,
                 name=self.name,
                 category=self.category,
                 stage=self.stage,
-                state=BlockState.BLOCKING if blocking else BlockState.CLEAR,
-                blocking_reason="DATA_DEGRADED (risk_level=DATA_DEGRADED)" if blocking else None,
+                state=BlockState.CLEAR,
+                blocking_reason=None,
                 state_source="db:risk_state ORDER BY checked_at DESC LIMIT 100",
                 source_file_line=self.source_file_line,
                 owner_module="src.riskguard.riskguard",
@@ -95,23 +99,29 @@ class TrailingLossReferenceAdapter:
                     "cutoff": cutoff,
                 },
                 notes=(
+                    "Informational only — always CLEAR. "
+                    "no_reference_row and insufficient_history are bootstrap-allowlisted "
+                    "to GREEN in riskguard.py; gate 6 (risk_level) is the live blocker. "
                     "SF7 fix: pre-filters at SQL layer to post-cutover rows with "
-                    "bankroll_truth_source=polymarket_wallet. insufficient_history is "
-                    "bootstrap-allowlisted to GREEN in riskguard.py."
+                    "bankroll_truth_source=polymarket_wallet."
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            # Informational gate — never fail-close to UNKNOWN.  Surface the
+            # error in raw_probe and stay CLEAR so blocking_blocks() does not
+            # treat this gate as a blocker.  Gate 6 is the authoritative live
+            # risk-level signal.
             return Block(
                 id=self.id,
                 name=self.name,
                 category=self.category,
                 stage=self.stage,
-                state=BlockState.UNKNOWN,
-                blocking_reason=f"adapter_error:{exc.__class__.__name__}: {exc}",
+                state=BlockState.CLEAR,
+                blocking_reason=None,
                 state_source="db:risk_state ORDER BY checked_at DESC LIMIT 100",
                 source_file_line=self.source_file_line,
                 owner_module="src.riskguard.riskguard",
                 owner_function="_trailing_loss_reference",
-                raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                raw_probe={"probe_error": f"{exc.__class__.__name__}: {exc}"},
+                notes="Informational only — exception during probe surfaced in raw_probe; state stays CLEAR.",
             )

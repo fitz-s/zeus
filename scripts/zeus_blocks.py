@@ -12,6 +12,7 @@ Usage:
 Exit codes:
     0   All DISCOVERY-stage blocks are CLEAR (safe to place entries)
     1   One or more DISCOVERY-stage blocks are BLOCKING or UNKNOWN
+    2   Registry construction failed (deps build error — check stderr)
 
 RegistryDeps construction is copied from cycle_runner.py:763-811 (the
 REGISTRY-GUARDED SHORT-CIRCUIT block).  If the recipe changes there,

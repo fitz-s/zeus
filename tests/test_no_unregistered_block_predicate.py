@@ -21,8 +21,6 @@ Also asserts:
 from __future__ import annotations
 
 import ast
-import re
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -169,9 +167,9 @@ def test_no_unregistered_boolean_in_short_circuit() -> None:
     source = _load_source()
     short_circuit_if = _find_short_circuit_if(source)
 
-    # Reconstruct the source of just the boolean expression for the error message
-    bool_expr_lines = source.splitlines()[short_circuit_if.lineno - 1 : short_circuit_if.end_lineno]
-    bool_expr_text = " ".join(l.strip() for l in bool_expr_lines)[:200]
+    # Extract just the boolean expression (not the entire if body) for the error message
+    bool_expr_text = ast.get_source_segment(source, short_circuit_if.test) or ""
+    bool_expr_text = bool_expr_text[:200]
 
     names = _collect_names(short_circuit_if.test)
     unregistered = names - _ALLOWLIST

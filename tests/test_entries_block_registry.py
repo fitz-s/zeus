@@ -328,37 +328,21 @@ def test_gate5_clear_when_no_cycle_or_null_reason(tmp_path: Path) -> None:
     assert block.state == BlockState.CLEAR
 
 
-def test_gate5_blocking_when_last_cycle_had_reason(tmp_path: Path) -> None:
+def test_gate5_always_clear_informational(tmp_path: Path) -> None:
+    """Gate 5 is informational only — always CLEAR, no DB query.
+
+    Local var entries_blocked_reason inside discover_cycle_opportunities is
+    not externally probable and there is no persistent ``cycles`` table.
+    The adapter must therefore always report CLEAR regardless of state and
+    surface its informational nature in raw_probe.
+    """
     from src.control.block_adapters.entries_blocked_reason import EntriesBlockedReasonAdapter
 
-    zeus_conn = _in_memory_zeus_db()
-    summary = {"entries_blocked_reason": "near_max_exposure"}
-    zeus_conn.execute(
-        "INSERT INTO cycles (created_at, summary_json) VALUES (?, ?)",
-        ("2026-05-04T10:00:00+00:00", json.dumps(summary)),
-    )
-    zeus_conn.commit()
-
-    deps = _make_deps(state_dir=tmp_path, zeus_conn=zeus_conn)
-    block = EntriesBlockedReasonAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert block.blocking_reason == "near_max_exposure"
-
-
-def test_gate5_clear_when_last_cycle_has_null_reason(tmp_path: Path) -> None:
-    from src.control.block_adapters.entries_blocked_reason import EntriesBlockedReasonAdapter
-
-    zeus_conn = _in_memory_zeus_db()
-    summary = {"entries_blocked_reason": None}
-    zeus_conn.execute(
-        "INSERT INTO cycles (created_at, summary_json) VALUES (?, ?)",
-        ("2026-05-04T10:00:00+00:00", json.dumps(summary)),
-    )
-    zeus_conn.commit()
-
-    deps = _make_deps(state_dir=tmp_path, zeus_conn=zeus_conn)
+    deps = _make_deps(state_dir=tmp_path)
     block = EntriesBlockedReasonAdapter().probe(deps)
     assert block.state == BlockState.CLEAR
+    assert block.blocking_reason is None
+    assert "note" in block.raw_probe
 
 
 # ── Gate 6: risk_level ────────────────────────────────────────────────────────
@@ -419,18 +403,21 @@ def test_gate7_clear_when_qualifying_rows_exist(tmp_path: Path) -> None:
     assert block.state == BlockState.CLEAR
 
 
-def test_gate7_blocking_when_no_qualifying_rows(tmp_path: Path) -> None:
+def test_gate7_always_clear_when_no_qualifying_rows(tmp_path: Path) -> None:
+    """Gate 7 is informational — always CLEAR even with no qualifying rows."""
     from src.control.block_adapters.trailing_loss_reference import TrailingLossReferenceAdapter
 
     risk_conn = _in_memory_risk_db()
     # Empty DB
     deps = _make_deps(state_dir=tmp_path, risk_conn=risk_conn)
     block = TrailingLossReferenceAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert block.blocking_reason == "DATA_DEGRADED (risk_level=DATA_DEGRADED)"
+    assert block.state == BlockState.CLEAR
+    assert block.blocking_reason is None
+    assert block.raw_probe["status"] == "no_reference_row"
 
 
-def test_gate7_blocking_when_only_non_qualifying_rows(tmp_path: Path) -> None:
+def test_gate7_always_clear_when_only_non_qualifying_rows(tmp_path: Path) -> None:
+    """Gate 7 is informational — always CLEAR even with insufficient_history."""
     from datetime import datetime, timedelta, timezone
 
     from src.control.block_adapters.trailing_loss_reference import TrailingLossReferenceAdapter
@@ -446,7 +433,9 @@ def test_gate7_blocking_when_only_non_qualifying_rows(tmp_path: Path) -> None:
 
     deps = _make_deps(state_dir=tmp_path, risk_conn=risk_conn)
     block = TrailingLossReferenceAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
+    assert block.state == BlockState.CLEAR
+    assert block.blocking_reason is None
+    assert block.raw_probe["status"] == "insufficient_history"
 
 
 # ── Gate 8: bankroll_truth_source ────────────────────────────────────────────
@@ -467,7 +456,8 @@ def test_gate8_clear_when_latest_row_has_polymarket_wallet(tmp_path: Path) -> No
     assert block.blocking_reason is None
 
 
-def test_gate8_blocking_when_latest_row_lacks_field(tmp_path: Path) -> None:
+def test_gate8_always_clear_when_latest_row_lacks_field(tmp_path: Path) -> None:
+    """Gate 8 is informational — always CLEAR; field absence surfaced in raw_probe."""
     from src.control.block_adapters.bankroll_truth_source import BankrollTruthSourceAdapter
 
     risk_conn = _in_memory_risk_db()
@@ -479,16 +469,20 @@ def test_gate8_blocking_when_latest_row_lacks_field(tmp_path: Path) -> None:
 
     deps = _make_deps(state_dir=tmp_path, risk_conn=risk_conn)
     block = BankrollTruthSourceAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert "DATA_DEGRADED" in (block.blocking_reason or "")
+    assert block.state == BlockState.CLEAR
+    assert block.blocking_reason is None
+    assert block.raw_probe["latest_truth_source"] is None
 
 
-def test_gate8_blocking_when_empty_db(tmp_path: Path) -> None:
+def test_gate8_always_clear_when_empty_db(tmp_path: Path) -> None:
+    """Gate 8 is informational — always CLEAR even with no rows."""
     from src.control.block_adapters.bankroll_truth_source import BankrollTruthSourceAdapter
 
     deps = _make_deps(state_dir=tmp_path)
     block = BankrollTruthSourceAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
+    assert block.state == BlockState.CLEAR
+    assert block.blocking_reason is None
+    assert block.raw_probe["latest_truth_source"] is None
 
 
 # ── Gate 9: heartbeat_health ─────────────────────────────────────────────────
@@ -656,6 +650,22 @@ def test_gate12_clear_when_evidence_file_present(tmp_path: Path) -> None:
     block = PromotionEvidenceFileAdapter().probe(deps)
     assert block.state == BlockState.CLEAR
     assert block.blocking_reason is None
+
+
+def test_gate12_blocking_when_evidence_file_corrupt(tmp_path: Path) -> None:
+    """Gate 12 must be BLOCKING with CORRUPT reason when the file exists but is invalid JSON."""
+    from src.control.block_adapters.promotion_evidence_file import PromotionEvidenceFileAdapter
+
+    evidence_path = tmp_path / "entry_forecast_promotion_evidence.json"
+    evidence_path.write_text("{this is not valid json}", encoding="utf-8")
+
+    deps = _make_deps(state_dir=tmp_path)
+    block = PromotionEvidenceFileAdapter().probe(deps)
+    assert block.state == BlockState.BLOCKING
+    assert block.blocking_reason == "ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT"
+    assert block.raw_probe["file_exists"] is True
+    assert block.raw_probe["parsed_ok"] is False
+    assert block.raw_probe["corruption_detail"] is not None
 
 
 # ── Gate 13: rollout_gate_env_var ────────────────────────────────────────────

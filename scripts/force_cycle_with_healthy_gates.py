@@ -20,6 +20,25 @@ import sys
 # Must precede any `src.*` import (and unittest.mock.patch on `src.*`)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ---------------------------------------------------------------------------
+# Destructive opt-in guard — refuse to run without explicit acknowledgement.
+# This script mutates state/zeus-world.db and deletes pause/tombstone files.
+# ---------------------------------------------------------------------------
+_FLAG = "--i-understand-this-is-destructive"
+_ENV_VAR = "ZEUS_ALLOW_FORCE_CYCLE"
+
+if _FLAG not in sys.argv and os.environ.get(_ENV_VAR) != "1":
+    print(
+        f"ERROR: this script mutates the live DB and removes pause/tombstone files.\n"
+        f"To run, pass '{_FLAG}' or set {_ENV_VAR}=1 in the environment.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+# Strip the flag from argv so argparse / downstream code don't see it.
+if _FLAG in sys.argv:
+    sys.argv.remove(_FLAG)
+
 from datetime import datetime, timezone
 from unittest.mock import patch
 

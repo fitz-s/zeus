@@ -4,10 +4,13 @@
 """Gate 8: bankroll_truth_source_polymarket_wallet_filter adapter.
 
 Probes: db:risk_state.details_json field 'bankroll_truth_source' (latest row)
-Blocks when: latest row lacks bankroll_truth_source='polymarket_wallet'.
 
-This gate is informational — it exposes whether the most recent risk_state
-row is a post-cutover row. If not, gate 7 will eventually flag DATA_DEGRADED.
+This gate is INFORMATIONAL ONLY — it always returns CLEAR.  It exposes
+whether the most recent risk_state row is a post-cutover row.  The presence
+or absence of bankroll_truth_source does not by itself imply entries are
+blocked; gate 6 (risk_level) is the authoritative blocker.
+
+Field presence and value are surfaced in raw_probe for operator visibility.
 """
 
 from __future__ import annotations
@@ -40,58 +43,71 @@ class BankrollTruthSourceAdapter:
                     ORDER BY checked_at DESC, id DESC LIMIT 1
                     """
                 ).fetchone()
+
+                # Count rows for context while connection is still open
+                try:
+                    rows_total_r = conn.execute(
+                        "SELECT COUNT(*) FROM risk_state"
+                    ).fetchone()
+                    rows_total: int | None = rows_total_r[0] if rows_total_r else 0
+                    rows_with_field_r = conn.execute(
+                        """
+                        SELECT COUNT(*) FROM risk_state
+                        WHERE json_extract(details_json, '$.bankroll_truth_source') = 'polymarket_wallet'
+                        """
+                    ).fetchone()
+                    rows_with_field: int | None = rows_with_field_r[0] if rows_with_field_r else 0
+                except Exception:  # noqa: BLE001
+                    rows_total = None
+                    rows_with_field = None
             finally:
                 conn.close()
 
             if row is None:
                 truth_source = None
-                has_polymarket_wallet = False
             else:
                 try:
                     details = json.loads(row[0]) if row[0] else {}
                     truth_source = details.get("bankroll_truth_source")
                 except (json.JSONDecodeError, TypeError):
                     truth_source = None
-                has_polymarket_wallet = truth_source == "polymarket_wallet"
-
-            # Blocks when the latest row lacks the field (will cause DATA_DEGRADED over time)
-            blocking = not has_polymarket_wallet
 
             return Block(
                 id=self.id,
                 name=self.name,
                 category=self.category,
                 stage=self.stage,
-                state=BlockState.BLOCKING if blocking else BlockState.CLEAR,
-                blocking_reason=(
-                    "DATA_DEGRADED (insufficient_history or no_reference_row)"
-                    if blocking else None
-                ),
+                state=BlockState.CLEAR,
+                blocking_reason=None,
                 state_source="db:risk_state.details_json field 'bankroll_truth_source'",
                 source_file_line=self.source_file_line,
                 owner_module="src.riskguard.riskguard",
                 owner_function="tick",
                 raw_probe={
-                    "bankroll_truth_source": truth_source,
-                    "has_polymarket_wallet": has_polymarket_wallet,
+                    "latest_truth_source": truth_source,
+                    "rows_with_field": rows_with_field,
+                    "rows_total": rows_total,
                 },
                 notes=(
+                    "Informational only — always CLEAR. "
                     "Field written at riskguard.py:976 inside tick(). "
                     "Pre-cutover rows lack the field and are excluded at SQL layer by gate 7."
                 ),
             )
         except Exception as exc:  # noqa: BLE001
+            # Informational gate — never fail-close to UNKNOWN.  Surface the
+            # error in raw_probe and stay CLEAR.
             return Block(
                 id=self.id,
                 name=self.name,
                 category=self.category,
                 stage=self.stage,
-                state=BlockState.UNKNOWN,
-                blocking_reason=f"adapter_error:{exc.__class__.__name__}: {exc}",
+                state=BlockState.CLEAR,
+                blocking_reason=None,
                 state_source="db:risk_state.details_json field 'bankroll_truth_source'",
                 source_file_line=self.source_file_line,
                 owner_module="src.riskguard.riskguard",
                 owner_function="tick",
-                raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                raw_probe={"probe_error": f"{exc.__class__.__name__}: {exc}"},
+                notes="Informational only — exception during probe surfaced in raw_probe; state stays CLEAR.",
             )
