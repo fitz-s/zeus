@@ -1709,7 +1709,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 summary["exits"] += 1
                 portfolio_dirty = True
         except Exception as e:
-            deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e)
+            deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
             reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
             if hours_to_settlement is None:
@@ -2195,7 +2195,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         lead_hours=float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     )
                 except Exception as exc:
-                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc)
+                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
                     summary["degraded"] = True
             for d in decisions:
                 if False:
@@ -2985,6 +2985,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         )
                     )
         except Exception as e:
-            deps.logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e)
+            deps.logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e, exc_info=True)
 
     return portfolio_dirty, tracker_dirty

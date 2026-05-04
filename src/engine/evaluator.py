@@ -749,55 +749,44 @@ def _entry_forecast_rollout_gate_flag_on() -> bool:
 
 
 def _entry_forecast_readiness_writer_flag_on() -> bool:
-    """Default ON since 2026-05-04 (operator authorization). Kill-switch
-    semantics match ``_entry_forecast_rollout_gate_flag_on``.
+    """Default OFF since 2026-05-04 (gate-purge fix-up per critic-opus PR #54).
+
+    The writer was the SECOND call site of evaluate_entry_forecast_rollout_gate
+    that Stage 1 missed. With rollout_mode='blocked' in config + missing
+    promotion-evidence, the writer would emit BLOCKED readiness_state rows
+    that the reader at evaluator.py:1658+ rejected, recreating the same
+    156-candidates-per-30min loop the rollout-blocker neutering was supposed
+    to eliminate.
+
+    Kill-switch semantics: set the env var to ``"1"`` to re-enable the
+    writer. Empty string and unset both keep the default-OFF behavior.
     """
 
-    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "1") != "0"
+    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "0") == "1"
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
-    """Return a blocker reason or ``None`` for the live entry-forecast cutover.
+    """Always returns ``None`` — rollout-evidence gating retired 2026-05-04.
 
-    Phase C-1 activation: when ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=1``,
-    defer to ``evaluate_entry_forecast_rollout_gate`` which checks
-    operator approval, G1 evidence, calibration promotion approval,
-    canary success evidence, and the bundled status snapshot. The
-    promotion-evidence file is read at every cycle from
-    ``state/entry_forecast_promotion_evidence.json``.
+    Operator decision (registry purge): this gate served the
+    modifications/rollout phase (require operator-approval JSON +
+    G1 evidence + calibration approval + canary success before live
+    orders could submit). That phase has ended. Live runtime safety is
+    covered by:
 
-    Default OFF preserves the legacy rollout-mode-only check so this
-    Phase-C wiring is byte-equal to pre-Phase-C behavior at flag
-    default; operator flips the flag to enforce the full gate.
+    - gate 6 ``_risk_allows_new_entries(risk_level)`` — bankroll/loss
+    - gate 9 ``heartbeat_supervisor`` — execution path health
+    - gate 10 ``ws_gap_guard`` — real-time price feed health
 
-    ``PromotionEvidenceCorruption`` (raised when the on-disk file
-    fails strict parsing) is caught here and surfaced as the explicit
-    ``ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT`` blocker rather than
-    propagating up and crashing the cycle. This is the single
-    activation site the critic-opus review demanded; future call sites
-    must re-implement the same try/except discipline or factor out a
-    shared helper.
+    The 156-candidates-per-30min that this gate was rejecting with
+    ``ENTRY_FORECAST_ROLLOUT_BLOCKED`` are now allowed through to the
+    live order path. The promotion-evidence JSON file, env-var flag,
+    and ``evaluate_entry_forecast_rollout_gate`` are kept callable for
+    Stage-2 follow-ups and observability tools but no longer block
+    cycle output.
     """
 
-    if _entry_forecast_rollout_gate_flag_on():
-        try:
-            evidence = read_promotion_evidence()
-        except PromotionEvidenceCorruption as exc:
-            return f"ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:{exc}"
-        decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
-        if decision.may_submit_live_orders:
-            return None
-        return decision.reason_codes[0] if decision.reason_codes else "ENTRY_FORECAST_ROLLOUT_GATE_BLOCKED"
-
-    if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
-        return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
-    if cfg.rollout_mode is EntryForecastRolloutMode.SHADOW:
-        return "ENTRY_FORECAST_ROLLOUT_SHADOW"
-    if cfg.rollout_mode is EntryForecastRolloutMode.CANARY:
-        return "ENTRY_FORECAST_ROLLOUT_CANARY"
-    if cfg.rollout_mode is EntryForecastRolloutMode.LIVE:
-        return None
-    return "ENTRY_FORECAST_ROLLOUT_MODE_UNKNOWN"
+    return None
 
 
 def _entry_forecast_city_id(city: City) -> str:
@@ -1629,7 +1618,19 @@ def evaluate_candidate(
     # was non-None. Fix: skip the cutover for Day0 mode and fall through
     # to the legacy fetch_ensemble path so Day0 candidates run their
     # existing signal pipeline as designed.
-    use_executable_forecast_cutover = entry_forecast_cfg is not None and not is_day0_mode
+    # Gate-purge fix-up 2026-05-04 (post-critic-opus PR #54): the
+    # executable_forecast cutover is gated on the writer flag too.  When
+    # the writer is OFF (default since gate retirement), bypass the
+    # cutover entirely and fall through to the legacy fetch_ensemble
+    # path that worked before the writer→reader machinery was wired in.
+    # Without this guard, killing only the writer left the reader emitting
+    # ENTRY_READINESS_MISSING / BLOCKED which still rejected the same 156
+    # candidates per cycle (critic-opus Ask 5).
+    use_executable_forecast_cutover = (
+        entry_forecast_cfg is not None
+        and not is_day0_mode
+        and _entry_forecast_readiness_writer_flag_on()
+    )
 
     if use_executable_forecast_cutover:
         if conn is None or not hasattr(conn, "execute"):
@@ -2624,7 +2625,7 @@ def evaluate_candidate(
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
-        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc)
+        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc, exc_info=True)
         _fdr_fallback = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)

@@ -1,24 +1,15 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-05-04
 # Authority basis: live-blockers session 2026-05-01 — harden auto_pause to
 #                  prevent permanent lock-out on transient failures.
+# RETIRED 2026-05-04: auto_pause_streak module deleted in gate-purge Stage 2.
+# All tests in this file are skipped; file preserved as history.
 """Antibody tests for the 2026-05-01 auto-pause hardening.
 
-The pre-fix behavior locked entries permanently after a single transient
-exception in the entry path because ``pause_entries`` wrote
-``effective_until=NULL`` to ``control_overrides_history``. These tests pin
-the four invariants of the new behavior:
-
-1. ``pause_entries`` writes a 15-minute ``effective_until`` by default.
-2. ``pause_entries`` is idempotent — a duplicate call with the same active
-   reason does NOT insert another history row.
-3. The cycle entry-path catch only escalates to ``pause_entries`` after the
-   3rd consecutive same-reason failure within a 5-minute window.
-4. The streak counter resets on a successful entry-path completion.
-5. The manual operator path (``issued_by="control_plane"``) is unaffected —
-   it can still issue indefinite pauses.
+RETIRED 2026-05-04: The streak-based auto-pause machinery was removed in the
+gate-purge Stage 2 commit.  These tests are preserved as history but are
+skipped via pytest.mark.skip.
 """
-
 from __future__ import annotations
 
 import sqlite3
@@ -26,13 +17,20 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import src.control.auto_pause_streak as streak
+pytestmark = pytest.mark.skip(reason="auto-pause streak retired 2026-05-04")
+
 import src.control.control_plane as cp
 from src.state.db import (
     apply_architecture_kernel_schema,
     get_connection,
     query_control_override_state,
 )
+
+# auto_pause_streak module deleted 2026-05-04 — import guard for history preservation
+try:
+    import src.control.auto_pause_streak as streak  # type: ignore[import]
+except ModuleNotFoundError:
+    streak = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

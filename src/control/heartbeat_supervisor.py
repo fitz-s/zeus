@@ -205,19 +205,8 @@ class HeartbeatSupervisor:
         return self._health == HeartbeatHealth.HEALTHY
 
     def _write_failclosed_tombstone(self) -> None:
-        if self._tombstone_written:
-            return
-        try:
-            from src.config import state_path
-
-            path = state_path("auto_pause_failclosed.tombstone")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(HEARTBEAT_CANCEL_SUSPECTED_REASON)
-            tmp.replace(path)
-            self._tombstone_written = True
-        except Exception as exc:
-            logger.error("Failed to write heartbeat fail-closed tombstone: %s", exc)
+        # Tombstone retired 2026-05-04 — runtime safety covered by gate 6/9/10.
+        pass
 
 
 _GLOBAL_SUPERVISOR: Optional[HeartbeatSupervisor] = None
