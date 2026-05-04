@@ -2,6 +2,7 @@
 
 **NOTE:** Closed entries moved to docs/to-do-list/known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
 **Location note:** Active known gaps moved from `docs/operations/known_gaps.md` to this to-do-list surface on 2026-05-02.
+**Last main-aligned:** 2026-05-04 (main = `cd882ee9`; no new OPEN items closed by PR #46/47; added calibration improvement backlog from session 59195a96)
 
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
@@ -1209,6 +1210,48 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 (D5 / D6 / Day0-canonical-event closed entries archived to
 `docs/to-do-list/known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
 Fragmentation (D1–D6)".)
+
+---
+
+## Calibration improvement backlog (recovered from session 59195a96)
+
+Items explicitly queued as future/open in session 59195a96, not in prior gap register. Non-blocking to live trading in current state. Source: `.claude/tasks/59195a96-*/3.json`, `4.json`, `6.json`, `7.json`, `8.json`.
+
+### [OPEN] s3 — climate_zone field missing from config/cities.json
+
+**Authority:** LAW 6 in `docs/reference/zeus_calibration_weighting_authority.md`.
+**Problem:** 51 cities lack a `climate_zone` enum field. Required enum values: `tropical_monsoon_coastal | temperate_coastal_frontal | inland_continental | high_altitude_arid`. Without this field, LAW 6 cluster-level α tuning (PoC v6, task s6) is unrunnable, and any weighting that partitions by climate zone silently falls back to uniform treatment.
+**Next step:** Propose mapping for all 51 cities → operator review before writing to config. Do not write the field without operator sign-off on the taxonomy.
+**Blocks:** s6 (PoC v6 cluster-level α tuning).
+
+### [OPEN] s4 — 11 antibody tests for calibration weighting LAW
+
+**Authority:** `docs/reference/zeus_calibration_weighting_authority.md`.
+**Problem:** No systematic antibody test suite exists for the calibration weighting laws. Any regression in LAW enforcement is invisible without tests.
+**Required tests (from spec):**
+`test_calibration_weight_continuity`, `test_per_city_weighting_eligibility`, `test_no_temp_delta_weight_in_production`, `test_weight_floor_nonzero_for_ambig_only`, `test_high_track_unaffected_by_low_law`, `test_rebuild_n_mc_default_bounded`, `test_runtime_n_mc_floor`, `test_rebuild_per_track_savepoint`, `test_no_per_city_alpha_tuning`, + 2 more per spec.
+**Next step:** Implement all 11 as pytest fixtures in `tests/test_calibration_weighting_laws.py`.
+
+### [OPEN — blocked by s3] s6 — PoC v6 cluster-level α tuning
+
+**Location:** `_poc_weighted_platt_2026-04-28/poc_v6_cluster_alpha.py` (to be created).
+**Problem:** Current Platt calibration uses a single global α. Climate-zone partitioning may improve aggregate Brier score and reduce per-zone miscalibration.
+**Scope:** 4-zone α grid search using `climate_zone` partition from s3. Compare aggregate Brier vs B_uniform baseline + per-zone Brier. Run on rebuilt `calibration_pairs_v2`.
+**Blocked by:** s3 (climate_zone field in config/cities.json).
+
+### [DEFERRED] s7 — Re-rebuild calibration_pairs_v2 at n_mc=10000
+
+**Problem:** Current `calibration_pairs_v2` was built with `n_mc=5000` (training time budget) but `p_raw_vector_from_maxes` at runtime uses `n_mc=10000`. This creates a ~10⁻³σ Platt fit asymmetry. Undetectable in practice but technically impure: the Platt model was fitted on a slightly different distribution than the one it scores at runtime.
+**Cost:** ~32 hours at n_mc=10000 with current Python loop. Feasible only after s8 (vectorize MC loop, 10-100× speedup).
+**Prerequisite:** s8 must land first to make the cost feasible.
+**Defer until:** live deployment is stable and s8 is complete.
+
+### [DEFERRED] s8 — Vectorize p_raw_vector_from_maxes MC loop
+
+**Location:** `src/signal/ensemble_signal.py:215`
+**Problem:** `p_raw_vector_from_maxes` uses a Python `for _ in range(n_mc)` loop. At n_mc=10000 and 416K snapshots, a full calibration_pairs_v2 rebuild takes ~32 hours. Vectorizing to `(n_mc, n_members)` numpy broadcast would give 10-100× speedup.
+**Required antibody:** Equivalence test (bit-precise result match vs current loop output) + p_raw_vector regression suite before deploying the vectorized version.
+**Not deployment-blocking.** Unblocks s7.
 
 ---
 
