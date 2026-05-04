@@ -37,6 +37,21 @@
     "unimodal_range_epsilon": 0.5,
     "conflict_kl_threshold": 0.15
   },
+  "_entry_forecast_note": "Entry forecast data contract — required by Settings.__init__ since 2026-05-03 (PR47). Source identity, calibration policy, and rollout mode must be set explicitly per operator deployment; mismatched values fail closed at boot. Defaults below mirror the live ECMWF Open Data lane.",
+  "entry_forecast": {
+    "source_id": "ecmwf_open_data",
+    "source_transport": "ensemble_snapshots_v2_db_reader",
+    "authority_family": "ecmwf_ifs_ens",
+    "high_track": "mx2t6_high_full_horizon",
+    "low_track": "mn2t6_low_full_horizon",
+    "target_horizon_days": 10,
+    "warm_horizon_days": 10,
+    "source_cycle_policy": "latest_complete_full_horizon",
+    "allow_short_horizon_06_18": false,
+    "rollout_mode": "live",
+    "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1",
+    "require_active_market_future_coverage": true
+  },
   "calibration": {
     "method": "platt",
     "refit_every_n": 50,
