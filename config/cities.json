@@ -1258,15 +1258,7 @@
       "diurnal_amplitude_c": 8.0
     }
   ],
-  "_source_contract_pending_conversions": [
-    {
-      "city": "Paris",
-      "status": "pending_release",
-      "reason": "same_provider_station_change_lfpg_to_lfpb_requires_backfill_settlement_calibration_release",
-      "evidence_ref": "architecture/paris_station_resolution_2026-05-01.yaml",
-      "release_gate": "state/source_contract_quarantine.json transition_history must contain completed evidence refs for config_updated, source_validity_updated, backfill_completed, settlements_rebuilt, calibration_rebuilt, and verification_passed"
-    }
-  ],
+  "_source_contract_pending_conversions": [],
   "_changelog": [
     {
       "timestamp": "2026-05-01T00:00:00+00:00",

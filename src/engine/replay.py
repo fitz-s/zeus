@@ -1620,7 +1620,6 @@ def _replay_one_settlement(
                 fee_rate=_replay_fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=k_mult,
-                safety_cap_usd=None,
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:

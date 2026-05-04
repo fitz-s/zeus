@@ -22,6 +22,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -300,6 +306,27 @@ def _add_missing_table_check(
     blocker = {"code": code, "table": table, "count": 0}
     if blocker not in report["blockers"]:
         report["blockers"].append(blocker)
+
+
+def _hko_gate_is_released(root: Path = ROOT) -> bool:
+    """Return True if the hko_canonical gate was formally released in the preflight override YAML.
+
+    Gate re-arms automatically if the YAML's released.released_at field is absent
+    or the file cannot be read. This mirrors the antibody design: the YAML release
+    block is the immune-system trigger, not hardcoded logic.
+
+    Added 2026-05-03: supports HK quarantine-release cycle from
+    docs/archives/packets/task_2026-05-02_hk_paris_release/work_log.md Step 2.
+    """
+    yaml_path = root / "architecture" / "preflight_overrides_2026-04-28.yaml"
+    if not yaml_path.exists() or not _YAML_AVAILABLE:
+        return False
+    try:
+        data = _yaml.safe_load(yaml_path.read_text())
+        released = (data or {}).get("hko_canonical", {}).get("released", {})
+        return bool((released or {}).get("released_at"))
+    except Exception:
+        return False
 
 
 def _new_report(mode: str, world_db: Path) -> dict:
@@ -1472,20 +1499,27 @@ def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor)
         if hko_predicates:
             hko_where = f"{label_where} AND ({' OR '.join(hko_predicates)})"
             hko_count = _count(cur, table, hko_where)
+            # Gate is advisory (non-blocking) if the hko_canonical release
+            # block has been signed in architecture/preflight_overrides_2026-04-28.yaml.
+            # The release block is the immune-system trigger — removing
+            # released_at from the YAML re-arms the gate automatically.
+            # Added 2026-05-03 per work_log task_2026-05-02_hk_paris_release Step 5a.
+            hko_released = _hko_gate_is_released()
             hko_met = hko_count == 0
             hko_check_id = f"observations.{metric}.hko_training_blocked"
             report["checks"][hko_check_id] = _check_entry(
                 check_id=hko_check_id,
-                status=PASS if hko_met else FAIL,
+                status=PASS if (hko_met or hko_released) else FAIL,
                 detail=(
                     f"{metric} HKO/Hong Kong VERIFIED labels requiring fresh "
                     f"source audit={hko_count}"
+                    + (" (advisory: hko_canonical released)" if hko_released and not hko_met else "")
                 ),
                 count=hko_count,
                 threshold=0,
-                met=hko_met,
+                met=hko_met or hko_released,
             )
-            if not hko_met:
+            if not hko_met and not hko_released:
                 report["blockers"].append(
                     {
                         "code": "observations.hko_requires_fresh_source_audit",

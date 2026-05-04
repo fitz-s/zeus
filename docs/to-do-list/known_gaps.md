@@ -2,6 +2,7 @@
 
 **NOTE:** Closed entries moved to docs/to-do-list/known_gaps_archive.md on 2026-05-01 (per 2026-04-30 recheck)
 **Location note:** Active known gaps moved from `docs/operations/known_gaps.md` to this to-do-list surface on 2026-05-02.
+**Last main-aligned:** 2026-05-04 (main = `cd882ee9`; no new OPEN items closed by PR #46/47; added calibration improvement backlog from session 59195a96)
 
 每个 gap 是一个 belief-reality mismatch。每个 gap 的终态：变成 antibody（test/type/code）→ FIXED。
 如果一个 gap 包含 "proposed antibody"，下一步就是实现它。
@@ -14,6 +15,32 @@ attention.
 what we made impossible): `docs/to-do-list/known_gaps_archive.md`. Reference
 when a similar pattern resurfaces; do not re-open without proof the antibody
 failed.
+
+---
+
+## CRITICAL: SQLite 单写者锁导致 live daemon 崩溃 (2026-05-04)
+
+**Status:** OPEN — 今天已发生：live daemon 3次崩溃，实际交易窗口丢失。
+**First observed:** 2026-05-04
+**Root cause:** SQLite 单写者模型。WAL 模式允许并发读，但同一时刻只有一个写者可以持有写锁。`rebuild_calibration_pairs_v2.py` 跑了 30+ 分钟写事务，任何需要写锁的操作（包括 `init_schema()`）都会等待或超时崩溃。
+
+**Severity by scenario:**
+
+| 场景 | 风险 |
+|------|------|
+| 重建脚本在 live trading 时段运行 | **CRITICAL** — live daemon 无法重启 |
+| 重建脚本在盘前运行但超时 | **HIGH** — 开盘时仍锁定 |
+| 正常数据采集（非重建） | LOW — 短事务，WAL 通常够用 |
+
+**Immediate mitigation:** 不要在 live 时段（或盘前 2h 内）运行 `rebuild_calibration_pairs_v2.py`。操作员手动调度。
+
+**Structural fixes (options):**
+1. **写锁 timeout + 快速失败**：rebuild 脚本持有锁超过 N 秒时主动放锁，live daemon 设置短 `timeout` 而不是无限等待——最小成本，治标。
+2. **DB 物理隔离**：calibration DB（重建写入）与 live trading DB（zeus.db）分开——从根本上消除锁竞争，是 `project_zeus_isolation_design.md` 已记录的结构决策方向。
+3. **事务分片**：rebuild 脚本改为分批 commit（每 N 城市一个事务），降低单次持锁时长——降低概率，但不消除竞争。
+
+**Proposed antibody:** DB 物理隔离（option 2）是唯一能使"rebuild 时 live daemon 崩溃"这一错误类别不可能发生的结构决策。Options 1/3 是降险措施。
+**Blocks:** live daemon 稳定性；任何需要在 live 时段运行 rebuild 的操作。
 
 ---
 
@@ -416,7 +443,7 @@ exposure at settlement time.
 residual exposure exactly once, including positions that were in exit retry, and
 does not resubmit sell orders after settlement.
 
-### [OPEN P1] Paris config uses LFPG while current markets resolve on LFPB
+### [CLOSED P1 — 2026-05-03] Paris config uses LFPG while current markets resolve on LFPB
 
 **Location:** `config/cities.json` Paris `wu_station` and
 `settlement_source`.
@@ -437,19 +464,20 @@ is a contract/source truth mismatch, not a modeling error.
 endpoint liveness; it is which WU station the active Polymarket contract names.
 The same active-event probe did not find non-Paris station mismatches among
 recognized configured cities.
-**Proposed remediation:**
-1. Run a fresh source audit for all active weather cities and both HIGH/LOW
-   families.
-2. Decide whether Paris should be globally remapped to `LFPB` for future
-   contracts or routed by date/family, preserving the observed HIGH boundary
-   between 2026-04-18 (`LFPG`) and 2026-04-19 (`LFPB`) plus the LOW unknown
-   window before 2026-04-23.
-3. Quarantine affected Paris training/settlement rows until station identity is
-   reconciled.
-4. Add a source-contract test that compares current Gamma resolutionSource
-   station id against the configured settlement source for tradable markets.
-**Acceptance evidence:** Paris live candidates only proceed when configured
-station id matches event resolutionSource or an explicit dated routing table.
+**Resolution (2026-05-01 decision + 2026-05-03 execution):**
+1. `config/cities.json` updated 2026-05-01: `wu_station: LFPB`,
+   `airport_name: Paris-Le Bourget Airport`.
+   Authority: `architecture/paris_station_resolution_2026-05-01.yaml`.
+2. LFPG legacy observation rows deleted by backfill `--replace-station-mismatch`.
+   762 LFPB obs rows backfilled (2024-01-01 → 2026-01-31).
+3. LFPG-derived calibration_pairs_v2 rows (747,150 QUARANTINED) deleted.
+   New LFPB pairs rebuilt over full historical window 2024-01-01→2026-05-01.
+4. Platt models refitted on LFPB pairs (all 8 buckets VERIFIED+active).
+5. Source-contract quarantine released via `state/source_contract_quarantine.json`.
+   Paris removed from `_source_contract_pending_conversions` in `cities.json`.
+6. `architecture/paris_station_resolution_2026-05-01.yaml` marked APPLIED.
+**Verification:** `verify_ready.py` passed with Paris markets in ready list.
+**Evidence:** `docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/11_paris_resync_log.md`
 
 
 ### [OPEN P1] Calibration maturity edge-threshold multiplier is dead on the live path
@@ -741,45 +769,16 @@ freshness function.
 coverage-insufficient Day0 observations reject entry before p_raw/calibration;
 monitor artifacts explicitly show stale-observation read-only degradation.
 
-### [OPEN P1] Day0 capture mode has contradictory resolution-hour filters
+### [CLOSED — 2026-05-04] Day0 capture mode has contradictory resolution-hour filters
 
-**Location:** `src/engine/cycle_runner.py::MODE_PARAMS`,
-`src/engine/cycle_runtime.py::execute_discovery_phase`,
-`src/data/market_scanner.py::find_weather_markets` / `_parse_event`,
-`architecture/runtime_modes.yaml`.
-**Problem:** Project law defines `day0_capture` as markets less than 6 hours to
-settlement. Runtime implements that second-stage filter with
-`max_hours_to_resolution=6`, but the call into `find_weather_markets()` does not
-override the scanner default `min_hours_to_resolution=6`. `_parse_event()` first
-drops markets whose `hours_to_resolution < 6`; then runtime keeps only markets
-whose `hours_to_resolution < 6`. The practical intersection is empty.
-**Read-only reproduction:** A synthetic New York temperature event 5 hours from
-resolution returned `scanner_default_returns=False` while
-`scanner_no_min_returns=True`; a 7-hour event survived the scanner default but
-`runtime_day0_keeps_after_default=False`. `MODE_PARAMS[DAY0_CAPTURE]` contains
-only `{'max_hours_to_resolution': 6}`, so runtime relies on the scanner default
-for the missing min filter.
-**Impact:** The strategy family that is supposed to exploit same-day observation
-speed can discover zero entry candidates before the evaluator sees observation,
-calibration, or edge logic. This means fixing Day0 signal math, station routing,
-and observation freshness would still not prove live Day0 capture works unless
-the discovery-mode filter contract is repaired.
-**False-positive boundary:** This affects the `day0_capture` entry discovery
-lane. It does not block monitoring of already-held positions, and it does not
-block non-Day0 opening/update modes.
-**Proposed remediation:**
-1. Make mode params explicit: `day0_capture` should pass
-   `min_hours_to_resolution=0` or the scanner should accept separate min/max
-   bounds instead of a global lower-bound default.
-2. Move mode-specific time-window filtering into one owner so scanner and
-   runtime cannot enforce contradictory halves of the same contract.
-3. Add a regression with 5h, 6h boundary, and 7h synthetic events proving
-   `day0_capture` keeps the intended <6h set and other modes keep their intended
-   windows.
-4. Record the applied discovery window in opportunity/no-trade facts.
-**Acceptance evidence:** A `day0_capture` dry-run with a fresh <6h market reaches
-`MarketCandidate(... discovery_mode='day0_capture')`; a >6h market is rejected
-with a structured discovery-window reason, not silently removed by two filters.
+**Closed:** 2026-05-04. Gap was valid when filed (original audit showed `MODE_PARAMS[DAY0_CAPTURE]` had no `min_hours_to_resolution`). Subsequent session added compensating logic in `cycle_runtime.py::execute_discovery_phase` (lines 1997-2001):
+```python
+min_hours_to_resolution = params.get("min_hours_to_resolution")
+if min_hours_to_resolution is None:
+    min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+```
+DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is passed to scanner → <6h markets are not dropped at scanner boundary. The fix is present in current main. Moving to archive.
 
 ### [OPEN P1] Final SDK submission envelope is not persisted after CLOB submit
 
@@ -1208,6 +1207,48 @@ Six design gaps identified at the signal→strategy→execution boundary. The si
 (D5 / D6 / Day0-canonical-event closed entries archived to
 `docs/to-do-list/known_gaps_archive.md` → "MEDIUM-CRITICAL: Cross-Layer Epistemic
 Fragmentation (D1–D6)".)
+
+---
+
+## Calibration improvement backlog (recovered from session 59195a96)
+
+Items explicitly queued as future/open in session 59195a96, not in prior gap register. Non-blocking to live trading in current state. Source: `.claude/tasks/59195a96-*/3.json`, `4.json`, `6.json`, `7.json`, `8.json`.
+
+### [OPEN] s3 — climate_zone field missing from config/cities.json
+
+**Authority:** LAW 6 in `docs/reference/zeus_calibration_weighting_authority.md`.
+**Problem:** 51 cities lack a `climate_zone` enum field. Required enum values: `tropical_monsoon_coastal | temperate_coastal_frontal | inland_continental | high_altitude_arid`. Without this field, LAW 6 cluster-level α tuning (PoC v6, task s6) is unrunnable, and any weighting that partitions by climate zone silently falls back to uniform treatment.
+**Next step:** Propose mapping for all 51 cities → operator review before writing to config. Do not write the field without operator sign-off on the taxonomy.
+**Blocks:** s6 (PoC v6 cluster-level α tuning).
+
+### [OPEN] s4 — 11 antibody tests for calibration weighting LAW
+
+**Authority:** `docs/reference/zeus_calibration_weighting_authority.md`.
+**Problem:** No systematic antibody test suite exists for the calibration weighting laws. Any regression in LAW enforcement is invisible without tests.
+**Required tests (from spec):**
+`test_calibration_weight_continuity`, `test_per_city_weighting_eligibility`, `test_no_temp_delta_weight_in_production`, `test_weight_floor_nonzero_for_ambig_only`, `test_high_track_unaffected_by_low_law`, `test_rebuild_n_mc_default_bounded`, `test_runtime_n_mc_floor`, `test_rebuild_per_track_savepoint`, `test_no_per_city_alpha_tuning`, + 2 more per spec.
+**Next step:** Implement all 11 as pytest fixtures in `tests/test_calibration_weighting_laws.py`.
+
+### [OPEN — blocked by s3] s6 — PoC v6 cluster-level α tuning
+
+**Location:** `_poc_weighted_platt_2026-04-28/poc_v6_cluster_alpha.py` (to be created).
+**Problem:** Current Platt calibration uses a single global α. Climate-zone partitioning may improve aggregate Brier score and reduce per-zone miscalibration.
+**Scope:** 4-zone α grid search using `climate_zone` partition from s3. Compare aggregate Brier vs B_uniform baseline + per-zone Brier. Run on rebuilt `calibration_pairs_v2`.
+**Blocked by:** s3 (climate_zone field in config/cities.json).
+
+### [DEFERRED] s7 — Re-rebuild calibration_pairs_v2 at n_mc=10000
+
+**Problem:** Current `calibration_pairs_v2` was built with `n_mc=5000` (training time budget) but `p_raw_vector_from_maxes` at runtime uses `n_mc=10000`. This creates a ~10⁻³σ Platt fit asymmetry. Undetectable in practice but technically impure: the Platt model was fitted on a slightly different distribution than the one it scores at runtime.
+**Cost:** ~32 hours at n_mc=10000 with current Python loop. Feasible only after s8 (vectorize MC loop, 10-100× speedup).
+**Prerequisite:** s8 must land first to make the cost feasible.
+**Defer until:** live deployment is stable and s8 is complete.
+
+### [DEFERRED] s8 — Vectorize p_raw_vector_from_maxes MC loop
+
+**Location:** `src/signal/ensemble_signal.py:215`
+**Problem:** `p_raw_vector_from_maxes` uses a Python `for _ in range(n_mc)` loop. At n_mc=10000 and 416K snapshots, a full calibration_pairs_v2 rebuild takes ~32 hours. Vectorizing to `(n_mc, n_members)` numpy broadcast would give 10-100× speedup.
+**Required antibody:** Equivalence test (bit-precise result match vs current loop output) + p_raw_vector regression suite before deploying the vectorized version.
+**Not deployment-blocking.** Unblocks s7.
 
 ---
 

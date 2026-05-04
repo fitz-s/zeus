@@ -1,7 +1,7 @@
 # Current Source Validity
 
 Status: active current-fact surface
-Last audited: 2026-04-30T00:23:50Z for Paris source-contract monitor refresh; 2026-04-21 for broad provider audit
+Last audited: 2026-05-03T00:00Z for Paris source-contract conversion completion; 2026-04-30T00:23:50Z for Paris source-contract monitor refresh; 2026-04-21 for broad provider audit
 Max staleness: 14 days for source/backfill/routing planning
 Evidence packet: `docs/operations/task_2026-04-21_gate_f_data_backfill/step1b_source_validity.md`
 Runtime evidence: `scripts/watch_source_contract.py --city Paris --json --report-only --fail-on DATA_UNAVAILABLE` run on 2026-04-30T00:23:50Z; conversion-plan evidence from a temp quarantine path at 2026-04-29T23:55:51Z
@@ -95,6 +95,44 @@ Re-audit before relying on this file if:
 - Paris source-contract monitor returns `MATCH` after full conversion evidence,
   or Polymarket changes Paris station/source again
 - the file is older than Max staleness and the task needs current source truth
+
+## 2026-05-03 Paris Source-Contract Conversion Completed
+
+As of 2026-05-03, the Paris source-contract conversion from LFPG → LFPB is
+fully applied. All six required release evidence items are complete:
+
+- **config_updated**: `config/cities.json` Paris entry updated 2026-05-01.
+  `wu_station: LFPB`, `airport_name: Paris-Le Bourget Airport`.
+  Authority: `architecture/paris_station_resolution_2026-05-01.yaml`.
+
+- **source_validity_updated**: This file (current_source_validity.md) updated
+  2026-05-03 to record conversion completion. Source monitor evidence from
+  2026-04-30T00:23:50Z confirmed LFPB as the active settlement station
+  across all 22 active Paris Polymarket markets.
+
+- **backfill_completed**: `scripts/backfill_wu_daily_all.py` run 2026-05-03
+  with `--replace-station-mismatch` for Paris over 2024-01-01→2026-01-31.
+  762 LFPB rows written to `observations`. No LFPG rows remain active.
+  Manifest: `state/backfill_manifest_wu_daily_all_backfill_wu_daily_all_20260503T170355Z.json`.
+
+- **settlements_rebuilt**: `scripts/rebuild_settlements.py --city Paris
+  --temperature-metric all --apply` run 2026-05-03. 853 HIGH + 853 LOW
+  VERIFIED settlement rows written from LFPB observations.
+
+- **calibration_rebuilt**: `scripts/rebuild_calibration_pairs_v2.py --city
+  Paris --start-date 2024-01-01 --end-date 2026-05-01 --no-dry-run --force`
+  run 2026-05-03. Full LFPB calibration_pairs_v2 window rebuilt.
+  `scripts/refit_platt_v2.py --cluster Paris --no-dry-run --force` run
+  2026-05-03. All 8 platt buckets (4 seasons × high/low) refit with LFPB
+  pairs.
+
+- **verification_passed**: `docs/archives/packets/task_2026-05-02_hk_paris_release/verify_ready.py`
+  passed with Paris markets appearing in the ready list. Zero station
+  MISMATCH events for Paris in source-contract probe.
+
+Authority: Operator directive 2026-05-03 +
+  `architecture/paris_station_resolution_2026-05-01.yaml` +
+  `docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/10_paris_resync_plan.md`
 
 ## Stale Behavior
 

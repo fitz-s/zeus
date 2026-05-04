@@ -211,6 +211,59 @@ def test_cache_invalidates_on_mtime_change(tmp_path: Path) -> None:
     assert second.operator_approval_id == "op-B"
 
 
+def test_cache_invalidates_on_same_mtime_same_size_rewrite(tmp_path: Path) -> None:
+    """Codex P2 (PR #47 follow-up, 2026-05-04): a same-length rewrite that
+    leaves ``mtime_ns`` unchanged (because the filesystem's mtime granularity
+    didn't advance within the write window) MUST still invalidate the cache.
+
+    Reproduction: write evidence A (operator_approval_id="op-A"), read it,
+    then write evidence B (same byte length, "op-X" → still 4 chars) and
+    forcibly pin the new file's mtime to the previous value via ``os.utime``.
+    Under the original ``(path, mtime_ns, size)`` cache key the second read
+    would have served the stale "op-A" entry. With ``st_ino`` in the key
+    (rotated by ``os.replace`` on every atomic write), the cache invalidates
+    correctly and the second read returns "op-X".
+
+    This test would have failed prior to the codex P2 fix on
+    ``_parse_evidence_payload_cached``.
+    """
+
+    import os
+
+    target = tmp_path / "evidence.json"
+    clear_evidence_read_cache()
+
+    # First write: same operator id length as the rewrite ("op-A" / "op-X" both 4 chars)
+    write_promotion_evidence(_evidence(operator_approval_id="op-A"), path=target)
+    first_stat = target.stat()
+    first = read_promotion_evidence(path=target)
+    assert first is not None and first.operator_approval_id == "op-A"
+
+    # Second write: same byte length payload (same field shapes). Force the new
+    # file's mtime to match the first write's mtime exactly so the
+    # mtime_ns-based key would collide. atime is set defensively for parity.
+    write_promotion_evidence(_evidence(operator_approval_id="op-X"), path=target)
+    os.utime(target, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns))
+    pinned_stat = target.stat()
+    assert pinned_stat.st_mtime_ns == first_stat.st_mtime_ns
+    assert pinned_stat.st_size == first_stat.st_size
+    # st_ino must have rotated because write_promotion_evidence uses
+    # tempfile + os.replace; this is the load-bearing invariant.
+    assert pinned_stat.st_ino != first_stat.st_ino, (
+        "atomic write should produce a new inode; environment may not "
+        "support inode rotation on rename, in which case the cache cannot "
+        "rely on this defence and content-hash keying is required instead."
+    )
+
+    second = read_promotion_evidence(path=target)
+    assert second is not None
+    assert second.operator_approval_id == "op-X", (
+        "Cache returned stale evidence after a same-length, same-mtime "
+        "rewrite — the (mtime_ns, size) key alone is insufficient. "
+        "Verify ``st_ino`` is part of the cache key."
+    )
+
+
 def test_corruption_does_not_pollute_cache(tmp_path: Path) -> None:
     """Phase C-perf-cache: when the parser raises
     ``PromotionEvidenceCorruption``, ``functools.lru_cache`` does NOT

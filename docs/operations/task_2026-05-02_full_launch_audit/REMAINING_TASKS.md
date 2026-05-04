@@ -1,19 +1,18 @@
 # Zeus Remaining Tasks (non-strategy)
 
-**Last refreshed**: 2026-05-03 PM CDT (post PR47 + cb4beb6c live-flip + multi-angle review)
+**Last refreshed**: 2026-05-04 (post PR46+PR47 merge to main; bankroll truth-chain resolved)
 **Scope**: Everything that is NOT a trading-strategy design decision. For strategy-design decisions, see `STRATEGIES_AND_GAPS.md` in this folder.
 
 > Categorized by priority and theme. Each task has a current task ID for cross-reference with the in-session task list.
 
-## Live-readiness state snapshot (2026-05-03 PM CDT)
+## Live-readiness state snapshot (2026-05-04)
 
-- Branch `healthcheck-riskguard-live-label-2026-05-02` is at HEAD `11bbc8b2`; origin matches.
-- `config/settings.json:entry_forecast.rollout_mode = "live"` (operator-authorized via cb4beb6c).
-- Live-entry forecast path is **fail-closed by construction**: `read_executable_forecast` calls `get_entry_readiness(strategy_key='entry_forecast')`; no daemon code writes those rows. DB probe 2026-05-03 PM: `SELECT COUNT(*) FROM readiness_state WHERE strategy_key='entry_forecast' = 0`.
-- Three orphaned gates exist as code + tests but are uncalled in src/ runtime: `evaluate_entry_forecast_rollout_gate`, `evaluate_calibration_transfer_policy`, `evaluate_entry_forecast_shadow`.
-- Multi-angle review verdict: REVERT-AND-RESPLIT cb4beb6c (code-reviewer), DEMAND-REVERT cb4beb6c rollout flip (critic-opus), SUSPECT (scientist).
-- Operator decision: keep `rollout_mode=live` (operator authority on unblock), continue deep plan within this PR, do NOT add new daemon import sites.
-- Active remediation plan: `docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md` Phases A and B (within-PR), Phase C (deferred to operator-authorized future PR).
+- **PR #46 MERGED** `595c93bb` into main (2026-05-03 20:43 CDT). **PR #47 MERGED** `cd882ee9` into main (2026-05-03 20:45 CDT). main = `cd882ee9`.
+- `config/settings.json:entry_forecast.rollout_mode = "blocked"` — Phase C commit `b9350930` (phase-C-4+5: dead-knob removal) reset rollout_mode from the cb4beb6c "live" flip back to "blocked".
+- **Bankroll truth chain P0 + $150 hardcode both RESOLVED** in commit `43e745b2` (Bankroll truth-chain cleanup: kill the $150 fiction). `capital_base_usd` removed from config and all 11 production sites; on-chain wallet is sole source. Daemons need restart for fix to take effect.
+- **DDD v2** landed within PR #46 (commits `c9c444ef` Two-Rail trigger redesign, `b719d199` live wiring, `650136bd` Paris re-inclusion).
+- Phase A remediation: done (`5acdb3a8`). Phase B: done (`f9aca68e`). Phase C: done (`8c3876f7`, `b9350930`, `49de7965`, `734012fa`, `433737c4`).
+- Rollout gate `evaluate_entry_forecast_rollout_gate` is now wired behind `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` env flag (Phase C-1). Entry readiness writer behind `ZEUS_ENTRY_FORECAST_READINESS_WRITER` flag (Phase C-3).
 
 ---
 
@@ -63,8 +62,8 @@ These directly prevent or degrade live trading right now or imminently.
 | PR #43 (pre-commit hook skip-invariant marker) | **MERGED** | `07658bbb` |
 | PR #44 (P0/P1 live blockers) | **MERGED** | `6e3b6a53` |
 | PR #45 (data daemon readiness) | **MERGED** | `47d11d45` |
-| PR #46 (healthcheck-riskguard-live-label) | OPEN, +24 ahead of origin/main | Operator's own PR. Now contains the full PR47 live-entry data-chain stack + cb4beb6c live-flip + 11bbc8b2 docs. Phase A/B remediation lands inside this PR per `REMEDIATION_PLAN_2026-05-03.md`. |
-| PR #47 (live entry data contract) | LANDED INTO PR46 | Stack `c858ed93..bd29a88f` (22 commits, 41 files) merged into PR46 via merge commit `bd29a88f`. No separate PR opened. |
+| PR #46 (healthcheck-riskguard-live-label + bankroll fix + DDD v2) | **MERGED** | `595c93bb` (2026-05-03 20:43 CDT). Contains bankroll truth-chain cleanup, DDD v2, Phase A/B/C remediation. |
+| PR #47 (live entry forecast target coverage contract) | **MERGED** | `cd882ee9` (2026-05-03 20:45 CDT). Merged into main as separate merge commit after PR #46. |
 | Local-only integration branch `live-restart-integration-2026-05-02` | **CLOSED** | Reconciled into main via PR #40-45 |
 
 ---
@@ -88,14 +87,31 @@ These directly prevent or degrade live trading right now or imminently.
 
 ---
 
+## F2. Future / Deferred (recovered from session 59195a96 + harness-debate-2026-04-27)
+
+Tasks explicitly queued as "Future" or left pending when sessions ended. Source: `.claude/tasks/` JSON files.
+
+| ID | Title | Origin | Status | Notes |
+|---|---|---|---|---|
+| s7 | **Future: re-rebuild calibration_pairs_v2 at n_mc=10000** | 59195a96 #7 | DEFERRED | After live deployment stable. Training=5000 vs runtime=10000 causes ~10⁻³σ Platt fit diff (undetectable now). Cost: ~32h at n_mc=10000. Prerequisite: task s8 (vectorize MC loop) first to make cost feasible. |
+| s8 | **Future: vectorize p_raw_vector_from_maxes MC loop** | 59195a96 #8 | DEFERRED | `src/signal/ensemble_signal.py:215` uses Python `for _ in range(n_mc)` loop. Vectorize to `(n_mc, n_members)` numpy broadcast → 10-100× speedup. Required: equivalence test (bit-precise vs current) + p_raw_vector regression suite. Not deployment-blocking. Unblocks s7. |
+| s3 | Add climate_zone field to config/cities.json | 59195a96 #3 | OPEN | LAW 6 in `docs/reference/zeus_calibration_weighting_authority.md`. 51 cities need enum: `tropical_monsoon_coastal \| temperate_coastal_frontal \| inland_continental \| high_altitude_arid`. Propose mapping for operator review first. |
+| s4 | Write 11 antibody tests per calibration weighting LAW | 59195a96 #4 | OPEN | Tests: `test_calibration_weight_continuity`, `test_per_city_weighting_eligibility`, `test_no_temp_delta_weight_in_production`, `test_weight_floor_nonzero_for_ambig_only`, `test_high_track_unaffected_by_low_law`, `test_rebuild_n_mc_default_bounded`, `test_runtime_n_mc_floor`, `test_rebuild_per_track_savepoint`, `test_no_per_city_alpha_tuning`, + 2 more per spec. |
+| s6 | Queue PoC v6 cluster-level α tuning | 59195a96 #6 | OPEN | `_poc_weighted_platt_2026-04-28/poc_v6_cluster_alpha.py` — 4-zone α grid search using climate_zone partition. Compare aggregate Brier vs B_uniform baseline + per-zone Brier. Run on rebuilt calibration_pairs_v2. Blocked by s3 (climate_zone field). |
+| h46 | **FUTURE: WS_PROVENANCE_INSTRUMENTATION (PATH C deferred)** | harness-debate #46 | DEFERRED | Extend `token_price_log` writer to tag `update_source` ('ws'\|'poll') for latency attribution. Documented in `src/state/ws_poll_reaction.py` docstring + `docs/operations/ws_poll_reaction/AGENTS.md`. Operator decides timing. Unlocks true ws_share/poll_share analytics. |
+| h91-93 | R3 G1 closure pack (pytest triage + data evidence + sign-off) | harness-debate #91-93 | OPEN | Three-part: (A.1) full-suite pytest ~30 failures triage; (A.2) TIGGE/calibration/live-alpha evidence inventory per bucket; (A.3) G1-close evidence pack for operator sign. Prerequisite for R3 G1 close. |
+
+---
+
 ## G. Structural debt (operator-named, deferred)
 
 These are real structural problems where a band-aid would just kick the can:
 
+*All previously listed items have been resolved. See §H.*
+
 | Topic | Why deferred |
 |---|---|
-| **$150 capital_base_usd hardcode** (haiku #35 found it) | Operator: "150 hardcoded is a complete mistake". The fix is NOT bumping 150 → 200; it's making wallet_balance the canonical truth and removing the metadata baseline entirely. Currently mitigated because daemon is GREEN post-restart. Real fix is a structural redesign of `load_portfolio` / `riskguard.py:1162` / `cycle_runner.py:466-485` consistency_lock direction |
-| **Bankroll truth chain P0** (operator's 2026-05-01 finding) | Same root as $150 hardcode. RiskGuard runs on $150 fiction; consistency_lock compares canonical-DB to itself. Today live trading is "safe by accident" because the $5 safety_cap_usd masks the upside-asymmetry. Cannot raise the cap until the truth chain is rebuilt |
+| (none open) | — |
 
 ---
 
@@ -120,7 +136,12 @@ These are real structural problems where a band-aid would just kick the can:
 | #29, #30 | PR #41 P1 fixes | Done |
 | #31 | Hook redesign | Done |
 | #34 | Sonnet PR review fixes | Done |
-| #35 | $150 hardcode root cause finding | Done — finding moved to §G |
+| #35 | $150 hardcode root cause finding | Done — finding moved to §G; subsequently fixed in PR #46 |
+| **PR #46** | healthcheck-riskguard-live-label + bankroll fix + DDD v2 | Merged `595c93bb` (2026-05-03 20:43 CDT) |
+| **PR #47** | live entry forecast target coverage contract | Merged `cd882ee9` (2026-05-03 20:45 CDT) |
+| **Bankroll truth chain P0** | $150 fiction eliminated; on-chain wallet sole source | `43e745b2` — all 11 production sites updated; `capital_base_usd` removed from config |
+| **$150 capital_base_usd hardcode** | Structural fix applied (not a band-aid) | Same commit `43e745b2` — `portfolio.py`, `riskguard.py`, `cycle_runtime.py`, `evaluator.py`, `replay.py`, `status_summary.py`, `main.py`, `config.py` |
+| **DDD v2** | Two-Rail trigger redesign | `c9c444ef`/`b719d199`/`650136bd` in PR #46 |
 | #36 | Wait for first opening_hunt cycle | Deleted (premise was wrong) |
 | #37, #38, #51, #52, #53, #55 | Strategy design gaps | Moved to `STRATEGIES_AND_GAPS.md` |
 | #39-#43 | Full-launch blocker audit haikus A-E | Done |
@@ -136,13 +157,14 @@ Concrete tasks available for pickup without operator/daemon conflict:
 1. **#12 DST gap fills mop-up**: ~231 remaining entries (single-threaded, low risk).
 2. **#18 UMA timing alignment**: Align shadow snapshot timings with UMA resolution windows.
 3. **#25 PR-A oracle path centralization**: Move all oracle artifacts to `~/.openclaw/storage/zeus/oracle/`.
-4. **Live_entry_data_contract Phase 6**: Split `source_health` / `data_coverage` / `entry_readiness` in healthcheck (partial overlap with PR #46; check PR #46 status first).
+4. **Live_entry_data_contract Phase 6**: Split `source_health` / `data_coverage` / `entry_readiness` in healthcheck. PR #46 is now merged — check what landed to avoid duplication.
 
 ---
 
 ## Summary
 
-- **Live trading daemon is GREEN** ($199.40 wallet, oracle gate removed, 15min cadence).
-- **riskguard-live is GREEN** (flap #61 resolved).
-- **Data daemon is GREEN** (catch-up resilience merged in #42; readiness substrate merged in #45).
-- **Next major workstreams**: opening-hunt entry data contract and strategy update execution.
+- **main = `cd882ee9`** (PR #46 + PR #47 merged 2026-05-03 evening CDT).
+- **Bankroll truth chain RESOLVED**: $150 fiction eliminated in `43e745b2`; on-chain wallet is sole source. **Daemons need restart** for this to take effect in live.
+- **`entry_forecast.rollout_mode = "blocked"`** (Phase C-4+5 dead-knob removal reset from cb4beb6c "live" flip).
+- **DDD v2 live**: Two-Rail trigger + p05 floor + linear curve landed in PR #46.
+- **Next major workstreams**: daemon restart post-bankroll-fix, opening-hunt entry data contract, strategy update execution.

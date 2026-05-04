@@ -544,7 +544,6 @@ def _reprice_decision_from_executable_snapshot(
     sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
     kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
     fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
-    safety_cap = getattr(decision, "safety_cap_usd", None)
     if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
     repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
@@ -553,7 +552,6 @@ def _reprice_decision_from_executable_snapshot(
         fee_rate=fee_rate,
         sizing_bankroll=sizing_bankroll,
         kelly_multiplier=kelly_multiplier,
-        safety_cap_usd=safety_cap,
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
@@ -588,7 +586,6 @@ def _reprice_decision_from_executable_snapshot(
             fee_rate=fee_rate,
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
-            safety_cap_usd=safety_cap,
         )
         if size_at_depth_limit <= 0.0:
             final_best_ask = None

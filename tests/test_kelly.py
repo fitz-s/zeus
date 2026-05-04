@@ -45,6 +45,28 @@ class TestKellySize:
         size = kelly_size(0.11, _ep(0.10), 100.0, kelly_mult=0.25)
         assert 0 < size < 5  # Small size for small edge
 
+    def test_no_per_trade_safety_cap_parameter(self):
+        """Antibody for the 2026-05-04 cap removal.
+
+        ``live_safety_cap_usd`` was removed from ``config/settings.json``
+        and the per-trade hard ceiling was deleted from
+        ``src/strategy/kelly.py::kelly_size``. Per-cycle exposure
+        discipline now lives in posture / RiskGuard / max-exposure
+        gates only (see ``config/settings.json::_bankroll_doctrine_2026_05_04``).
+
+        This test fails if anyone re-introduces a ``safety_cap_usd``
+        parameter without operator authorization.
+        """
+
+        import inspect
+
+        sig = inspect.signature(kelly_size)
+        assert "safety_cap_usd" not in sig.parameters, (
+            "kelly_size must NOT accept safety_cap_usd; the per-trade cap "
+            "was removed 2026-05-04. Re-introducing the parameter would "
+            "resurrect dead code that masks the bankroll truth chain."
+        )
+
 
 class TestDynamicKellyMult:
     def test_base_unchanged(self):

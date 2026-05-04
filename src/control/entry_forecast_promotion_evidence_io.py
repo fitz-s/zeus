@@ -148,29 +148,46 @@ def _parse_evidence_payload_cached(
     path_str: str,
     _mtime_ns: int,  # cache-key-only; not consumed in body
     _size: int,  # cache-key-only; not consumed in body
+    _ino: int,  # cache-key-only; catches atomic-write inode rotation (PR47 codex P2)
+    _ctime_ns: int,  # cache-key-only; metadata-change timestamp; defence-in-depth (PR47 codex P2)
 ) -> EntryForecastPromotionEvidence | None:
     """Strict-parse a promotion-evidence payload.
 
     Phase C-perf-cache (critic ATTACK 3 follow-up): cache keyed by
-    ``(path, mtime_ns, size)`` so the daemon does not re-parse the
-    file 200×/cycle when both ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
-    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON. The cache
-    invalidates automatically when ``mtime_ns`` or ``size`` changes —
-    operator script writes new evidence, mtime ticks, next read
-    re-parses. ``functools.lru_cache`` does not cache exceptions, so
-    corruption re-runs the parse every call (acceptable: corrupt
-    files are rare and re-parsing produces consistent error messages
-    rather than caching a stale exception object).
+    ``(path, mtime_ns, size, ino, ctime_ns)`` so the daemon does not
+    re-parse the file 200×/cycle when both
+    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
+    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON.
+
+    Cache key strength (2026-05-04, codex P2 follow-up on PR #47):
+    keying on ``(mtime_ns, size)`` alone allowed stale entries to
+    survive a same-length rewrite when the filesystem's mtime
+    granularity didn't advance within the write window — e.g. an
+    operator rewriting evidence with the same byte count back-to-back.
+    Inode (``st_ino``) and metadata-change time (``st_ctime_ns``) are
+    now part of the key:
+
+    - ``write_promotion_evidence`` always writes via tempfile +
+      ``os.replace``. Each write produces a new inode, so any rewrite
+      mutates ``st_ino`` regardless of mtime resolution. This is the
+      load-bearing invariant.
+    - ``st_ctime_ns`` advances on metadata-only updates (touch, chmod,
+      attribute change). Defence in depth — even non-overwrite mutations
+      that legitimately should invalidate the cache flush it.
+
+    ``functools.lru_cache`` does not cache exceptions, so corruption
+    re-runs the parse every call (acceptable: corrupt files are rare
+    and re-parsing produces consistent error messages rather than
+    caching a stale exception object).
 
     **stat/read_text race note**: ``read_promotion_evidence`` calls
     ``target.stat()`` and then this function reads ``target.read_text()``
     via separate syscalls. If ``os.replace`` swaps the inode between
     the two calls, the reader sees the NEW content but caches under
-    the OLD ``(mtime, size)`` key. The race is bounded because mtime
-    advances monotonically on overwrite — subsequent readers see the
-    new stat, miss the cache with a fresh key, and re-parse. The
-    "wrong-key" entry can never re-collide; it only consumes one of
-    the four LRU slots until evicted. No production failure mode.
+    the OLD key. With ``st_ino`` in the key, subsequent readers stat
+    the new inode, miss the cache, and re-parse. The "wrong-key" entry
+    cannot re-collide; it occupies one of the four LRU slots until
+    evicted. No production failure mode.
     """
 
     target = Path(path_str)
@@ -216,9 +233,12 @@ def read_promotion_evidence(
     accept a malformed payload as valid evidence.
 
     Phase C-perf-cache (critic ATTACK 3 follow-up): the parse is cached
-    by ``(path, mtime_ns, size)``. The cache invalidates automatically
-    on file change. Successful parses are cached up to LRU(maxsize=4);
-    corruption raises and is not cached (re-parses on every call).
+    by ``(path, mtime_ns, size, ino, ctime_ns)``. The cache invalidates
+    automatically on file change — including same-length rewrites where
+    mtime granularity does not advance, because ``os.replace`` rotates
+    ``st_ino`` on every atomic write. Successful parses are cached up
+    to LRU(maxsize=4); corruption raises and is not cached (re-parses
+    on every call).
     """
 
     target = path or DEFAULT_PROMOTION_EVIDENCE_PATH
@@ -226,7 +246,13 @@ def read_promotion_evidence(
         stat = target.stat()
     except FileNotFoundError:
         return None
-    return _parse_evidence_payload_cached(str(target), stat.st_mtime_ns, stat.st_size)
+    return _parse_evidence_payload_cached(
+        str(target),
+        stat.st_mtime_ns,
+        stat.st_size,
+        stat.st_ino,
+        stat.st_ctime_ns,
+    )
 
 
 def clear_evidence_read_cache() -> None:
