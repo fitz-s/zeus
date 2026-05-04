@@ -187,6 +187,18 @@ class MarketCandidate:
     # cycle_runtime. Storing the enum (not the str) keeps downstream
     # dispatch type-safe; cycle_runtime serializes to .value for SQL.
     market_phase: Optional["MarketPhase"] = None
+    # PR #56 review (Copilot + Codex P1, 2026-05-04): full provenance
+    # of how ``market_phase`` was determined. Pre-fix the evaluator
+    # hardcoded ``_phase_source="verified_gamma"`` whenever
+    # ``market_phase`` was non-None, silently dropping the actual
+    # provenance from MarketPhaseEvidence and skipping the 0.7×
+    # ``fallback_f1`` haircut in the A6 phase-aware Kelly resolver.
+    # Now cycle_runtime stamps the evidence's ``phase_source`` here so
+    # the evaluator passes the real value through. Valid values match
+    # MarketPhaseEvidence.phase_source: ``verified_gamma`` |
+    # ``fallback_f1`` | ``onchain_resolved`` | ``unknown`` | None
+    # (legacy fixture / pre-evidence path).
+    market_phase_source: Optional[str] = None
 
 
 @dataclass
@@ -3112,7 +3124,16 @@ def evaluate_candidate(
             _phase_value = (
                 candidate.market_phase.value if candidate.market_phase is not None else None
             )
-            _phase_source = "verified_gamma" if _phase_value is not None else None
+            # PR #56 review (Copilot + Codex P1, 2026-05-04): read the
+            # real MarketPhaseEvidence.phase_source stamped onto the
+            # candidate by cycle_runtime instead of hardcoding
+            # ``verified_gamma``. Pre-fix the resolver never saw
+            # ``fallback_f1`` even when Gamma omitted endDate, skipping
+            # the documented 0.7× haircut and over-sizing Kelly. Falls
+            # back to None for legacy fixture / pre-evidence callers
+            # that don't stamp the field — the resolver treats None as
+            # "no haircut applied" (back-compat with pre-A6 behavior).
+            _phase_source = getattr(candidate, "market_phase_source", None)
             phase_aware_factor = phase_aware_kelly_multiplier(
                 strategy_key=strategy_key,
                 market_phase=_phase_value,

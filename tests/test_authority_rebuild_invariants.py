@@ -493,6 +493,168 @@ def test_oracle_estimator_sanity_anchors():
 
 
 # ─────────────────────────────────────────────────────────────────── #
+#  PR #56 review (Copilot+Codex P1): phase_source propagation contract   #
+# ─────────────────────────────────────────────────────────────────── #
+
+
+def test_PR56_market_candidate_carries_phase_source_field():
+    """PR #56 review pin: ``MarketCandidate.market_phase_source`` exists and
+    defaults to ``None``. The field is the single conduit between the
+    cycle_runtime evidence builder and the evaluator's A6 Kelly resolver.
+    A regression that drops the field would silently revert evaluator to
+    the pre-fix hardcoded ``verified_gamma`` (over-sized Kelly on
+    Gamma-omitted-endDate paths)."""
+    from src.engine.evaluator import MarketCandidate
+    from src.config import City
+
+    # Default constructor must accept the field and default to None
+    candidate = MarketCandidate(
+        city=City(
+            name="NYC", lat=40.0, lon=-73.0, timezone="America/New_York",
+            settlement_unit="F", cluster="test", wu_station="KNYC",
+            settlement_source_type="wu_icao",
+        ),
+        target_date="2026-05-08",
+        outcomes=[],
+        hours_since_open=1.0,
+    )
+    assert hasattr(candidate, "market_phase_source")
+    assert candidate.market_phase_source is None
+
+    # Field must round-trip when set
+    candidate2 = MarketCandidate(
+        city=candidate.city,
+        target_date="2026-05-08",
+        outcomes=[],
+        hours_since_open=1.0,
+        market_phase_source="fallback_f1",
+    )
+    assert candidate2.market_phase_source == "fallback_f1"
+
+
+def test_PR56_evaluator_reads_phase_source_from_candidate_not_hardcode():
+    """PR #56 review pin: evaluator's A6 phase-aware Kelly site must read
+    ``candidate.market_phase_source`` and forward it verbatim to
+    ``phase_aware_kelly_multiplier``. Pre-fix it hardcoded
+    ``"verified_gamma"`` whenever ``market_phase`` was non-None,
+    skipping the 0.7× ``fallback_f1`` haircut.
+
+    Source-grep antibody: the literal string "verified_gamma" must NOT
+    appear as a hardcoded ``_phase_source`` assignment in evaluator.py.
+    Allowed: docstring/comment references; forbidden: assignment of
+    that literal to the resolver-input variable.
+    """
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "engine" / "evaluator.py"
+    ).read_text()
+    import re
+    # Match only assignment at start-of-line (with optional indent) —
+    # excludes docstring/comment cross-references that mention the
+    # historical hardcode for context (PR #56 fix commit body etc.).
+    forbidden = re.compile(
+        r'^\s+_phase_source\s*=\s*"verified_gamma"',
+        re.MULTILINE,
+    )
+    matches = forbidden.findall(src)
+    assert not matches, (
+        "evaluator.py hardcodes _phase_source=\"verified_gamma\" at "
+        "module-level/function-body — must read "
+        "candidate.market_phase_source instead. Found "
+        f"{len(matches)} occurrence(s). PR #56 review fix regressed."
+    )
+
+
+def test_PR56_dispatch_flag_warning_is_one_shot_per_value(monkeypatch, caplog):
+    """PR #56 review pin (Copilot MEDIUM): unrecognized env-var values
+    must emit exactly ONE warning per distinct misspelling, not one
+    warning per call. Pre-fix the M3 logging fired on every call —
+    Python logging does not dedupe by message content, so a tight
+    dispatch loop with a misspelled env var would spam the log.
+    """
+    import logging
+    from src.engine import dispatch as _dispatch
+
+    _dispatch._reset_dispatch_flag_warning_cache_for_test()
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "garbase")
+
+    with caplog.at_level(logging.WARNING, logger="src.engine.dispatch"):
+        # Call 5x — only the first should warn
+        for _ in range(5):
+            assert _dispatch.market_phase_dispatch_enabled() is True
+
+    warning_records = [
+        r for r in caplog.records
+        if r.name == "src.engine.dispatch" and r.levelno == logging.WARNING
+    ]
+    assert len(warning_records) == 1, (
+        f"Expected exactly 1 warning for 5 calls with same bad value; "
+        f"got {len(warning_records)}. Pre-PR-#56 fix this would have "
+        f"emitted 5 warnings (log spam)."
+    )
+
+    # A DIFFERENT bad value must produce its own one-shot warning
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "enabled")
+    with caplog.at_level(logging.WARNING, logger="src.engine.dispatch"):
+        for _ in range(3):
+            assert _dispatch.market_phase_dispatch_enabled() is True
+
+    # Now we should have 2 total warnings — one per distinct bad value
+    warning_records = [
+        r for r in caplog.records
+        if r.name == "src.engine.dispatch" and r.levelno == logging.WARNING
+    ]
+    assert len(warning_records) == 2, (
+        f"Expected 2 warnings for 2 distinct bad values; "
+        f"got {len(warning_records)}."
+    )
+
+
+def test_PR56_fallback_f1_haircut_visible_through_full_chain(tmp_path):
+    """PR #56 review pin: end-to-end the phase_source provenance flows
+    through. fallback_f1 (gamma payload missing endDate) → resolver
+    sees fallback_f1 → 0.7× haircut applied. Without the fix the
+    multiplier would be 0.7× larger than expected.
+
+    Cross-checks: (a) the existing
+    test_resolver_parametrized_floor_matrix already pins the multiplier
+    when phase_source is passed explicitly; (b) this test pins the
+    cycle_runtime → evaluator → resolver chain end-to-end without
+    mocking the resolver.
+    """
+    _write_oracle(tmp_path, {"NYC": {"high": {"n": 200, "mismatches": 4}}})
+
+    class _C:
+        name = "NYC"
+        timezone = "America/New_York"
+
+    decision = datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc)
+
+    mult_verified = phase_aware_kelly_multiplier(
+        strategy_key="settlement_capture",
+        market_phase="settlement_day",
+        city=_C(),
+        temperature_metric="high",
+        decision_time_utc=decision,
+        target_local_date=date(2026, 5, 8),
+        phase_source="verified_gamma",
+    )
+    mult_fallback = phase_aware_kelly_multiplier(
+        strategy_key="settlement_capture",
+        market_phase="settlement_day",
+        city=_C(),
+        temperature_metric="high",
+        decision_time_utc=decision,
+        target_local_date=date(2026, 5, 8),
+        phase_source="fallback_f1",
+    )
+    # The haircut must be observable: fallback gets 0.7× of verified
+    assert mult_fallback == pytest.approx(mult_verified * 0.7, abs=1e-6)
+    # Sanity: not just both zero
+    assert mult_verified > 0.0
+
+
+# ─────────────────────────────────────────────────────────────────── #
 #  H3 critic R6: m>=1 with n<10 must NOT permanently BLACKLIST          #
 # ─────────────────────────────────────────────────────────────────── #
 

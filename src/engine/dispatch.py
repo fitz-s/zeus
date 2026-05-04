@@ -109,6 +109,15 @@ class PhaseAuthorityViolation(RuntimeError):
 _TRUTHY_FLAG_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 _FALSY_FLAG_VALUES: frozenset[str] = frozenset({"0", "false", "no", "off"})
 
+# PR #56 review (Copilot MEDIUM, 2026-05-04): explicit one-shot guard for
+# unrecognized env-var values. Pre-fix the warn-on-unrecognized path
+# fired on every call; in dispatch hot loops this turned a misspelled
+# env var into log spam. Standard Python logging does NOT dedupe by
+# message content (the original code comment claimed it did — incorrect).
+# Module-level set tracks already-warned-about values so each typo
+# generates exactly one warning per process lifetime.
+_warned_unrecognized_dispatch_values: set[str] = set()
+
 
 def market_phase_dispatch_enabled() -> bool:
     """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is enabled.
@@ -129,11 +138,11 @@ def market_phase_dispatch_enabled() -> bool:
 
     Unrecognized non-empty values (e.g., a typo like ``"garbase"`` or
     ``"enabled"``) keep the post-A6 default ON and emit a one-shot
-    warning. Critic R6 M3 fix (2026-05-04): pre-fix, unrecognized values
-    silently flipped to OFF — operator typo became a kill-switch by
-    accident. Remain-on is the conservative direction since the default
-    is ON; the warning makes the typo loud without crashing the daemon
-    on a misspelled env var.
+    warning per misspelling (PR #56 review). Critic R6 M3 fix
+    (2026-05-04): pre-fix, unrecognized values silently flipped to OFF —
+    operator typo became a kill-switch by accident. Remain-on is the
+    conservative direction since the default is ON; the one-shot warning
+    surfaces the typo without spamming logs in tight dispatch loops.
 
     Empty / whitespace falls back to the default.
     """
@@ -144,17 +153,25 @@ def market_phase_dispatch_enabled() -> bool:
         return True
     if raw in _FALSY_FLAG_VALUES:
         return False
-    # Unrecognized: warn (once is enough — this is per-call, but the log
-    # framework dedupes identical messages cheaply) and stay on default.
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "Unrecognized %s=%r — expected one of %s (truthy) or %s (falsy). "
-        "Remaining on post-A6 default (phase-axis ON). Fix the env var to "
-        "silence this warning.",
-        _DISPATCH_FLAG_ENV, raw,
-        sorted(_TRUTHY_FLAG_VALUES), sorted(_FALSY_FLAG_VALUES),
-    )
+    # Unrecognized: warn once per distinct bad value, then default ON.
+    if raw not in _warned_unrecognized_dispatch_values:
+        _warned_unrecognized_dispatch_values.add(raw)
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Unrecognized %s=%r — expected one of %s (truthy) or %s "
+            "(falsy). Remaining on post-A6 default (phase-axis ON). "
+            "Fix the env var to silence this warning.",
+            _DISPATCH_FLAG_ENV, raw,
+            sorted(_TRUTHY_FLAG_VALUES), sorted(_FALSY_FLAG_VALUES),
+        )
     return True
+
+
+def _reset_dispatch_flag_warning_cache_for_test() -> None:
+    """Clear the one-shot warning set. NOT public API; only for test
+    fixtures that need to assert warning emission across multiple calls.
+    """
+    _warned_unrecognized_dispatch_values.clear()
 
 
 def is_settlement_day_dispatch(

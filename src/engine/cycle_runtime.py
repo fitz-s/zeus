@@ -2282,6 +2282,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             observation=obs,
             discovery_mode=mode.value,
             market_phase=market_phase,
+            # PR #56 review (Copilot + Codex P1, 2026-05-04): forward the
+            # MarketPhaseEvidence provenance so evaluator's A6 phase-aware
+            # Kelly resolver applies the right haircut (fallback_f1=0.7×).
+            # Pre-fix evaluator hardcoded "verified_gamma" → systematic
+            # over-sizing on Gamma payloads missing endDate.
+            market_phase_source=market_phase_evidence.phase_source,
         )
         summary["candidates"] += 1
 
