@@ -2237,8 +2237,12 @@ def evaluate_candidate(
     except Exception:
         pass
     if _phase2_data_version is not None:
-        from src.types.metric_identity import source_family_from_data_version
-        if source_family_from_data_version(_phase2_data_version) is None:
+        from src.types.metric_identity import (
+            source_family_from_data_version,
+            source_family_from_source_id,
+        )
+        _dv_family = source_family_from_data_version(_phase2_data_version)
+        if _dv_family is None:
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
@@ -2254,6 +2258,40 @@ def evaluate_candidate(
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
             )]
+        # Phase 2.6 (2026-05-04, critic-opus MAJOR 8): cross-field consistency.
+        # If ens_result carries BOTH source_id and data_version, their
+        # source_family must agree. A misconfigured ingest writer that set
+        # source_id='ecmwf_open_data' but data_version='tigge_*' would
+        # otherwise route the (wrong) Platt bucket via source_id while the
+        # gate sees the (right) family via data_version. This guard catches
+        # the divergence at evaluator entry.
+        _sid_for_consistency: Optional[str] = None
+        try:
+            if isinstance(ens_result, dict):
+                _candidate_sid = ens_result.get("source_id")
+                if isinstance(_candidate_sid, str) and _candidate_sid:
+                    _sid_for_consistency = _candidate_sid
+        except (TypeError, AttributeError):
+            _sid_for_consistency = None
+        if _sid_for_consistency is not None:
+            _sid_family = source_family_from_source_id(_sid_for_consistency)
+            if _sid_family is not None and _sid_family != _dv_family:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="FORECAST_PROVENANCE_INCONSISTENT",
+                    rejection_reasons=[
+                        f"ens_result source_id={_sid_for_consistency!r} "
+                        f"(family={_sid_family!r}) disagrees with "
+                        f"data_version={_phase2_data_version!r} "
+                        f"(family={_dv_family!r}); ingest writer mismatch"
+                    ],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=entry_validations,
+                    decision_snapshot_id=snapshot_id,
+                    p_raw=p_raw,
+                )]
     _phase2_cycle: Optional[str] = None
     _phase2_source_id: Optional[str] = None
     _phase2_horizon_profile: Optional[str] = None

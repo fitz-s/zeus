@@ -17,6 +17,7 @@ import numpy as np
 from src.config import City, ensemble_member_count
 from src.data.forecast_source_registry import (
     ForecastSourceRole,
+    SourceNotEnabled,
     gate_source,
     gate_source_role,
     source_id_for_ensemble_model,
@@ -116,6 +117,36 @@ def fetch_ensemble(
     source_id = source_id_for_ensemble_model(model)
     source_spec = gate_source(source_id)
     gate_source_role(source_spec, role)
+
+    # Phase 3 hardening (2026-05-04, critic-opus MAJOR 6): the routing flip
+    # in c525e358 sent `model='ecmwf_ifs025'` to source_id `ecmwf_open_data`,
+    # but this fetcher's HTTP path still calls the Open-Meteo broker
+    # (line ~155). That re-introduces the training/serving skew the routing
+    # flip was supposed to *remove* — Open-Meteo applies 1-hour temporal
+    # interpolation and member re-packaging. Refuse entry_primary on
+    # ecmwf_open_data unless the spec has a real ingest_class (proper raw
+    # GRIB ingester). The operator must either:
+    #   (a) wire `ingest_class` on src/data/forecast_source_registry.py so
+    #       _fetch_registered_ingest_ensemble routes through raw ECMWF
+    #       Open Data (src/data/ecmwf_open_data.py::collect_open_ens_cycle),
+    #       OR
+    #   (b) flip the executable-forecast reader writer ON so live entry
+    #       loads ens_result via reader_result.bundle.to_ens_result()
+    #       at evaluator.py:1713 instead of fetch_ensemble at :1717.
+    # The exec-forecast reader path already produces typed data_version
+    # via the snapshot row, so it inherently can't trigger this guard.
+    if (
+        source_id == "ecmwf_open_data"
+        and role == "entry_primary"
+        and source_spec.ingest_class is None
+    ):
+        raise SourceNotEnabled(
+            "ecmwf_open_data is registered for entry_primary but has no "
+            "ingest_class — fetch_ensemble would route through the Open-Meteo "
+            "broker (training/serving skew). Use the executable-forecast "
+            "reader path or attach a raw-GRIB ingest_class to the spec."
+        )
+
     if source_spec.ingest_class is not None:
         return _fetch_registered_ingest_ensemble(
             city,

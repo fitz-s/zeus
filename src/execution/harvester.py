@@ -1656,7 +1656,19 @@ def harvest_settlement(
             _phase2_horizon_profile = (
                 "full" if _phase2_cycle in ("00", "12") else "short"
             )
-    except Exception:  # noqa: BLE001 — never block harvest on stratification derivation
+    except (ImportError, AttributeError, TypeError, ValueError) as _exc:
+        # Phase 2.6 hardening (2026-05-04, critic-opus MINOR 10): explicit
+        # exception list rather than bare Exception so a real bug doesn't
+        # get swallowed silently. We log+continue (writer's schema-default
+        # branch produces well-formed rows from None args). If a future
+        # exception type needs to fall through here, add it explicitly so
+        # the maintainer is forced to think about whether silent fallback
+        # is right for that case.
+        logger.warning(
+            "Phase 2.6 stratification derivation failed for %s/%s; falling "
+            "back to schema defaults: %s: %s",
+            city.name, target_date, type(_exc).__name__, _exc,
+        )
         _phase2_cycle = None
         _phase2_source_id_field = None
         _phase2_horizon_profile = None
