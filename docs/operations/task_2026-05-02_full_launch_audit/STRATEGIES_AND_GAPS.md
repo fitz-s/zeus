@@ -153,7 +153,7 @@ opening_inertia                    center_buy / shoulder_sell / opening_inertia 
 **Current code path**: `src/engine/cycle_runtime.py:1950` filter `hours_to_resolution < params["max_hours_to_resolution"]`, params from MODE_PARAMS in `src/engine/cycle_runner.py:335`.
 
 **Decision required**:
-- Window definition: "24h before settle" (UMA 10:00 UTC) OR "24h before target_date midnight in city's local timezone"? They differ for non-UTC cities.
+- Window definition: "24h before Polymarket endDate (uniformly 12:00 UTC of target_date for ALL weather markets — verified across 13 cities via Gamma API, see `task_2026-05-04_strategy_redesign_day0_endgame/INVESTIGATION_EXTERNAL.md` Q1)" OR "24h before target_date midnight in city's local timezone"? They differ by up to ~12h depending on city longitude. **NOTE**: prior drafts of this section cited "(UMA 10:00 UTC)" as the settle anchor — that claim has no source-code anchor and is documentation drift. UMA settlement timing is variable (proposer-driven submission then optimistic dispute window); it is NOT a fixed UTC hour. The Polymarket endDate (12:00 UTC) is the canonical target_date close for purposes of this window. Per `task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md` §1.E1+§4.D-C.
 - Should DAY0_CAPTURE **replace** UPDATE_REACTION's near-settle role, or coexist?
 - Cadence: 15 min interval is fine, but is it enough for the final 6h sub-window where price action accelerates?
 
@@ -161,20 +161,26 @@ opening_inertia                    center_buy / shoulder_sell / opening_inertia 
 
 ---
 
-### 3.2 Gap: middle-state has 20h/day strategy vacuum (task #51)
+### 3.2 Gap: middle-state framing was wrong; reframed to global-tiled scheduling (task #51 — REFRAMED 2026-05-04)
 
-**Symptom**: After OPENING_HUNT's 24h-since-open window closes and before DAY0_CAPTURE's near-settle window opens, only UPDATE_REACTION's 4 cron times cover the middle. Markets sit unwatched for 10h+ stretches.
+**Original framing (REFUTED)**: "After OPENING_HUNT's 24h-since-open window closes and before DAY0_CAPTURE's near-settle window opens, markets sit unwatched for 10h+ stretches." This assumed the schedule was framed against a single market's lifecycle.
 
-**Why it exists**: UPDATE_REACTION cron is bound to NWP model release times (ECMWF 00z and 12z, GFS 06z and 18z release after lag). The original assumption: "no new forecast = no new edge to capture." That assumption is wrong for two reasons:
-1. Polymarket prices move continuously even when the underlying physical forecast is unchanged (toxic flow, retail flow, news shocks)
-2. Existing snapshots can re-evaluate edge as time decays — the same forecast at 50h-to-settle vs 30h-to-settle has different implied probability under the model
+**Why the original framing is wrong**: Operator 2026-05-04: "一个全球50个城市遍布所有时区的市场怎么可能有任何的停滞期呢？" Zeus tracks 51 cities across all 24 timezones; for any UTC hour, 2-21 cities are inside their own SETTLEMENT_DAY (24h-before-end-of-target-date in city-local tz) — there is **no single global vacuum**. The "20h vacuum" was an artifact of treating one DiscoveryMode-axis as if it were the whole schedule. Per `task_2026-05-04_strategy_redesign_day0_endgame/INVESTIGATION_INTERNAL.md` Q5 (51-city UTC×Day0 matrix).
+
+**Actual structural gap** (per `INVESTIGATION_INTERNAL.md` Q4 + PLAN_v2 §3 three-lane scheduling):
+
+1. **Lane 1 (per-(city, target_date) UTC-anchored)**: Today missing. Each city × target_date pair has a deterministic SETTLEMENT_DAY entry boundary at `end_of_target_local_date_utc - 24h` (in UTC, derived from the city's IANA tz). The current daemon has no per-city per-date triggers; DAY0_CAPTURE fires globally on a clock unrelated to per-city boundaries.
+2. **Lane 2 (Polymarket market events)**: Today missing. Market createdAt (~04:04 UTC daily for new target_date) and market endDate (12:00 UTC of target_date — uniform across cities per Gamma API verification, see PLAN_v2 §1.E1) need event-triggered re-evaluation, not a fixed cron cadence that sometimes misses by hours.
+3. **Lane 3 (NWP release events)**: Partially handled by UPDATE_REACTION cron (07/09/19/21 UTC pinned to ECMWF 00z/12z + GFS 06z/18z release windows per `INVESTIGATION_EXTERNAL.md` §F6) but missing the file-watcher / marker-file plumbing that would catch actual release availability rather than scheduled-availability.
+
+**Why MIDDLE_STATE_HUNT was the wrong fix**: Adding a 5th DiscoveryMode preserves the single-axis framing that caused the vacuum illusion in the first place. The right fix is the three-lane decomposition (P6+P7 in PLAN_v2 §6).
 
 **Decision required**:
-- New mode `MIDDLE_STATE_HUNT` fired every 15-30 min in the gap window?
-- OR convert UPDATE_REACTION to interval-based (5-15 min) and absorb middle-state into it?
-- OR skip a dedicated mode and only react to price events (§3.4)?
+- Confirm three-lane reframe is the chosen direction (P6+P7 packets carry the implementation).
+- Decide whether OPENING_HUNT and UPDATE_REACTION continue as legacy DiscoveryMode-axis cron jobs while Lane 1/2/3 are layered on top, or whether the entire mode axis is migrated.
+- If layered: P3 (mode→phase migration) handles the hot-path dispatch sites; the legacy modes can stay as schedule labels (per PLAN_v2 §2 "What `DiscoveryMode` becomes").
 
-**Sub-strategy implications**: if added, MIDDLE_STATE_HUNT would naturally produce all 4 strategy_keys (`center_buy` / `shoulder_sell` / `opening_inertia` / and once §3.5 lands, `shoulder_buy` / `center_sell`).
+**Sub-strategy implications**: per-(city, target_date) Lane 1 triggers naturally give every city its own SETTLEMENT_DAY discovery window without inventing a 5th mode. Strategy keys (`center_buy` / `shoulder_sell` / `opening_inertia` / dormant `shoulder_buy` / `center_sell`) are unchanged by this reframe; only the trigger axis is reorganized.
 
 ---
 
