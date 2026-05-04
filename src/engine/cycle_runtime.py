@@ -2033,7 +2033,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             filter_market_to_settlement_day,
             market_phase_dispatch_enabled,
         )
-        if market_phase_dispatch_enabled():
+        # Critic R5 code-reviewer M1: stamp the flag state on the cycle
+        # summary so downstream substrate / cohort attribution can
+        # explain step-changes in candidate count when the operator
+        # flips ZEUS_MARKET_PHASE_DISPATCH. Without this, the substrate
+        # log shows only the post-filter count with no audit trail.
+        flag_on = market_phase_dispatch_enabled()
+        summary["market_phase_dispatch_flag"] = flag_on
+        if flag_on:
             markets = [
                 m for m in markets
                 if filter_market_to_settlement_day(

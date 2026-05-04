@@ -312,6 +312,15 @@ def test_day0_transition_flag_on_falls_back_to_legacy_on_parse_error(
         decision_time_utc=decision_time,
         legacy_hours_to_settlement=10.0,
     ) is False
+    # Critic R5 code-reviewer L1: parse-error path with no legacy hours.
+    # The helper should fall through to legacy and report False (no
+    # threshold to compare against).
+    assert should_enter_day0_window(
+        target_date_str="not-a-date",
+        city_timezone="Europe/London",
+        decision_time_utc=decision_time,
+        legacy_hours_to_settlement=None,
+    ) is False
 
 
 # ---------------------------------------------------------------------- #
@@ -510,3 +519,82 @@ def test_p3_p4_share_dispatch_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert market_phase_dispatch_enabled() is True
     monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     assert market_phase_dispatch_enabled() is False
+
+
+# ---------------------------------------------------------------------- #
+# Critic R5 R4-A4-M1 carry-forward verification
+# ---------------------------------------------------------------------- #
+
+
+def test_attribution_drift_flag_aware_deferral_at_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critic R5 reported R4 A4-M1 as UNRESOLVED at HEAD because line
+    148 of attribution_drift.py still has the legacy clause. This is
+    correct AT line 148 but misleading: the flag-aware deferral at
+    line 144-145 returns None BEFORE line 148 runs when flag is ON.
+    The legacy clause at line 148 is correctly the flag-OFF path.
+    This test pins both branches end-to-end so future reviewers don't
+    re-flag this as unresolved.
+    """
+    from src.state.attribution_drift import (
+        AttributionSignature,
+        _infer_strategy_from_signature,
+    )
+
+    sig = AttributionSignature(
+        position_id="pos-r5-verify",
+        label_strategy="settlement_capture",
+        inferred_strategy=None,
+        bin_topology="point",
+        direction="buy_yes",
+        discovery_mode="day0_capture",
+        bin_label="0-1",
+        is_label_inferable=False,
+    )
+
+    # Flag ON → returns None at line 145 BEFORE legacy clause runs.
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    assert _infer_strategy_from_signature(sig) is None, (
+        "R4 A4-M1: with flag ON, _infer_strategy_from_signature MUST "
+        "defer (return None) — flag-aware return at line 144-145 "
+        "executes BEFORE the legacy clause at line 148"
+    )
+
+    # Flag OFF → reaches the legacy clause at line 148 normally.
+    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    assert _infer_strategy_from_signature(sig) == "settlement_capture", (
+        "R4 A4-M1: with flag OFF, the legacy clause at line 148 "
+        "remains authoritative — discovery_mode='day0_capture' → "
+        "'settlement_capture'"
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Critic R5 code-reviewer M1 — flag stamped on cycle summary
+# ---------------------------------------------------------------------- #
+
+
+def test_cycle_summary_records_dispatch_flag_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code-reviewer M1: when site 2 candidate filter runs, the cycle
+    summary must record the flag state so downstream cohort
+    attribution can explain step-changes in candidate count when the
+    operator flips ZEUS_MARKET_PHASE_DISPATCH. Without this, the
+    substrate log shows post-filter count with no audit trail.
+
+    This test exercises the stamping logic by reading the source
+    directly (the cycle is too heavy-weight to spin up here; the
+    integration belongs to a runtime-level test which is out of P4
+    scope per PLAN_v3 §6.P4 + critic R5 A10).
+    """
+    src_path = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "engine" / "cycle_runtime.py"
+    )
+    src = src_path.read_text()
+    assert 'summary["market_phase_dispatch_flag"] = flag_on' in src, (
+        "M1: cycle_runtime.py must stamp the dispatch flag on summary "
+        "at the candidate filter site (around the if/else at line ~2036)"
+    )

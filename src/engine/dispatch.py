@@ -34,9 +34,40 @@ Why a flag rather than a hard cutover:
   it is locked ON for ≥1 stable week with no regressions, P3.5 can
   excise the legacy branch.
 
-This module is the single locus for the dispatch decision so the six
+This module is the single locus for the per-candidate strategy +
+DAY0_WINDOW + obs-fetch + candidate-filter dispatch decisions — six
 call sites (3 in evaluator.py + 1 obs-fetch gate + 2 D-A sites in
 cycle_runtime.py) all read the same flag and the same logic.
+
+KNOWN UNMIGRATED SIBLING (critic R5 ATTACK 3 / A3-M1):
+``src/engine/evaluator.py:1427`` (``is_day0_mode = candidate.discovery_mode
+== "day0_capture"``) drives ``EntryMethod`` selection (DAY0_OBSERVATION
+vs ENS_MEMBER_COUNTING) and two downstream rejection branches. It is NOT
+migrated by P3/P4. Under flag OFF this is harmless (every site reads
+the same legacy axis). Under flag ON it produces a phase/method
+incoherence for divergent candidates (e.g.,
+``discovery_mode=opening_hunt`` + ``market_phase=settlement_day`` —
+strategy_key dispatch routes to ``settlement_capture`` while EntryMethod
+stays on ENS_MEMBER_COUNTING). Closure: the EntryMethod selection logic
+is rewired through the StrategyProfile registry in PR #54 §3.A4 — see
+``docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md``.
+This is a flag-OFF safe scaffold; flag MUST stay default OFF until the
+PR #54 cutover lands.
+
+KNOWN OBSERVABILITY-ONLY GAPS (critic R5 A5-M2 / A6-M3 / A7-M4):
+- ``_is_settlement_day_phase`` hardcodes ``uma_resolved=False`` — UMA
+  on-chain resolved truth is not wired today. POST_TRADING and RESOLVED
+  collapse to the same dispatch behavior. PR #54 §3.A5 ships the UMA
+  ``SettlementResolved`` listener.
+- F1 fallback (12:00 UTC of target_date) is the only endDate source
+  for site 1 (monitor loop has no Gamma payload). With flag ON this
+  becomes silent live authority. PR #54 §3.A5 introduces
+  ``MarketPhaseEvidence.phase_source ∈ {verified_gamma, fallback_f1,
+  unknown, onchain_resolved}`` so callers can distinguish + degrade.
+- ``market_phase=None`` collapses MISSING + PARSE_FAILED + PRE_FLAG_FLIP
+  into a single state. Finding A's "missing = OK" pattern for the
+  phase axis. PR #54 §3.A5 separates these.
+
 Cycle-axis sites (cycle_runner.py:_classify_edge_source / freshness
 short-circuit) are NOT migrated by P3/P4 because they operate before
 per-candidate phase is available — see
@@ -266,6 +297,19 @@ def filter_market_to_settlement_day(
         city_timezone=getattr(city, "timezone", ""),
         decision_time_utc=decision_time_utc,
     )
+    if result is None:
+        # Critic R5 A5-L6: log when site 2 silently drops a candidate
+        # under flag ON due to phase-tag parse failure. Without this,
+        # operators flipping ZEUS_MARKET_PHASE_DISPATCH=1 see a
+        # candidate-count drop with no audit trail tying it to Gamma
+        # payload corruption.
+        import logging
+        logging.getLogger(__name__).warning(
+            "filter_market_to_settlement_day fail-soft excluded "
+            "%s/%s — phase tag could not be computed",
+            getattr(city, "name", "<unknown>"),
+            target_date_str,
+        )
     # None (parse error) collapses to False — fail-soft toward
     # excluding the candidate when flag is ON.
     return result is True
