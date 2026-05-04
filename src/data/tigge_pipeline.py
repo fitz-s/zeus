@@ -180,9 +180,13 @@ def determine_catch_up_dates(
     """Return list of issue dates needing catch-up (oldest first).
 
     Bounded by ``max_lookback_days`` to avoid runaway backfills. The newest
-    issue date considered is yesterday (today's TIGGE 00Z is typically not
-    posted to MARS until ~10:00 UTC). The oldest is ``max(yesterday -
-    max_lookback_days + 1, db_max_issue + 1)``.
+    issue date considered is yesterday — TIGGE on the public MARS archive
+    has a **48-hour embargo** (confirmed at <https://confluence.ecmwf.int/>;
+    see ``docs/operations/tigge_daemon_integration.md`` §"Source role"),
+    so today's 00Z cannot be requested same-day under any circumstances.
+    The earlier "TIGGE posts by 10:00 UTC" comment was wrong and has been
+    purged. The oldest is ``max(yesterday - max_lookback_days + 1,
+    db_max_issue + 1)``.
     """
     today = today_utc or datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
