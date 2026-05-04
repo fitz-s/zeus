@@ -140,6 +140,59 @@ def _registered_review_safe_tags(repo_root: str) -> set[str]:
     return set(REVIEW_SAFE_TAG.findall(text))
 
 
+def git_add_is_broad(command: str) -> bool:
+    """Return True iff command contains a real `git add` with broad args (-A, --all, .).
+
+    Uses POSIX shlex WITHOUT whitespace_split so quoted strings are single tokens,
+    preventing false positives from e.g. echo '...git add -A...' or double-quoted args.
+    """
+    BROAD = {"-A", "--all", "."}
+    if not _raw_mentions_git(command):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.commenters = "#"  # strip # comments so they don't false-positive
+        # Do NOT set whitespace_split=True — that breaks quote handling
+        tokens = list(lexer)
+    except ValueError:
+        return False
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in SEPARATORS or ENV_ASSIGNMENT.match(t):
+            i += 1
+            continue
+        if not _is_git_token(t):
+            i += 1
+            continue
+        i += 1  # past 'git'
+        while i < len(tokens) and tokens[i] not in SEPARATORS:
+            opt = tokens[i]
+            if opt in GIT_SUBCOMMANDS_WITH_VALUE:
+                i += 2
+                continue
+            if any(opt.startswith(p + "=") for p in GIT_SUBCOMMANDS_WITH_VALUE if p.startswith("--")):
+                i += 1
+                continue
+            if opt in GIT_VALUELESS_OPTIONS or (opt.startswith("-") and opt not in {"-"}):
+                i += 1
+                continue
+            if "$" in opt or "`" in opt:
+                break  # dynamic subcommand — skip
+            if opt != "add":
+                break  # different subcommand
+            # Found git add — scan its args
+            i += 1
+            while i < len(tokens) and tokens[i] not in SEPARATORS:
+                if tokens[i] in BROAD:
+                    return True
+                i += 1
+            break
+        i += 1
+    return False
+
+
 def validate_staged_review_safe_tags(repo_root: str) -> list[tuple[str, str]]:
     """Return newly staged REVIEW-SAFE tag lines not registered in the index.
 
@@ -213,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     has = sub.add_parser("has-git-subcommand")
     has.add_argument("targets", nargs="+")
 
+    sub.add_parser("git-add-is-broad")
+
     rel = sub.add_parser("repo-relative")
     rel.add_argument("repo_root")
     rel.add_argument("file_path")
@@ -241,6 +296,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 64
             return 1
         return 0 if any(subcmd in targets for subcmd in subcommands) else 1
+
+    if args.cmd == "git-add-is-broad":
+        command = os.environ.get("HOOK_COMMAND", "")
+        return 0 if git_add_is_broad(command) else 1
 
     if args.cmd == "repo-relative":
         code, path = repo_relative(args.repo_root, args.file_path)

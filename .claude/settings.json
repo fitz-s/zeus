@@ -1,6 +1,18 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-merge-cleanup-reminder.sh",
+            "description": "Soft cleanup checklist after gh pr merge / git merge: worktree removal, ops packet lifecycle (delete-by-default), context compact, agent-replay pruning"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit|NotebookEdit",
@@ -29,6 +41,11 @@
             "type": "command",
             "command": ".claude/hooks/pre-merge-contamination-check.sh",
             "description": "Advise conflict-first handling for git merge/pull/cherry-pick/rebase/am on protected branches; validate MERGE_AUDIT_EVIDENCE only for escalated broad/high-risk conflict surfaces"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/cotenant-staging-guard.sh",
+            "description": "Block git add -A/--all/. in main worktree (co-tenant absorption risk). Linked worktrees have isolated indexes and are always allowed. Bypass: COTENANT_GUARD_BYPASS=1"
           }
         ]
       }

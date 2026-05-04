@@ -190,6 +190,19 @@ production rows. The antibody is conflict-first escalation, not making every
 clean merge pay a critic tax. (Evidence archived at
 `docs/archives/packets/task_2026-04-28_contamination_remediation/`.)
 
+### Commit & PR protocol
+
+Commits: `type(scope): subject` — body only when why is non-obvious. Use `[skip-invariant]` for governance/docs-only commits that intentionally bypass the invariant baseline.
+
+Worktree isolation: `git add -A`/`--all`/`.` is hook-blocked in the main worktree; allowed in any linked worktree (isolated index). Bypass: `COTENANT_GUARD_BYPASS=1`. Verify `git log -1` after heredoc commits.
+
+PRs: batch multiple slices into one PR — every open triggers automated review that surfaces substantive issues. Resolve all review comments before merging. Template: `.github/pull_request_template.md`.
+
+**Post-merge cleanup** (soft, agent decides; hook prints checklist on `gh pr merge`):
+- worktree → `git worktree remove <path> && git worktree prune` when task done.
+- ops packet → **delete by default** (git = backup); archive only when packet holds evidence `git log` can't summarize (contamination verdict, design rationale).
+- context → `/compact` before ending a long session.
+
 ## 3. Navigation & Task Routing
 
 **Step 1 — Run the topology digest for your task.** This is not optional. The
@@ -239,7 +252,9 @@ Use the first-class route when an agent needs to classify this closeout habit:
 `python3 scripts/topology_doctor.py --navigation --task "direct operation feedback capsule: context recovery, Zeus improvement insights, topology helped/blocked" --intent "direct operation feedback capsule" --write-intent read_only`.
 Pass an existing packet `work_log.md` or `receipt.json` only when that packet
 already consumes it; `.omx/context/*handoff*` remains local runtime scratch, not
-a repo persistence target.
+a repo persistence target. Old `.omc/state/agent-replay-*.jsonl` files are safe
+to delete when no active recovery is in progress — they accumulate across sessions
+and have no cross-session authority.
 
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
