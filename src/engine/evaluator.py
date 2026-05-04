@@ -23,6 +23,7 @@ import numpy as np
 if TYPE_CHECKING:
     from src.data.observation_client import Day0ObservationContext
     from src.strategy.market_phase import MarketPhase
+    from src.strategy.market_phase_evidence import MarketPhaseEvidence
 
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
@@ -199,6 +200,14 @@ class MarketCandidate:
     # ``fallback_f1`` | ``onchain_resolved`` | ``unknown`` | None
     # (legacy fixture / pre-evidence path).
     market_phase_source: Optional[str] = None
+    phase_evidence: Optional["MarketPhaseEvidence"] = None
+
+    def __post_init__(self) -> None:
+        if self.phase_evidence is not None:
+            if self.market_phase is None:
+                self.market_phase = self.phase_evidence.phase
+            if self.market_phase_source is None:
+                self.market_phase_source = self.phase_evidence.phase_source
 
 
 @dataclass

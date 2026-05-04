@@ -1,8 +1,8 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-02; last_reused=2026-05-02
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-02; last_reused=2026-05-04
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-02
-# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy.
+# Last reused/audited: 2026-05-04
+# Authority basis: task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -292,6 +292,108 @@ NYC = City(
     settlement_unit="F",
     wu_station="KLGA",
 )
+
+
+def test_PR56_phase_evidence_sidecar_auto_derives_legacy_fields():
+    from src.strategy.market_phase import MarketPhase
+    from src.strategy.market_phase_evidence import MarketPhaseEvidence
+
+    evidence = MarketPhaseEvidence(
+        phase=MarketPhase.SETTLEMENT_DAY,
+        phase_source="fallback_f1",
+        market_start_at=None,
+        market_end_at=datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc),
+        settlement_day_entry_utc=datetime(2026, 4, 1, 4, 0, tzinfo=timezone.utc),
+    )
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=1.0,
+        phase_evidence=evidence,
+    )
+    assert candidate.market_phase is MarketPhase.SETTLEMENT_DAY
+    assert candidate.market_phase_source == "fallback_f1"
+
+    explicit = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=1.0,
+        market_phase=MarketPhase.PRE_SETTLEMENT_DAY,
+        market_phase_source="verified_gamma",
+        phase_evidence=evidence,
+    )
+    assert explicit.market_phase is MarketPhase.PRE_SETTLEMENT_DAY
+    assert explicit.market_phase_source == "verified_gamma"
+
+    legacy = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[],
+        hours_since_open=1.0,
+    )
+    assert legacy.market_phase is None
+    assert legacy.market_phase_source is None
+
+
+def test_PR56_cycle_runtime_forwards_phase_evidence_sidecar():
+    from src.strategy.market_phase import MarketPhase
+
+    captured = {}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-01",
+        "outcomes": [],
+        "hours_since_open": 1.0,
+        "hours_to_resolution": 36.0,
+        "temperature_metric": "high",
+        "event_id": "evt-phase-evidence",
+        "slug": "slug-phase-evidence",
+    }
+
+    def _evaluate_candidate(candidate, *args, **kwargs):
+        captured["candidate"] = candidate
+        return []
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        get_current_observation=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-settlement candidate should not fetch day0 observation")
+        ),
+        evaluate_candidate=_evaluate_candidate,
+    )
+
+    summary = {"candidates": 0, "no_trades": 0}
+    cycle_runtime.execute_discovery_phase(
+        None,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=CycleArtifact(mode="opening_hunt", started_at="2026-03-31T00:00:00Z"),
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 3, 31, 0, 0, tzinfo=timezone.utc),
+        env="paper",
+        deps=deps,
+    )
+
+    candidate = captured["candidate"]
+    assert summary["candidates"] == 1
+    assert candidate.phase_evidence is not None
+    assert candidate.phase_evidence.phase is MarketPhase.PRE_SETTLEMENT_DAY
+    assert candidate.phase_evidence.phase_source == "fallback_f1"
+    assert candidate.market_phase is candidate.phase_evidence.phase
+    assert candidate.market_phase_source == candidate.phase_evidence.phase_source
 
 
 class _CycleSettingsStub:

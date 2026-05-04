@@ -2288,6 +2288,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # Pre-fix evaluator hardcoded "verified_gamma" → systematic
             # over-sizing on Gamma payloads missing endDate.
             market_phase_source=market_phase_evidence.phase_source,
+            phase_evidence=market_phase_evidence,
         )
         summary["candidates"] += 1
 
