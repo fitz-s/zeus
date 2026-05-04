@@ -241,10 +241,14 @@ After merge + restart:
 
 ```sql
 -- Within 30 min of daemon boot, this returns 0 rows (no gap)
+-- Note (2026-05-04 critic-opus blocker fix): query MUST use `data_version LIKE 'tigge_%'` not
+-- `model_version='tigge'`. The latter returns only 116 stranded legacy ghost rows. Real TIGGE
+-- ingest writes `model_version='ecmwf_ens'` + `data_version='tigge_*_v1'` per
+-- scripts/ingest_grib_to_snapshots.py:65,71. Provenance lives in data_version, not model_version.
 SELECT date(today + i) FROM (VALUES (0),(1),(2),(3),(4),(5)) v(i)
 WHERE date(today + i) NOT IN (
   SELECT DISTINCT target_date FROM ensemble_snapshots_v2
-  WHERE model_version='tigge' AND target_date >= date('now')
+  WHERE data_version LIKE 'tigge_%' AND target_date >= date('now')
 );
 
 -- scheduler_jobs_health.json shows ingest_tigge_freshness_guard with status=OK

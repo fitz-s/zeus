@@ -21,21 +21,50 @@ When live evaluator applies the bucket-averaged Platt to a 12z forecast:
 - Bias may shift (00z systematically longer-lead than mean, 12z shorter)
 - Calibration error magnitude: empirically TBD; depends on data, but documented in numerical-weather-prediction literature (cite forthcoming).
 
-## Decision
+## Decision (REVISED 2026-05-04 per may4math.md Finding 1)
 
-Add `cycle TEXT NOT NULL DEFAULT '00'` to `platt_models_v2`. Bucket key becomes `(metric, city, cycle, season, data_version, input_space)`. Existing rows backfilled with `'00'` (legacy is 00z-only).
+**Original draft proposed adding only `cycle` as stratifier. That is insufficient.** Per may4math.md mathematical tribunal, the minimum domain key for `ForecastCalibrationDomain` is:
+
+```
+(temperature_metric, city/cluster, season, source_id, cycle_hour_utc, horizon_profile, data_version, input_space)
+```
+
+Cycle alone misses: TIGGE vs Open Data physical-source difference, full vs short horizon profile difference. ECMWF 4D-Var uses different assimilation windows for 00z (21–09 UTC) vs 12z (09–21 UTC); these are not comparable to TIGGE archive without source-cycle proof.
+
+Add THREE columns to `platt_models_v2` (and `calibration_pairs_v2`):
+
+- `cycle TEXT NOT NULL DEFAULT '00'` — `'00'` or `'12'` (06/18 not in TIGGE; gate as ineligible upstream)
+- `source_id TEXT NOT NULL DEFAULT 'tigge_mars'` — source authority (TIGGE archive vs ecmwf_open_data); legacy backfill defaults to `'tigge_mars'` since pre-2026-05-04 calibration pairs come from TIGGE
+- `horizon_profile TEXT NOT NULL DEFAULT 'full'` — `'full'` (00z/12z, 240+ lead) or `'short'` (06z/18z, ~120 lead); always `'full'` for TIGGE-aligned entry_primary
+
+Bucket key becomes:
+```
+(temperature_metric, city/cluster, season, source_id, cycle_hour_utc, horizon_profile, data_version, input_space)
+```
+
+Existing rows backfilled with `cycle='00'`, `source_id='tigge_mars'`, `horizon_profile='full'` (matches the pre-existing 17-month TIGGE 00z-only training corpus).
 
 Equivalent change to `calibration_pairs_v2`: add `cycle TEXT NOT NULL` derived from `forecast_available_at` (or `issue_time` of the snapshot), backfilled to `'00'` for existing rows.
 
 The fitter (`scripts/refit_platt_v2.py`) groups by the new bucket key. Each (metric, city, cycle, season, data_version, input_space) tuple becomes its own Platt fit.
 
-## Why option C (cycle stratifier) rather than D (lead-bin stratifier)
+## Why this stratifier set rather than alternatives
 
 | Option | Stratifier dim | New buckets per old bucket | Sample density |
 |---|---|---|---|
-| C (chosen) | cycle ∈ {00z, 12z} | 2× | halved |
+| Original C draft | cycle ∈ {00z, 12z} only | 2× | halved |
+| **REVISED** | source_id × cycle_hour × horizon_profile | up to 4× (live: 2×; with TIGGE separation: 4×) | quartered in worst case |
 | D | lead_bin (e.g., 0-1d, 1-2d, ..., 7d+) | ~7× | divided by 7 |
-| C+D | cycle × lead_bin | ~14× | divided by 14 |
+
+The REVISED set is what may4math.md Finding 1 minimum-safe domain demands. In practice for entry_primary:
+- `source_id` ∈ {tigge_mars, ecmwf_open_data} (pure TIGGE training data has only `tigge_mars`; mixed-source cells will appear after Phase 2.5 transfer policy fix)
+- `cycle_hour_utc` ∈ {'00','12'} for entry_primary (06/18 ineligible)
+- `horizon_profile` = 'full' for entry_primary (short profile is monitor-only)
+
+So practical multiplication for entry_primary buckets is `2 (sources) × 2 (cycles) × 1 (horizon) = 4×`. With 90-day 12z backfill landing only TIGGE rows initially, source_id stays 1 dim (just `tigge_mars`) until Phase 2.5 enables OpenData calibration pairs to flow in. Effective near-term multiplication = **2×** (cycle only); longer-term = 4×.
+
+- D (lead-bin) deferred — needs full 17-month historical first
+- Lead-bin can be added as a continuous feature to the Platt regression (already the case via `B·lead_days` term); it doesn't need to be a stratifier as long as cycle/source/horizon are correctly factored out
 
 - D would push most buckets to immature (level=4) again, requiring many more months of data
 - C is a coarser-grained but mathematically meaningful split: the cycle is a discrete operational choice, the lead is a continuous regression

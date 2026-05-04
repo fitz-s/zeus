@@ -19,8 +19,18 @@ This is not a software bug — it is a math/data-architecture asymmetry that mus
 
 1. **launchctl bootout** of `com.zeus.live-trading` (active daemon killed; PID 76474 terminated 2026-05-04)
 2. **Plist quarantined**: `~/Library/LaunchAgents/com.zeus.live-trading.plist` → renamed to `.locked-2026-05-04-cycle-asymmetry-platt-retrain.bak` so `launchctl load`/`bootstrap` will not find it
-3. **control_overrides::global:entries:gate = true** (reason: `LIVE_UNSAFE_2026_05_04_TIGGE_12Z_GAP_PLATT_NOT_RETRAINED`) — even if daemon were re-launched manually, evaluator would refuse entries
+3. **control_overrides::operator:tigge_12z_gap:LIVE_UNSAFE_2026_05_04 = true** (reason: `LIVE_UNSAFE_2026_05_04_TIGGE_12Z_GAP_PLATT_NOT_RETRAINED_OPERATOR_PRECEDENCE_200`, **precedence=200**, `effective_until=NULL`) — even if daemon were re-launched manually, evaluator would refuse entries.
 4. **This file** — human-readable record of state and unlock procedure
+
+### Lock layer 3 history (critic-opus 2026-05-04 BLOCKER 1 disclosure)
+
+The original layer-3 row written 2026-05-04 09:05:35 UTC by `pause_entries(...issued_by='operator_via_claude_2026-05-04')` was silently overwritten at 09:19:17 UTC by an `auto_pause:ValueError` row (precedence=100, 15-minute auto-expiry) raised by an unhandled exception elsewhere in the entry path. That auto-pause row expired at 09:34:17 UTC. **Between 09:34:17 and 09:39:00 UTC (~5 minutes) layer 3 was decorative** (no active row); layers 1+2 still held.
+
+At 09:39:00 UTC a fresh row was inserted with `override_id='operator:tigge_12z_gap:LIVE_UNSAFE_2026_05_04'`, `precedence=200`, `effective_until=NULL`. `precedence=200 > 100` ensures any future `system_auto_pause` cannot overwrite this row. The DB-level reader resolves the highest-precedence active row, so this is the authoritative entries-paused state until operator-issued resume.
+
+**Trade daemon (`com.zeus.live-trading`) was already down via layer 1 (launchctl bootout) throughout this entire window.** No live trades were possible. Lock-layer-3 decorativeness was a reader-cache + auto-expiry artifact, not a live-trading risk window.
+
+**Antibody**: any future operator-issued lock should use `precedence ≥ 200` and `effective_until=NULL`. The default `pause_entries` API uses `system_auto_pause` issuer which auto-expires; not suitable for indefinite operator locks.
 
 ## What is still running
 
