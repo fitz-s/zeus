@@ -1,0 +1,7 @@
+# Phase C-1 rollout-gate dry-run — 2026-05-04T02:15:38.337160+00:00
+flag=ZEUS_ENTRY_FORECAST_ROLLOUT_GATE
+evidence_present=False
+blocker_code='ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING'
+ready_to_flip=True
+rationale=gate fail-closes with reason 'ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING'; this is the expected first-flip behavior — flag is safe to flip while the operator continues populating evidence.
+decision={"may_submit_live_orders": false, "reason_codes": ["ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"], "status": "BLOCKED"}
