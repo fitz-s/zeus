@@ -83,7 +83,7 @@ def test_t6_filter_flag_off_returns_true_so_legacy_filter_is_authority(
     the caller's legacy ``hours_to_resolution`` filter remains the sole
     authority and behavior is byte-equal to pre-P4.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     market = _market(city_name="LA", city_timezone="America/Los_Angeles", target_date="2026-05-08")
     decision_time = datetime(2026, 5, 8, 6, 0, tzinfo=UTC)
     assert filter_market_to_settlement_day(market=market, decision_time_utc=decision_time) is True
@@ -96,7 +96,7 @@ def test_t6_day0_transition_flag_off_uses_legacy_threshold(
     returns True iff ``legacy_hours_to_settlement <= 6.0`` regardless of
     market_phase. Byte-equal to pre-P4.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     decision_time = datetime(2026, 5, 8, 12, 0, tzinfo=UTC)
     # legacy threshold says enter
     assert should_enter_day0_window(
@@ -128,7 +128,7 @@ def test_t6_day0_transition_flag_off_ignores_phase_axis(
     SETTLEMENT_DAY, the legacy threshold is the sole gate. This pins
     the byte-equal contract.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     # London target_date=2026-05-08, decision_time=2026-05-08 06:00 UTC.
     # London BST = UTC+1 in May, so 06:00 UTC = 07:00 BST. Local target
     # day started at 23:00 UTC of 2026-05-07. So phase = SETTLEMENT_DAY.
@@ -562,7 +562,7 @@ def test_attribution_drift_flag_aware_deferral_at_head(
     )
 
     # Flag OFF → reaches the legacy clause at line 148 normally.
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     assert _infer_strategy_from_signature(sig) == "settlement_capture", (
         "R4 A4-M1: with flag OFF, the legacy clause at line 148 "
         "remains authoritative — discovery_mode='day0_capture' → "

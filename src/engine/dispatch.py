@@ -39,34 +39,35 @@ DAY0_WINDOW + obs-fetch + candidate-filter dispatch decisions — six
 call sites (3 in evaluator.py + 1 obs-fetch gate + 2 D-A sites in
 cycle_runtime.py) all read the same flag and the same logic.
 
-KNOWN UNMIGRATED SIBLING (critic R5 ATTACK 3 / A3-M1):
-``src/engine/evaluator.py:1427`` (``is_day0_mode = candidate.discovery_mode
-== "day0_capture"``) drives ``EntryMethod`` selection (DAY0_OBSERVATION
-vs ENS_MEMBER_COUNTING) and two downstream rejection branches. It is NOT
-migrated by P3/P4. Under flag OFF this is harmless (every site reads
-the same legacy axis). Under flag ON it produces a phase/method
-incoherence for divergent candidates (e.g.,
-``discovery_mode=opening_hunt`` + ``market_phase=settlement_day`` —
-strategy_key dispatch routes to ``settlement_capture`` while EntryMethod
-stays on ENS_MEMBER_COUNTING). Closure: the EntryMethod selection logic
-is rewired through the StrategyProfile registry in PR #54 §3.A4 — see
-``docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md``.
-This is a flag-OFF safe scaffold; flag MUST stay default OFF until the
-PR #54 cutover lands.
+SITE 5 (critic R5 ATTACK 3 / A3-M1) — MIGRATED in §A4:
+``src/engine/evaluator.py:1416`` (``is_day0_mode = ...``) drives
+``EntryMethod`` selection (DAY0_OBSERVATION vs ENS_MEMBER_COUNTING) and
+several downstream rejection branches. Pre-§A4 this read
+``candidate.discovery_mode == "day0_capture"`` directly — under flag ON
+that produced a phase/method incoherence (e.g.,
+``discovery_mode=opening_hunt`` + ``market_phase=settlement_day``:
+strategy dispatch routes to ``settlement_capture`` but EntryMethod
+stayed on ENS_MEMBER_COUNTING). §A4 routes the line through
+``is_settlement_day_dispatch(candidate)`` so flag OFF preserves legacy
+behavior byte-equal AND flag ON resolves the 7th site coherently.
+The dispatch helper is now the SINGLE locus for the phase-vs-mode
+axis decision across all 5 callers.
 
 KNOWN OBSERVABILITY-ONLY GAPS (critic R5 A5-M2 / A6-M3 / A7-M4):
 - ``_is_settlement_day_phase`` hardcodes ``uma_resolved=False`` — UMA
   on-chain resolved truth is not wired today. POST_TRADING and RESOLVED
-  collapse to the same dispatch behavior. PR #54 §3.A5 ships the UMA
-  ``SettlementResolved`` listener.
+  collapse to the same dispatch behavior. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
+  §A5 ships the UMA ``SettlementResolved`` listener.
 - F1 fallback (12:00 UTC of target_date) is the only endDate source
   for site 1 (monitor loop has no Gamma payload). With flag ON this
-  becomes silent live authority. PR #54 §3.A5 introduces
-  ``MarketPhaseEvidence.phase_source ∈ {verified_gamma, fallback_f1,
-  unknown, onchain_resolved}`` so callers can distinguish + degrade.
+  becomes silent live authority. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
+  §A5 introduces ``MarketPhaseEvidence.phase_source ∈ {verified_gamma,
+  fallback_f1, unknown, onchain_resolved}`` so callers can distinguish
+  + degrade.
 - ``market_phase=None`` collapses MISSING + PARSE_FAILED + PRE_FLAG_FLIP
   into a single state. Finding A's "missing = OK" pattern for the
-  phase axis. PR #54 §3.A5 separates these.
+  phase axis. ``task_2026-05-04_oracle_kelly_evidence_rebuild`` §A5
+  separates these.
 
 Cycle-axis sites (cycle_runner.py:_classify_edge_source / freshness
 short-circuit) are NOT migrated by P3/P4 because they operate before
@@ -89,34 +90,126 @@ if TYPE_CHECKING:
 _DISPATCH_FLAG_ENV = "ZEUS_MARKET_PHASE_DISPATCH"
 
 
-def market_phase_dispatch_enabled() -> bool:
-    """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is set to a truthy
-    value. Default OFF; T6 byte-equal invariant requires that when this
-    is OFF every dispatch site behaves byte-equal to pre-P3.
+class PhaseAuthorityViolation(RuntimeError):
+    """Raised by strict-dispatch sites when ``candidate.market_phase``
+    is ``None`` under flag ON (PLAN.md §A5 + Bug review Finding F).
+
+    The fail-soft default (``strict=False``) lets dispatch callers
+    fall back to the legacy cycle-axis rule when a candidate slips
+    through without a phase tag — preserving the migration's
+    "no behavior change on flag flip" property. The strict variant
+    is for LIVE-AUTHORITY callers (Kelly resolver, entry executor,
+    settlement attribution) where silent legacy fallback would mask
+    a tag-failure as a successful determination. Strict callers
+    catch this exception, log the failure_reason, and reject the
+    candidate — never trade against an undetermined phase.
     """
-    return os.environ.get(_DISPATCH_FLAG_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def is_settlement_day_dispatch(candidate: "MarketCandidate") -> bool:
+_TRUTHY_FLAG_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+_FALSY_FLAG_VALUES: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
+# PR #56 review (Copilot MEDIUM, 2026-05-04): explicit one-shot guard for
+# unrecognized env-var values. Pre-fix the warn-on-unrecognized path
+# fired on every call; in dispatch hot loops this turned a misspelled
+# env var into log spam. Standard Python logging does NOT dedupe by
+# message content (the original code comment claimed it did — incorrect).
+# Module-level set tracks already-warned-about values so each typo
+# generates exactly one warning per process lifetime.
+_warned_unrecognized_dispatch_values: set[str] = set()
+
+
+def market_phase_dispatch_enabled() -> bool:
+    """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is enabled.
+
+    PRE-A6 default: ``"0"`` (OFF). T6 byte-equal invariant required that
+    when this was OFF every dispatch site behaved byte-equal to pre-P3.
+
+    POST-A6 default: ``"1"`` (ON). PLAN.md §A6 + operator directive
+    "做就做到位" (2026-05-04) — phase-axis dispatch becomes the live
+    default; flag remains as an emergency kill-switch via env override
+    (set ``ZEUS_MARKET_PHASE_DISPATCH=0`` to revert to legacy cycle-axis
+    behavior). The legacy branches stay in dispatch.py until a follow-up
+    cleanup PR excises them after ≥1 stable week of phase-axis live.
+
+    Recognized values:
+      truthy (case-insensitive): "1", "true", "yes", "on"
+      falsy (case-insensitive):  "0", "false", "no", "off"
+
+    Unrecognized non-empty values (e.g., a typo like ``"garbase"`` or
+    ``"enabled"``) keep the post-A6 default ON and emit a one-shot
+    warning per misspelling (PR #56 review). Critic R6 M3 fix
+    (2026-05-04): pre-fix, unrecognized values silently flipped to OFF —
+    operator typo became a kill-switch by accident. Remain-on is the
+    conservative direction since the default is ON; the one-shot warning
+    surfaces the typo without spamming logs in tight dispatch loops.
+
+    Empty / whitespace falls back to the default.
+    """
+    raw = os.environ.get(_DISPATCH_FLAG_ENV, "").strip().lower()
+    if raw == "":
+        return True  # post-A6 default
+    if raw in _TRUTHY_FLAG_VALUES:
+        return True
+    if raw in _FALSY_FLAG_VALUES:
+        return False
+    # Unrecognized: warn once per distinct bad value, then default ON.
+    if raw not in _warned_unrecognized_dispatch_values:
+        _warned_unrecognized_dispatch_values.add(raw)
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Unrecognized %s=%r — expected one of %s (truthy) or %s "
+            "(falsy). Remaining on post-A6 default (phase-axis ON). "
+            "Fix the env var to silence this warning.",
+            _DISPATCH_FLAG_ENV, raw,
+            sorted(_TRUTHY_FLAG_VALUES), sorted(_FALSY_FLAG_VALUES),
+        )
+    return True
+
+
+def _reset_dispatch_flag_warning_cache_for_test() -> None:
+    """Clear the one-shot warning set. NOT public API; only for test
+    fixtures that need to assert warning emission across multiple calls.
+    """
+    _warned_unrecognized_dispatch_values.clear()
+
+
+def is_settlement_day_dispatch(
+    candidate: "MarketCandidate", *, strict: bool = False
+) -> bool:
     """Single dispatch question: at this candidate, should the daemon
     take the SETTLEMENT_DAY-class strategy path?
 
     Flag OFF (default, byte-equal to pre-P3): legacy
-    ``candidate.discovery_mode == DAY0_CAPTURE.value``.
+    ``candidate.discovery_mode == DAY0_CAPTURE.value``. ``strict`` is
+    ignored when the flag is OFF — the legacy axis is fully resolvable
+    without a phase tag.
 
     Flag ON: ``candidate.market_phase == MarketPhase.SETTLEMENT_DAY``.
-    Falls back to legacy logic if ``candidate.market_phase`` is None
-    (untagged / off-cycle / test fixture) — fail-soft so the migration
-    never trades silent misclassification for a hard fault.
+
+    Phase=None handling under flag ON:
+      - ``strict=False`` (default, fail-soft): falls back to legacy
+        cycle-axis rule. Preserves the "flag flip changes nothing
+        observable when phase tagging is incomplete" property used by
+        test fixtures and off-cycle direct construction.
+      - ``strict=True`` (PLAN.md §A5 Finding F floor): raises
+        ``PhaseAuthorityViolation``. Live-authority callers (Kelly
+        resolver, entry executor, settlement attribution) opt into this
+        so a silent fallback never masks a tag-failure as a successful
+        determination.
     """
     if not market_phase_dispatch_enabled():
         return _is_day0_capture_legacy(candidate)
 
     market_phase = getattr(candidate, "market_phase", None)
     if market_phase is None:
-        # Untagged candidate — defer to legacy. This is the path taken
-        # by test fixtures and any off-cycle direct construction; the
-        # production cycle_runtime always tags at construction.
+        if strict:
+            raise PhaseAuthorityViolation(
+                f"market_phase=None under flag ON for candidate "
+                f"{getattr(candidate, 'condition_id', '<unknown>')}; "
+                f"strict caller refuses silent legacy fallback"
+            )
+        # Fail-soft path: defer to legacy.
         return _is_day0_capture_legacy(candidate)
 
     # str-Enum equality: ``MarketPhase.SETTLEMENT_DAY == "settlement_day"``.
@@ -210,7 +303,11 @@ def _is_settlement_day_phase(
     When ``market`` is ``None`` (P4 site 1 — monitor loop has only
     ``pos.target_date`` + ``city.timezone``, no Gamma payload), fall
     back to F1: Polymarket weather endDate uniformly 12:00 UTC of
-    target_date (verified across 13 cities).
+    target_date (verified across 13 cities — INVESTIGATION_EXTERNAL
+    Q3 contributes 7 cities, CRITIC_REVIEW_R2 spot-check contributes
+    6; full breakdown in
+    docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/
+    CRITIC_REVIEW_R2.md).
 
     The tri-state return is critical: collapsing parse-failure to
     ``False`` would silently let a corrupt target_date row exit the

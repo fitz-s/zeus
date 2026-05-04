@@ -1080,7 +1080,18 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
 
 
 def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
-    """Positions nearing settlement must enter the universal Day0 terminal phase."""
+    """Positions nearing settlement must enter the universal Day0 terminal phase.
+
+    A6 audit (2026-05-04, rebuild fixes branch): the fixture's
+    target_date=2026-04-01 + decision_time=2026-04-02T04:30Z places the
+    market in POST_TRADING phase under the new phase-axis dispatch
+    (settlement period 2026-04-01T05:00Z..2026-04-01T12:00Z for Chicago
+    has already passed). Phase-axis correctly refuses day0_window entry
+    after settlement. This test asserts the LEGACY 6-hour-to-settlement
+    transition contract; pin to flag=OFF until phase-axis equivalents
+    are added in a follow-up packet.
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
 
@@ -1186,7 +1197,12 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     not emit a canonical event — only updated position_current.phase.
     Post-slice: canonical emission is wired via
     _emit_day0_window_entered_canonical_if_available in cycle_runtime.
+
+    A6 audit (2026-05-04): pin to legacy 6-hour transition — see
+    test_monitoring_transitions_holding_position_into_day0_window for the
+    full rationale.
     """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine import cycle_runtime
     from src.contracts import EdgeContext, EntryMethod
     from src.state.db import get_connection, init_schema, log_trade_entry, query_position_events
@@ -1299,7 +1315,13 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
-    """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path."""
+    """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
+
+    A6 audit (2026-05-04): pin to legacy 6-hour transition — see
+    test_monitoring_transitions_holding_position_into_day0_window for the
+    full rationale.
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine import cycle_runtime, monitor_refresh
     from src.contracts import EdgeContext, EntryMethod
 

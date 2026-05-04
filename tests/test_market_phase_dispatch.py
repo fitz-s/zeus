@@ -43,13 +43,28 @@ def _candidate(*, discovery_mode: str = "", market_phase=None) -> SimpleNamespac
 # ---------------------------------------------------------------------- #
 
 
-def test_flag_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flag_default_post_a6_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A6 cutover (PLAN.md §A6 + operator directive 2026-05-04
+    "做就做到位"): the live default flips to ON. ``delenv`` (i.e., the
+    flag unset entirely) resolves to True post-A6 — the migration is
+    complete and the legacy branch is the kill-switch path now, not
+    the default path.
+    """
     monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    assert market_phase_dispatch_enabled() is True
+
+
+def test_flag_explicit_zero_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator can still flip OFF via explicit ``"0"`` env override —
+    A6 keeps the legacy branch as a kill-switch."""
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     assert market_phase_dispatch_enabled() is False
 
 
 @pytest.mark.parametrize("value,expected", [
-    ("0", False), ("", False), ("false", False), ("no", False), ("off", False),
+    # Empty string is treated as "unset" -> default (post-A6 = True).
+    ("", True),
+    ("0", False), ("false", False), ("no", False), ("off", False),
     ("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True),
 ])
 def test_flag_truthy_recognized(monkeypatch: pytest.MonkeyPatch, value: str, expected: bool) -> None:
@@ -67,7 +82,7 @@ def test_t6_flag_off_legacy_path_for_day0_capture_candidate(
 ) -> None:
     """T6 invariant: flag OFF + DAY0_CAPTURE candidate ⇒ True (legacy).
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     cand = _candidate(discovery_mode=DiscoveryMode.DAY0_CAPTURE.value, market_phase=None)
     assert is_settlement_day_dispatch(cand) is True
 
@@ -77,7 +92,7 @@ def test_t6_flag_off_legacy_path_for_opening_hunt_candidate(
 ) -> None:
     """T6 invariant: flag OFF + OPENING_HUNT candidate ⇒ False (legacy).
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     cand = _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value, market_phase=None)
     assert is_settlement_day_dispatch(cand) is False
 
@@ -90,7 +105,7 @@ def test_t6_flag_off_ignores_market_phase_field(
     Pre-flag-flip safety: tagging without flipping must not change
     dispatch behavior anywhere.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     cand = _candidate(
         discovery_mode=DiscoveryMode.OPENING_HUNT.value,
         market_phase=MarketPhase.SETTLEMENT_DAY,
@@ -190,7 +205,7 @@ def test_evaluator_edge_source_flag_off_preserves_legacy(
     "settlement_capture" iff candidate.discovery_mode == DAY0_CAPTURE.
     Post-P3 with flag OFF: same.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.engine.evaluator import _edge_source_for
 
     bin_stub = SimpleNamespace(is_shoulder=False)
@@ -242,7 +257,7 @@ def test_obs_fetch_gate_flag_off_day0_capture_mode(
     regardless of market_phase. Byte-equal to pre-P3 ``mode ==
     DAY0_CAPTURE`` short-circuit.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     for phase in [None, MarketPhase.PRE_TRADING, MarketPhase.SETTLEMENT_DAY,
                   MarketPhase.POST_TRADING]:
         assert should_fetch_settlement_day_observation(
@@ -256,7 +271,7 @@ def test_obs_fetch_gate_flag_off_other_modes(
     """T6 byte-equal at site 4: flag OFF + non-DAY0_CAPTURE mode ⇒ False
     regardless of market_phase tagging.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     for mode in [DiscoveryMode.OPENING_HUNT, DiscoveryMode.UPDATE_REACTION]:
         for phase in [None, MarketPhase.SETTLEMENT_DAY, MarketPhase.PRE_SETTLEMENT_DAY]:
             assert should_fetch_settlement_day_observation(
@@ -354,7 +369,7 @@ def test_attribution_drift_uses_legacy_inference_when_flag_off(
     """Flag OFF: attribution_drift behavior is unchanged. Same legacy
     mode-axis inference that pre-P3 callers depend on.
     """
-    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     from src.state.attribution_drift import (
         AttributionSignature,
         _infer_strategy_from_signature,

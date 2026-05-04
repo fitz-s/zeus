@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Lifecycle: last_reviewed=2026-05-04; last_reused=2026-05-04
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (storage path centralization + atomic write).
 """Oracle shadow-snapshot listener.
 
 Captures WU ICAO API responses at the *same time window* that PM's UMA
@@ -40,7 +42,13 @@ logger = logging.getLogger("oracle_snapshot")
 
 # ── paths ─────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
-SNAPSHOT_DIR = ROOT / "raw" / "oracle_shadow_snapshots"
+# Storage paths centralized in src.state.paths (PLAN.md §A2 + D-10).
+# CITY_CONFIG stays repo-local; snapshot dir is storage-controlled so
+# tests can redirect it via ZEUS_STORAGE_ROOT.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from src.state.paths import oracle_snapshot_dir, write_json_atomic  # noqa: E402
+
 CITY_CONFIG = ROOT / "config" / "cities.json"
 
 # ── WU API ────────────────────────────────────────────────────────────
@@ -181,11 +189,9 @@ def capture_snapshots(target: date | None = None) -> dict:
             "wu_raw_payload": payload,
         }
 
-        city_dir = SNAPSHOT_DIR / city_name.lower().replace(" ", "_")
-        city_dir.mkdir(parents=True, exist_ok=True)
+        city_dir = oracle_snapshot_dir() / city_name.lower().replace(" ", "_")
         out_file = city_dir / f"{target.isoformat()}.json"
-        with open(out_file, "w") as f:
-            json.dump(snapshot, f, indent=2)
+        write_json_atomic(out_file, snapshot, writer_identity="oracle_snapshot_listener")
 
         logger.info("WU snapshot: %s high=%s (%d obs)", city_name, daily_high,
                      snapshot["observation_count"])
@@ -204,11 +210,9 @@ def capture_snapshots(target: date | None = None) -> dict:
             "data_version": "oracle_shadow_v1",
             "hko_raw_payload": hko_payload,
         }
-        city_dir = SNAPSHOT_DIR / "hong_kong"
-        city_dir.mkdir(parents=True, exist_ok=True)
+        city_dir = oracle_snapshot_dir() / "hong_kong"
         out_file = city_dir / f"{target.isoformat()}.json"
-        with open(out_file, "w") as f:
-            json.dump(snapshot, f, indent=2)
+        write_json_atomic(out_file, snapshot, writer_identity="oracle_snapshot_listener")
         logger.info("HKO snapshot: Hong Kong")
         stats["hko_captured"] += 1
     else:

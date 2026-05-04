@@ -132,6 +132,13 @@ package_defaults:
     authority_role: calibration_math
     gates:
     - pytest -q tests/test_platt.py tests/test_calibration_manager.py
+  src/oracle:
+    zone: K3_extension
+    authority_role: oracle_uncertainty_math
+    hazards:
+    - DERIVED_ONLY
+    gates:
+    - pytest -q tests/test_data_density_discount_v2.py tests/test_oracle_posterior.py
   src/strategy:
     zone: K3_extension
     authority_role: strategy_math
@@ -1016,10 +1023,15 @@ files:
     authority_role: phase_axis_dispatch
     why: Single locus for D-B mode→phase migration (PLAN_v3 §6.P3) and D-A
       two-clock unification (PLAN_v3 §6.P4). Flag-gated by
-      ZEUS_MARKET_PHASE_DISPATCH; default OFF preserves byte-equal pre-P3
-      legacy dispatch (T6 invariant). Centralizes the read of
-      candidate.market_phase vs candidate.discovery_mode so all per-candidate
-      and obs-fetch sites stay coordinated.
+      ZEUS_MARKET_PHASE_DISPATCH; A6 (2026-05-04 oracle/Kelly evidence
+      rebuild) flipped the default to ON (empty env var → True). Setting
+      ZEUS_MARKET_PHASE_DISPATCH=0 reverts to pre-P3 legacy dispatch and
+      preserves byte-equal behavior (T6 invariant escape hatch). The
+      flag-flip is gradual — tests asserting legacy mode-axis contracts
+      pin "0" explicitly so phase-axis evolution doesn't break them.
+      Centralizes the read of candidate.market_phase vs
+      candidate.discovery_mode so all per-candidate and obs-fetch sites
+      stay coordinated.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
@@ -1033,6 +1045,13 @@ files:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
     - src/engine/replay.py
+  src/engine/ddd_wiring.py:
+    zone: K2_K3_coordination
+    authority_role: oracle_density_discount_wiring
+    why: Computes decision-time DDD inputs and routes fail-closed oracle-density outcomes into evaluator decisions.
+    downstream:
+    - src/engine/evaluator.py
+    - src/oracle/data_density_discount.py
   src/engine/lifecycle_events.py:
     zone: K2_runtime
     authority_role: lifecycle_event_builder
@@ -1270,6 +1289,12 @@ files:
     zone: K3_extension
     authority_role: package_marker
     why: Marks calibration namespace.
+  src/calibration/forecast_calibration_domain.py:
+    zone: K3_extension
+    authority_role: calibration_domain_identity_contract
+    why: Immutable source/cycle/metric/domain identity object preventing 00Z/12Z/OpenData/TIGGE calibration-domain mixing.
+    hazards:
+    - CALIBRATION_FAMILY_MIXING
   src/calibration/blocked_oos.py:
     zone: K3_extension
     authority_role: shadow_calibration_eval
@@ -1347,6 +1372,18 @@ files:
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
     - src/execution/harvester.py
+  src/oracle/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks oracle uncertainty namespace.
+  src/oracle/data_density_discount.py:
+    zone: K3_extension
+    authority_role: oracle_density_discount_math
+    why: Pure DDD two-rail coverage/uncertainty discount math for sizing and decision rejection.
+    hazards:
+    - DERIVED_ONLY
+    downstream:
+    - src/engine/ddd_wiring.py
   src/strategy/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1408,10 +1445,41 @@ files:
   src/strategy/oracle_penalty.py:
     zone: K3_extension
     authority_role: oracle_error_rate_penalty
-    why: Per-city oracle error rate classification and Kelly sizing penalty multiplier. Loads data/oracle_error_rates.json.
+    why: Per-city oracle error rate classification and Kelly sizing penalty multiplier. Post-A3 (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A3) the 9-status enum + Beta-binomial posterior replace the legacy 4-status point-estimate; loads via paths.oracle_error_rates_path() instead of a hardcoded constant.
     hazards:
     - ORACLE_TRUNCATION_BIAS
     downstream:
+    - src/engine/evaluator.py
+    - src/strategy/kelly.py
+  src/strategy/oracle_status.py:
+    zone: K3_extension
+    authority_role: oracle_status_enum
+    why: 9-status OracleStatus enum (post-A3 rebuild). Split into its own module to break the oracle_penalty <-> oracle_estimator circular import.
+    downstream:
+    - src/strategy/oracle_penalty.py
+    - src/strategy/oracle_estimator.py
+  src/strategy/oracle_estimator.py:
+    zone: K3_extension
+    authority_role: oracle_evidence_classifier
+    why: Beta-binomial posterior helpers (Beta(1,1) prior; posterior_mean, posterior_upper_95, classify) for the 9-status oracle rebuild. Pure math; no JSON-loading concerns.
+    downstream:
+    - src/strategy/oracle_penalty.py
+  src/strategy/strategy_profile.py:
+    zone: K3_extension
+    authority_role: strategy_profile_registry_loader
+    why: Single-source loader for architecture/strategy_profile_registry.yaml (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A4). Replaces 5 hardcoded sets (STRATEGY_KELLY_MULTIPLIERS, LIVE_SAFE_STRATEGIES, _LIVE_ALLOWED_STRATEGIES, KNOWN_STRATEGIES, evaluator's is_day0_mode). Schema-enforced at load; ProfileNotFound on unknown key.
+    downstream:
+    - src/strategy/kelly.py
+    - src/control/control_plane.py
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+  src/strategy/market_phase_evidence.py:
+    zone: K3_extension
+    authority_role: phase_provenance_record
+    why: MarketPhaseEvidence dataclass + builder (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A5 + Bug review Finding F). Wraps the bare MarketPhase enum with phase_source provenance (verified_gamma / fallback_f1 / onchain_resolved / unknown) so dispatch can reject phase=None for live-authority callers and the Kelly resolver can apply quality-aware degradation (0.7× on fallback_f1).
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/dispatch.py
     - src/engine/evaluator.py
   src/strategy/selection_family.py:
     zone: K3_extension
@@ -1441,6 +1509,13 @@ files:
     zone: K3_extension
     authority_role: backtest_economics_tombstone
     why: ECONOMICS purpose tombstone — refuses to run until market_events_v2 + parity contracts unblock.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+  src/backtest/executable_ev_replay.py:
+    zone: K3_extension
+    authority_role: executable_ev_replay_verifier
+    why: Pure read-only replay verifier for decision-time executable EV math; compares frozen replay inputs against recorded decisions without live evaluator calls or DB writes.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH
@@ -1729,6 +1804,27 @@ files:
     downstream:
     - src/riskguard/riskguard.py
     - src/state/portfolio.py
+  src/state/cohort_boundary.py:
+    zone: K2_runtime
+    authority_role: migration_cohort_discriminator
+    why: PR #51 UTC-fix migration cohort boundary helper (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A1 + D-5/D-6). Discriminator at `2026-05-04T03:57:08Z` (PR #51 merge instant); reporters bucket attribution rows by `recorded_at` against this constant. No DB column added — discriminator is git-log fact, re-derived lazily at report time.
+    downstream: []
+  src/state/paths.py:
+    zone: K2_runtime
+    authority_role: storage_path_locator
+    why: Single locus for ZEUS_STORAGE_ROOT-aware artifact paths + atomic JSON writer + heartbeat (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A2 + D-10). Replaces 3 hardcoded `Path(__file__).parent.parent.parent / "data"` patterns and consolidates the previously-scattered `_atomic_write_json` private helpers.
+    downstream:
+    - src/strategy/oracle_penalty.py
+    - src/strategy/strategy_profile.py
+    - scripts/bridge_oracle_to_calibration.py
+    - scripts/oracle_snapshot_listener.py
+  src/state/uma_resolution_listener.py:
+    zone: K2_runtime
+    authority_role: uma_onchain_resolution_listener
+    why: Pluggable UMA OO `SettlementResolved` event listener (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A5 + Bug review Finding F). Provides UmaRpcClient ABC + parse_settle_event + record_resolution + lookup_resolution + poll_uma_resolutions. Default no-RPC mode returns [] (production today); operator wires UmaHttpRpcClient via settings to flip from heuristic POST_TRADING to onchain_resolved phase determination.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/strategy/market_phase_evidence.py
   src/state/projection.py:
     zone: K0_frozen_kernel
     authority_role: canonical_projection_law

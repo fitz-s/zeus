@@ -333,11 +333,13 @@ modules:
       - src/calibration/store.py
       - src/calibration/retrain_trigger.py
       - src/calibration/effective_sample_size.py
+      - src/calibration/forecast_calibration_domain.py
       - src/calibration/retrain_trigger.py
     public_entry_files:
       - src/calibration/platt.py
       - src/calibration/manager.py
       - src/calibration/store.py
+      - src/calibration/forecast_calibration_domain.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - src/contracts/calibration_bins.py
@@ -349,6 +351,7 @@ modules:
       - tests/test_calibration_bins_canonical.py
       - tests/test_calibration_unification.py
       - tests/test_calibration_retrain.py
+      - tests/test_forecast_calibration_domain.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   strategy:

@@ -36,22 +36,33 @@ DEFAULT_EDGE_THRESHOLD_MULTIPLIER = 1.0
 TIGHTENED_EDGE_THRESHOLD_MULTIPLIER = 2.0
 
 # G6 antibody (2026-04-26): typed boot/catalog allowlist of strategies that
-# may be enabled when the live-only daemon starts. Universe of buildable
-# strategies lives in src/engine/cycle_runner.py::KNOWN_STRATEGIES (4 entries).
-# This set is not the runtime live-entry authority; that boundary is
-# _LIVE_ALLOWED_STRATEGIES plus is_strategy_enabled(). Expansion REQUIRES an
-# explicit packet — accidental drift caught by tests/test_live_safe_strategies.py.
+# may be enabled when the live-only daemon starts. Post-A4 (PLAN.md §A4 +
+# Bug review §E) this is derived from the StrategyProfile registry —
+# strategies with live_status in {"live", "shadow"}. The pre-A4 hardcoded
+# frozenset diverged from _LIVE_ALLOWED_STRATEGIES (shoulder_sell was in
+# LIVE_SAFE but not _LIVE_ALLOWED); resolving the divergence in a single
+# source is the §A4 cutover invariant.
 #
-# 2026-04-29: Operator authorized boot/catalog expansion to ALL 4
-# KNOWN_STRATEGIES post-calibration-rebuild. Runtime live-entry stayed narrower:
-# shoulder_sell remains blocked by _LIVE_ALLOWED_STRATEGIES until a promotion
-# packet updates execution, sizing, evidence, and tests together.
-LIVE_SAFE_STRATEGIES: frozenset[str] = frozenset({
-    "opening_inertia",
-    "center_buy",
-    "settlement_capture",
-    "shoulder_sell",
-})
+# ``LIVE_SAFE_STRATEGIES`` and ``_LIVE_ALLOWED_STRATEGIES`` remain
+# importable names (backward compat for tests/test_live_safe_strategies.py
+# and any other caller); they're now lazy attributes resolved through
+# ``__getattr__`` so a test that swaps the registry via
+# ``strategy_profile._reload_for_test`` picks up the change without
+# re-importing this module.
+
+
+def __getattr__(name: str):
+    """PEP 562 lazy attribute resolution. Defers strategy_profile import
+    so the registry is only loaded when a caller actually asks for one
+    of these symbols (avoids import cycles + makes test reload trivial).
+    """
+    if name == "LIVE_SAFE_STRATEGIES":
+        from src.strategy.strategy_profile import live_safe_keys
+        return live_safe_keys()
+    if name == "_LIVE_ALLOWED_STRATEGIES":
+        from src.strategy.strategy_profile import live_allowed_keys
+        return live_allowed_keys()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 COMMANDS = {
     "pause_entries",                # Stop entering, keep monitoring
@@ -71,13 +82,19 @@ def assert_live_safe_strategies_under_live_mode(enabled: Iterable[str]) -> None:
     Helper called from src/main.py boot path. Runtime is live-only, so this
     guard is unconditional and no longer reads the retired ZEUS_MODE switch.
     Exits via SystemExit so daemon launchers consume the fatal refusal cleanly.
+
+    Post-A4: live_safe set is derived from the StrategyProfile registry
+    on each call (see __getattr__ above). Tests that monkeypatch the
+    registry pick up the change without re-importing this module.
     """
+    from src.strategy.strategy_profile import live_safe_keys
     enabled_set = frozenset(enabled)
-    offenders = sorted(enabled_set - LIVE_SAFE_STRATEGIES)
+    live_safe = live_safe_keys()
+    offenders = sorted(enabled_set - live_safe)
     if offenders:
         sys.exit(
             f"FATAL: live mode refused — non-allowlisted strategies enabled: "
-            f"{offenders}. LIVE_SAFE_STRATEGIES={sorted(LIVE_SAFE_STRATEGIES)}. "
+            f"{offenders}. LIVE_SAFE_STRATEGIES={sorted(live_safe)}. "
             f"Disable each via control_plane set_strategy_gate before relaunching."
         )
 
@@ -318,13 +335,16 @@ def strategy_gates() -> dict[str, GateDecision]:
     return result
 
 
-_LIVE_ALLOWED_STRATEGIES = {"settlement_capture", "center_buy", "opening_inertia"}
-
-
 def is_strategy_enabled(strategy: str) -> bool:
+    """Runtime live-entry gate. Post-A4: derived from the StrategyProfile
+    registry on each call (live_status == "live"). Pre-A4 this read a
+    hardcoded ``_LIVE_ALLOWED_STRATEGIES`` set; the symbol stays importable
+    via __getattr__ above for backward compat.
+    """
     if not strategy:
         return True
-    if strategy not in _LIVE_ALLOWED_STRATEGIES:
+    from src.strategy.strategy_profile import live_allowed_keys
+    if strategy not in live_allowed_keys():
         return False
     decision = strategy_gates().get(strategy)
     if decision is None:

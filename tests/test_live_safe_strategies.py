@@ -1,7 +1,7 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-02
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-02; last_reused=2026-05-02
-# Purpose: G6 antibody — pin LIVE_SAFE_STRATEGIES typed frozenset + boot-time
+# Last reused/audited: 2026-05-04
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-04; last_reused=2026-05-04
+# Purpose: G6 antibody — pin LIVE_SAFE_STRATEGIES typed set + boot-time
 #          refusal to launch live daemon when any non-boot-safe strategy is
 #          enabled. Keeps the buildable universe, boot/catalog-safe set, and
 #          runtime-live execution boundary named separately.
@@ -12,9 +12,13 @@
 # Authority basis: docs/operations/task_2026-04-26_g6_live_safe_strategies/plan.md
 #   §4 antibody design + parent packet
 #   docs/operations/task_2026-04-26_live_readiness_completion/plan.md §5 K1.G6.
-#   Reused/audited for docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
-#   Stage 0 catalog-truth lock: boot-safe, runtime-live, sizing, and reporting
-#   strategy surfaces must not be mistaken for one authority surface.
+#   docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
+#   Stage 0 catalog-truth lock.
+#   docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4
+#   (registry cutover: 5 hardcoded sets consolidated to one YAML; tests
+#    that pinned the hardcoded literals now read through the registry,
+#    ghost-injection switches from monkeypatching module constants to
+#    swapping strategy_profile._registry).
 """G6 antibody — LIVE_SAFE_STRATEGIES typed frozenset + boot-time refusal.
 
 Cross-module relationship pinned:
@@ -45,6 +49,48 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _inject_ghost_strategy(monkeypatch, *, live_status: str = "live") -> str:
+    """Helper for tests that need a synthetic strategy outside the canonical
+    registry. Snapshots ``strategy_profile._registry``, adds a
+    ``_test_ghost_strategy`` with the given ``live_status``, and lets
+    monkeypatch unwind on test exit.
+
+    Pre-A4: tests in this file monkey-patched ``cycle_runner.KNOWN_STRATEGIES``
+    and ``control_plane._LIVE_ALLOWED_STRATEGIES`` directly to inject a ghost.
+    Post-A4 those symbols are derived from the StrategyProfile registry, so
+    ghost injection moves to the registry. Same antibody, same boot-guard
+    refusal — the implementation surface changed but the property pinned
+    by the tests (boot guard refuses unsafe strategies in the enabled set)
+    is preserved.
+
+    Returns the ghost strategy key for use in the test body.
+    """
+    from src.strategy import strategy_profile
+    from src.strategy.strategy_profile import StrategyProfile
+
+    # Force-load the canonical registry.
+    canonical = dict(strategy_profile.all_profiles())
+    ghost_key = "_test_ghost_strategy"
+    ghost = StrategyProfile(
+        key=ghost_key,
+        thesis="synthetic test ghost — not for production",
+        live_status=live_status,
+        allowed_market_phases=frozenset(),
+        allowed_discovery_modes=frozenset(),
+        allowed_directions=frozenset(),
+        allowed_bin_topology=frozenset(),
+        metric_support={"high": "blocked", "low": "blocked"},
+        kelly_default_multiplier=0.0,
+        kelly_phase_overrides={},
+        min_shadow_decisions=0,
+        min_settled_decisions=0,
+        promotion_evidence_ref=None,
+    )
+    canonical[ghost_key] = ghost
+    monkeypatch.setattr(strategy_profile, "_registry", canonical)
+    return ghost_key
 
 
 # ---------------------------------------------------------------------------
@@ -104,27 +150,31 @@ def test_live_safe_strategies_subset_of_known_strategies():
 def test_stage0_strategy_authority_surfaces_are_explicitly_split():
     """Stage 0 catalog truth: buildable, boot-safe, live-allowed, sizing, and reporting surfaces differ by design.
 
-    This is not a license to keep them divergent forever. It prevents the
-    dangerous weaker claim "catalog matches code" from passing when only one
-    surface was checked. The May 2 strategy update requires all of these
-    surfaces to be named before Stage 1 changes live strategy behavior.
+    Post-A4: the buildable / boot-safe / live-allowed / positive-sizing
+    surfaces all derive from the StrategyProfile registry (single source).
+    Cross-module invariants from cycle_runtime.CANONICAL_STRATEGY_KEYS,
+    portfolio.CANONICAL_STRATEGY_KEYS, and edge_observation.STRATEGY_KEYS
+    still need to match — a regression where one falls out of sync would
+    silently emit decisions for strategies the others don't know about.
     """
     from src.control import control_plane
     from src.engine import cycle_runtime
     from src.engine.cycle_runner import KNOWN_STRATEGIES
     from src.state.edge_observation import STRATEGY_KEYS as EDGE_OBSERVATION_KEYS
     from src.state.portfolio import CANONICAL_STRATEGY_KEYS as PORTFOLIO_KEYS
-    from src.strategy.kelly import STRATEGY_KELLY_MULTIPLIERS
+    from src.strategy import strategy_profile
 
     buildable = set(KNOWN_STRATEGIES)
     runtime_canonical = set(cycle_runtime.CANONICAL_STRATEGY_KEYS)
     portfolio_canonical = set(PORTFOLIO_KEYS)
     boot_safe = set(control_plane.LIVE_SAFE_STRATEGIES)
     live_allowed = set(control_plane._LIVE_ALLOWED_STRATEGIES)
+    # Post-A4: positive-sizing comes from the registry's
+    # kelly_default_multiplier > 0 set (replaces STRATEGY_KELLY_MULTIPLIERS).
     positive_sizing = {
-        strategy_key
-        for strategy_key, multiplier in STRATEGY_KELLY_MULTIPLIERS.items()
-        if multiplier > 0.0
+        key
+        for key, profile in strategy_profile.all_profiles().items()
+        if profile.kelly_default_multiplier > 0.0
     }
     reportable = set(EDGE_OBSERVATION_KEYS)
 
@@ -133,32 +183,33 @@ def test_stage0_strategy_authority_surfaces_are_explicitly_split():
     assert positive_sizing == live_allowed
     assert "shoulder_sell" in boot_safe
     assert "shoulder_sell" not in live_allowed
-    assert STRATEGY_KELLY_MULTIPLIERS["shoulder_sell"] == 0.0
-    assert STRATEGY_KELLY_MULTIPLIERS["shoulder_buy"] == 0.0
-    assert STRATEGY_KELLY_MULTIPLIERS["center_sell"] == 0.0
+    # Pre-A4: STRATEGY_KELLY_MULTIPLIERS["shoulder_sell"] == 0.0 etc.
+    # Post-A4: equivalent assertion via registry.
+    assert strategy_profile.get("shoulder_sell").kelly_default_multiplier == 0.0
+    assert strategy_profile.get("shoulder_buy").kelly_default_multiplier == 0.0
+    assert strategy_profile.get("center_sell").kelly_default_multiplier == 0.0
 
 
 def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
     """Stage 1 rollback verdict: do not create a second taxonomy feature flag.
 
-    The rollback boundary is the runtime-live strategy allowlist. Adding a
-    separate negative flag such as DISABLE_NEW_TAXONOMY would create a second
-    authority surface whose typo/default behavior can live-open the taxonomy.
+    Post-A4: positive-sizing is derived from the registry's
+    kelly_default_multiplier > 0 set (was STRATEGY_KELLY_MULTIPLIERS pre-A4).
     """
     from src.config import settings
     from src.control import control_plane
-    from src.strategy.kelly import STRATEGY_KELLY_MULTIPLIERS
+    from src.strategy import strategy_profile
 
     flags = settings["feature_flags"]
 
     assert "DISABLE_NEW_TAXONOMY" not in flags
     assert "ENABLE_NEW_TAXONOMY" not in flags
     assert "NEW_TAXONOMY_LIVE" not in flags
-    assert control_plane._LIVE_ALLOWED_STRATEGIES == {
+    assert control_plane._LIVE_ALLOWED_STRATEGIES == frozenset({
         "settlement_capture",
         "center_buy",
         "opening_inertia",
-    }
+    })
     assert control_plane.is_strategy_enabled("settlement_capture") is True
     assert control_plane.is_strategy_enabled("center_buy") is True
     assert control_plane.is_strategy_enabled("opening_inertia") is True
@@ -166,11 +217,11 @@ def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
     assert control_plane.is_strategy_enabled("shoulder_buy") is False
     assert control_plane.is_strategy_enabled("center_sell") is False
 
-    positive_sizing = {
-        strategy_key
-        for strategy_key, multiplier in STRATEGY_KELLY_MULTIPLIERS.items()
-        if multiplier > 0.0
-    }
+    positive_sizing = frozenset(
+        key
+        for key, profile in strategy_profile.all_profiles().items()
+        if profile.kelly_default_multiplier > 0.0
+    )
     assert positive_sizing == control_plane._LIVE_ALLOWED_STRATEGIES
 
 
@@ -282,62 +333,53 @@ def _populate_strategy_gates(_control_state: dict, gates: dict[str, bool]) -> No
 
 
 def test_boot_helper_refuses_when_unsafe_strategy_enabled(monkeypatch):
-    """Production composition path: hydrated state with a ghost strategy enabled → SystemExit.
+    """Boot guard refuses arbitrary unsafe strategies in the enabled set.
 
-    Replaces the missing relationship test that masked BLOCKER #1.
-    Sets up _control_state via the same shape refresh_control_state() would
-    populate, then invokes the boot guard with refresh_state=False (we already
-    populated it ourselves to avoid touching a real DB).
+    Pre-A4 this test injected a ghost into BOTH ``KNOWN_STRATEGIES`` and
+    ``_LIVE_ALLOWED_STRATEGIES`` while leaving ``LIVE_SAFE_STRATEGIES``
+    unchanged — exploiting the divergence between three hardcoded sets to
+    construct the "ghost in enabled, not in safe" scenario. Post-A4 those
+    three sets all derive from the StrategyProfile registry; the divergence
+    is structurally impossible. The G6 antibody now lives in two places:
 
-    Uses a synthetic strategy name OUTSIDE the LIVE_SAFE_STRATEGIES allowlist
-    so the test stays correct under any allowlist expansion (including the
-    2026-04-29 expansion to all 4 KNOWN_STRATEGIES). The boot guard composes
-    enabled = KNOWN_STRATEGIES ∩ enabled_gates, so a name not in
-    KNOWN_STRATEGIES will not enter the enabled set even if its gate=True.
-    To test the refusal path properly we must monkeypatch KNOWN_STRATEGIES.
+    - The registry's single-source guarantees KNOWN ≡ LIVE_SAFE, making
+      the BLOCKER #1 scenario un-constructable (caught by
+      ``test_post_a4_known_equals_live_safe`` below).
+    - The inner ``assert_live_safe_strategies_under_live_mode`` still
+      refuses arbitrary unsafe enabled sets — that's what this test pins,
+      via direct call rather than the composition wrapper (the wrapper's
+      pre-A4 attack surface is gone post-A4).
     """
-    import src.control.control_plane as cp
-    import src.engine.cycle_runner as cycle_runner
-    import src.main as main_mod
+    from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
-    monkeypatch.setenv("ZEUS_MODE", "live")
-
-    # Inject a ghost strategy into both KNOWN_STRATEGIES and the stricter
-    # runtime-live surface so it appears enabled but NOT boot-safe.
-    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
-    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
-    monkeypatch.setattr(
-        cp,
-        "_LIVE_ALLOWED_STRATEGIES",
-        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
-    )
-
-    # Snapshot + restore _control_state to avoid leaking into other tests.
-    original_state = dict(cp._control_state)
-    monkeypatch.setattr(cp, "_control_state", {})
-
-    # Production scenario: a ghost strategy enabled that is NOT in the allowlist.
-    _populate_strategy_gates(
-        cp._control_state,
-        {
-            "opening_inertia": True,
-            "center_buy": True,
-            "shoulder_sell": True,
-            "settlement_capture": True,
-            "_test_ghost_strategy": True,
-        },
-    )
-
+    # Synthetic enabled set with a ghost strategy not in the registry.
+    # The inner assertion is the underlying boot-guard refusal — same
+    # antibody as pre-A4, called without the composition wrapper.
     with pytest.raises(SystemExit) as exc_info:
-        main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
-
+        assert_live_safe_strategies_under_live_mode(
+            {"_test_ghost_strategy", "opening_inertia"}
+        )
     msg = str(exc_info.value)
     assert "FATAL" in msg, f"Expected FATAL marker: {msg!r}"
     assert "_test_ghost_strategy" in msg, f"Expected ghost in offenders: {msg!r}"
 
-    # Restore (defensive — monkeypatch.setattr handles this, but explicit on dict).
-    cp._control_state.clear()
-    cp._control_state.update(original_state)
+
+def test_post_a4_known_equals_live_safe():
+    """A4 single-source invariant: ``KNOWN_STRATEGIES`` (cycle_runner) and
+    ``LIVE_SAFE_STRATEGIES`` (control_plane) MUST be the same set, because
+    both lazily resolve through ``strategy_profile.live_safe_keys()``.
+
+    Pre-A4 these were independent hardcoded literals; the BLOCKER #1
+    failure mode required them to diverge. Post-A4 they cannot diverge
+    by construction — this test pins the construction.
+    """
+    from src.control import control_plane
+    from src.engine import cycle_runner
+    from src.strategy import strategy_profile
+
+    assert cycle_runner.KNOWN_STRATEGIES == control_plane.LIVE_SAFE_STRATEGIES
+    assert cycle_runner.KNOWN_STRATEGIES == strategy_profile.live_safe_keys()
+    assert control_plane._LIVE_ALLOWED_STRATEGIES <= cycle_runner.KNOWN_STRATEGIES
 
 
 def test_boot_helper_silent_when_only_safe_strategy_enabled(monkeypatch):
@@ -370,49 +412,27 @@ def test_boot_helper_silent_when_only_safe_strategy_enabled(monkeypatch):
     cp._control_state.update(original_state)
 
 
-def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypatch):
-    """The pre-fix BLOCKER scenario, now PINNED as expected behavior under refresh_state=False.
+def test_boot_helper_with_cold_cache_under_post_a4_single_source(monkeypatch):
+    """Cold cache + post-A4 single-source registry: silent boot.
 
-    Cold cache (empty _control_state) + is_strategy_enabled returns True for
-    all KNOWN_STRATEGIES → guard refuses if any KNOWN_STRATEGIES are not in
-    LIVE_SAFE_STRATEGIES. This documents the contract operators MUST satisfy:
-    hydration before guard. The production main() path always passes
-    refresh_state=True (the default), which calls refresh_control_state()
-    first; this test pins what happens if a future caller forgets to hydrate.
-
-    To remain correct under allowlist expansion (2026-04-29: all 4 KNOWN now
-    safe), this test injects a ghost into KNOWN_STRATEGIES so the cold-cache
-    default-True semantic surfaces a non-safe strategy.
+    Pre-A4 this test name was test_boot_helper_with_cold_cache_refuses_via_default_true_semantic
+    and exploited the KNOWN != LIVE_SAFE divergence to surface a ghost
+    via cold-cache default-True semantics. Post-A4 the divergence is
+    impossible by construction (both derive from one registry call),
+    so the cold-cache attack surface is closed.
     """
+
     import src.control.control_plane as cp
-    import src.engine.cycle_runner as cycle_runner
     import src.main as main_mod
 
     monkeypatch.setenv("ZEUS_MODE", "live")
-
-    # Extend both KNOWN_STRATEGIES and the stricter runtime-live surface with a
-    # synthetic ghost so cold-cache default-True surfaces it as offender even
-    # when all 4 real KNOWN are boot-safe.
-    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
-    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
-    monkeypatch.setattr(
-        cp,
-        "_LIVE_ALLOWED_STRATEGIES",
-        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
-    )
-
     original_state = dict(cp._control_state)
     monkeypatch.setattr(cp, "_control_state", {})  # empty: cold cache
 
-    with pytest.raises(SystemExit) as exc_info:
-        main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
-
-    msg = str(exc_info.value)
-    # The ghost (only non-safe under expanded allowlist) must be named.
-    assert "_test_ghost_strategy" in msg, (
-        f"Cold-cache scenario must surface non-safe strategies. "
-        f"Missing _test_ghost_strategy in: {msg!r}"
-    )
+    # Cold cache: every strategy in KNOWN looks enabled (default-True).
+    # Composition produces enabled = KNOWN_STRATEGIES = LIVE_SAFE_STRATEGIES.
+    # Boot guard accepts silently — no divergence possible post-A4.
+    main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
 
     cp._control_state.clear()
     cp._control_state.update(original_state)
@@ -495,31 +515,28 @@ def test_boot_helper_round_trips_real_db_gate(monkeypatch, tmp_path):
     )
 
 
-def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_path):
-    """Inverse of the above: empty DB → refresh yields strategy_gates={} → default-True → SystemExit.
+def test_boot_helper_round_trip_with_empty_db_under_post_a4_single_source(monkeypatch, tmp_path):
+    """Empty DB + single-source registry: silent boot.
 
-    Confirms the post-fix path is still fail-closed when the operator has
-    NOT issued any set_strategy_gate commands and at least one non-allowlisted
-    strategy exists in KNOWN_STRATEGIES. Injects a ghost into KNOWN_STRATEGIES
-    to remain correct under the 2026-04-29 allowlist expansion (all 4 real
-    KNOWN now safe).
+    Pre-A4 this test exploited the KNOWN != LIVE_SAFE divergence by
+    injecting a ghost into KNOWN_STRATEGIES while leaving LIVE_SAFE
+    unchanged, then confirming an empty DB + default-True semantics
+    surfaced the ghost as an offender. Post-A4 the divergence is
+    structurally impossible.
+
+    The post-A4 invariant: an empty DB hydrates strategy_gates={}, so
+    is_strategy_enabled returns True for all KNOWN_STRATEGIES, and the
+    composed enabled set equals KNOWN_STRATEGIES. Since KNOWN ==
+    LIVE_SAFE_STRATEGIES, the boot guard accepts silently. The test
+    pins this graceful-empty-DB property.
     """
     import sqlite3
     import src.control.control_plane as cp
-    import src.engine.cycle_runner as cycle_runner
     import src.main as main_mod
     import src.state.db as db
     from src.state.db import init_schema
 
     monkeypatch.setenv("ZEUS_MODE", "live")
-
-    extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
-    monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
-    monkeypatch.setattr(
-        cp,
-        "_LIVE_ALLOWED_STRATEGIES",
-        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
-    )
 
     db_path = tmp_path / "empty.db"
 
@@ -538,12 +555,8 @@ def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_pa
     monkeypatch.setattr(cp, "get_world_connection", fake_conn)
     monkeypatch.setattr(cp, "_control_state", {})
 
-    with pytest.raises(SystemExit) as exc_info:
-        main_mod._assert_live_safe_strategies_or_exit()
-
-    msg = str(exc_info.value)
-    # Under expanded allowlist, only the ghost is non-safe. Pin its presence.
-    assert "_test_ghost_strategy" in msg, (
-        f"Empty-DB scenario must surface non-safe strategies. "
-        f"Missing _test_ghost_strategy in: {msg!r}"
-    )
+    # Empty DB + clean registry: enabled set == KNOWN == LIVE_SAFE.
+    # Boot guard accepts silently. Pre-A4 this would have raised because
+    # the test injected a ghost into KNOWN; post-A4 single-source
+    # prevents the divergence so silent boot is the correct outcome.
+    main_mod._assert_live_safe_strategies_or_exit()

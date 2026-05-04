@@ -177,7 +177,9 @@ def evaluate_ddd(
     current_cov:        Current directional coverage [0.0, 1.0]
     window_elapsed:     Fraction of the observation window elapsed [0.0, 1.0]
     N_platt_samples:    Number of Platt training samples for (city, track)
-    mismatch_rate:      Existing oracle mismatch rate from oracle_penalty
+    mismatch_rate:      Oracle policy mismatch rate from oracle_penalty. For
+                        posterior-backed artifacts this is the beta-binomial
+                        95% upper bound, not raw mismatches / n.
     city_floors_config: Loaded floors JSON dict (from load_city_floors)
     n_star_config:      Loaded N_star JSON dict (from load_nstar_config)
     sigma_diagnostic:   σ of historical coverage (for monitoring only, NOT trigger)
