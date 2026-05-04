@@ -2270,6 +2270,90 @@ def evaluate_candidate(
                 _phase2_horizon_profile = _hp
     except Exception:
         pass
+
+    # Phase 2.5 (2026-05-04, may4math.md F2 + critic-opus BLOCKER 6):
+    # evaluate_calibration_transfer activation. When the live forecast is
+    # NOT the legacy TIGGE training domain (i.e., data_version starts with
+    # 'ecmwf_opendata_'), we are about to apply a Platt model trained on
+    # TIGGE/00z/full to a forecast from a different domain. That is a
+    # cross-domain transfer and cannot be live-eligible without OOS
+    # evidence in validated_calibration_transfers. The gate fails closed
+    # (SHADOW_ONLY) until an operator runs a holdout experiment and
+    # records the transfer authority.
+    if (
+        isinstance(_phase2_data_version, str)
+        and _phase2_data_version.startswith("ecmwf_opendata_")
+    ):
+        try:
+            from src.calibration.forecast_calibration_domain import (
+                ForecastCalibrationDomain,
+            )
+            from src.data.calibration_transfer_policy import (
+                evaluate_calibration_transfer,
+            )
+            from src.types.metric_identity import (
+                HIGH_LOCALDAY_MAX,
+                LOW_LOCALDAY_MIN,
+            )
+
+            _calibrator_dv = (
+                HIGH_LOCALDAY_MAX.data_version
+                if temperature_metric.is_high()
+                else LOW_LOCALDAY_MIN.data_version
+            )
+            _forecast_domain = ForecastCalibrationDomain(
+                source_id=_phase2_source_id or "ecmwf_open_data",
+                cycle_hour_utc=_phase2_cycle or "00",
+                horizon_profile=_phase2_horizon_profile or "full",
+                metric=temperature_metric.temperature_metric,
+                season=_cal_season,
+                data_version=_phase2_data_version,
+            )
+            _calibrator_domain = ForecastCalibrationDomain(
+                source_id="tigge_mars",
+                cycle_hour_utc="00",
+                horizon_profile="full",
+                metric=temperature_metric.temperature_metric,
+                season=_cal_season,
+                data_version=_calibrator_dv,
+            )
+            _transfer = evaluate_calibration_transfer(
+                conn,
+                forecast_domain=_forecast_domain,
+                calibrator_domain=_calibrator_domain,
+            )
+        except Exception as _exc:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="CALIBRATION_TRANSFER_FAULT",
+                rejection_reasons=[
+                    f"evaluate_calibration_transfer raised: {type(_exc).__name__}: {_exc}"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
+        if not _transfer.live_eligible:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="CALIBRATION_TRANSFER_SHADOW_ONLY"
+                if _transfer.status == "SHADOW_ONLY"
+                else "CALIBRATION_TRANSFER_BLOCKED",
+                rejection_reasons=[
+                    f"OpenData→TIGGE calibration transfer not approved: "
+                    f"status={_transfer.status} reasons={list(_transfer.reason_codes)}"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
+
     cal, cal_level = get_calibrator(
         conn, city, target_date,
         temperature_metric=temperature_metric.temperature_metric,

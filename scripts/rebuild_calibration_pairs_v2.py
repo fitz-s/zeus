@@ -353,6 +353,32 @@ def _process_snapshot_v2(
         data_version,
     )
 
+    # Phase 2.6 (2026-05-04, critic-opus BLOCKER 2): derive cycle / source_id
+    # / horizon_profile from the snapshot row so rebuilt rows land in the
+    # correct stratified Platt bucket. Without these args, add_calibration_pair_v2
+    # falls into its schema-default branch ('00','tigge_mars','full'), silently
+    # contaminating any OpenData-tagged historical snapshot with TIGGE labels.
+    _rb_cycle: Optional[str] = None
+    _rb_source_id: Optional[str] = None
+    _rb_horizon_profile: Optional[str] = None
+    try:
+        _it = snapshot["issue_time"]
+        if isinstance(_it, str) and len(_it) >= 13:
+            _rb_cycle = _it[11:13]
+        from src.calibration.forecast_calibration_domain import (
+            derive_source_id_from_data_version,
+        )
+        _rb_source_id = derive_source_id_from_data_version(data_version)
+        if _rb_cycle is not None:
+            _rb_horizon_profile = "full" if _rb_cycle in ("00", "12") else "short"
+    except (KeyError, ImportError, AttributeError, TypeError):
+        # Best-effort: leave None so writer falls into schema-default branch.
+        # We don't want a stratification derivation hiccup to crash the whole
+        # rebuild — the writer's schema defaults still produce well-formed rows.
+        _rb_cycle = None
+        _rb_source_id = None
+        _rb_horizon_profile = None
+
     pairs_this_snapshot = 0
     for b, p in zip(bins, p_raw_vec):
         outcome = 1 if b is winning_bin else 0
@@ -378,6 +404,9 @@ def _process_snapshot_v2(
             causality_status="OK",
             snapshot_id=snapshot["snapshot_id"],
             city_obj=city,
+            cycle=_rb_cycle,
+            source_id=_rb_source_id,
+            horizon_profile=_rb_horizon_profile,
         )
         pairs_this_snapshot += 1
 
