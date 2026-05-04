@@ -1074,6 +1074,14 @@ def _parse_event(
         "temperature_metric": temperature_metric,
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
+        # P2 (PLAN_v3 §6.P2 stage 3 critic R3 ATTACK 8 fix, 2026-05-04):
+        # surface Polymarket startDate / endDate verbatim onto the parent
+        # market dict so ``market_phase_from_market_dict`` consumes the
+        # explicit Gamma timestamps instead of always falling through to
+        # the F1 12:00-UTC fallback. F1 is verified across 13 cities but
+        # the design intent is "fallback when Gamma omits", not "only path".
+        "market_start_at": event.get("startDate") or event.get("start_date"),
+        "market_end_at": event.get("endDate") or event.get("end_date"),
         "outcomes": outcomes,
         "condition_ids": executable_condition_ids,
         "support_topology": {

@@ -34,6 +34,14 @@ This directive REPLACES any v2 wording that suggested per-city-tz scheduler oper
 9. **A5+A12+A10/OD3 fix** — §3 clarifies `observed_target_day_fraction` is *clock-time* approximation (informationally degraded for west-of-UTC-5 cities); §7 OD3 documents the regime where option B (hard gate) is correct.
 10. **C6 minor fix** — §6 P3 prose updated to "5+1 sites" (5 strategy-dispatch + 1 observation-fetch gate at `cycle_runtime.py:2083`).
 
+### v3 → v3.1 amendments (post-critic-R3 on PR #53, 2026-05-04)
+
+11. **R3 ATTACK 8 fix** — surface Polymarket `startDate`/`endDate` onto the parent market dict from `_parse_event` so `market_phase_from_market_dict` consumes Gamma's explicit timestamps; F1 12:00-UTC is now a real fallback, not the only path. Implemented at `src/data/market_scanner.py::_parse_event` return dict.
+12. **R3 ATTACK 6 fix** — rename `_require_utc` → `_require_zero_utc_offset` in `src/strategy/market_phase.py` to honestly reflect the looseness (zero-offset zones like `Europe/London` winter accepted). No production-path change today; future-agent footgun closed.
+13. **R3 ATTACK 1 fix** — §6 P2 amended to name `probability_trace_fact.market_phase` (the actual chosen column) instead of the conceptual `decision_chain.market_phase`, with rationale tied to §6.P9 cohort attribution.
+14. **R3 ATTACK 2 fix** — §2 boundary anchor wording updated from "city-local end-of-target_date − 24h" to "city-local 00:00 of target_local_date (start-of-target_date local)" to match the DST-correct implementation in `settlement_day_entry_utc`.
+15. **R3 ATTACK 5 fix** — A14 SAVEPOINT atomicity DEFERRED-TO-P3 in §6 with rationale recorded inline (P2 ships read-only tag; transition mechanism only materializes with P3 D-B dispatch flip). T7 moves from §8-promise to §8-with-P3 explicit.
+
 ---
 
 ## §0 What v1 got wrong (consolidated)
@@ -117,7 +125,7 @@ class MarketPhase(Enum):
 
 **Boundary anchors** (locked from F1, F10):
 - `PRE_TRADING → PRE_SETTLEMENT_DAY` at Polymarket `startDate` (~T-2 days + 20-70min warm-up)
-- `PRE_SETTLEMENT_DAY → SETTLEMENT_DAY` at `lead_hours_to_settlement_close() ≤ 24` (city-local end-of-target_date − 24h)
+- `PRE_SETTLEMENT_DAY → SETTLEMENT_DAY` at city-local 00:00 of `target_local_date` (i.e., start-of-target_date local; equivalent to "24h before end-of-target_date" on non-DST days, but stays local-calendar-correct on DST-transition days where the older "end−24h" formulation silently shifted by ±1h). Implemented at `src/strategy/market_phase.py::settlement_day_entry_utc`. Locked from operator framing "当地市场 0 点前的 24 个小时" + critic R3 ATTACK 2 (PR #53). [v3 amendment 8]
 - `SETTLEMENT_DAY → POST_TRADING` at Polymarket endDate = 12:00 UTC of target_date
 - `POST_TRADING → RESOLVED` at UMA proposePrice settlement (variable, ~14h+ after endDate)
 
@@ -365,17 +373,37 @@ P2  MarketPhase enum + per-cycle snapshot (the AUGMENTATION layer)
        * position_events.phase_after — already populated by build_position_current_projection
                                     at src/state/projection.py:61, 82. P2 does
                                     NOT change this writer.
-       * decision_chain.market_phase — NEW column added by P2 (one schema change,
-                                    additive, default NULL for legacy rows).
+       * probability_trace_fact.market_phase — NEW column added by P2 stage 3
+                                    (one schema change, additive, default
+                                    NULL for legacy rows + ALTER migration).
+                                    Chosen over a separate decision_chain
+                                    table because probability_trace_fact is
+                                    the existing per-decision lineage spine
+                                    (carries decision_id, strategy_key,
+                                    discovery_mode) and aligns with §6.P9
+                                    cohort attribution. Implemented at
+                                    src/state/db.py + writer
+                                    log_probability_trace_fact.
+                                    [v3 amendment 9 — critic R3 ATTACK 1]
        * candidate snapshot       — NEW market_phase tag in evidence/reporting.
-    - Per-market multi-position write atomicity (per critic R2 A14):
+    - Per-market multi-position write atomicity (per critic R2 A14)
+      DEFERRED-TO-P3 [v3 amendment 10 — critic R3 ATTACK 5]:
        * When a market transitions MarketPhase (e.g., to SETTLEMENT_DAY), all
          active positions on that market must transition LifecyclePhase in a
          single SAVEPOINT. Use upsert_position_current() inside an explicit
          BEGIN/SAVEPOINT/RELEASE block.
        * §8 T7 invariant test asserts no partial-write state.
+       * RATIONALE FOR DEFERRAL: P2 ships MarketPhase as an
+         observability/cohort tag only — it is read-only with respect to
+         position_current. The "multi-position transition" surface that A14
+         worried about does not yet exist; it materializes only when P3
+         (D-B mode→phase migration) flips dispatch onto market_phase.
+         Implementing SAVEPOINT atomicity in P2 would be scaffolding without
+         a caller. The SAVEPOINT-wrapped transition + T7 land with P3 in the
+         same PR.
     - Risk: MED (touches every layer, but additive — no removal)
-    - Tests: §8 floor (relationship invariants T1-T7)
+    - Tests: §8 floor (relationship invariants T1-T6 land with P2; T7 lands
+      with P3 SAVEPOINT atomicity)
 
 P3  D-B mode→phase migration (5+1 sites; per critic R2 C6)
     - 5 strategy-dispatch sites:
@@ -565,6 +593,8 @@ T4. **endDate UTC anchor**: `MarketPhase.POST_TRADING` for any city's market at 
 T5. **Candidate filter consistency post-D-A fix**: at `decision_time = T`, the count of candidates passing `min_hours_to_resolution` filter equals the count of cities in `MarketPhase ∈ {PRE_SETTLEMENT_DAY, SETTLEMENT_DAY}` per INTERNAL Q5 matrix.
 
 T6. **Mode-default preservation post-D-B**: with no flag flipped, every site's behavior is byte-equal to pre-D-B (no live regression). The phase-coupled path is reachable only via explicit phase-aware refactor flag (or post-P3 default flip).
+
+T7. **Per-market multi-position SAVEPOINT atomicity** [LANDS WITH P3 — see §6.P2 deferral note + §0.1 amendment 15]: when a market transitions MarketPhase, all its active positions are updated in a single SAVEPOINT. Test asserts that a synthetic mid-transition crash leaves zero partially-updated positions (every position either has the new phase or the old, never the new on some and old on others).
 
 ---
 

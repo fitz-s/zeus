@@ -1441,6 +1441,11 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     except sqlite3.OperationalError:
         pass
     try:
+        # Read consumer for this index lands with PLAN_v3 §6.P9 (per-(strategy_key,
+        # market_phase) cohort attribution SQL). Until then the index has no live
+        # query; it is provisioned now so the first cohort report doesn't trigger
+        # a full-table scan after months of writes. Do NOT GC as orphan — see
+        # critic R3 ATTACK 9 (PR #53).
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_probability_trace_market_phase "
             "ON probability_trace_fact(market_phase);"

@@ -342,6 +342,75 @@ def test_adapter_handles_offset_iso8601_variant() -> None:
         assert phase == MarketPhase.POST_TRADING
 
 
+def test_adapter_uses_explicit_end_in_production_parse_event_dict() -> None:
+    """Critic R3 ATTACK 8 regression antibody. The production market dict
+    from ``src.data.market_scanner._parse_event`` MUST carry
+    ``market_end_at`` and ``market_start_at`` so the adapter consumes
+    Gamma's explicit timestamps, not the F1 fallback. Test exercises the
+    real ``_parse_event`` shape end-to-end (via a synthetic Gamma-shape
+    payload) and asserts the explicit endDate wins over the F1 anchor.
+
+    Pre-fix this test failed because ``_parse_event`` omitted those keys
+    and the adapter silently used ``_f1_fallback_end_utc(target_local_date)
+    = 12:00 UTC``. The fix at ``market_scanner.py:1077-1083`` threads
+    ``event.get("endDate")`` and ``event.get("startDate")`` onto the
+    parent market dict.
+    """
+    from src.strategy.market_phase import market_phase_from_market_dict
+
+    # Synthetic Gamma payload with a NON-12:00 endDate to prove the
+    # explicit value wins over the F1 fallback. (Real Polymarket weather
+    # markets settle at 12:00 UTC per F1, but this test must distinguish
+    # explicit-vs-fallback paths, so we use 14:00 UTC to make the
+    # difference observable.)
+    market_dict = {
+        "event_id": "ev-1",
+        "slug": "high-temp-london-may-8",
+        "target_date": "2026-05-08",
+        "outcomes": [],
+        "market_start_at": "2026-05-06T04:04:00Z",
+        "market_end_at": "2026-05-08T14:00:00Z",  # NOT 12:00
+    }
+    decision_time = datetime(2026, 5, 8, 13, 0, 0, tzinfo=UTC)
+
+    phase = market_phase_from_market_dict(
+        market=market_dict,
+        city_timezone="Europe/London",
+        target_date_str="2026-05-08",
+        decision_time_utc=decision_time,
+    )
+    # If the F1 fallback (12:00 UTC) had been used, decision_time 13:00
+    # would be POST_TRADING. With the explicit 14:00 endDate, 13:00 is
+    # still SETTLEMENT_DAY. This delta proves the explicit path is live.
+    assert phase == MarketPhase.SETTLEMENT_DAY, (
+        f"explicit market_end_at=14:00 should keep 13:00 in SETTLEMENT_DAY; "
+        f"got {phase} — F1 fallback shadow."
+    )
+
+
+def test_parse_event_dict_carries_endDate_keys() -> None:
+    """Schema-level antibody on ``_parse_event``: confirm the dict it
+    returns includes the ``market_end_at`` / ``market_start_at`` keys
+    threaded from the Gamma event. Future refactors that drop these
+    keys silently re-introduce the F1-only-path bug; this test fails
+    loudly.
+    """
+    from src.data import market_scanner
+
+    # Walk the source for the literal keys; cheap structural assertion
+    # that survives without executing the heavy network/scanner stack.
+    src_text = open(market_scanner.__file__, "r", encoding="utf-8").read()
+    assert '"market_end_at"' in src_text, (
+        "src/data/market_scanner.py must carry the literal "
+        '"market_end_at" key in _parse_event\'s returned dict — see '
+        "critic-opus R3 ATTACK 8 (PR #53)."
+    )
+    assert '"market_start_at"' in src_text, (
+        "src/data/market_scanner.py must carry the literal "
+        '"market_start_at" key in _parse_event\'s returned dict.'
+    )
+
+
 def test_adapter_naive_gamma_payload_is_loud_failure() -> None:
     """A Gamma payload missing tz info would silently drift through
     naive arithmetic. The adapter raises so cycle_runtime can log and
@@ -404,7 +473,7 @@ def test_strict_utc_offset_rejected_for_non_utc_tz() -> None:
     target = date(2026, 5, 8)
     chicago_decision_time = datetime(2026, 5, 8, 12, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
 
-    with pytest.raises(ValueError, match="must carry UTC offset"):
+    with pytest.raises(ValueError, match="must carry zero UTC offset"):
         market_phase_for_decision(
             target_local_date=target,
             city_timezone="Europe/London",

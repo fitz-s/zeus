@@ -56,27 +56,38 @@ class MarketPhase(str, Enum):
     RESOLVED = "resolved"
 
 
-def _require_utc(value: datetime, name: str) -> datetime:
-    """Strictly validate that ``value`` is a UTC-offset-aware datetime.
+def _require_zero_utc_offset(value: datetime, name: str) -> datetime:
+    """Validate that ``value`` is a tz-aware datetime carrying a
+    zero-offset timezone. Rejects naive datetimes and non-zero-offset
+    zones (the canonical error case: ``ZoneInfo("America/Chicago")``).
 
-    A ``tzinfo is not None`` check is too permissive — a caller who
-    passes ``ZoneInfo("America/Chicago")`` would slip through and the
-    function would silently compare instants across mixed offsets. The
-    parameter is named ``*_utc`` so we enforce ``utcoffset() ==
-    timedelta(0)`` literally.
+    DELIBERATE LOOSENESS — accepts any zero-offset zone, including:
+      - ``timezone.utc`` (canonical)
+      - ``ZoneInfo("UTC")``
+      - ``timezone(timedelta(0))``
+      - ``ZoneInfo("Europe/London")`` IN WINTER (offset 0 for half the year)
+      - ``ZoneInfo("Atlantic/Reykjavik")`` (offset 0 year-round)
+
+    These all produce identical UTC instants and any subsequent UTC
+    arithmetic is correct. The function is named ``_require_zero_utc_offset``
+    rather than ``_require_utc`` to make this explicit: a future caller
+    expecting "the result is literally ``timezone.utc``" must check
+    additionally. Production today calls with ``datetime.now(timezone.utc)``
+    so the looseness is unobservable; the rename guards against future
+    misreading per critic R3 ATTACK 6 (PR #53 review).
     """
     if value.tzinfo is None:
         raise ValueError(
-            f"{name} must be timezone-aware (UTC). Naive datetimes silently "
-            f"drift across host tz; per critic R1 C5 and operator directive "
+            f"{name} must be timezone-aware. Naive datetimes silently drift "
+            f"across host tz; per critic R1 C5 and operator directive "
             f"2026-05-04 (UTC-strict execution)."
         )
     if value.utcoffset() != timedelta(0):
         raise ValueError(
-            f"{name} must carry UTC offset (utcoffset == 0); got "
-            f"{value.tzinfo!r} with offset {value.utcoffset()!r}. "
-            f"Per UTC-strict directive, callers convert at the boundary "
-            f"before passing — silent astimezone() here would hide the bug."
+            f"{name} must carry zero UTC offset; got {value.tzinfo!r} with "
+            f"offset {value.utcoffset()!r}. Per UTC-strict directive, "
+            f"callers convert at the boundary before passing — silent "
+            f"astimezone() here would hide the bug."
         )
     return value
 
@@ -123,10 +134,10 @@ def market_phase_for_decision(
     """Compute ``MarketPhase`` at ``decision_time_utc`` given market
     boundaries.
 
-    All datetime arguments MUST be UTC-offset-aware (``utcoffset() ==
-    timedelta(0)``). Naive or non-UTC-offset datetimes raise
+    All datetime arguments MUST carry zero UTC offset (``utcoffset() ==
+    timedelta(0)``). Naive or non-zero-offset datetimes raise
     ``ValueError`` rather than being silently coerced — see
-    ``_require_utc`` for the rationale.
+    ``_require_zero_utc_offset`` for the rationale.
 
     ``polymarket_start_utc`` may be ``None`` when the start time is
     unknown (e.g., during pre-discovery when only target_date and city
@@ -139,10 +150,10 @@ def market_phase_for_decision(
     See PLAN_v2 §2 for the boundary table. T3 in §8 pins inclusive-late
     semantics; T4 pins the 12:00 UTC POST_TRADING anchor.
     """
-    decision_time_utc = _require_utc(decision_time_utc, "decision_time_utc")
-    polymarket_end_utc = _require_utc(polymarket_end_utc, "polymarket_end_utc")
+    decision_time_utc = _require_zero_utc_offset(decision_time_utc, "decision_time_utc")
+    polymarket_end_utc = _require_zero_utc_offset(polymarket_end_utc, "polymarket_end_utc")
     if polymarket_start_utc is not None:
-        polymarket_start_utc = _require_utc(polymarket_start_utc, "polymarket_start_utc")
+        polymarket_start_utc = _require_zero_utc_offset(polymarket_start_utc, "polymarket_start_utc")
 
     if uma_resolved:
         return MarketPhase.RESOLVED
