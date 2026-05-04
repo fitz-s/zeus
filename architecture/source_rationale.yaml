@@ -1011,6 +1011,20 @@ files:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
     - src/main.py
+  src/engine/dispatch.py:
+    zone: K2_runtime
+    authority_role: phase_axis_dispatch
+    why: Single locus for D-B mode→phase migration (PLAN_v3 §6.P3) and D-A
+      two-clock unification (PLAN_v3 §6.P4). Flag-gated by
+      ZEUS_MARKET_PHASE_DISPATCH; default OFF preserves byte-equal pre-P3
+      legacy dispatch (T6 invariant). Centralizes the read of
+      candidate.market_phase vs candidate.discovery_mode so all per-candidate
+      and obs-fetch sites stay coordinated.
+    downstream:
+    - src/engine/cycle_runner.py
+    - src/engine/cycle_runtime.py
+    - src/engine/evaluator.py
+    - src/state/attribution_drift.py
   src/engine/evaluator.py:
     zone: K3_extension
     authority_role: signal_strategy_sizing_pipeline

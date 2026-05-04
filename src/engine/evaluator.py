@@ -22,6 +22,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from src.data.observation_client import Day0ObservationContext
+    from src.strategy.market_phase import MarketPhase
 
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
@@ -171,6 +172,15 @@ class MarketCandidate:
     slug: str = ""
     observation: Optional["Day0ObservationContext"] = None
     discovery_mode: str = ""
+    # P2 (PLAN_v3 §6.P2 stage 2): MarketPhase axis A tag.
+    # Computed from (target_local_date, city.timezone, decision_time_utc,
+    # polymarket_start/end) at candidate construction time using the
+    # cycle's frozen decision_time. None when constructed by legacy
+    # callers (test fixtures, off-cycle paths) — production discovery
+    # tags every candidate via market_phase_from_market_dict in
+    # cycle_runtime. Storing the enum (not the str) keeps downstream
+    # dispatch type-safe; cycle_runtime serializes to .value for SQL.
+    market_phase: Optional["MarketPhase"] = None
 
 
 @dataclass
@@ -204,6 +214,12 @@ class EdgeDecision:
     sizing_bankroll: float = 0.0
     kelly_multiplier_used: float = 0.0
     execution_fee_rate: float = 0.0
+    # P2 (PLAN_v3 §6.P2 stage 2): MarketPhase axis A tag forwarded from
+    # the candidate. Stored as the enum's ``.value`` string so SQL/JSON
+    # serialization is uniform; downstream callers that need the enum
+    # re-resolve via ``MarketPhase(value)``. None when the upstream
+    # candidate was untagged (legacy / test fixtures).
+    market_phase: Optional[str] = None
 
     # Heavy Bound Domain Objects (Phase 2 encapsulation)
     edge_context: Optional[EdgeContext] = None
@@ -917,7 +933,11 @@ def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_so
 
 
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 1 of 3 in evaluator (PLAN_v3 §6.P3). Migration is flag-gated
+    # via ``is_settlement_day_dispatch``; flag OFF preserves byte-equal
+    # legacy behavior (T6).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -929,7 +949,9 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
 
 
 def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 2 of 3 in evaluator (PLAN_v3 §6.P3).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -941,7 +963,9 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
 
 
 def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str | None:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 3 of 3 in evaluator (PLAN_v3 §6.P3).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"

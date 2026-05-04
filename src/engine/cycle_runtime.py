@@ -1498,12 +1498,32 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
+                _now_utc = deps._utcnow()
                 hours_to_settlement = lead_hours_to_settlement_close(
                     pos.target_date,
                     city.timezone,
-                    deps._utcnow(),
+                    _now_utc,
                 )
-                if (hours_to_settlement <= 6.0
+                # P4 site 1 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
+                # Flag OFF (default): byte-equal legacy
+                # ``hours_to_settlement <= 6.0`` (anchored on city-local
+                # end-of-target_date). Flag ON: respect the position's
+                # market-phase axis A — DAY0_WINDOW transition fires when
+                # the market is in MarketPhase.SETTLEMENT_DAY (city-local
+                # 00:00 of target_date through Polymarket endDate 12:00
+                # UTC). The wider window matches operator framing
+                # "all 24 hours before midnight of the local market" and
+                # closes the legacy bug where west-of-UTC cities fired
+                # DAY0_WINDOW AFTER Polymarket trading already closed.
+                from src.engine.dispatch import should_enter_day0_window
+                _enter_day0 = should_enter_day0_window(
+                    target_date_str=pos.target_date,
+                    city_timezone=city.timezone,
+                    decision_time_utc=_now_utc,
+                    legacy_hours_to_settlement=hours_to_settlement,
+                    legacy_threshold_hours=6.0,
+                )
+                if (_enter_day0
                         and pos.state in {"entered", "holding"}
                         and not getattr(pos, "exit_state", "")):
                     new_state = enter_day0_window_runtime_state(
@@ -2001,7 +2021,34 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     if "min_hours_since_open" in params:
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
-        markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+        # P4 site 2 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
+        # Flag OFF (default): byte-equal legacy filter on hours_to_resolution
+        # (anchored at UTC endDate − now via market_scanner._parse_event).
+        # Flag ON: replace with phase-axis SETTLEMENT_DAY membership
+        # (anchored at city-local 00:00 of target_date for entry, 12:00 UTC
+        # of target_date for exit per F1). Closes the D-A drift where
+        # west-of-UTC cities had their DAY0_CAPTURE candidate window open
+        # 18+h AFTER Polymarket trading already closed.
+        from src.engine.dispatch import (
+            filter_market_to_settlement_day,
+            market_phase_dispatch_enabled,
+        )
+        # Critic R5 code-reviewer M1: stamp the flag state on the cycle
+        # summary so downstream substrate / cohort attribution can
+        # explain step-changes in candidate count when the operator
+        # flips ZEUS_MARKET_PHASE_DISPATCH. Without this, the substrate
+        # log shows only the post-filter count with no audit trail.
+        flag_on = market_phase_dispatch_enabled()
+        summary["market_phase_dispatch_flag"] = flag_on
+        if flag_on:
+            markets = [
+                m for m in markets
+                if filter_market_to_settlement_day(
+                    market=m, decision_time_utc=decision_time
+                )
+            ]
+        else:
+            markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
     scan_authority = _market_scan_authority()
     summary["market_scan_authority"] = scan_authority
     _record_forward_market_substrate(markets, scan_authority)
@@ -2077,10 +2124,41 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             for outcome in market.get("outcomes", [])
             if not (outcome.get("range_low") is None and outcome.get("range_high") is None)
         ]
+
+        # P2 stage 2 (PLAN_v3 §6.P2) — derive MarketPhase axis A from the
+        # cycle's frozen decision_time BEFORE the obs gate so P3's
+        # phase-based dispatch can read it. Errors are fail-soft: log +
+        # leave market_phase=None so dispatch falls back to legacy mode.
+        market_phase = None
+        try:
+            from src.strategy.market_phase import market_phase_from_market_dict
+
+            market_phase = market_phase_from_market_dict(
+                market=market,
+                city_timezone=city.timezone,
+                target_date_str=market["target_date"],
+                decision_time_utc=decision_time,
+            )
+        except Exception as exc:
+            deps.logger.warning(
+                "MarketPhase tag failed for %s/%s: %s",
+                city.name,
+                market.get("target_date"),
+                exc,
+            )
+
+        # P3 site 4 of 4 — observation-fetch gate (PLAN_v3 §6.P3).
+        # Routed through the testable helper per critic R4 A7-M2 so the
+        # contract has independent unit tests instead of being inlined.
+        from src.engine.dispatch import should_fetch_settlement_day_observation
+        should_fetch_observation = should_fetch_settlement_day_observation(
+            mode=mode, market_phase=market_phase
+        )
+
         try:
             obs = (
                 fetch_day0_observation(city, market["target_date"], decision_time, deps=deps)
-                if mode == deps.DiscoveryMode.DAY0_CAPTURE
+                if should_fetch_observation
                 else None
             )
         except Exception as e:
@@ -2125,6 +2203,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 continue
             raise
 
+        # market_phase already computed above (used by both the obs-fetch
+        # gate at P3 site 4 and the candidate tag below).
         candidate = market_candidate_ctor(
             city=city,
             target_date=market["target_date"],
@@ -2144,6 +2224,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             slug=market.get("slug", ""),
             observation=obs,
             discovery_mode=mode.value,
+            market_phase=market_phase,
         )
         summary["candidates"] += 1
 
@@ -2157,6 +2238,17 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 entry_bankroll=entry_bankroll,
                 decision_time=decision_time,
             )
+            # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
+            # every returned EdgeDecision. evaluate_candidate has 30+
+            # ``return [EdgeDecision(...)]`` sites; stamping at the call
+            # site keeps the contract single-locus instead of threading
+            # ``market_phase=`` into every return. The serialized
+            # ``.value`` form is used so SQL/JSON downstream paths see a
+            # uniform string regardless of caller.
+            if decisions and candidate.market_phase is not None:
+                _phase_value = candidate.market_phase.value
+                for _d in decisions:
+                    _d.market_phase = _phase_value
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
                 if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):

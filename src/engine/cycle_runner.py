@@ -325,7 +325,14 @@ def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
 
 
 def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
-    if mode == DiscoveryMode.DAY0_CAPTURE:
+    # P3 cycle-axis site (PLAN_v3 §6.P3 — explicitly NOT migrated to
+    # phase-axis because this fires before per-candidate phase is
+    # available). Routed through ``settlement_day_dispatch_for_mode``
+    # for grep-symmetry with the per-candidate sites; behavior is the
+    # legacy ``mode == DAY0_CAPTURE`` rule regardless of the
+    # ZEUS_MARKET_PHASE_DISPATCH flag. Critic R4 A5-L1 fix.
+    from src.engine.dispatch import settlement_day_dispatch_for_mode
+    if settlement_day_dispatch_for_mode(mode):
         return "settlement_capture"
     if mode == DiscoveryMode.OPENING_HUNT:
         return "opening_inertia"
@@ -435,7 +442,12 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.warning("freshness_gate mid_run evaluation failed: %s", exc)
         _freshness_verdict = None
     if _freshness_verdict is not None:
-        if _freshness_verdict.day0_capture_disabled and mode == DiscoveryMode.DAY0_CAPTURE:
+        # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly
+        # NOT migrated to phase-axis; this gate fires before any candidate
+        # is constructed). Routed through helper for grep-symmetry per
+        # critic R4 A5-L1.
+        from src.engine.dispatch import settlement_day_dispatch_for_mode
+        if _freshness_verdict.day0_capture_disabled and settlement_day_dispatch_for_mode(mode):
             summary["skipped"] = True
             summary["skip_reason"] = "cycle_skipped_freshness_degraded"
             summary["stale_sources"] = list(_freshness_verdict.stale_sources)

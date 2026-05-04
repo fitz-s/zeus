@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §P0 — APScheduler UTC invariant.
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §P0 — APScheduler UTC invariant.
 """P0 antibody: ``BlockingScheduler`` in ``src/main.py`` MUST be
 constructed with ``timezone=ZoneInfo("UTC")``.
 
