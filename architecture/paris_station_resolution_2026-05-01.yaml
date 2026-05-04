@@ -160,4 +160,23 @@ paris_station_lfpb_canonical:
     - 7_close: Once steps 1-6 land, mark this YAML as APPLIED and close
       the known_gaps.md OPEN P1 Paris entry.
 
-  apply_status: PLANNED  # this YAML records the decision; runtime apply is the operator's call.
+  apply_status: APPLIED
+  applied_at: 2026-05-03T00:00Z
+  applied_by: Fitz
+  applied_notes: |
+    All 7 apply_steps completed 2026-05-03 per operator directive.
+    Steps 1-3 completed 2026-05-01: config_update (cities.json LFPB),
+    hardcode_audit (recorded), apply_legacy_quarantine (LFPG rows).
+    Step 4 completed 2026-05-03: backfill_lfpb 762 LFPB obs rows
+    (2024-01-01 to 2026-01-31, with --replace-station-mismatch).
+    Step 5 completed 2026-05-03: rebuild_calibration_pairs_v2 full window
+    + refit_platt_v2 all 8 buckets + rebuild_settlements 1706 rows.
+    Step 6 completed 2026-05-03: verification passed (verify_ready.py,
+    source-contract probe zero MISMATCH).
+    Step 7 completed 2026-05-03: this YAML marked APPLIED; Paris removed
+    from _source_contract_pending_conversions; source_contract_quarantine.json
+    released; QUARANTINED LFPG calibration_pairs_v2 rows deleted.
+    Evidence: docs/operations/task_2026-05-03_ddd_implementation_plan/
+    phase1_results/E8_audit/11_paris_resync_log.md
+    Plan: docs/operations/task_2026-05-03_ddd_implementation_plan/
+    phase1_results/E8_audit/10_paris_resync_plan.md

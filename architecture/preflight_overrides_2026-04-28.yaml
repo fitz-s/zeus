@@ -186,3 +186,17 @@ hko_canonical:
     table: observations
     where: authority='VERIFIED' AND (LOWER(source) LIKE 'hko%' OR city='Hong Kong')
     rows_affected: 821
+  released:
+    released_by: Fitz
+    released_at: 2026-05-02T00:00Z
+    rationale: |
+      HK quarantine released 2026-05-02 as part of the HK+Paris combined release packet
+      (docs/archives/packets/task_2026-05-02_hk_paris_release/work_log.md Step 2).
+      HKO XML backfill confirmed 29 April 2026 rows; all 821 historical rows released
+      to VERIFIED. The hko_requires_fresh_source_audit gate is now advisory - HK is
+      a confirmed VERIFIED city again. Gate re-arms automatically if this released:
+      block is removed or the released_at field is cleared.
+    effect:
+      - hko_requires_fresh_source_audit gate flips from BLOCKER to ADVISORY
+      - gate still emits count for audit; does not block rebuild_calibration_pairs_v2
+    plan_evidence: docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/10_paris_resync_plan.md

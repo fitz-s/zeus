@@ -416,7 +416,7 @@ exposure at settlement time.
 residual exposure exactly once, including positions that were in exit retry, and
 does not resubmit sell orders after settlement.
 
-### [OPEN P1] Paris config uses LFPG while current markets resolve on LFPB
+### [CLOSED P1 — 2026-05-03] Paris config uses LFPG while current markets resolve on LFPB
 
 **Location:** `config/cities.json` Paris `wu_station` and
 `settlement_source`.
@@ -437,19 +437,20 @@ is a contract/source truth mismatch, not a modeling error.
 endpoint liveness; it is which WU station the active Polymarket contract names.
 The same active-event probe did not find non-Paris station mismatches among
 recognized configured cities.
-**Proposed remediation:**
-1. Run a fresh source audit for all active weather cities and both HIGH/LOW
-   families.
-2. Decide whether Paris should be globally remapped to `LFPB` for future
-   contracts or routed by date/family, preserving the observed HIGH boundary
-   between 2026-04-18 (`LFPG`) and 2026-04-19 (`LFPB`) plus the LOW unknown
-   window before 2026-04-23.
-3. Quarantine affected Paris training/settlement rows until station identity is
-   reconciled.
-4. Add a source-contract test that compares current Gamma resolutionSource
-   station id against the configured settlement source for tradable markets.
-**Acceptance evidence:** Paris live candidates only proceed when configured
-station id matches event resolutionSource or an explicit dated routing table.
+**Resolution (2026-05-01 decision + 2026-05-03 execution):**
+1. `config/cities.json` updated 2026-05-01: `wu_station: LFPB`,
+   `airport_name: Paris-Le Bourget Airport`.
+   Authority: `architecture/paris_station_resolution_2026-05-01.yaml`.
+2. LFPG legacy observation rows deleted by backfill `--replace-station-mismatch`.
+   762 LFPB obs rows backfilled (2024-01-01 → 2026-01-31).
+3. LFPG-derived calibration_pairs_v2 rows (747,150 QUARANTINED) deleted.
+   New LFPB pairs rebuilt over full historical window 2024-01-01→2026-05-01.
+4. Platt models refitted on LFPB pairs (all 8 buckets VERIFIED+active).
+5. Source-contract quarantine released via `state/source_contract_quarantine.json`.
+   Paris removed from `_source_contract_pending_conversions` in `cities.json`.
+6. `architecture/paris_station_resolution_2026-05-01.yaml` marked APPLIED.
+**Verification:** `verify_ready.py` passed with Paris markets in ready list.
+**Evidence:** `docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/11_paris_resync_log.md`
 
 
 ### [OPEN P1] Calibration maturity edge-threshold multiplier is dead on the live path
