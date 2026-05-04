@@ -101,28 +101,15 @@ def _ens_result_phase2_keys(ens_result: dict) -> tuple[
     args. This helper mirrors the evaluator's extraction logic so both
     entry and exit paths route through the same stratified bucket.
 
-    Returns (None, None, None) if ens_result is malformed — manager.py
-    then falls into its legacy lookup, preserving backward compat for
-    legacy callers but no longer silently mis-routing OpenData forecasts
-    to the TIGGE bucket once cycle/source_id are populated.
+    Copilot review #5 + Codex P1 #7 (2026-05-04): delegated to the shared
+    forecast_calibration_domain.derive_phase2_keys_from_ens_result helper
+    so datetime issue_time and horizon_profile derivation behave the same
+    way in monitor and evaluator paths.
     """
-    cycle: str | None = None
-    source_id: str | None = None
-    horizon_profile: str | None = None
-    try:
-        if isinstance(ens_result, dict):
-            it = ens_result.get("issue_time")
-            if isinstance(it, str) and len(it) >= 13:
-                cycle = it[11:13]
-            sid = ens_result.get("source_id")
-            if isinstance(sid, str) and sid:
-                source_id = sid
-            hp = ens_result.get("horizon_profile")
-            if isinstance(hp, str) and hp:
-                horizon_profile = hp
-    except (TypeError, AttributeError, KeyError):
-        return None, None, None
-    return cycle, source_id, horizon_profile
+    from src.calibration.forecast_calibration_domain import (
+        derive_phase2_keys_from_ens_result,
+    )
+    return derive_phase2_keys_from_ens_result(ens_result)
 
 
 def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:

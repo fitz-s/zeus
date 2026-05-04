@@ -36,6 +36,36 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1 = "ecmwf_open_data_uses_tigge_localday_cal_v1"
 
+# Copilot review #1 (2026-05-04): authority threshold ranking. The
+# validated_calibration_transfers.authority column stores tier strings; the
+# original `AND authority = ?` filter implemented exact-match instead of
+# threshold (>=) semantics. We define the rank inline so passing
+# minimum_authority='UNVERIFIED' admits both UNVERIFIED and VERIFIED rows,
+# while passing 'VERIFIED' admits only VERIFIED. New tiers added in the future
+# slot in by extending this dict.
+_AUTHORITY_RANK: dict[str, int] = {
+    "UNVERIFIED": 0,
+    "VERIFIED": 1,
+}
+
+
+def _authority_threshold_clause(minimum_authority: str) -> tuple[str, list[str]]:
+    """Build SQL fragment + params expressing ``authority >= minimum_authority``.
+
+    Returns ``("AND authority IN (?, ?, ...)", [tier_a, tier_b, ...])``. When
+    minimum_authority is unknown, fail-closed by requiring exact-match (so an
+    operator typo doesn't accidentally widen the policy).
+    """
+    minimum_rank = _AUTHORITY_RANK.get(minimum_authority)
+    if minimum_rank is None:
+        return "AND authority = ?", [minimum_authority]
+    eligible = sorted(
+        tier for tier, rank in _AUTHORITY_RANK.items() if rank >= minimum_rank
+    )
+    placeholders = ",".join("?" * len(eligible))
+    return f"AND authority IN ({placeholders})", list(eligible)
+
+
 _TRANSFER_SOURCE_BY_OPENDATA_VERSION = {
     ECMWF_OPENDATA_HIGH_DATA_VERSION: HIGH_LOCALDAY_MAX.data_version,
     ECMWF_OPENDATA_LOW_DATA_VERSION: LOW_LOCALDAY_MIN.data_version,
@@ -158,6 +188,12 @@ def evaluate_calibration_transfer(
         )
 
     expiry_clause = ""
+    # Copilot review #1 (2026-05-04): minimum_authority is documented as a
+    # threshold (>=); original SQL used exact-match `=`, which silently rejects
+    # higher tiers when caller passes a lower minimum. Build the IN(...) clause
+    # via _authority_threshold_clause so the behavior matches the docstring.
+    auth_clause, auth_params = _authority_threshold_clause(minimum_authority)
+
     params: list = [
         # train (calibrator)
         calibrator_domain.source_id,
@@ -173,7 +209,7 @@ def evaluate_calibration_transfer(
         forecast_domain.data_version,
         forecast_domain.metric,
         forecast_domain.season,
-        minimum_authority,
+        *auth_params,
     ]
     if require_unexpired:
         expiry_clause = "AND (expires_at IS NULL OR expires_at > ?)"
@@ -189,7 +225,7 @@ def evaluate_calibration_transfer(
           AND test_source_id = ? AND test_cycle_hour_utc = ?
           AND test_horizon_profile = ? AND test_data_version = ?
           AND test_metric = ? AND test_season = ?
-          AND authority = ?
+          {auth_clause}
           {expiry_clause}
         ORDER BY validated_at DESC
         LIMIT 1

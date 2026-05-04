@@ -2292,22 +2292,17 @@ def evaluate_candidate(
                     decision_snapshot_id=snapshot_id,
                     p_raw=p_raw,
                 )]
-    _phase2_cycle: Optional[str] = None
-    _phase2_source_id: Optional[str] = None
-    _phase2_horizon_profile: Optional[str] = None
-    try:
-        if isinstance(ens_result, dict):
-            _it = ens_result.get("issue_time")
-            if isinstance(_it, str) and len(_it) >= 13:
-                _phase2_cycle = _it[11:13]
-            _src = ens_result.get("source_id")
-            if isinstance(_src, str) and _src:
-                _phase2_source_id = _src
-            _hp = ens_result.get("horizon_profile")
-            if isinstance(_hp, str) and _hp:
-                _phase2_horizon_profile = _hp
-    except Exception:
-        pass
+    # Copilot review #4 + Codex P1 #7 (2026-05-04): use shared helper that
+    # handles datetime issue_time AND derives horizon_profile from cycle when
+    # ens_result producers don't populate it. Pre-fix this block silently
+    # left horizon_profile=None (axis dead) and stripped 12z datetime
+    # issue_times to None (silent misroute to 00z TIGGE bucket).
+    from src.calibration.forecast_calibration_domain import (
+        derive_phase2_keys_from_ens_result,
+    )
+    _phase2_cycle, _phase2_source_id, _phase2_horizon_profile = (
+        derive_phase2_keys_from_ens_result(ens_result if isinstance(ens_result, dict) else None)
+    )
 
     # Phase 2.5 (2026-05-04, may4math.md F2 + critic-opus BLOCKER 6):
     # evaluate_calibration_transfer activation. When the live forecast is

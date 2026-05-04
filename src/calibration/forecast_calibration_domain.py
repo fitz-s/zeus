@@ -95,6 +95,55 @@ def parse_cycle_from_issue_time(issue_time_iso: Optional[str]) -> Optional[str]:
     return hh
 
 
+def derive_phase2_keys_from_ens_result(
+    ens_result: Optional[dict],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Derive (cycle_hour_utc, source_id, horizon_profile) from an ens_result.
+
+    Phase 2 stratification needs these three keys to look up the right Platt
+    bucket. ens_result producers populate ``issue_time`` (str OR datetime,
+    depending on whether the registered-ingest path was used) and
+    ``source_id``; ``horizon_profile`` is *not* populated upstream as of
+    2026-05-04, so we derive it from cycle (00/12 → 'full', else 'short').
+
+    Copilot review #4 + #5 (2026-05-04): horizon_profile derivation when
+    ``ens_result['horizon_profile']`` is absent — pre-fix this axis was
+    always None and stratification was effectively dead.
+
+    Codex P1 review #7 (2026-05-04): handle ``datetime`` issue_time in
+    addition to str — pre-fix the registered-ingest path (datetime) silently
+    routed 12z snapshots to the schema-default 00z bucket.
+
+    Returns (None, None, None) if ens_result is malformed — callers fall back
+    to schema-default bucket selection (which the store loader is itself
+    responsible for failing-closed on for OpenData; see store.py loader).
+    """
+    if not isinstance(ens_result, dict):
+        return None, None, None
+    cycle: Optional[str] = None
+    source_id: Optional[str] = None
+    horizon_profile: Optional[str] = None
+    try:
+        it = ens_result.get("issue_time")
+        if isinstance(it, str) and len(it) >= 13:
+            cycle = it[11:13]
+        elif hasattr(it, "hour"):
+            cycle = f"{int(it.hour):02d}"
+        sid = ens_result.get("source_id")
+        if isinstance(sid, str) and sid:
+            source_id = sid
+        hp = ens_result.get("horizon_profile")
+        if isinstance(hp, str) and hp:
+            horizon_profile = hp
+        if horizon_profile is None and cycle is not None:
+            # 00/12 are full-horizon TIGGE/OpenData runs; other cycles (06/18)
+            # are short-horizon. Matches scripts/rebuild_calibration_pairs_v2.py.
+            horizon_profile = "full" if cycle in ("00", "12") else "short"
+    except (TypeError, AttributeError, KeyError):
+        return None, None, None
+    return cycle, source_id, horizon_profile
+
+
 def derive_source_id_from_data_version(data_version: Optional[str]) -> Optional[str]:
     """Map a data_version string to its canonical source_id.
 
