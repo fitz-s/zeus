@@ -86,8 +86,17 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
     "ukmo_global_deterministic_10km": "ukmo_previous_runs",
 }
 
+# Phase 3 routing fix (2026-05-04): training/serving alignment.
+# `ecmwf_ifs025` model now routes to `ecmwf_open_data` (raw ECMWF public
+# feed) instead of `openmeteo_ensemble_ecmwf_ifs025` (third-party broker).
+# Open-Meteo applies 1-hour temporal interpolation and re-packages the
+# 51-member ENS, breaking member-identity alignment with the TIGGE
+# archive that Platt models were trained on. ECMWF Open Data is the
+# same model, same ensemble, raw GRIB2 → no training/serving skew.
+# Authority: docs/operations/task_2026-05-04_tigge_ingest_resilience/
+#            DESIGN_PHASE3_LIVE_ROUTING_FIX.md
 ENSEMBLE_MODEL_SOURCE_MAP: dict[str, str] = {
-    "ecmwf_ifs025": "openmeteo_ensemble_ecmwf_ifs025",
+    "ecmwf_ifs025": "ecmwf_open_data",
     "gfs025": "openmeteo_ensemble_gfs025",
     "gfs": "openmeteo_ensemble_gfs025",
     "tigge": "tigge",
@@ -163,13 +172,29 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("entry_primary", "monitor_fallback", "diagnostic"),
         degradation_level="OK",
     ),
+    # Phase 3 (2026-05-04): ECMWF Open Data promoted from diagnostic to
+    # entry_primary candidate. Same model & 51-member ENS as the TIGGE
+    # archive used for Platt training; raw GRIB2 with no third-party
+    # interpolation; 4 cycles/day. Live eligibility is gated separately
+    # by evaluate_calibration_transfer (Phase 2.5) — a forecast routed
+    # here can still be SHADOW_ONLY if no validated_transfers row exists
+    # for its (cycle, source, horizon, season) domain. Routing presence
+    # ≠ live trading; the calibration transfer evaluator is the unlock
+    # gate.
+    # Authority: docs/operations/task_2026-05-04_tigge_ingest_resilience/
+    #            DESIGN_PHASE3_LIVE_ROUTING_FIX.md
     "ecmwf_open_data": ForecastSourceSpec(
         source_id="ecmwf_open_data",
         tier="secondary",
         kind="scheduled_collector",
         model_name="ecmwf_open_data",
-        allowed_roles=("diagnostic",),
-        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+        allowed_roles=(
+            "entry_primary",
+            "training_archive_alignment",
+            "monitor_fallback",
+            "diagnostic",
+        ),
+        degradation_level="OK",
     ),
 }
 
