@@ -521,6 +521,14 @@ def test_H3_small_n_with_one_mismatch_does_not_blacklist():
     # Strong signal in tight-bound regime — high m / low n still blacklists
     # (n>=10 + p95>0.10 satisfies BLACKLIST conditions)
     assert classify(10, 11) == OracleStatus.BLACKLIST
+    # Critic R7 ATTACK 8 LOW carry-forward (2026-05-04): explicit pin
+    # of the m=0, n=10 boundary-up corner. Pre-fix this was only
+    # transitively covered by OK6 (zero-error N=12). A future m=0
+    # threshold change to e.g. p95<=0.20 could silently flip n=10,m=0
+    # from INSUFFICIENT_SAMPLE to OK without an OK6 regression.
+    # p95(0, 10) = 0.2384, which is > CAUTION_P95_LOWER (0.05) so
+    # the m=0 branch correctly returns INSUFFICIENT_SAMPLE.
+    assert classify(0, 10) == OracleStatus.INSUFFICIENT_SAMPLE
 
 
 def test_H3_insufficient_sample_keeps_sizing_conservative_not_blocked():
