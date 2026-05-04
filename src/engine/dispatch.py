@@ -39,21 +39,19 @@ DAY0_WINDOW + obs-fetch + candidate-filter dispatch decisions — six
 call sites (3 in evaluator.py + 1 obs-fetch gate + 2 D-A sites in
 cycle_runtime.py) all read the same flag and the same logic.
 
-KNOWN UNMIGRATED SIBLING (critic R5 ATTACK 3 / A3-M1):
-``src/engine/evaluator.py:1427`` (``is_day0_mode = candidate.discovery_mode
-== "day0_capture"``) drives ``EntryMethod`` selection (DAY0_OBSERVATION
-vs ENS_MEMBER_COUNTING) and two downstream rejection branches. It is NOT
-migrated by P3/P4. Under flag OFF this is harmless (every site reads
-the same legacy axis). Under flag ON it produces a phase/method
-incoherence for divergent candidates (e.g.,
-``discovery_mode=opening_hunt`` + ``market_phase=settlement_day`` —
-strategy_key dispatch routes to ``settlement_capture`` while EntryMethod
-stays on ENS_MEMBER_COUNTING). Closure: the EntryMethod selection logic
-is rewired through the StrategyProfile registry in the oracle/Kelly
-rebuild — see ``docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md``
-§A4 (PR number assigned at open-time; task path is the stable anchor).
-This is a flag-OFF safe scaffold; flag MUST stay default OFF until the
-rebuild §A4 cutover lands.
+SITE 5 (critic R5 ATTACK 3 / A3-M1) — MIGRATED in §A4:
+``src/engine/evaluator.py:1416`` (``is_day0_mode = ...``) drives
+``EntryMethod`` selection (DAY0_OBSERVATION vs ENS_MEMBER_COUNTING) and
+several downstream rejection branches. Pre-§A4 this read
+``candidate.discovery_mode == "day0_capture"`` directly — under flag ON
+that produced a phase/method incoherence (e.g.,
+``discovery_mode=opening_hunt`` + ``market_phase=settlement_day``:
+strategy dispatch routes to ``settlement_capture`` but EntryMethod
+stayed on ENS_MEMBER_COUNTING). §A4 routes the line through
+``is_settlement_day_dispatch(candidate)`` so flag OFF preserves legacy
+behavior byte-equal AND flag ON resolves the 7th site coherently.
+The dispatch helper is now the SINGLE locus for the phase-vs-mode
+axis decision across all 5 callers.
 
 KNOWN OBSERVABILITY-ONLY GAPS (critic R5 A5-M2 / A6-M3 / A7-M4):
 - ``_is_settlement_day_phase`` hardcodes ``uma_resolved=False`` — UMA

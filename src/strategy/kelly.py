@@ -64,20 +64,21 @@ def kelly_size(
     return f_star * kelly_mult * bankroll
 
 
-STRATEGY_KELLY_MULTIPLIERS = {
-    "settlement_capture": 1.0,
-    "center_buy": 1.0,
-    "opening_inertia": 0.5,
-    "shoulder_sell": 0.0,
-    "shoulder_buy": 0.0,
-    "center_sell": 0.0,
-}
-
-
 def strategy_kelly_multiplier(strategy_key: str | None) -> float:
-    """Return the live sizing multiplier for a strategy key, fail-closed."""
+    """Return the live sizing multiplier for a strategy key, fail-closed.
 
-    return STRATEGY_KELLY_MULTIPLIERS.get(str(strategy_key or "").strip(), 0.0)
+    Pre-A4: read from a hardcoded ``STRATEGY_KELLY_MULTIPLIERS`` dict
+    defined in this file. Post-A4: read through
+    ``src.strategy.strategy_profile.kelly_default_multiplier`` which
+    delegates to ``architecture/strategy_profile_registry.yaml`` (single
+    source of truth — see PLAN.md §A4 + Bug review §D). Fail-closed
+    behavior unchanged: unknown / empty key returns 0.0.
+
+    A6 will introduce a phase-aware resolver; until then this default
+    matches pre-A4 behavior verbatim.
+    """
+    from src.strategy.strategy_profile import kelly_default_multiplier as _kdm
+    return _kdm(str(strategy_key or "").strip())
 
 
 # Per-city Kelly multiplier (asymmetric-loss policy layer, 2026-05-03).
@@ -227,7 +228,8 @@ def dynamic_kelly_mult(
     # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
     # Note: This check applies to the upstream Kelly computation before per-strategy
     # gating. The final multiplier step (below) can legitimately produce 0.0 to
-    # disable shadow, dormant, or unknown strategies via STRATEGY_KELLY_MULTIPLIERS.
+    # disable shadow, dormant, or unknown strategies via the registry's
+    # kelly_default_multiplier (was STRATEGY_KELLY_MULTIPLIERS pre-A4).
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
             f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "

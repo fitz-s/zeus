@@ -74,7 +74,23 @@ from src.strategy.risk_limits import RiskLimits
 
 logger = logging.getLogger(__name__)
 
-KNOWN_STRATEGIES = {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}
+# Post-A4: KNOWN_STRATEGIES is derived from the StrategyProfile registry's
+# boot-allowed set (live_status in {"live", "shadow"}). The pre-A4 hardcoded
+# set was a 4-entry literal that drifted independently of LIVE_SAFE_STRATEGIES
+# in control_plane (both nominally "boot allowlist", separate sources).
+# Resolved here by routing through the single registry source — see PLAN.md
+# §A4 + Bug review §D.
+#
+# Lazy module __getattr__ so callers using ``from cycle_runner import
+# KNOWN_STRATEGIES`` keep working AND tests that swap the registry pick up
+# the change without re-importing this module.
+
+
+def __getattr__(name: str):
+    if name == "KNOWN_STRATEGIES":
+        from src.strategy.strategy_profile import live_safe_keys
+        return live_safe_keys()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED
 # force-exit sweep. Slice B1 (PR #19 finding 9, 2026-04-26) collapsed the
@@ -344,7 +360,13 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
 
 
 def _classify_strategy(mode: DiscoveryMode, edge, edge_source: str = "") -> str:
-    if edge_source in KNOWN_STRATEGIES:
+    # Use the same source as ``KNOWN_STRATEGIES`` (boot-allowed set) so
+    # the classifier accepts only strategies the daemon would actually
+    # boot. Dormant/blocked strategies (shoulder_buy, center_sell) stay
+    # unclassified at this layer, mirroring the pre-A4 hardcoded set's
+    # 4-entry universe.
+    from src.strategy.strategy_profile import live_safe_keys
+    if edge_source in live_safe_keys():
         return edge_source
     return _classify_edge_source(mode, edge)
 

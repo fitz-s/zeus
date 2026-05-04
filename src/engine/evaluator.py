@@ -1413,7 +1413,16 @@ def evaluate_candidate(
     temperature_metric = _normalize_temperature_metric(
         getattr(candidate, "temperature_metric", None)
     )
-    is_day0_mode = candidate.discovery_mode == "day0_capture"
+    # Phase-axis dispatch (PR #53 P3+P4 closure of the 7th unmigrated
+    # site flagged by critic R5 ATTACK 3 / A3-M1). Flag OFF default:
+    # byte-equal to the legacy ``discovery_mode == "day0_capture"`` rule.
+    # Flag ON: routes through MarketPhase per-candidate, eliminating the
+    # phase/method incoherence where strategy_key dispatch could pick
+    # settlement_capture while EntryMethod stayed on ENS_MEMBER_COUNTING.
+    # See ``src/engine/dispatch.py`` module docstring §"KNOWN UNMIGRATED
+    # SIBLING" for the closure narrative.
+    from src.engine.dispatch import is_settlement_day_dispatch
+    is_day0_mode = is_settlement_day_dispatch(candidate)
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
