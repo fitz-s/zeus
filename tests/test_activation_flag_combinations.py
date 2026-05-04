@@ -149,6 +149,7 @@ def _read_back_row(conn: sqlite3.Connection):
 # -------------------------------------------------------------------- #
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_a_kill_switch_zero_disables_flags(monkeypatch, tmp_path):
     """Post-2026-05-04 default-ON activation: the kill-switch is
     ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=0`` /
@@ -224,6 +225,7 @@ def test_inv_a_flag2_alone_writes_blocked_when_evidence_missing(monkeypatch, tmp
     assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in row["reason_codes_json"]
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_a_flag1_alone_blocks_when_evidence_missing(monkeypatch, tmp_path):
     """Flag 1 (ROLLOUT_GATE) ON, flag 2 killed ⇒ rollout blocker
     surfaces EVIDENCE_MISSING. Even though no row is ever written,
@@ -242,6 +244,7 @@ def test_inv_a_flag1_alone_blocks_when_evidence_missing(monkeypatch, tmp_path):
     assert blocker == "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_a_flags_1_and_2_on_no_evidence_both_sites_fail_closed(monkeypatch, tmp_path):
     """Both flags ON, no evidence file ⇒ rollout blocker emits
     EVIDENCE_MISSING AND writer lands BLOCKED. The two daemon read
@@ -274,6 +277,7 @@ def test_inv_a_flags_1_and_2_on_no_evidence_both_sites_fail_closed(monkeypatch, 
 # -------------------------------------------------------------------- #
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_b_flag1_corrupt_evidence_typed_blocker(monkeypatch, tmp_path):
     """Flag 1 ON + corrupt JSON ⇒ rollout blocker prefixed
     ``ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:`` (never crashes the
@@ -318,6 +322,7 @@ def test_inv_b_flag2_corrupt_evidence_writer_treats_as_missing(monkeypatch, tmp_
     assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in row["reason_codes_json"]
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_b_flags_1_and_2_corrupt_evidence_dual_signal(monkeypatch, tmp_path):
     """Both flags ON + corrupt JSON ⇒ blocker site says CORRUPT, writer
     site says MISSING. The two surfaces are intentionally different so
@@ -384,6 +389,7 @@ def test_inv_c_evidence_file_rotation_invalidates_cache(monkeypatch, tmp_path):
     assert second.canary_success_evidence_id is None  # picked up the rotation
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_c_rollout_gate_sees_rotated_evidence_without_explicit_cache_clear(
     monkeypatch, tmp_path
 ):
@@ -470,6 +476,7 @@ def test_inv_e_all_flags_on_complete_evidence_writes_live_eligible(monkeypatch, 
     assert row["status"] == "LIVE_ELIGIBLE"
 
 
+@pytest.mark.skip(reason="rollout gate retired 2026-05-04 (see evaluator.py:759 docstring); test asserts retired blocker behaviour")
 def test_inv_e_all_flags_on_evidence_lacks_canary_writer_lands_blocked(
     monkeypatch, tmp_path
 ):

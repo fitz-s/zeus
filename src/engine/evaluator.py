@@ -757,47 +757,27 @@ def _entry_forecast_readiness_writer_flag_on() -> bool:
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
-    """Return a blocker reason or ``None`` for the live entry-forecast cutover.
+    """Always returns ``None`` — rollout-evidence gating retired 2026-05-04.
 
-    Phase C-1 activation: when ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=1``,
-    defer to ``evaluate_entry_forecast_rollout_gate`` which checks
-    operator approval, G1 evidence, calibration promotion approval,
-    canary success evidence, and the bundled status snapshot. The
-    promotion-evidence file is read at every cycle from
-    ``state/entry_forecast_promotion_evidence.json``.
+    Operator decision (registry purge): this gate served the
+    modifications/rollout phase (require operator-approval JSON +
+    G1 evidence + calibration approval + canary success before live
+    orders could submit). That phase has ended. Live runtime safety is
+    covered by:
 
-    Default OFF preserves the legacy rollout-mode-only check so this
-    Phase-C wiring is byte-equal to pre-Phase-C behavior at flag
-    default; operator flips the flag to enforce the full gate.
+    - gate 6 ``_risk_allows_new_entries(risk_level)`` — bankroll/loss
+    - gate 9 ``heartbeat_supervisor`` — execution path health
+    - gate 10 ``ws_gap_guard`` — real-time price feed health
 
-    ``PromotionEvidenceCorruption`` (raised when the on-disk file
-    fails strict parsing) is caught here and surfaced as the explicit
-    ``ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT`` blocker rather than
-    propagating up and crashing the cycle. This is the single
-    activation site the critic-opus review demanded; future call sites
-    must re-implement the same try/except discipline or factor out a
-    shared helper.
+    The 156-candidates-per-30min that this gate was rejecting with
+    ``ENTRY_FORECAST_ROLLOUT_BLOCKED`` are now allowed through to the
+    live order path. The promotion-evidence JSON file, env-var flag,
+    and ``evaluate_entry_forecast_rollout_gate`` are kept callable for
+    Stage-2 follow-ups and observability tools but no longer block
+    cycle output.
     """
 
-    if _entry_forecast_rollout_gate_flag_on():
-        try:
-            evidence = read_promotion_evidence()
-        except PromotionEvidenceCorruption as exc:
-            return f"ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:{exc}"
-        decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
-        if decision.may_submit_live_orders:
-            return None
-        return decision.reason_codes[0] if decision.reason_codes else "ENTRY_FORECAST_ROLLOUT_GATE_BLOCKED"
-
-    if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
-        return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
-    if cfg.rollout_mode is EntryForecastRolloutMode.SHADOW:
-        return "ENTRY_FORECAST_ROLLOUT_SHADOW"
-    if cfg.rollout_mode is EntryForecastRolloutMode.CANARY:
-        return "ENTRY_FORECAST_ROLLOUT_CANARY"
-    if cfg.rollout_mode is EntryForecastRolloutMode.LIVE:
-        return None
-    return "ENTRY_FORECAST_ROLLOUT_MODE_UNKNOWN"
+    return None
 
 
 def _entry_forecast_city_id(city: City) -> str:
