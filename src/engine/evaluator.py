@@ -2211,9 +2211,34 @@ def evaluate_candidate(
     # L3 Phase 9C: metric-aware calibrator lookup. `temperature_metric` is
     # MetricIdentity (normalized at L662 via _normalize_temperature_metric);
     # pull the string attribute for the kwarg.
+    #
+    # Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): derive
+    # cycle/source_id/horizon_profile from forecast provenance (ens_result)
+    # for cycle-stratified Platt bucket selection. None defaults preserve
+    # legacy behavior — load_platt_model_v2 hits schema-default bucket
+    # ('00','tigge_mars','full') when any field is unavailable.
+    _phase2_cycle: Optional[str] = None
+    _phase2_source_id: Optional[str] = None
+    _phase2_horizon_profile: Optional[str] = None
+    try:
+        if isinstance(ens_result, dict):
+            _it = ens_result.get("issue_time")
+            if isinstance(_it, str) and len(_it) >= 13:
+                _phase2_cycle = _it[11:13]
+            _src = ens_result.get("source_id")
+            if isinstance(_src, str) and _src:
+                _phase2_source_id = _src
+            _hp = ens_result.get("horizon_profile")
+            if isinstance(_hp, str) and _hp:
+                _phase2_horizon_profile = _hp
+    except Exception:
+        pass
     cal, cal_level = get_calibrator(
         conn, city, target_date,
         temperature_metric=temperature_metric.temperature_metric,
+        cycle=_phase2_cycle,
+        source_id=_phase2_source_id,
+        horizon_profile=_phase2_horizon_profile,
     )
     if cal is not None:
         p_cal = calibrate_and_normalize(
