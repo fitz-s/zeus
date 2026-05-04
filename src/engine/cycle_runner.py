@@ -15,6 +15,17 @@ from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
 from src.control import auto_pause_streak
+# 2026-05-04 (live-block antibody — structural fix #4): single source of truth
+# for "why are entries blocked right now?" across all 13 stacked gates.
+# Phase 1 is observational — registry snapshot is logged + emitted into the
+# cycle JSON before the existing L752 short-circuit.  Existing logic unchanged.
+# See docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
+from src.control.entries_block_registry import (
+    BlockStage,
+    BlockState,
+    EntriesBlockRegistry,
+)
+from src.control.block_adapters._base import RegistryDeps
 # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01): module-level import
 # so test monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", ...) takes effect.
 # Per-cycle freshness consumer wired into run_cycle() top to short-circuit DAY0_CAPTURE
@@ -749,6 +760,54 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # posture surfaces only when it is the *sole* block.
     if entries_blocked_reason is None and _current_posture != "NORMAL":
         entries_blocked_reason = f"posture={_current_posture}"
+    # ── REGISTRY-GUARDED SHORT-CIRCUIT (2026-05-04 antibody) ─────────────────
+    # Phase 1: observational only.  Snapshot all 13 entries-block gates so
+    # a single cycle JSON record answers "why are entries blocked right now?"
+    # without grepping 5 modules.  CI gate
+    # `tests/test_no_unregistered_block_predicate.py` enforces that any new
+    # boolean appearing in the line below is also registered as an adapter.
+    try:
+        import os as _os
+        from pathlib import Path as _Path
+        from src.state.db import get_world_connection as _get_world_conn, get_connection as _get_db_conn, RISK_DB_PATH as _RISK_DB_PATH
+        from src.riskguard import riskguard as _riskguard_mod
+        from src.control import heartbeat_supervisor as _heartbeat_mod
+        from src.control import ws_gap_guard as _ws_gap_mod
+        from src.control import entry_forecast_rollout as _rollout_gate_mod
+        _block_registry = EntriesBlockRegistry.from_runtime(
+            RegistryDeps(
+                state_dir=_Path(STATE_DIR),
+                db_connection_factory=_get_world_conn,
+                risk_state_db_connection_factory=lambda: _get_db_conn(_RISK_DB_PATH),
+                riskguard_module=_riskguard_mod,
+                heartbeat_module=_heartbeat_mod,
+                ws_gap_guard_module=_ws_gap_mod,
+                rollout_gate_module=_rollout_gate_mod,
+                env=dict(_os.environ),
+            )
+        )
+        _block_snapshot = _block_registry.enumerate_blocks(stage="all")
+        _blocking_count = sum(1 for b in _block_snapshot if b.state == BlockState.BLOCKING)
+        _unknown_count = sum(1 for b in _block_snapshot if b.state == BlockState.UNKNOWN)
+        logger.info(
+            "ENTRIES_BLOCK_REGISTRY_SNAPSHOT cycle=%s blocking=%d unknown=%d total=%d clear_discovery=%s",
+            summary.get("cycle_id", "?"),
+            _blocking_count,
+            _unknown_count,
+            len(_block_snapshot),
+            _block_registry.is_clear(BlockStage.DISCOVERY),
+        )
+        summary["block_registry"] = [b.to_dict() for b in _block_snapshot]
+    except Exception as _registry_exc:  # noqa: BLE001
+        # Registry must never break the cycle — fail soft, log, continue.
+        logger.warning(
+            "ENTRIES_BLOCK_REGISTRY_SNAPSHOT_FAILED cycle=%s exc=%s: %s",
+            summary.get("cycle_id", "?"),
+            type(_registry_exc).__name__,
+            _registry_exc,
+            exc_info=True,
+        )
+        summary["block_registry_error"] = f"{type(_registry_exc).__name__}: {_registry_exc}"
     if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())

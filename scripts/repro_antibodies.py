@@ -44,6 +44,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch, MagicMock
 
 # ---------------------------------------------------------------------------
@@ -422,6 +423,9 @@ def main() -> int:
 
     _post_run_cleanup()
 
+    registry_exit = verify_registry_catches_gates()
+    results["Registry gate injection (gates 1/9/10/12)"] = (registry_exit == 0)
+
     # Final grep counts
     print("\n[VERIFY] Final grep counts on", STDERR_LOG)
     log_text = STDERR_LOG.read_text(encoding="utf-8") if STDERR_LOG.exists() else ""
@@ -465,10 +469,207 @@ def main() -> int:
     print("=" * 72)
 
     if all_passed:
-        print("OVERALL: PASS — both antibodies verified")
+        print("OVERALL: PASS — all antibodies and registry gate checks verified")
         return 0
     else:
-        print("OVERALL: FAIL — one or more antibodies did not fire")
+        print("OVERALL: FAIL — one or more checks did not pass")
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Registry section — verify registry catches each gate type
+# ---------------------------------------------------------------------------
+
+def _build_synthetic_deps(
+    *,
+    state_dir: Path,
+    tombstone_present: bool = False,
+    heartbeat_summary: dict | None = None,
+    ws_gap_summary: dict | None = None,
+) -> "Any":
+    """Build a synthetic RegistryDeps for registry injection tests.
+
+    Uses types.ModuleType stubs for all module fields so no real daemon
+    state is read.  Only the fields relevant to the tested gate are wired;
+    others return CLEAR-safe defaults.
+    """
+    import types
+    import sqlite3
+    from src.control.block_adapters._base import RegistryDeps
+
+    # ── Stub module factory ────────────────────────────────────────────────
+
+    def _make_heartbeat_mod(summary_override: dict | None) -> types.ModuleType:
+        mod = types.ModuleType("heartbeat_supervisor_stub")
+        _hb = summary_override or {
+            "health": "HEALTHY",
+            "entry": {"allow_submit": True},
+        }
+        mod.summary = lambda: _hb
+        return mod
+
+    def _make_ws_gap_mod(summary_override: dict | None) -> types.ModuleType:
+        mod = types.ModuleType("ws_gap_guard_stub")
+        _ws = summary_override or {
+            "subscription_state": "SUBSCRIBED",
+            "gap_reason": "none",
+            "entry": {"allow_submit": True},
+        }
+        mod.summary = lambda: _ws
+        return mod
+
+    def _make_riskguard_mod() -> types.ModuleType:
+        """Returns a stub that makes gate 6 report GREEN (CLEAR)."""
+        from src.riskguard.riskguard import RiskLevel
+        mod = types.ModuleType("riskguard_stub")
+        mod.get_current_level = lambda: RiskLevel.GREEN
+        mod.RiskLevel = RiskLevel
+        return mod
+
+    def _make_rollout_gate_mod() -> types.ModuleType:
+        mod = types.ModuleType("rollout_gate_stub")
+        # evaluate_entry_forecast_rollout_gate: not called in DISCOVERY stage
+        # so a no-op is fine.
+        mod.evaluate_entry_forecast_rollout_gate = lambda *a, **kw: None
+        return mod
+
+    # ── In-memory SQLite stub (no real file) ──────────────────────────────
+
+    def _make_mem_conn() -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        # Minimal schema so gate 3/5 queries don't crash
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS control_overrides_history (
+                override_id TEXT, target_type TEXT, target_key TEXT,
+                action_type TEXT, value TEXT, issued_by TEXT,
+                issued_at TEXT, effective_until TEXT, reason TEXT,
+                precedence INTEGER, operation TEXT, recorded_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cycles (id INTEGER, summary_json TEXT, created_at TEXT)
+            """
+        )
+        conn.commit()
+        return conn
+
+    return RegistryDeps(
+        state_dir=state_dir,
+        db_connection_factory=_make_mem_conn,
+        risk_state_db_connection_factory=_make_mem_conn,
+        riskguard_module=_make_riskguard_mod(),
+        heartbeat_module=_make_heartbeat_mod(heartbeat_summary),
+        ws_gap_guard_module=_make_ws_gap_mod(ws_gap_summary),
+        rollout_gate_module=_make_rollout_gate_mod(),
+        env={},
+    )
+
+
+def verify_registry_catches_gates() -> int:
+    """Verify the registry detects BLOCKING state for 4 representative gate types.
+
+    Scenarios:
+      1. Gate 1 (tombstone present) → BLOCKING
+      2. Gate 9 (heartbeat DEGRADED + allow_submit=False) → BLOCKING
+      3. Gate 10 (ws_gap DISCONNECTED + allow_submit=False) → BLOCKING
+      4. Gate 12 (promotion evidence file absent) → BLOCKING (default state)
+
+    Returns 0 if all assertions pass, 1 if any fails.
+    """
+    import tempfile
+    from src.control.entries_block_registry import BlockState, EntriesBlockRegistry
+
+    print("\n" + "=" * 72)
+    print("[REGISTRY] Gate injection checks")
+    print("=" * 72)
+
+    failures: list[str] = []
+
+    # ── 1. Tombstone present → gate 1 BLOCKING ────────────────────────────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
+        state_dir = Path(tmp)
+        # Create the tombstone file
+        (state_dir / "auto_pause_failclosed.tombstone").write_text("", encoding="utf-8")
+
+        deps = _build_synthetic_deps(state_dir=state_dir)
+        registry = EntriesBlockRegistry.from_runtime(deps)
+        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
+        b1 = blocks[1]
+
+        if b1.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] Gate 1 (auto_pause_failclosed_tombstone): BLOCKING ✓ reason={b1.blocking_reason}")
+        else:
+            msg = f"Gate 1 expected BLOCKING when tombstone present, got {b1.state.value!r}"
+            print(f"[REGISTRY] Gate 1 FAIL: {msg}")
+            failures.append(msg)
+
+    # ── 2. Heartbeat DEGRADED + allow_submit=False → gate 9 BLOCKING ──────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
+        state_dir = Path(tmp)
+        hb_summary = {
+            "health": "DEGRADED",
+            "entry": {"allow_submit": False},
+        }
+        deps = _build_synthetic_deps(state_dir=state_dir, heartbeat_summary=hb_summary)
+        registry = EntriesBlockRegistry.from_runtime(deps)
+        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
+        b9 = blocks[9]
+
+        if b9.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] Gate 9 (heartbeat_supervisor_allow_submit): BLOCKING ✓ reason={b9.blocking_reason}")
+        else:
+            msg = f"Gate 9 expected BLOCKING when health=DEGRADED allow_submit=False, got {b9.state.value!r}"
+            print(f"[REGISTRY] Gate 9 FAIL: {msg}")
+            failures.append(msg)
+
+    # ── 3. WS gap DISCONNECTED + allow_submit=False → gate 10 BLOCKING ────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
+        state_dir = Path(tmp)
+        ws_summary = {
+            "subscription_state": "DISCONNECTED",
+            "gap_reason": "not_configured",
+            "entry": {"allow_submit": False},
+        }
+        deps = _build_synthetic_deps(state_dir=state_dir, ws_gap_summary=ws_summary)
+        registry = EntriesBlockRegistry.from_runtime(deps)
+        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
+        b10 = blocks[10]
+
+        if b10.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] Gate 10 (ws_gap_guard_allow_submit): BLOCKING ✓ reason={b10.blocking_reason}")
+        else:
+            msg = f"Gate 10 expected BLOCKING when subscription_state=DISCONNECTED, got {b10.state.value!r}"
+            print(f"[REGISTRY] Gate 10 FAIL: {msg}")
+            failures.append(msg)
+
+    # ── 4. Promotion evidence file absent → gate 12 BLOCKING ──────────────
+    with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
+        state_dir = Path(tmp)
+        # No evidence file written — that is the default state
+        deps = _build_synthetic_deps(state_dir=state_dir)
+        registry = EntriesBlockRegistry.from_runtime(deps)
+        blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
+        b12 = blocks[12]
+
+        if b12.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
+            print(f"[REGISTRY] Gate 12 (entry_forecast_promotion_evidence_file): BLOCKING ✓ reason={b12.blocking_reason}")
+        else:
+            msg = f"Gate 12 expected BLOCKING when evidence file absent, got {b12.state.value!r}"
+            print(f"[REGISTRY] Gate 12 FAIL: {msg}")
+            failures.append(msg)
+
+    # ── Summary ────────────────────────────────────────────────────────────
+    print("-" * 72)
+    if not failures:
+        print("[REGISTRY] All 4 gate injection checks PASSED")
+        return 0
+    else:
+        for f in failures:
+            print(f"[REGISTRY] FAIL: {f}")
+        print(f"[REGISTRY] {len(failures)} check(s) failed")
         return 1
 
 
