@@ -33,13 +33,13 @@ just on the posterior bound:
 
     age > 7 days                                                     → STALE
     n == 0                                                           → MISSING
+    n < 10  (sample too small for any committed verdict)             → INSUFFICIENT_SAMPLE
 
     m == 0  (zero observed errors — never demonstrated unreliability)
-        n < 10                                                       → INSUFFICIENT_SAMPLE
         posterior_upper_95 > 0.05                                    → INSUFFICIENT_SAMPLE
         posterior_upper_95 ≤ 0.05                                    → OK
 
-    m >= 1  (demonstrated unreliability)
+    m >= 1  (demonstrated unreliability, n >= 10)
         posterior_upper_95 > 0.10                                    → BLACKLIST
         posterior_upper_95 > 0.05                                    → CAUTION
         posterior_upper_95 ≤ 0.05                                    → INCIDENTAL
@@ -164,19 +164,34 @@ def classify(
     if n == 0:
         return OracleStatus.MISSING
 
+    # H3 critic R6 (2026-05-04): require n >= INSUFFICIENT_SAMPLE_N for ANY
+    # verdict other than INSUFFICIENT_SAMPLE — uniform across m=0 and m>=1.
+    # Pre-fix, m>=1 hard-routed to {BLACKLIST,CAUTION,INCIDENTAL} regardless
+    # of n: a brand-new city with m=1, n=2 (p95 ≈ 0.87) was permanently
+    # BLACKLISTED by a single mismatch in only two samples. The Bayesian
+    # bound itself encodes sample size (small-n widens p95) but the operator
+    # framing in PLAN.md §A3 is "verdict requires evidence sufficiency",
+    # so we hard-gate on n. Symmetric reading: the m=0 branch already
+    # required n >= INSUFFICIENT_SAMPLE_N to commit to OK; the m>=1 branch
+    # now requires the same threshold to commit to BLACKLIST/CAUTION/
+    # INCIDENTAL. INSUFFICIENT_SAMPLE multiplier (max(0.5, 1-p95)) keeps
+    # sizing conservative-but-not-blocked while the city accumulates more
+    # samples — strictly safer than BLACKLIST=0.0 for a brand-new city.
+    if n < INSUFFICIENT_SAMPLE_N:
+        return OracleStatus.INSUFFICIENT_SAMPLE
+
     p95 = posterior_upper_95(m, n)
 
     if m == 0:
         # Zero observed errors. Status is about evidence sufficiency,
         # not failure: the city has never failed; the question is
-        # whether we have enough sample to commit to OK.
-        if n < INSUFFICIENT_SAMPLE_N:
-            return OracleStatus.INSUFFICIENT_SAMPLE
+        # whether the bound is tight enough to commit to OK.
         if p95 > CAUTION_P95_LOWER:
             return OracleStatus.INSUFFICIENT_SAMPLE
         return OracleStatus.OK
 
-    # m >= 1: demonstrated some unreliability. Tier by posterior bound.
+    # m >= 1, n >= INSUFFICIENT_SAMPLE_N: demonstrated some unreliability
+    # with enough samples to commit to a tier.
     if p95 > BLACKLIST_P95_LOWER:
         return OracleStatus.BLACKLIST
     if p95 > CAUTION_P95_LOWER:

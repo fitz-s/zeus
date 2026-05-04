@@ -493,6 +493,59 @@ def test_oracle_estimator_sanity_anchors():
 
 
 # ─────────────────────────────────────────────────────────────────── #
+#  H3 critic R6: m>=1 with n<10 must NOT permanently BLACKLIST          #
+# ─────────────────────────────────────────────────────────────────── #
+
+
+def test_H3_small_n_with_one_mismatch_does_not_blacklist():
+    """H3 critic R6 pin: a brand-new city with m=1, n=2 (or any n<10
+    with at least one mismatch) MUST classify as INSUFFICIENT_SAMPLE,
+    not BLACKLIST.
+
+    Pre-fix the m>=1 branch hard-routed by p95 alone; m=1 n=2 has
+    p95 ≈ 0.87 → BLACKLIST permanently. A single error in 2 samples
+    is not evidence of unreliability — it's evidence of insufficient
+    sample. The post-H3 classifier is symmetric across m=0 and m>=1:
+    both require n >= INSUFFICIENT_SAMPLE_N to commit to any verdict
+    other than INSUFFICIENT_SAMPLE.
+    """
+    from src.strategy.oracle_estimator import classify
+    from src.strategy.oracle_status import OracleStatus
+
+    # Worst-case small-n with one mismatch
+    assert classify(1, 2) == OracleStatus.INSUFFICIENT_SAMPLE
+    # Boundary just below threshold
+    assert classify(1, 9) == OracleStatus.INSUFFICIENT_SAMPLE
+    # Crossing the threshold flips to a tier (n=10 is enough for verdict)
+    assert classify(1, 10) == OracleStatus.BLACKLIST
+    # Strong signal in tight-bound regime — high m / low n still blacklists
+    # (n>=10 + p95>0.10 satisfies BLACKLIST conditions)
+    assert classify(10, 11) == OracleStatus.BLACKLIST
+
+
+def test_H3_insufficient_sample_keeps_sizing_conservative_not_blocked():
+    """H3 multiplier contract: INSUFFICIENT_SAMPLE multiplier must be
+    in (0.0, 1.0) — strictly safer than BLACKLIST=0.0 (entries blocked)
+    and strictly more conservative than OK=1.0 (full sizing).
+
+    Operator framing: "we don't have enough evidence to judge — size
+    half-Kelly until n >= 10". A regression that maps INSUFFICIENT_SAMPLE
+    to 0.0 would re-introduce the H3 brand-new-city block; mapping
+    to 1.0 would silently full-size unproven cities.
+    """
+    from src.strategy import oracle_penalty
+    from src.strategy.oracle_status import OracleStatus
+    info = oracle_penalty._info_from_record(
+        city="NewCity",
+        metric="high",
+        record={"n": 2, "mismatches": 1},
+        artifact_age_hours=0.0,
+    )
+    assert info.status == OracleStatus.INSUFFICIENT_SAMPLE
+    assert 0.0 < info.penalty_multiplier < 1.0
+
+
+# ─────────────────────────────────────────────────────────────────── #
 #  H2 critic R6: cycle_runtime strategy structures derive from registry  #
 # ─────────────────────────────────────────────────────────────────── #
 
