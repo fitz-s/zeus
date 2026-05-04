@@ -153,17 +153,26 @@ def _truncate_to_module_header(src: str) -> str:
     ``def ``, ``class ``, or ``async def `` at column 0.
 
     Used by ``header_only=True`` to scope antibodies to module-level
-    declarations only. Decorators (``@...``) on module-level functions
-    are kept in the header (they precede the ``def``); this is fine
-    because antibody patterns target hardcoded data structures, not
-    decorator syntax.
+    declarations only.
 
-    If no module-level def/class is found, returns ``src`` unchanged
-    (the entire file is treated as header).
+    Cutoff anchors (column-0):
+      - ``def `` / ``async def `` / ``class `` (the definition itself)
+      - ``@`` (decorators preceding a definition) — included so that
+        decorator kwargs containing set/list literals (e.g.
+        ``@register(allowed_keys={"settlement_capture"})``) cannot
+        re-introduce the false-positive that ``header_only`` exists
+        to eliminate. Copilot review on PR #60 flagged this gap.
+
+    Decorators on module-level constants (``@cached(...) X = ...``)
+    don't exist syntactically in Python, so anchoring at ``@`` cannot
+    miscount real module-level constants.
+
+    If no anchor is found, returns ``src`` unchanged (the entire file
+    is treated as header — typical of a pure-data config module).
     """
     lines = src.splitlines(keepends=True)
     for i, line in enumerate(lines):
-        if line.startswith(("def ", "class ", "async def ")):
+        if line.startswith(("def ", "class ", "async def ", "@")):
             return "".join(lines[:i])
     return src
 

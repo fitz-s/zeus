@@ -313,10 +313,34 @@ def test_header_only_returns_whole_src_when_no_def_or_class(tmp_path):
     )
 
 
-def test_header_only_keeps_decorators_in_header(tmp_path):
-    """Decorators (``@...``) precede the ``def`` and stay in the
-    header. They don't typically match antibody data-shape patterns,
-    so this is a benign convention rather than a hazard."""
+def test_header_only_excludes_decorator_kwargs_from_header(tmp_path):
+    """Copilot PR #60 review pin: a decorator's kwargs (e.g.
+    ``@register(allowed={...})``) belong to the function definition
+    that follows, not to the module header. Without this guarantee,
+    antibodies that ban hardcoded sets/lists at module scope would
+    false-positive on legitimate decorator configuration."""
+    src = textwrap.dedent('''\
+        TOP = 1
+
+        @register(allowed={"settlement_capture", "center_buy"})
+        def foo():
+            pass
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'allowed\s*=\s*\{', header_only=True,
+    )
+    assert matches == [], (
+        f"decorator kwargs must be excluded from module-header scope; "
+        f"got {matches!r}"
+    )
+
+
+def test_header_only_function_body_still_excluded_with_decorator(tmp_path):
+    """Companion to the decorator-kwargs test: the body of a decorated
+    function is still excluded. The cutoff is the decorator line itself,
+    so everything from ``@`` onward is out of scope."""
     src = textwrap.dedent('''\
         TOP = 1
 
@@ -326,11 +350,37 @@ def test_header_only_keeps_decorators_in_header(tmp_path):
     ''')
     fixture = tmp_path / "subject.py"
     fixture.write_text(src)
-    # The function-body BAD assignment is excluded.
     matches = find_forbidden_assignments(
         fixture, r'BAD\s*=\s*\{', header_only=True,
     )
     assert matches == [], f"function body must be excluded; got {matches!r}"
+
+
+def test_find_all_in_code_header_only_excludes_function_body_match(tmp_path):
+    """Copilot PR #60 review pin: ``find_all_in_code(header_only=True)``
+    must mirror ``find_forbidden_assignments``'s scoping. Pinned
+    independently so a regression in one helper's wiring does not
+    silently break the line/column-reporting variant."""
+    src = textwrap.dedent('''\
+        TOP_LEVEL_BAD = {"a"}
+
+        def helper():
+            INSIDE_BAD = {"b"}
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    # Without scoping: both matches surface.
+    bare = list(find_all_in_code(fixture, r"\w+_BAD\s*=\s*\{", header_only=False))
+    assert len(bare) == 2, (
+        f"baseline must catch both; got {[m.group() for m in bare]!r}"
+    )
+    # With scoping: only the module-level match.
+    scoped = list(find_all_in_code(fixture, r"\w+_BAD\s*=\s*\{", header_only=True))
+    assert len(scoped) == 1, (
+        f"header_only=True must drop function-body match; "
+        f"got {[m.group() for m in scoped]!r}"
+    )
+    assert "TOP_LEVEL_BAD" in scoped[0].group()
 
 
 def test_header_only_still_strips_docstring_in_header(tmp_path):

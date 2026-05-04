@@ -127,6 +127,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
     "src/state/schema/v2_schema.py": 1,
+    # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
+    # Both `table` and `attached` are internal identifiers passed by callers
+    # in src/calibration/store.py — no user input. Sites were extracted out
+    # of store.py during the PR #55+#56 capsule cleanup; per the scanner
+    # contract, internal-whitelist interpolation → bump baseline (see the
+    # store.py rule above).
+    "src/state/schema_introspection.py": 2,
     "src/state/venue_command_repo.py": 5,
     "src/state/ws_poll_reaction.py": 1,
     # Tail catch — fresh files with f-string SQL must be added explicitly.

@@ -275,7 +275,7 @@ def test_per_bucket_threshold_override_actually_overrides(tmp_path: Path):
         db_path, metric_identity=HIGH_LOCALDAY_MAX, cluster="OverrideCity",
         season="DJF", data_version="tigge_v3", A=1.5, n_samples=60,
     )
-    bucket_key = "high:OverrideCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:OverrideCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     report = run_weekly(
         db_path, end_date=date(2026, 4, 28), window_days=7,
         overrides={bucket_key: 1.1},
@@ -327,7 +327,7 @@ def test_bootstrap_usable_count_surfaces_in_per_bucket_snapshot(tmp_path: Path):
     try:
         # Bootstrap with 5 valid + 1 scalar (will be skipped).
         bootstrap_with_scalar = [(1.0, 0.3, 0.0)] * 5 + [99]  # last is non-iterable
-        model_key = "high:UsableTestCity:DJF:tigge_v3:width_normalized_density"
+        model_key = "high:UsableTestCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """

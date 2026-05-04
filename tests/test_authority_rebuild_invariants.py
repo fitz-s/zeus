@@ -547,10 +547,15 @@ def test_PR56_evaluator_reads_phase_source_from_candidate_not_hardcode():
     triple-quoted/comment text before grepping); forbidden: assignment
     of that literal to the resolver-input variable.
     """
+    # Anchor with a leading negative-lookbehind on word chars so the
+    # antibody does NOT match larger identifiers like
+    # ``market_phase_source = "verified_gamma"`` (a different variable that
+    # legitimately propagates the phase_source value through the candidate
+    # pipeline). Codex review on PR #60 caught the suffix-substring drift.
     matches = find_forbidden_assignments(
         Path(__file__).resolve().parent.parent
         / "src" / "engine" / "evaluator.py",
-        r'_phase_source\s*=\s*"verified_gamma"',
+        r'(?<![A-Za-z0-9_])_phase_source\s*=\s*"verified_gamma"',
     )
     assert not matches, (
         "evaluator.py hardcodes _phase_source=\"verified_gamma\" — must "

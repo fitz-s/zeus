@@ -188,7 +188,6 @@ def _run_live_buy_no_authorization_case(
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     deps = types.SimpleNamespace(
@@ -1578,7 +1577,6 @@ def test_trade_and_no_trade_artifacts_carry_replay_reference_fields(monkeypatch,
             self.sizing_bankroll = 100.0
             self.kelly_multiplier_used = 0.25
             self.execution_fee_rate = 0.0
-            self.safety_cap_usd = None
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -2432,7 +2430,6 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     def _capture_final_intent(intent, **kwargs):
@@ -2541,7 +2538,6 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -2644,7 +2640,6 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -2720,7 +2715,6 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -2809,7 +2803,6 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     deps = types.SimpleNamespace(
@@ -2899,7 +2892,6 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     deps = types.SimpleNamespace(
@@ -3045,7 +3037,6 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -3099,7 +3090,6 @@ def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_pa
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -3141,7 +3131,6 @@ def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_p
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     with pytest.raises(ValueError, match="EXECUTABLE_TAKER_DEPTH_CONSTRAINED"):
@@ -3180,7 +3169,6 @@ def test_executable_snapshot_repricing_ignores_thin_ask_outside_slippage_budget(
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
@@ -3258,7 +3246,6 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
     captured = {}
 
@@ -3386,7 +3373,6 @@ def test_live_reprice_rejects_passive_without_maker_only_support(tmp_path):
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     captured = {}
@@ -3536,7 +3522,6 @@ def test_live_entry_captures_and_commits_snapshot_before_executor(tmp_path, monk
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.003,
-        safety_cap_usd=None,
     )
 
     class FakeClob:
@@ -4367,7 +4352,7 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
         def mean_context(self):
             return {"offset": 0.0, "lead_days": 1.5}
 
-    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
         calls.append({"model": model, "role": role})
         n_members = 31 if role == "diagnostic" else 51
         return {
@@ -4490,7 +4475,7 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
         def forecast_context(self):
             return {"uncertainty": self.sigma_context(), "location": self.mean_context()}
 
-    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
         n_members = 31 if role == "diagnostic" else 51
         return {
             "members_hourly": np.ones((n_members, len(times))) * 40.0,
@@ -4762,7 +4747,6 @@ def test_execute_discovery_phase_logs_rejected_live_entry_telemetry(monkeypatch,
             self.sizing_bankroll = 100.0
             self.kelly_multiplier_used = 0.25
             self.execution_fee_rate = 0.0
-            self.safety_cap_usd = None
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
@@ -5045,7 +5029,6 @@ def test_shoulder_sell_is_phase_compatible_but_runtime_live_blocked(monkeypatch,
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        safety_cap_usd=None,
     )
 
     deps = types.SimpleNamespace(
@@ -7016,7 +6999,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None, role=None: {
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
@@ -7154,7 +7137,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None, role=None: {
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
@@ -7264,7 +7247,7 @@ def test_update_reaction_brier_alpha_fails_closed_before_sizing(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None, role=None: {
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: {
             "members_hourly": np.ones(((31 if model == "gfs025" else 51), 24)) * 40.0,
             "times": [
                 datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
@@ -7437,7 +7420,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None, role=None: None if model == "gfs025" else {
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: None if model == "gfs025" else {
             "members_hourly": np.ones((51, 12)) * 44.0,
             "times": [
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -7549,7 +7532,7 @@ def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
     monkeypatch.setattr(
         evaluator_module,
         "fetch_ensemble",
-        lambda city, forecast_days=2, model=None, role=None: (
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: (
             lambda base_utc: {
                 "members_hourly": np.ones((51, 12)) * 44.0,
                 "times": [
@@ -7701,7 +7684,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
         def get_best_bid_ask(self, token_id):
             return (0.29, 0.31, 10.0, 10.0)
 
-    def _fetch_ensemble(city, forecast_days=2, model=None, role=None):
+    def _fetch_ensemble(city, forecast_days=2, model=None, role=None, **kwargs):
         if model == "gfs025":
             return {
                 "members_hourly": gfs_members,
@@ -7774,7 +7757,7 @@ def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypat
         discovery_mode=DiscoveryMode.OPENING_HUNT.value,
     )
 
-    def _fetch(city, forecast_days=2, model=None, role=None):
+    def _fetch(city, forecast_days=2, model=None, role=None, **kwargs):
         if model == "gfs025":
             return {
                 "members_hourly": np.ones((31, 6)) * 40.0,
@@ -8719,13 +8702,13 @@ def test_fetch_ensemble_caches_identical_request(monkeypatch):
     first = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=3,
-        model="ecmwf_ifs025",
+        model="gfs025",  # not ecmwf_open_data → bypasses 2026-05-04 ingest_class guard
         role="monitor_fallback",
     )
     second = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=3,
-        model="ecmwf_ifs025",
+        model="gfs025",  # not ecmwf_open_data → bypasses 2026-05-04 ingest_class guard
         role="monitor_fallback",
     )
 
@@ -8764,13 +8747,13 @@ def test_fetch_ensemble_reuses_longer_horizon_for_shorter_request(monkeypatch):
     long_result = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=8,
-        model="ecmwf_ifs025",
+        model="gfs025",  # not ecmwf_open_data → bypasses 2026-05-04 ingest_class guard
         role="monitor_fallback",
     )
     short_result = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=3,
-        model="ecmwf_ifs025",
+        model="gfs025",  # not ecmwf_open_data → bypasses 2026-05-04 ingest_class guard
         role="monitor_fallback",
     )
 

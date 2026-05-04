@@ -286,7 +286,32 @@ TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics
 # 9 not-currently-passing baseline (7 healthcheck reclaimed; 1 test_day0
 # happens to pass; 1 test_live_assumptions_manifest xfailed pending fix) +
 # 5 oracle resilience tests in tests/runtime/test_evaluator_oracle_resilience.py.
-BASELINE_PASSED=658
+#
+# 2026-05-04 PR #60 cluster-cleanup: 658 → 678 (+20). Repaired 50 silently
+# rotted tests accumulated across PR #55–#59 by [skip-invariant] commits
+# whose narrow test runs missed the regressions. Five clusters split between
+# test debt (production moved forward, tests stale) and true regression
+# (production code asymmetric or contract incomplete):
+#   - Cluster A (test debt): safety_cap_usd removed in d0259327 (bankroll
+#     doctrine), tests still passed it. -17 lines from test_runtime_guards.
+#   - Cluster B (true regression): platt_models_v2 / calibration_pairs_v2
+#     canonical schema lacked cycle/source_id/horizon_profile while
+#     save_platt_model_v2 unconditionally inserted them. v2_schema.py now
+#     adds the columns + idempotent ALTER for legacy DBs (mirror of the
+#     ensemble_snapshots_v2 pattern). 11 hardcoded model_keys in tests
+#     bumped from 5-part to 8-part Phase 2 format.
+#   - Cluster C (test debt): production fetch_ensemble grew a kw-only
+#     temperature_metric param; 8 lambda/def mocks added **kwargs.
+#   - Cluster D (test debt): 2 new dynamic-SQL sites in
+#     src/state/schema_introspection.py — internal-whitelist PRAGMA
+#     interpolation; scanner baseline 143 → 145.
+#   - Cluster E (true regression): 5 test_inv_prototype antibodies pinned
+#     contracts production never reached — async-def recognition,
+#     class-scope verification, schema column existence. Implemented in
+#     architecture/inv_prototype.py + INV_02/INV_07 schema citations
+#     gained ::table.column targets.
+# All 50 prior failures cleared; net delta vs main = +20 passing tests.
+BASELINE_PASSED=678
 BASELINE_SKIPPED=46
 
 if [ ! -x "$PYTEST_BIN" ]; then
