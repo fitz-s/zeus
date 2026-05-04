@@ -23,6 +23,7 @@ land with their respective packets — see PLAN_v2 §6 sequencing rule.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -40,7 +41,7 @@ UTC = timezone.utc
 # ---------------------------------------------------------------------- #
 
 
-def _london_endDate(target: date) -> datetime:
+def _london_end_date(target: date) -> datetime:
     return datetime(target.year, target.month, target.day, 12, 0, 0, tzinfo=UTC)
 
 
@@ -66,7 +67,7 @@ def test_t3_settlement_day_entry_inclusive_late() -> None:
         target_local_date=target,
         city_timezone="Europe/London",
         polymarket_start_utc=datetime(2026, 5, 6, 4, 4, tzinfo=UTC),
-        polymarket_end_utc=_london_endDate(target),
+        polymarket_end_utc=_london_end_date(target),
     )
 
     assert (
@@ -112,7 +113,7 @@ def test_t3_settlement_day_entry_la_2026_05_08() -> None:
 
 def test_t4_post_trading_at_or_after_endDate() -> None:
     target = date(2026, 5, 8)
-    end_utc = _london_endDate(target)
+    end_utc = _london_end_date(target)
     common = dict(
         target_local_date=target,
         city_timezone="Europe/London",
@@ -178,7 +179,7 @@ def test_t1_phase_stable_across_midnight_straddle() -> None:
         target_local_date=target,
         city_timezone="Pacific/Auckland",
         polymarket_start_utc=datetime(2026, 5, 6, 4, 4, tzinfo=UTC),
-        polymarket_end_utc=_london_endDate(target),
+        polymarket_end_utc=_london_end_date(target),
     )
 
     sd_entry = settlement_day_entry_utc(
@@ -203,7 +204,7 @@ def test_t1_phase_stable_across_midnight_straddle() -> None:
 def test_pre_trading_when_before_polymarket_start() -> None:
     target = date(2026, 5, 8)
     start_utc = datetime(2026, 5, 6, 4, 4, tzinfo=UTC)
-    end_utc = _london_endDate(target)
+    end_utc = _london_end_date(target)
     decision_time = start_utc - timedelta(hours=1)
 
     assert (
@@ -224,7 +225,7 @@ def test_resolved_overrides_all_other_phases() -> None:
     """
     target = date(2026, 5, 8)
     start_utc = datetime(2026, 5, 6, 4, 4, tzinfo=UTC)
-    end_utc = _london_endDate(target)
+    end_utc = _london_end_date(target)
 
     for dt in [
         start_utc - timedelta(days=1),  # before start
@@ -258,7 +259,7 @@ def test_naive_decision_time_rejected() -> None:
             city_timezone="Europe/London",
             decision_time_utc=datetime(2026, 5, 8, 12, 0, 0),  # naive
             polymarket_start_utc=datetime(2026, 5, 6, 4, 4, tzinfo=UTC),
-            polymarket_end_utc=_london_endDate(target),
+            polymarket_end_utc=_london_end_date(target),
         )
 
 
@@ -360,19 +361,69 @@ def test_adapter_naive_gamma_payload_is_loud_failure() -> None:
 
 def test_settlement_day_entry_dst_aware_london_spring_forward() -> None:
     """London spring-forward 2026-03-29: clocks jump 01:00 GMT → 02:00 BST.
-    Target 2026-03-29 (the spring-forward day): city-local end-of-target
-    is 2026-03-30 00:00 BST = 2026-03-29 23:00 UTC. SETTLEMENT_DAY entry
-    is 2026-03-28 23:00 UTC. Pre-spring-forward target 2026-03-28
-    end-of-day is 2026-03-29 00:00 GMT = 2026-03-29 00:00 UTC.
-    The helper must use ZoneInfo to resolve the boundary tz, not assume
-    a fixed offset.
+
+    Per PR #53 review (Copilot comment 3179345263), the SETTLEMENT_DAY
+    entry boundary is **city-local 00:00 of target_local_date** — i.e.,
+    the start of the local calendar day for ``target_date``. This makes
+    the SETTLEMENT_DAY window equal the LOCAL calendar day, which on
+    DST-transition days yields a 23h or 25h UTC interval (because the
+    local day itself is short or long), but the LOCAL geometry stays
+    coherent.
+
+    target_local_date = 2026-03-29 (spring-forward day): local 00:00
+    happens at 00:00 GMT (the DST jump is at 01:00 GMT → 02:00 BST,
+    AFTER local midnight). So sd_entry_utc = 2026-03-29 00:00 UTC.
+
+    target_local_date = 2026-03-28 (day before): local 00:00 = 00:00 GMT
+    = 2026-03-28 00:00 UTC.
+
+    The previous "24h before end-of-target" formulation gave 2026-03-28
+    23:00 UTC for target_local_date=2026-03-29 — off by one hour because
+    end-of-target was already in BST while sd_entry should still be in
+    GMT. Anchoring at LOCAL start-of-target_date fixes this.
     """
     sd_entry_post = settlement_day_entry_utc(
         target_local_date=date(2026, 3, 29), city_timezone="Europe/London"
     )
-    assert sd_entry_post == datetime(2026, 3, 28, 23, 0, 0, tzinfo=UTC)
+    assert sd_entry_post == datetime(2026, 3, 29, 0, 0, 0, tzinfo=UTC)
 
     sd_entry_pre = settlement_day_entry_utc(
         target_local_date=date(2026, 3, 28), city_timezone="Europe/London"
     )
     assert sd_entry_pre == datetime(2026, 3, 28, 0, 0, 0, tzinfo=UTC)
+
+
+def test_strict_utc_offset_rejected_for_non_utc_tz() -> None:
+    """``_require_utc`` (used inside ``market_phase_for_decision``)
+    enforces ``utcoffset() == timedelta(0)``. A datetime carrying
+    ``ZoneInfo('America/Chicago')`` has tzinfo set but a non-zero
+    offset, and the previous ``tzinfo is None`` check would let it
+    through. Per PR #53 Copilot comment 3179339283, the parameter is
+    named ``*_utc`` so we reject non-UTC offsets loudly.
+    """
+    target = date(2026, 5, 8)
+    chicago_decision_time = datetime(2026, 5, 8, 12, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
+
+    with pytest.raises(ValueError, match="must carry UTC offset"):
+        market_phase_for_decision(
+            target_local_date=target,
+            city_timezone="Europe/London",
+            decision_time_utc=chicago_decision_time,
+            polymarket_start_utc=datetime(2026, 5, 6, 4, 4, tzinfo=UTC),
+            polymarket_end_utc=_london_end_date(target),
+        )
+
+
+def test_market_phase_inherits_str_for_serialization() -> None:
+    """Per PR #53 Copilot comment 3179339276 — match LifecyclePhase
+    convention. Equality with bare strings, ``json.dumps`` cleanliness,
+    and SQL-bind compatibility all flow from ``str`` inheritance.
+    """
+    import json
+    from src.strategy.market_phase import MarketPhase
+
+    assert MarketPhase.SETTLEMENT_DAY == "settlement_day"
+    assert json.dumps(MarketPhase.POST_TRADING.value) == '"post_trading"'
+    assert isinstance(MarketPhase.PRE_TRADING.value, str)
+
+

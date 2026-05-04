@@ -41,7 +41,14 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 
-class MarketPhase(Enum):
+class MarketPhase(str, Enum):
+    """``str``-valued enum so SQL/JSON serialization is uniform with the
+    rest of the project's state-like enums (e.g. ``LifecyclePhase`` at
+    ``src/state/lifecycle_manager.py:9``). Inheriting from ``str`` makes
+    ``MarketPhase.SETTLEMENT_DAY == "settlement_day"`` true and lets
+    SQLite bind the value directly.
+    """
+
     PRE_TRADING = "pre_trading"
     PRE_SETTLEMENT_DAY = "pre_settlement_day"
     SETTLEMENT_DAY = "settlement_day"
@@ -49,11 +56,29 @@ class MarketPhase(Enum):
     RESOLVED = "resolved"
 
 
-SETTLEMENT_DAY_LOOKBACK_HOURS: int = 24
-"""Hours before city-local end-of-target_date at which SETTLEMENT_DAY
-begins. Per PLAN_v2 §2 boundary 2 + operator framing
-"day 0 应该交易所有当地市场 0 点前的 24 个小时" (STRATEGIES_AND_GAPS §3.1).
-"""
+def _require_utc(value: datetime, name: str) -> datetime:
+    """Strictly validate that ``value`` is a UTC-offset-aware datetime.
+
+    A ``tzinfo is not None`` check is too permissive — a caller who
+    passes ``ZoneInfo("America/Chicago")`` would slip through and the
+    function would silently compare instants across mixed offsets. The
+    parameter is named ``*_utc`` so we enforce ``utcoffset() ==
+    timedelta(0)`` literally.
+    """
+    if value.tzinfo is None:
+        raise ValueError(
+            f"{name} must be timezone-aware (UTC). Naive datetimes silently "
+            f"drift across host tz; per critic R1 C5 and operator directive "
+            f"2026-05-04 (UTC-strict execution)."
+        )
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name} must carry UTC offset (utcoffset == 0); got "
+            f"{value.tzinfo!r} with offset {value.utcoffset()!r}. "
+            f"Per UTC-strict directive, callers convert at the boundary "
+            f"before passing — silent astimezone() here would hide the bug."
+        )
+    return value
 
 
 def settlement_day_entry_utc(
@@ -63,22 +88,27 @@ def settlement_day_entry_utc(
 ) -> datetime:
     """UTC instant at which a city's market enters ``SETTLEMENT_DAY``.
 
-    Defined as 24h before city-local end-of-target_date — i.e., 24h
-    before city-local 00:00 of ``target_date + 1`` day.
+    Defined as **city-local 00:00 of ``target_local_date``** — i.e., the
+    start of the local calendar day for ``target_date``. The
+    SETTLEMENT_DAY window equals the LOCAL calendar day (per operator
+    framing "day 0 应该交易所有当地市场 0 点前的 24 个小时" =
+    "trade all 24 hours before midnight of the local market" =
+    the local target_date day itself, anchored at local midnight).
 
-    DST-correct because ``ZoneInfo(city_timezone)`` resolves the local
-    offset for the *target boundary date*, not the *current* host
-    offset. Spring-forward / fall-back days produce a 23h or 25h
-    SETTLEMENT_DAY window; downstream code must tolerate this rather
-    than assume exactly 24h.
+    On DST-transition target dates this yields a 23h or 25h window in
+    UTC wall-clock terms (because the local day itself is 23h or 25h
+    long), which is the *correct* behavior — downstream code reasons
+    about local-calendar-day geometry, not fixed UTC intervals.
+    Anchoring at ``end_of_target_utc - 24h`` would silently shift the
+    boundary by ±1h on DST days and misphase decisions; caught in
+    PR #53 review (Copilot comment 3179345263).
     """
-    end_of_target_local = datetime.combine(
-        target_local_date + timedelta(days=1),
+    sd_entry_local = datetime.combine(
+        target_local_date,
         time(0, 0, 0),
         tzinfo=ZoneInfo(city_timezone),
     )
-    end_of_target_utc = end_of_target_local.astimezone(timezone.utc)
-    return end_of_target_utc - timedelta(hours=SETTLEMENT_DAY_LOOKBACK_HOURS)
+    return sd_entry_local.astimezone(timezone.utc)
 
 
 def market_phase_for_decision(
@@ -93,27 +123,26 @@ def market_phase_for_decision(
     """Compute ``MarketPhase`` at ``decision_time_utc`` given market
     boundaries.
 
-    All datetime arguments MUST be timezone-aware. ``polymarket_start_utc``
-    may be ``None`` when the start time is unknown (e.g., during
-    pre-discovery when only target_date and city are known); in that
-    case the function returns ``PRE_SETTLEMENT_DAY`` whenever
-    ``decision_time_utc`` is before the SETTLEMENT_DAY anchor (the
-    market is treated as already trading by default — the caller must
-    upstream-filter PRE_TRADING markets when start time is unavailable).
+    All datetime arguments MUST be UTC-offset-aware (``utcoffset() ==
+    timedelta(0)``). Naive or non-UTC-offset datetimes raise
+    ``ValueError`` rather than being silently coerced — see
+    ``_require_utc`` for the rationale.
+
+    ``polymarket_start_utc`` may be ``None`` when the start time is
+    unknown (e.g., during pre-discovery when only target_date and city
+    are known); in that case the function returns ``PRE_SETTLEMENT_DAY``
+    whenever ``decision_time_utc`` is before the SETTLEMENT_DAY
+    anchor (the market is treated as already trading by default — the
+    caller must upstream-filter PRE_TRADING markets when start time is
+    unavailable).
 
     See PLAN_v2 §2 for the boundary table. T3 in §8 pins inclusive-late
     semantics; T4 pins the 12:00 UTC POST_TRADING anchor.
     """
-    if decision_time_utc.tzinfo is None:
-        raise ValueError(
-            "decision_time_utc must be timezone-aware (UTC). Naive "
-            "datetimes silently drift across host tz; per critic R1 C5 "
-            "and operator directive 2026-05-04 (UTC-strict execution)."
-        )
-    if polymarket_end_utc.tzinfo is None:
-        raise ValueError("polymarket_end_utc must be timezone-aware (UTC).")
-    if polymarket_start_utc is not None and polymarket_start_utc.tzinfo is None:
-        raise ValueError("polymarket_start_utc must be timezone-aware (UTC).")
+    decision_time_utc = _require_utc(decision_time_utc, "decision_time_utc")
+    polymarket_end_utc = _require_utc(polymarket_end_utc, "polymarket_end_utc")
+    if polymarket_start_utc is not None:
+        polymarket_start_utc = _require_utc(polymarket_start_utc, "polymarket_start_utc")
 
     if uma_resolved:
         return MarketPhase.RESOLVED
