@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 import numpy as np
 
 from src.state.db import get_world_connection
+from src.state.schema_introspection import has_columns
 
 if TYPE_CHECKING:
     from src.config import City
@@ -86,34 +87,39 @@ def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
 def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bool:
     """True iff platt_models_v2 has cycle/source_id/horizon_profile columns.
 
-    Codex P1 #6 (2026-05-04): the migration script
-    migrate_phase2_cycle_stratification.py adds these columns via ALTER, so
-    pre-migration DBs and several test fixtures lack them.  The loader must
-    degrade gracefully — skip the WHERE filters and return None for the
-    bucket_* fields — instead of raising OperationalError on legacy callers.
+    Thin wrapper around ``has_columns`` (PROPOSALS_2026-05-04 P2 — moved
+    out of inline form during PR #59).  ``table_ref`` may be qualified
+    (``"world.platt_models_v2"``); split into bare-table-name + attached
+    DB before delegation.
+
+    The migration script ``migrate_phase2_cycle_stratification.py``
+    adds these columns via ALTER, so pre-migration DBs and several
+    test fixtures lack them.  The loader degrades gracefully — skips
+    the WHERE filters and returns None for the bucket_* fields —
+    instead of raising OperationalError on legacy callers.
     """
-    try:
-        rows = _table_info(conn, table_ref)
-    except (sqlite3.Error, ValueError):
-        return False
-    cols = {row[1] for row in rows}
-    return {"cycle", "source_id", "horizon_profile"}.issubset(cols)
+    if table_ref.startswith("world."):
+        return has_columns(
+            conn, table_ref.removeprefix("world."),
+            "cycle", "source_id", "horizon_profile",
+            attached="world",
+        )
+    return has_columns(
+        conn, table_ref, "cycle", "source_id", "horizon_profile",
+    )
 
 
 def _v2_pairs_table_has_stratification(conn: sqlite3.Connection) -> bool:
     """True iff calibration_pairs_v2 has cycle/source_id/horizon_profile columns.
 
-    Mirrors _v2_table_has_stratification for the pairs table.  Used by
-    add_calibration_pair_v2 to choose between the migrated INSERT form
-    (with stratification columns) and the legacy form.  Pre-migration
+    Used by add_calibration_pair_v2 to choose between the migrated INSERT
+    form (with stratification columns) and the legacy form.  Pre-migration
     fixtures lack the columns so legacy form is the safe fallback.
     """
-    try:
-        rows = conn.execute("PRAGMA table_info(calibration_pairs_v2)").fetchall()
-    except sqlite3.Error:
-        return False
-    cols = {row[1] for row in rows}
-    return {"cycle", "source_id", "horizon_profile"}.issubset(cols)
+    return has_columns(
+        conn, "calibration_pairs_v2",
+        "cycle", "source_id", "horizon_profile",
+    )
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:
