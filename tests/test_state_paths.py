@@ -84,11 +84,14 @@ def test_oracle_penalty_picks_up_storage_root_override(
 ) -> None:
     """``oracle_penalty._load`` must call the path builder on each
     invocation (not capture at import) so an env override propagates
-    without re-importing the module.
+    without re-importing the module. Uses the post-A3 schema (n +
+    mismatches) so the loaded record classifies as a real status, not
+    MISSING.
     """
     monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
-    # Write a synthetic oracle file under the override root.
-    payload = {"NYC": {"high": {"oracle_error_rate": 0.05, "status": "CAUTION"}}}
+    # Post-A3 schema: bridge writes n + mismatches at city.high level.
+    # n=200, m=10 → posterior_upper_95 ≈ 0.087 → CAUTION (>0.05, ≤0.10).
+    payload = {"NYC": {"high": {"n": 200, "mismatches": 10}}}
     target = tmp_path / "data" / "oracle_error_rates.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload))
@@ -99,8 +102,12 @@ def test_oracle_penalty_picks_up_storage_root_override(
     importlib.reload(op)
     op.reload()
     info = op.get_oracle_info("NYC", "high")
-    assert info.error_rate == pytest.approx(0.05)
     assert info.status.value == "CAUTION"
+    assert info.n == 200
+    assert info.mismatches == 10
+    # error_rate is the backward-compat alias for posterior_mean (Bayes-corrected).
+    # Empirical rate (m/n) = 0.05; posterior_mean = 11/202 ≈ 0.0545.
+    assert info.error_rate == pytest.approx(11 / 202, abs=1e-4)
 
 
 def test_atomic_write_creates_target_with_payload(tmp_path: Path) -> None:

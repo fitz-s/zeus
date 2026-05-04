@@ -300,23 +300,48 @@ def bridge(dry_run: bool = False) -> dict:
 
         city_entry["high"]["snapshot_data"] = snap_stats
 
-        # Combine snapshot error rate with historical same-source error rate
-        hist_rate = city_entry["high"].get("oracle_error_rate", 0.0)
+        # PLAN.md §A3: write raw counts at the top level so the reader
+        # can compute the Beta-binomial posterior. Pre-A3 the bridge
+        # wrote only `oracle_error_rate` (point estimate), losing the
+        # n/m split needed for evidence-graded classification. The
+        # downstream reader (oracle_penalty) now treats absence of n/m
+        # as MISSING (mult 0.5) — files that bridge wrote pre-A3 will
+        # carry only oracle_error_rate and degrade until the next bridge
+        # run.
+        n = int(snap_stats["snapshot_comparisons"])
+        m = int(snap_stats["snapshot_mismatch"])
+        city_entry["high"]["n"] = n
+        city_entry["high"]["mismatches"] = m
+        city_entry["high"]["last_observed_date"] = (
+            max(snap_stats["snapshot_dates"]) if snap_stats.get("snapshot_dates") else None
+        )
+
+        # Keep oracle_error_rate as a derived convenience field — readers
+        # compute their own posterior, but operators still grep for the
+        # raw rate when triaging. ``error_rate = m/n`` is the maximum-
+        # likelihood estimate; the posterior_mean lives in the reader.
         snap_rate = snap_stats["snapshot_error_rate"]
+        city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
 
-        # Use the higher of the two as the effective oracle_error_rate
-        combined_rate = max(hist_rate, snap_rate)
-        city_entry["high"]["oracle_error_rate"] = combined_rate
-
-        # Update status
-        if combined_rate > 0.10:
-            city_entry["high"]["status"] = "BLACKLIST"
-        elif combined_rate > 0.03:
-            city_entry["high"]["status"] = "CAUTION"
-        elif combined_rate > 0.0:
-            city_entry["high"]["status"] = "INCIDENTAL"
+        # Status field is now informational. The reader recomputes
+        # status via oracle_estimator.classify(m, n, age) on each
+        # `get_oracle_info` call — operators changing thresholds in code
+        # should NOT need a bridge re-run. We still emit a status hint
+        # for human readability of the JSON dump.
+        if n < 10:
+            city_entry["high"]["status_hint"] = "INSUFFICIENT_SAMPLE"
+        elif m == 0:
+            city_entry["high"]["status_hint"] = "OK_pending_p95"
+        elif snap_rate > 0.10:
+            city_entry["high"]["status_hint"] = "BLACKLIST"
+        elif snap_rate > 0.03:
+            city_entry["high"]["status_hint"] = "CAUTION"
         else:
-            city_entry["high"]["status"] = "OK"
+            city_entry["high"]["status_hint"] = "INCIDENTAL"
+        # Drop the old top-level "status" field; the reader's classify()
+        # is the authority. Keep a one-cycle compat shim so anything
+        # ad-hoc reading the JSON doesn't crash on missing key.
+        city_entry["high"]["status"] = city_entry["high"]["status_hint"]
 
     if not dry_run:
         # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous

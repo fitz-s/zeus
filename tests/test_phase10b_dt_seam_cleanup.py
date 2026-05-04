@@ -128,88 +128,119 @@ class TestRCMOraclePenaltyCityMetricKeying:
         op._cache = None
 
     def test_r_cm_1_high_seed_does_not_contaminate_low(self, tmp_path, monkeypatch):
-        """R-CM.1: HIGH penalty entry is isolated from LOW."""
-        import src.strategy.oracle_penalty as op
-        self._reset_cache()
+        """R-CM.1: HIGH penalty entry is isolated from LOW.
 
-        # PLAN.md §A2 migration: redirect storage via ZEUS_STORAGE_ROOT
-        # rather than monkey-patching the module-level _ORACLE_FILE constant
-        # (which no longer exists post-A2). The path builder re-reads the
-        # env on each call, so the override propagates without reimport.
+        Post-A3 (PLAN.md §A3 + Bug review Finding C): LOW always returns
+        METRIC_UNSUPPORTED until a LOW snapshot bridge ships. The seam-
+        isolation property still holds — reading HIGH does not affect
+        what LOW reports — but the LOW status is METRIC_UNSUPPORTED, not
+        the legacy default-OK.
+        """
+        import src.strategy.oracle_penalty as op
+        op._reset_for_test()
+
+        # Post-A3 schema: bridge writes n + mismatches. n=25, m=10 →
+        # posterior_upper_95 ≈ 0.564 > 0.10 → BLACKLIST.
         json_path = tmp_path / "data" / "oracle_error_rates.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps({
             "chicago": {
-                "high": {"oracle_error_rate": 0.15},  # BLACKLIST tier
+                "high": {"n": 25, "mismatches": 10},  # BLACKLIST tier
             }
         }))
         monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
 
-        op._cache = None
         info_high = op.get_oracle_info("chicago", "high")
         info_low = op.get_oracle_info("chicago", "low")
 
         assert info_high.status.value == "BLACKLIST", (
-            "chicago HIGH should be BLACKLIST (0.15 > 0.10)"
+            "chicago HIGH should be BLACKLIST (n=25 m=10 → posterior_upper_95 > 0.10)"
         )
-        assert info_low.status.value == "OK", (
-            "chicago LOW must default to OK when absent from JSON — seam isolation"
+        # Post-A3 (PLAN.md §A3 + Bug review Finding C): LOW always returns
+        # METRIC_UNSUPPORTED until a LOW oracle bridge ships. Seam isolation
+        # is preserved (HIGH=BLACKLIST does not flip LOW), but the LOW
+        # status reflects the missing-bridge reality, not silent OK.
+        assert info_low.status.value == "METRIC_UNSUPPORTED", (
+            "chicago LOW must be METRIC_UNSUPPORTED until LOW oracle bridge ships"
         )
+        assert info_low.penalty_multiplier == 0.0
 
     def test_r_cm_2_invalidating_high_does_not_evict_low(self, tmp_path, monkeypatch):
-        """R-CM.2: (city, 'high') and (city, 'low') are independent cache keys."""
+        """R-CM.2: (city, 'high') and (city, 'low') are independent cache keys.
+
+        Post-A3: LOW is METRIC_UNSUPPORTED regardless of cache contents
+        (computed at get_oracle_info time, not at load). The seam-
+        isolation property is now stronger — even if the cache is
+        fully populated for both metrics, LOW never inherits HIGH's
+        status.
+        """
         import src.strategy.oracle_penalty as op
-        self._reset_cache()
+        op._reset_for_test()
 
         json_path = tmp_path / "data" / "oracle_error_rates.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
+        # Post-A3 schema: include n + mismatches.
         json_path.write_text(json.dumps({
             "london": {
-                "high": {"oracle_error_rate": 0.05},  # CAUTION
-                "low": {"oracle_error_rate": 0.0},    # OK
+                "high": {"n": 100, "mismatches": 4},  # CAUTION (p95 ~ 0.090)
+                "low": {"n": 100, "mismatches": 0},   # would be OK if not METRIC_UNSUPPORTED
             }
         }))
         monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
 
-        op._cache = None
-        # Load both
-        _ = op.get_oracle_info("london", "high")
-        _ = op.get_oracle_info("london", "low")
+        # Load both. LOW gets METRIC_UNSUPPORTED short-circuit.
+        info_high = op.get_oracle_info("london", "high")
+        info_low_first = op.get_oracle_info("london", "low")
 
-        # Simulate "invalidating" HIGH by deleting from cache directly
+        assert info_high.status.value == "CAUTION"
+        assert info_low_first.status.value == "METRIC_UNSUPPORTED"
+
+        # Simulate "invalidating" HIGH by deleting from raw cache.
         if op._cache is not None:
             op._cache.pop(("london", "high"), None)
 
-        # LOW must still be in cache
-        info_low = op.get_oracle_info("london", "low")
-
-        assert info_low.status.value == "OK", (
-            "Evicting (london, high) must not evict (london, low)"
+        # LOW must still report METRIC_UNSUPPORTED — independent of HIGH cache.
+        info_low_after = op.get_oracle_info("london", "low")
+        assert info_low_after.status.value == "METRIC_UNSUPPORTED", (
+            "Evicting (london, high) must not affect what LOW reports"
         )
 
     def test_r_cm_3_legacy_flat_json_loads_as_high_only(self, tmp_path, monkeypatch):
-        """R-CM.3: Legacy flat {city: {oracle_error_rate: N}} treated as (city, 'high')."""
+        """R-CM.3: Legacy flat {city: {oracle_error_rate: N}} treated as (city, 'high').
+
+        Post-A3 the loader returns ``(records, mtime)``; legacy flat records
+        carry only ``oracle_error_rate`` (no n / mismatches), so the reader
+        treats them as MISSING (mult 0.5) until the next bridge run writes
+        the new schema. The "loaded as (city, 'high') key only" cache-shape
+        property is what this test pins; the resulting STATUS now degrades
+        to MISSING per PLAN.md §A3 (the legacy point estimate alone cannot
+        bound the posterior).
+        """
         import src.strategy.oracle_penalty as op
-        self._reset_cache()
+        op._reset_for_test()
 
         json_path = tmp_path / "data" / "oracle_error_rates.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        # Legacy flat shape (no 'high'/'low' sub-keys)
+        # Legacy flat shape (no 'high'/'low' sub-keys, no n/m fields).
         json_path.write_text(json.dumps({
             "tokyo": {"oracle_error_rate": 0.08, "status": "CAUTION"}
         }))
         monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
 
-        op._cache = None
-        loaded = op._load()
+        # Post-A3 _load() returns (records, mtime).
+        loaded, _mtime = op._load()
 
         assert ("tokyo", "high") in loaded, (
-            "Legacy flat JSON must create (city, 'high') key"
+            "Legacy flat JSON must create (city, 'high') cache key"
         )
         assert ("tokyo", "low") not in loaded, (
-            "Legacy flat JSON must NOT create (city, 'low') key"
+            "Legacy flat JSON must NOT create (city, 'low') cache key"
         )
-        assert loaded[("tokyo", "high")].status.value == "CAUTION"
+        # Status degrades to MISSING because n/mismatches absent.
+        info = op.get_oracle_info("tokyo", "high")
+        assert info.status.value == "MISSING", (
+            "Legacy flat record without n/m → MISSING (rate alone cannot bound posterior)"
+        )
 
 
 # ---------------------------------------------------------------------------
