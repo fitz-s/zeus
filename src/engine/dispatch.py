@@ -90,6 +90,22 @@ if TYPE_CHECKING:
 _DISPATCH_FLAG_ENV = "ZEUS_MARKET_PHASE_DISPATCH"
 
 
+class PhaseAuthorityViolation(RuntimeError):
+    """Raised by strict-dispatch sites when ``candidate.market_phase``
+    is ``None`` under flag ON (PLAN.md §A5 + Bug review Finding F).
+
+    The fail-soft default (``strict=False``) lets dispatch callers
+    fall back to the legacy cycle-axis rule when a candidate slips
+    through without a phase tag — preserving the migration's
+    "no behavior change on flag flip" property. The strict variant
+    is for LIVE-AUTHORITY callers (Kelly resolver, entry executor,
+    settlement attribution) where silent legacy fallback would mask
+    a tag-failure as a successful determination. Strict callers
+    catch this exception, log the failure_reason, and reject the
+    candidate — never trade against an undetermined phase.
+    """
+
+
 def market_phase_dispatch_enabled() -> bool:
     """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is set to a truthy
     value. Default OFF; T6 byte-equal invariant requires that when this
@@ -98,26 +114,42 @@ def market_phase_dispatch_enabled() -> bool:
     return os.environ.get(_DISPATCH_FLAG_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def is_settlement_day_dispatch(candidate: "MarketCandidate") -> bool:
+def is_settlement_day_dispatch(
+    candidate: "MarketCandidate", *, strict: bool = False
+) -> bool:
     """Single dispatch question: at this candidate, should the daemon
     take the SETTLEMENT_DAY-class strategy path?
 
     Flag OFF (default, byte-equal to pre-P3): legacy
-    ``candidate.discovery_mode == DAY0_CAPTURE.value``.
+    ``candidate.discovery_mode == DAY0_CAPTURE.value``. ``strict`` is
+    ignored when the flag is OFF — the legacy axis is fully resolvable
+    without a phase tag.
 
     Flag ON: ``candidate.market_phase == MarketPhase.SETTLEMENT_DAY``.
-    Falls back to legacy logic if ``candidate.market_phase`` is None
-    (untagged / off-cycle / test fixture) — fail-soft so the migration
-    never trades silent misclassification for a hard fault.
+
+    Phase=None handling under flag ON:
+      - ``strict=False`` (default, fail-soft): falls back to legacy
+        cycle-axis rule. Preserves the "flag flip changes nothing
+        observable when phase tagging is incomplete" property used by
+        test fixtures and off-cycle direct construction.
+      - ``strict=True`` (PLAN.md §A5 Finding F floor): raises
+        ``PhaseAuthorityViolation``. Live-authority callers (Kelly
+        resolver, entry executor, settlement attribution) opt into this
+        so a silent fallback never masks a tag-failure as a successful
+        determination.
     """
     if not market_phase_dispatch_enabled():
         return _is_day0_capture_legacy(candidate)
 
     market_phase = getattr(candidate, "market_phase", None)
     if market_phase is None:
-        # Untagged candidate — defer to legacy. This is the path taken
-        # by test fixtures and any off-cycle direct construction; the
-        # production cycle_runtime always tags at construction.
+        if strict:
+            raise PhaseAuthorityViolation(
+                f"market_phase=None under flag ON for candidate "
+                f"{getattr(candidate, 'condition_id', '<unknown>')}; "
+                f"strict caller refuses silent legacy fallback"
+            )
+        # Fail-soft path: defer to legacy.
         return _is_day0_capture_legacy(candidate)
 
     # str-Enum equality: ``MarketPhase.SETTLEMENT_DAY == "settlement_day"``.

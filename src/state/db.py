@@ -692,6 +692,20 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             -- decision-time cohort attribution. Additive, default NULL
             -- for legacy rows; legacy-DB ALTER TABLE migration below.
             market_phase TEXT,
+            -- A5 (PLAN.md §A5 + Bug review Finding F): MarketPhaseEvidence
+            -- provenance fields. ``market_phase_source`` distinguishes
+            -- verified_gamma / fallback_f1 / onchain_resolved / unknown so
+            -- attribution reports can stratify by determination quality.
+            -- The 3 timestamp columns capture WHICH boundaries the phase
+            -- was computed against — so a future cohort report can detect
+            -- a midnight-straddle drift without re-running the cycle.
+            -- ``uma_resolved_source`` carries the on-chain Settle tx hash
+            -- when phase_source == "onchain_resolved", NULL otherwise.
+            market_phase_source TEXT,
+            market_start_at TEXT,
+            market_end_at TEXT,
+            settlement_day_entry_utc TEXT,
+            uma_resolved_source TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -1452,6 +1466,41 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
         )
     except sqlite3.OperationalError:
         pass
+
+    # A5 (PLAN.md §A5 + Bug review Finding F, 2026-05-04): MarketPhaseEvidence
+    # provenance columns. Same migration pattern as ``market_phase`` above —
+    # ALTER catches legacy DBs; duplicate-column OperationalError is the
+    # expected fresh-DB no-op path.
+    for col in (
+        "market_phase_source",
+        "market_start_at",
+        "market_end_at",
+        "settlement_day_entry_utc",
+        "uma_resolved_source",
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE probability_trace_fact ADD COLUMN {col} TEXT;"
+            )
+        except sqlite3.OperationalError:
+            pass
+    try:
+        # Index on phase_source for cohort queries that group by determination
+        # quality (e.g., "what % of post-A5 decisions used fallback_f1?").
+        # Provisioned now so the first cohort report after wiring doesn't
+        # trigger a full-table scan; mirrors the idx_probability_trace_market_phase
+        # rationale from §6.P9.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_probability_trace_phase_source "
+            "ON probability_trace_fact(market_phase_source);"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # A5 uma_resolution table — listener writes here, cycle_runtime reads
+    # it via uma_resolution_listener.lookup_resolution. Idempotent.
+    from src.state.uma_resolution_listener import init_uma_resolution_schema as _init_uma
+    _init_uma(conn)
 
     # REOPEN-1 (2026-04-23): forecasts writer at src/data/forecasts_append.py:256-262
     # inserts rebuild_run_id + data_source_version; legacy DBs predate the CREATE

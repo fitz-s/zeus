@@ -2129,22 +2129,51 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # cycle's frozen decision_time BEFORE the obs gate so P3's
         # phase-based dispatch can read it. Errors are fail-soft: log +
         # leave market_phase=None so dispatch falls back to legacy mode.
-        market_phase = None
-        try:
-            from src.strategy.market_phase import market_phase_from_market_dict
+        #
+        # A5 (PLAN.md §A5): build the full MarketPhaseEvidence record
+        # alongside the bare phase. The evidence carries phase_source
+        # (verified_gamma / fallback_f1 / unknown) + the timestamps used,
+        # so attribution writers can persist the determination provenance
+        # and the A6 Kelly resolver can apply a 0.7× haircut on
+        # fallback_f1. ``market_phase`` (bare enum) is kept for backward
+        # compat with existing dispatch callsites; the evidence object is
+        # the canonical post-A5 source.
+        from src.strategy.market_phase_evidence import (
+            from_market_dict as _build_market_phase_evidence,
+        )
+        from src.state.uma_resolution_listener import lookup_resolution as _lookup_uma
 
-            market_phase = market_phase_from_market_dict(
-                market=market,
-                city_timezone=city.timezone,
-                target_date_str=market["target_date"],
-                decision_time_utc=decision_time,
+        # If a UMA resolution has been observed for this market, propagate
+        # its tx hash so the evidence reports phase_source=onchain_resolved
+        # (strictly stronger than heuristic POST_TRADING).
+        uma_tx_hash = None
+        try:
+            condition_id = market.get("condition_id") or market.get("conditionId")
+            if condition_id and conn is not None:
+                resolved = _lookup_uma(conn, str(condition_id))
+                if resolved is not None:
+                    uma_tx_hash = resolved.tx_hash
+        except Exception as exc:  # noqa: BLE001 - UMA lookup is observability-only
+            deps.logger.warning(
+                "UMA resolution lookup failed for %s: %s",
+                market.get("condition_id") or market.get("conditionId"),
+                exc,
             )
-        except Exception as exc:
+
+        market_phase_evidence = _build_market_phase_evidence(
+            market=market,
+            city_timezone=city.timezone,
+            target_date_str=market.get("target_date", ""),
+            decision_time_utc=decision_time,
+            uma_resolved_source=uma_tx_hash,
+        )
+        market_phase = market_phase_evidence.phase
+        if market_phase_evidence.phase_source == "unknown":
             deps.logger.warning(
                 "MarketPhase tag failed for %s/%s: %s",
                 city.name,
                 market.get("target_date"),
-                exc,
+                market_phase_evidence.failure_reason,
             )
 
         # P3 site 4 of 4 — observation-fetch gate (PLAN_v3 §6.P3).
