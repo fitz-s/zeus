@@ -187,6 +187,36 @@ fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 PYTEST_BIN="${ZEUS_HOOK_PYTEST_BIN:-${REPO_ROOT}/.venv/bin/python}"
+
+# Worktree-tolerant venv discovery (2026-05-04). Fresh worktrees routinely
+# lack a local `.venv` because the canonical workspace at the main repo
+# holds the only real venv; sibling worktrees rely on operator-managed
+# symlinks that are not auto-provisioned. Without this fall-through,
+# every fresh worktree's first commit hits the BLOCKED "PYTEST_BIN not
+# found" path, then operators manually
+# `ln -s /path/to/main/zeus/.venv .venv`. The recurrence is documented
+# in the Claude memory ("Pre-commit invariant hook needed `.venv/bin/
+# python` in worktree: fixed by symlinking canonical venv").
+#
+# Discovery: parse `git worktree list --porcelain` and pick the first
+# `worktree` line — git lists the canonical (main) repo first, before
+# any `git worktree add`-ed sibling. Fall through ONLY if:
+#   - operator did not pin ZEUS_HOOK_PYTEST_BIN (their override wins)
+#   - local PYTEST_BIN is missing or non-executable
+#   - main worktree is a different path than REPO_ROOT (otherwise we'd
+#     re-check the same broken path)
+#   - main worktree's `.venv/bin/python` exists and is executable
+# When falling through, surface the choice to stderr so operators are
+# not silently running pytest from a sibling worktree's interpreter.
+if [ ! -x "$PYTEST_BIN" ] && [ -z "${ZEUS_HOOK_PYTEST_BIN:-}" ]; then
+    MAIN_WT=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree / {print $2; exit}')
+    if [ -n "$MAIN_WT" ] && [ "$MAIN_WT" != "$REPO_ROOT" ] \
+       && [ -x "$MAIN_WT/.venv/bin/python" ]; then
+        PYTEST_BIN="$MAIN_WT/.venv/bin/python"
+        echo "[pre-commit-invariant-test] INFO: using main-worktree venv at $PYTEST_BIN (no local .venv at $REPO_ROOT/.venv)" >&2
+    fi
+fi
 # Baseline progression history:
 #   BATCH C (settlement_semantics): 73 → 76 (+3 HKO/WMO type-encoded)
 #   SIDECAR-3 (negative-half): 76 → 79
