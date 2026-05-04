@@ -504,6 +504,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "PortfolioGovernor cycle-start refresh failed: %s; blocking new entries fail-closed",
             _governor_start_exc,
+            exc_info=True,
         )
         summary["portfolio_governor_cycle_start"] = {
             "configured": False,
@@ -525,7 +526,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     try:
         chain_stats, chain_ready = _run_chain_sync(portfolio, clob, conn)
     except Exception as exc:
-        logger.error("Chain sync FAILED — entries will be blocked: %s", exc)
+        logger.error("Chain sync FAILED — entries will be blocked: %s", exc, exc_info=True)
         chain_stats, chain_ready = {"error": str(exc)}, False
     if chain_stats:
         summary["chain_sync"] = chain_stats
@@ -554,7 +555,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         rec_summary = reconcile_unresolved_commands()
         summary["command_recovery"] = rec_summary
     except Exception as exc:
-        logger.error("command_recovery raised; continuing cycle: %s", exc)
+        logger.error("command_recovery raised; continuing cycle: %s", exc, exc_info=True)
         summary["command_recovery"] = {"error": str(exc)}
 
     entry_bankroll, cap_summary = _entry_bankroll_for_cycle(portfolio, clob)
@@ -633,6 +634,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "runtime_posture read raised unexpectedly: %s; treating as NO_NEW_ENTRIES",
             _posture_exc,
+            exc_info=True,
         )
         _current_posture = "NO_NEW_ENTRIES"
     summary["posture"] = _current_posture
@@ -642,6 +644,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "CutoverGuard summary failed: %s; blocking new entries fail-closed",
             _cutover_exc,
+            exc_info=True,
         )
         _cutover_summary = {
             "state": "BLOCKED",
@@ -656,6 +659,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "HeartbeatSupervisor summary failed: %s; blocking new entries fail-closed",
             _heartbeat_exc,
+            exc_info=True,
         )
         _heartbeat_status = {
             "health": "LOST",
@@ -670,6 +674,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "WS user-channel guard summary failed: %s; blocking new entries fail-closed",
             _ws_gap_exc,
+            exc_info=True,
         )
         _ws_gap_status = {
             "subscription_state": "DISCONNECTED",
@@ -694,6 +699,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         logger.error(
             "PortfolioGovernor summary failed: %s; blocking new entries fail-closed",
             _governor_exc,
+            exc_info=True,
         )
         _governor_status = {
             "configured": False,

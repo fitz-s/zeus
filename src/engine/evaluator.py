@@ -2624,7 +2624,7 @@ def evaluate_candidate(
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
-        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc)
+        logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc, exc_info=True)
         _fdr_fallback = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)
