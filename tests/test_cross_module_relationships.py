@@ -783,14 +783,17 @@ def run_relationship_checks() -> dict:
             results["daily_baseline_anchoring"] = {"status": SKIP, "detail": "risk_state empty"}
         else:
             daily, weekly = _load_baselines_from_risk_history()
-            capital = float(settings.capital_base_usd)
+            # 2026-05-04: capital_base_usd removed. The "anchored away from
+            # capital" check is now inert — there's no config-literal anchor
+            # to compare against. We still record daily/weekly for diagnostic
+            # value but the anchoring property is no longer meaningful.
             results["daily_baseline_anchoring"] = {
                 "status": PASS,
                 "daily_baseline": round(daily, 2),
                 "weekly_baseline": round(weekly, 2),
-                "capital_base": round(capital, 2),
-                "anchored_away_from_capital": abs(daily - capital) > 0.01,
-                "detail": f"daily={daily:.2f}, weekly={weekly:.2f}, capital={capital:.2f}",
+                "capital_base": None,
+                "anchored_away_from_capital": None,
+                "detail": f"daily={daily:.2f}, weekly={weekly:.2f}, capital_base_usd removed (2026-05-04)",
             }
     except Exception as exc:
         results["daily_baseline_anchoring"] = {"status": FAIL, "detail": str(exc)}

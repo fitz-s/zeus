@@ -353,7 +353,10 @@ class TestPortfolio:
 
         loaded = load_portfolio(path)
 
-        assert loaded.bankroll == pytest.approx(settings.capital_base_usd)
+        # 2026-05-04: load_portfolio() no longer seeds bankroll from
+        # settings.capital_base_usd ($150 fiction). Default is 0.0 —
+        # bankroll truth flows from bankroll_provider in live paths.
+        assert loaded.bankroll == pytest.approx(0.0)
         assert len(loaded.positions) == 1
         assert loaded.positions[0].trade_id == "t1"
         assert loaded.positions[0].city == "NYC"

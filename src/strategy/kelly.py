@@ -86,6 +86,96 @@ def strategy_kelly_multiplier(strategy_key: str | None) -> float:
     return STRATEGY_KELLY_MULTIPLIERS.get(str(strategy_key or "").strip(), 0.0)
 
 
+# Per-city Kelly multiplier (asymmetric-loss policy layer, 2026-05-03).
+# Authority: docs/reference/zeus_kelly_asymmetric_loss_handoff.md +
+# RERUN_PLAN_v2.md §5 (D-A migration: Denver/Paris asymmetric loss moved out
+# of DDD floor and into Kelly multiplier).
+#
+# Composition (live evaluator-side): final_kelly =
+#   base_kelly × strategy_kelly_multiplier × city_kelly_multiplier × (1 - DDD_discount)
+#
+# Default 1.0× for cities not listed; explicit override per-city for asymmetric-
+# loss preference. Operator can override via settings.json::sizing::city_kelly_multipliers
+# without touching code.
+DEFAULT_CITY_KELLY_MULTIPLIERS: dict[str, float] = {
+    # Continental cities with strong cold-airmass penetration risk →
+    # 3-hour outage at peak hour can mask large overnight bust.
+    # Operator Ruling A 2026-05-03: asymmetric loss principle.
+    "Denver": 0.7,
+    # Paris is excluded from DDD until workstream A LFPB resync completes;
+    # the multiplier is registered now so the wiring is ready when Paris
+    # re-enters the universe. Same continental cold-snap exposure as Denver.
+    "Paris": 0.7,
+}
+
+_CITY_KELLY_CACHE: dict[str, float] | None = None
+
+
+def _load_city_kelly_overrides() -> dict[str, float]:
+    """Read settings.json::sizing::city_kelly_multipliers (best-effort).
+
+    Operator updates this section to bless or revoke per-city overrides
+    without redeploying code. Absent / malformed → empty dict (defaults
+    apply).
+    """
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+
+        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
+        if not cfg_path.exists():
+            return {}
+        cfg = _json.loads(cfg_path.read_text())
+        sizing = cfg.get("sizing") or {}
+        overrides = sizing.get("city_kelly_multipliers") or {}
+        # Sanitize: only float-like positive values
+        clean: dict[str, float] = {}
+        for city, val in overrides.items():
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                continue
+            if f >= 0.0 and f <= 2.0:  # sane range; refuse > 2× Kelly amplification
+                clean[city] = f
+        return clean
+    except Exception as exc:  # noqa: BLE001 — fail-open to defaults
+        logger.warning(
+            "city_kelly_multiplier override load failed: %s; using DEFAULTS only", exc
+        )
+        return {}
+
+
+def city_kelly_multiplier(city: str | None) -> float:
+    """Return the per-city Kelly multiplier, fail-OPEN to 1.0× for unknown city.
+
+    Asymmetric-loss policy lives here, NOT in the DDD floor (RERUN_PLAN_v2.md
+    §5 D-A migration). Defaults from ``DEFAULT_CITY_KELLY_MULTIPLIERS``;
+    operator can override via ``config/settings.json::sizing::city_kelly_multipliers``.
+
+    Fail-open default (1.0×) is intentional: a missing entry means "no
+    asymmetric-loss adjustment for this city" — which is the correct answer
+    for the 44 of 46 cities without a documented override. Compare with the
+    strategy multiplier which fails-CLOSED to 0.0 for unknown strategies; the
+    semantics differ because strategy_key being unknown indicates a
+    mis-routing bug, whereas a city without an entry is the normal case.
+
+    Args:
+        city: City name (e.g. "Denver", "NYC"). None or empty → 1.0×.
+
+    Returns:
+        Multiplier in [0.0, 2.0] range. Typical values are 0.7–1.0.
+    """
+    global _CITY_KELLY_CACHE
+    if _CITY_KELLY_CACHE is None:
+        merged = dict(DEFAULT_CITY_KELLY_MULTIPLIERS)
+        merged.update(_load_city_kelly_overrides())
+        _CITY_KELLY_CACHE = merged
+    name = str(city or "").strip()
+    if not name:
+        return 1.0
+    return _CITY_KELLY_CACHE.get(name, 1.0)
+
+
 def dynamic_kelly_mult(
     base: float = 0.25,
     ci_width: float = 0.0,
@@ -95,11 +185,19 @@ def dynamic_kelly_mult(
     drawdown_pct: float = 0.0,
     max_drawdown: float = 0.20,
     strategy_key: str | None = None,
+    city: str | None = None,
 ) -> float:
     """Compute dynamic Kelly multiplier. Spec §5.2.
 
     Reduces base multiplier based on uncertainty and risk state.
     All adjustments are multiplicative (cumulative).
+
+    The optional ``city`` parameter applies a per-city asymmetric-loss
+    multiplier (default 1.0× for cities without an override). This is the
+    D-A migration target from RERUN_PLAN_v2.md §5 — Denver/Paris ruling-A
+    asymmetric loss preferences live here, NOT in the DDD floor. Default
+    None preserves legacy behavior for tests and unwired tooling. Live
+    callers should pass the city name from the edge/decision context.
     """
     # C1/INV-13: provenance check — kelly_mult is registered in provenance_registry.yaml
     require_provenance("kelly_mult")
@@ -149,4 +247,10 @@ def dynamic_kelly_mult(
         )
     if strategy_key is not None:
         m *= strategy_kelly_multiplier(strategy_key)
+    # Per-city asymmetric-loss multiplier (D-A migration target). Applied AFTER
+    # strategy gate so a 0.0 strategy mult correctly zeros the result regardless
+    # of city. Default 1.0× when city is None or has no override → no behavior
+    # change for legacy callers.
+    if city is not None:
+        m *= city_kelly_multiplier(city)
     return m

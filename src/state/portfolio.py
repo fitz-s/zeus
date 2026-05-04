@@ -1016,12 +1016,18 @@ class Position:
 
 @dataclass
 class PortfolioState:
+    # bankroll/daily_baseline_total/weekly_baseline_total default to 0.0
+    # ("uninitialized — ask bankroll_provider"). The legacy 150.0 default
+    # was the structural-failure source: any caller that constructed a bare
+    # PortfolioState() inherited the $150 fiction. Live truth must come from
+    # src.runtime.bankroll_provider.current(); when that returns None the
+    # cycle fails-CLOSED rather than falling back to a config literal.
     positions: list[Position] = field(default_factory=list)
-    bankroll: float = 150.0
+    bankroll: float = 0.0
     updated_at: str = ""
     audit_logging_enabled: bool = False
-    daily_baseline_total: float = 150.0
-    weekly_baseline_total: float = 150.0
+    daily_baseline_total: float = 0.0
+    weekly_baseline_total: float = 0.0
     # Layer 5+6: recently closed positions for reentry/cooldown checks
     recent_exits: list[dict] = field(default_factory=list)
     # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
@@ -1124,7 +1130,13 @@ def _load_portfolio_from_json_data(data: dict, *, current_mode: str) -> Portfoli
             ", ".join(skipped_terminal[:10]) + ("..." if len(skipped_terminal) > 10 else ""),
         )
 
-    bankroll = float(settings.capital_base_usd)
+    # Bankroll is uninitialized at this load step; live truth is supplied by
+    # src.runtime.bankroll_provider.current() in cycle_runner / riskguard.
+    # Removed 2026-05-04: previously defaulted to settings.capital_base_usd
+    # ($150 fiction). PortfolioState is now position-and-snapshot data only;
+    # the bankroll field is overridden by upstream callers when on-chain
+    # truth is available, and remains 0.0 (fail-CLOSED in sizing) otherwise.
+    bankroll = 0.0
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
@@ -1277,7 +1289,12 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     path = path or POSITIONS_PATH
 
     current_mode = get_mode()
-    bankroll = float(settings.capital_base_usd)
+    # Bankroll uninitialized at load — live truth is supplied by
+    # src.runtime.bankroll_provider.current() in cycle_runner / riskguard.
+    # Removed 2026-05-04: previously defaulted to settings.capital_base_usd
+    # ($150 fiction). PortfolioState carries 0.0 when canonical metadata is
+    # absent; sizing math fails-CLOSED, riskguard returns DATA_DEGRADED.
+    bankroll = 0.0
 
     from src.state.db import (
         get_connection,

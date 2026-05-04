@@ -579,6 +579,8 @@ def load_platt_model_v2(
     season: str,
     data_version: Optional[str] = None,
     input_space: str = "width_normalized_density",
+    frozen_as_of: Optional[str] = None,
+    model_key: Optional[str] = None,
 ) -> Optional[dict]:
     """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
 
@@ -601,6 +603,17 @@ def load_platt_model_v2(
     data_version lives in MetricIdentity (metric_identity.py:78-90); callers
     pass ``MetricIdentity.data_version`` here.
 
+    2026-05-03 (F1 forward-fix from RERUN_PLAN_v2.md §5): added
+    ``frozen_as_of`` + ``model_key`` parameters. Without one of these, a future
+    mass-refit silently takes over live serving the moment new rows land.
+    ``frozen_as_of`` adds ``AND recorded_at <= ?`` so the loader cannot pick
+    rows recorded after the operator-blessed snapshot. ``model_key`` overrides
+    all match filters (still requires is_active=1, authority='VERIFIED') for
+    explicit per-bucket pin. Both default to None → legacy behavior preserved
+    for tests and unwired tooling. Production callers should thread the
+    config-pinned values from
+    ``src.calibration.manager.get_calibration_pin_config``.
+
     Filters by (temperature_metric, cluster, season[, data_version], input_space) +
     is_active=1 + authority='VERIFIED'. Returns None if no matching row exists —
     caller (get_calibrator) falls back to legacy or on-the-fly fit.
@@ -619,12 +632,41 @@ def load_platt_model_v2(
             tests and tooling that have not yet threaded the metric.
         input_space: defaults to "width_normalized_density" (canonical post-P9
             space); legacy input_space="raw_probability" is legal but stale.
+        frozen_as_of: optional ISO-formatted timestamp (e.g. "2026-05-03 12:00:00").
+            When provided, only rows with ``recorded_at <= frozen_as_of`` are
+            returned. Use to pin live serving to an operator-blessed generation
+            so future mass-refits don't silently take over (F1 forward-fix).
+        model_key: optional explicit model_key pin. When provided, the loader
+            matches that exact row (still gated by is_active=1 and authority=
+            'VERIFIED'); all other discriminator filters are ignored. Use for
+            per-(city, metric, cluster, season) pinning when a specific blessed
+            calibrator must be locked.
 
     Returns:
         Same dict shape as load_platt_model, or None.
     """
     table = _qualified_calibration_read_table(conn, "platt_models_v2")
-    if data_version is not None:
+
+    # Explicit model_key pin — bypasses match filters, still gated by auth/active
+    if model_key is not None:
+        row = conn.execute(
+            f"""
+            SELECT param_A, param_B, param_C, bootstrap_params_json,
+                   n_samples, brier_insample, fitted_at, input_space
+            FROM {table}
+            WHERE model_key = ?
+              AND is_active = 1
+              AND authority = 'VERIFIED'
+            LIMIT 1
+            """,
+            (model_key,),
+        ).fetchone()
+    elif data_version is not None:
+        params: list = [temperature_metric, cluster, season, data_version, input_space]
+        frozen_clause = ""
+        if frozen_as_of is not None:
+            frozen_clause = "AND recorded_at <= ?"
+            params.append(frozen_as_of)
         row = conn.execute(
             f"""
             SELECT param_A, param_B, param_C, bootstrap_params_json,
@@ -637,27 +679,34 @@ def load_platt_model_v2(
               AND input_space = ?
               AND is_active = 1
               AND authority = 'VERIFIED'
+              {frozen_clause}
             ORDER BY fitted_at DESC
             LIMIT 1
             """,
-            (temperature_metric, cluster, season, data_version, input_space),
+            tuple(params),
         ).fetchone()
     else:
+        params = [temperature_metric, cluster, season, input_space]
+        frozen_clause = ""
+        if frozen_as_of is not None:
+            frozen_clause = "AND recorded_at <= ?"
+            params.append(frozen_as_of)
         row = conn.execute(
-                        f"""
+            f"""
             SELECT param_A, param_B, param_C, bootstrap_params_json,
                    n_samples, brier_insample, fitted_at, input_space
-                        FROM {table}
+            FROM {table}
             WHERE temperature_metric = ?
               AND cluster = ?
               AND season = ?
               AND input_space = ?
               AND is_active = 1
               AND authority = 'VERIFIED'
+              {frozen_clause}
             ORDER BY fitted_at DESC
             LIMIT 1
             """,
-            (temperature_metric, cluster, season, input_space),
+            tuple(params),
         ).fetchone()
 
     if row is None:

@@ -85,7 +85,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
     # The KEY thing this test guards is that L225 reads `level3` AT ALL —
     # pre-fix, that read crashed with UnboundLocalError before the
     # comparison could even evaluate.
-    def fake_v2(conn, *, temperature_metric, cluster, season, data_version=None):
+    def fake_v2(conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs):
         if cluster == fallback_cluster:
             return {
                 "n_samples": 0,

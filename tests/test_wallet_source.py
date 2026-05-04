@@ -1,13 +1,15 @@
-"""P7 u2014 Wallet as bankroll source of truth.
+"""P7 — Wallet as bankroll source of truth.
 
-Tests that wallet_balance is the PRIMARY bankroll in live mode, config_cap is
-the upper-bound safety cap, and the daemon fails closed when the wallet query
-fails at startup.
+Tests that wallet_balance is the SOLE bankroll in live mode (no config cap).
+2026-05-04 update (bankroll truth-chain cleanup): the prior `min(balance,
+settings.capital_base_usd)` truncation has been removed; effective bankroll
+now equals the on-chain wallet balance unconditionally. The daemon still
+fails closed when the wallet query fails at startup.
 
 Criteria covered:
-  #1 u2014 startup fails closed when wallet raises
-  #2 u2014 wallet $50, config cap $200 u2192 effective bankroll = $50
-  #3 u2014 wallet $500, config cap $200 u2192 effective bankroll = $200
+  #1 — startup fails closed when wallet raises
+  #2 — wallet balance flows through unchanged (no upper-bound clip)
+  #3 — wallet error returns (None, entry_block_reason)
 """
 
 import logging
@@ -17,6 +19,9 @@ from src.state.portfolio import PortfolioState
 
 
 class _Settings:
+    # capital_base_usd retained as a no-op test fixture attribute purely to
+    # keep this stub class shape close to the historical Settings object.
+    # cycle_runtime no longer reads this field (removed 2026-05-04).
     capital_base_usd = 200.0
 
 
@@ -52,7 +57,7 @@ class _FailLiveClob:
 
 class TestWalletBankrollSource:
     def test_wallet_balance_is_primary_bankroll(self):
-        """Criterion #2: wallet $50, config cap $200 u2192 effective bankroll = $50."""
+        """Criterion #2: wallet $50 → effective bankroll = $50 (unclipped)."""
         clob = _LiveClob(balance=50.0)
         portfolio = PortfolioState(bankroll=150.0)
         bankroll, cap = _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=_FakeDeps)
@@ -61,15 +66,21 @@ class TestWalletBankrollSource:
         assert cap["bankroll_truth_source"] == "wallet_balance"
         assert cap["wallet_balance_used"] is True
 
-    def test_config_caps_wallet(self):
-        """Criterion #3: wallet $500, config cap $200 u2192 effective bankroll = $200."""
+    def test_wallet_balance_flows_through_unclipped(self):
+        """2026-05-04: wallet $500 → effective bankroll = $500 (no config cap).
+
+        Prior behaviour (deleted with the bankroll truth-chain cleanup):
+        ``min(balance, settings.capital_base_usd)`` would have clipped this
+        to $200. Live truth is now the wallet balance unconditionally.
+        """
         clob = _LiveClob(balance=500.0)
         portfolio = PortfolioState(bankroll=150.0)
         bankroll, cap = _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=_FakeDeps)
-        assert bankroll == 200.0
+        assert bankroll == 500.0
         assert cap["wallet_balance_usd"] == 500.0
-        assert cap["dynamic_cap_usd"] == 200.0
+        assert cap["dynamic_cap_usd"] == 500.0
         assert cap["bankroll_truth_source"] == "wallet_balance"
+        assert cap["entry_bankroll_contract"] == "live_wallet_only"
 
     def test_wallet_error_blocks_entries(self):
         """Wallet query exception u2192 returns (None, ...) with entry_block_reason=wallet_query_failed."""

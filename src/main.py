@@ -657,8 +657,17 @@ def main():
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
-    logger.info("Capital: $%.2f | Kelly: %.0f%%",
-                settings.capital_base_usd,
+    # Capital truth: query on-chain wallet via bankroll_provider. Removed
+    # 2026-05-04: previously logged settings.capital_base_usd ($150 fiction)
+    # at startup, which masked the real wallet balance during boot diagnostics.
+    try:
+        from src.runtime.bankroll_provider import current as _bankroll_current
+        _record = _bankroll_current()
+        _capital_str = f"${_record.value_usd:.2f}" if _record else "<wallet_unreachable>"
+    except Exception as _exc:
+        _capital_str = f"<wallet_query_error: {_exc}>"
+    logger.info("Capital (on-chain): %s | Kelly: %.0f%%",
+                _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
     conn = get_world_connection()

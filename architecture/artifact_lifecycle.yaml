@@ -211,3 +211,9 @@ liminal_artifacts:
     authority_behavior: "Dated TIGGE data/training handoff; evidence only and not a durable runbook or authority surface."
     canonical_owner: architecture/docs_registry.yaml
     guardrail: "Use docs/runbooks/tigge_cloud_download.md for reusable operator guidance and docs/authority/** for binding data/runtime law."
+  - path: docs/artifacts/Zeus_May2_review_ strategy_update.md
+    artifact_role: operations_evidence
+    route_class: operations_evidence
+    authority_behavior: "May 2 strategy update review artifact; evidence only, not executable law."
+    canonical_owner: docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
+    guardrail: "Translate review claims into tests, gates, and operations docs before treating them as implementation authority."

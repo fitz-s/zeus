@@ -184,6 +184,13 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 is_bimodal INTEGER,
                 model_version TEXT NOT NULL,
                 data_version TEXT NOT NULL,
+                source_id TEXT,
+                source_transport TEXT,
+                source_run_id TEXT,
+                release_calendar_key TEXT,
+                source_cycle_time TEXT,
+                source_release_time TEXT,
+                source_available_at TEXT,
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),
                 causality_status TEXT NOT NULL DEFAULT 'OK'
@@ -221,12 +228,36 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
             # contract_version + boundary_min_value columns dropped in P7B (no live
             # consumer; P8 will re-add if needed when shadow-activation consumers land).
             "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
+            # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_id TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_transport TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_run_id TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN release_calendar_key TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
+            "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
         ]:
             try:
                 conn.execute(alter_sql)
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
+                ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
+                ON ensemble_snapshots_v2(
+                    city,
+                    target_date,
+                    temperature_metric,
+                    source_id,
+                    source_transport,
+                    data_version,
+                    source_run_id
+                )
+        """)
 
         # ----------------------------------------------------------------
         # calibration_pairs_v2

@@ -1181,13 +1181,16 @@ def test_inv_status_fallback_bankroll_uses_initial_bankroll(monkeypatch, tmp_pat
 
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
-    expected_initial = float(status_summary_module.settings.capital_base_usd)
+    # 2026-05-04: status_summary now derives initial_bankroll from
+    # bankroll_provider.current() (the conftest.py fixture returns $150),
+    # not from the (removed) settings.capital_base_usd config literal.
+    expected_initial = 150.0
     expected_total = 1.25 + 1.5
 
     assert status["portfolio"]["initial_bankroll"] == pytest.approx(expected_initial)
     assert status["portfolio"]["total_pnl"] == pytest.approx(expected_total)
     assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial + expected_total)
-    assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "settings.capital_base_usd"
+    assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):

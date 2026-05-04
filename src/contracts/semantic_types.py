@@ -67,7 +67,14 @@ class RejectionStage(str, Enum):
     EXECUTION_PRICE_UNAVAILABLE = "EXECUTION_PRICE_UNAVAILABLE"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     MARKET_LIQUIDITY = "MARKET_LIQUIDITY"
-    
+    # DDD v2 live-wiring rejection stages (RERUN_PLAN_v2.md §5 D-E, 2026-05-03):
+    DDD_HALT = "DDD_HALT"
+    DDD_CITY_UNCONFIGURED = "DDD_CITY_UNCONFIGURED"
+    DDD_NO_TRAIN_DATA = "DDD_NO_TRAIN_DATA"
+    DDD_EXCLUDED_WORKSTREAM_A = "DDD_EXCLUDED_WORKSTREAM_A"
+    DDD_UNKNOWN_STATUS = "DDD_UNKNOWN_STATUS"
+    DDD_CONFIG_MISSING = "DDD_CONFIG_MISSING"
+
 class EntryMethod(str, Enum):
     """Known probability refresh methods carried by Position across modules."""
 

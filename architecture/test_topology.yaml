@@ -41,13 +41,22 @@ test_trust_policy:
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_replay_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_etl_skill_eligibility_filter.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_calibration_manager_low_fallback_regression.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_pairs_v2_metric_linter.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_store_metric_required.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_calibration_transfer_policy.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_calibration_v2_fallback_alerting.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_calibration_retrain.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_readiness_writer.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_rollout.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -94,10 +103,10 @@ test_trust_policy:
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_kelly_live_safety_cap.py: {created: "2026-04-11", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
     tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-04-29"}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
-    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-04-29"}
+    tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-05-02"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -141,7 +150,7 @@ test_trust_policy:
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-04-29"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-04-28"}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-04-29"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-04-30"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-04-29"}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
@@ -151,7 +160,7 @@ test_trust_policy:
     tests/test_sigma_floor_evaluation.py: {created: "2026-04-07", last_used: "2026-04-28"}
     tests/test_edge_observation.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_edge_observation_weekly.py: {created: "2026-04-28", last_used: "2026-04-28"}
-    tests/test_attribution_drift.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_attribution_drift.py: {created: "2026-04-28", last_used: "2026-05-02"}
     tests/test_attribution_drift_weekly.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ws_poll_reaction.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ws_poll_reaction_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
@@ -184,10 +193,19 @@ test_trust_policy:
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_opendata_writes_v2_table.py: {created: "2026-05-02", last_used: "2026-05-03"}
+    tests/test_opendata_future_target_contract.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_producer_readiness_builder.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_readiness_state.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_release_calendar.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_job_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_source_run_coverage_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_source_run_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_readiness_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_market_topology_state_schema.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -210,10 +228,12 @@ categories:
     - tests/test_backtest_training_eligibility.py
     - tests/test_dissemination_schedules.py
     - tests/test_forecasts_writer_provenance_required.py
+    - tests/test_forecast_fetch_plan.py
     - tests/test_replay_skill_eligibility_filter.py
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_platt_bootstrap_equivalence.py
+    - tests/test_ensemble_snapshots_v2_executable_schema.py
     - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
@@ -252,10 +272,18 @@ categories:
     - tests/test_strategy_benchmark.py
     - tests/test_risk_allocator.py
     - tests/test_live_readiness_gates.py
+    - tests/test_entry_forecast_config.py
+    - tests/test_entry_forecast_promotion_evidence_io.py
+    - tests/test_entry_readiness_writer.py
+    - tests/test_entry_forecast_chain_relationship.py
     - tests/test_ingest_boot_time_semantics.py
+    - tests/test_opendata_release_calendar_selection.py
+    - tests/test_opendata_writes_v2_table.py
+    - tests/test_opendata_future_target_contract.py
     - tests/test_readiness_state.py
     - tests/test_release_calendar.py
     - tests/test_job_run_schema.py
+    - tests/test_source_run_coverage_schema.py
     - tests/test_source_run_schema.py
     - tests/test_readiness_state_schema.py
     - tests/test_market_topology_state_schema.py
@@ -330,6 +358,7 @@ categories:
     - tests/test_harvester_high_calibration_v2_route.py
     - tests/test_harvester_metric_identity.py
     - tests/test_ingest_grib_law5_antibody.py
+    - tests/test_ingest_grib_source_run_context.py
     - tests/test_settlements_unique_migration.py
     - tests/test_canonical_position_current_schema_alignment.py
     - tests/test_decision_evidence_entry_emission.py
@@ -352,7 +381,9 @@ categories:
     - tests/test_calibration_manager_low_fallback_regression.py
     - tests/test_calibration_pairs_v2_metric_linter.py
     - tests/test_calibration_store_metric_required.py
+    - tests/test_calibration_transfer_policy.py
     - tests/test_calibration_v2_fallback_alerting.py
+    - tests/test_entry_forecast_shadow.py
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
@@ -589,18 +620,51 @@ law_gate:
       - scripts/live_readiness_check.py
       - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/G1.yaml
       - docs/operations/task_2026-04-26_ultimate_plan/r3/frozen_interfaces/G1.md
+  ENTRY_FORECAST_CONFIG:
+    tests:
+      - tests/test_entry_forecast_config.py
+    protects:
+      - docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md
+      - config/settings.json
+      - src/config.py
   DATA_DAEMON_READINESS_CONTRACT:
     tests:
+      - tests/test_calibration_transfer_policy.py
+      - tests/test_entry_forecast_evaluator_cutover.py
+      - tests/test_entry_forecast_promotion_evidence_io.py
+      - tests/test_entry_readiness_writer.py
+      - tests/test_entry_forecast_chain_relationship.py
+      - tests/test_entry_forecast_rollout.py
+      - tests/test_entry_forecast_shadow.py
+      - tests/test_executable_forecast_reader.py
+      - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
+      - tests/test_ingest_grib_source_run_context.py
+      - tests/test_live_entry_status.py
+      - tests/test_opendata_release_calendar_selection.py
+      - tests/test_opendata_writes_v2_table.py
+      - tests/test_opendata_future_target_contract.py
+      - tests/test_producer_readiness_builder.py
       - tests/test_readiness_state.py
       - tests/test_release_calendar.py
       - tests/test_job_run_schema.py
+      - tests/test_source_run_coverage_schema.py
       - tests/test_source_run_schema.py
       - tests/test_readiness_state_schema.py
       - tests/test_market_topology_state_schema.py
     protects:
       - docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md
       - config/source_release_calendar.yaml
+      - src/control/entry_forecast_rollout.py
+      - src/engine/evaluator.py
+      - src/data/calibration_transfer_policy.py
+      - src/data/entry_forecast_shadow.py
+      - src/data/executable_forecast_reader.py
+      - src/data/live_entry_status.py
+      - scripts/ingest_grib_to_snapshots.py
+      - scripts/healthcheck.py
+      - src/data/ecmwf_open_data.py
+      - src/data/producer_readiness.py
       - src/data/release_calendar.py
       - src/state/db.py
       - src/state/job_run_repo.py

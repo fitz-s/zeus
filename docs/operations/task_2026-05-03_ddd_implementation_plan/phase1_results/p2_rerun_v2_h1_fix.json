@@ -1,0 +1,1950 @@
+{
+  "_metadata": {
+    "purpose": "H1 denominator fix rerun: zero-coverage days included via calendar enumeration",
+    "produced_at": "2026-05-03",
+    "fix": "H1 — every calendar date contributes; zero-row days = coverage 0.0, not skipped",
+    "scope": "HIGH metric only (LOW is a separate fix)",
+    "train_window": "2025-07-01 → 2025-12-31",
+    "test_window": "2026-01-01 → 2026-04-30",
+    "n_calendar_train": 184,
+    "n_calendar_test": 120
+  },
+  "per_city": {
+    "Amsterdam": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Ankara": {
+      "peak_hour": 15.2,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Atlanta": {
+      "peak_hour": 17.6,
+      "window_hours": [
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.8571428571428571,
+        "mean": 0.9845238095238095,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Auckland": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 183,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 1.0,
+        "mean": 0.9945652173913043,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.07372097807744857
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.07372097807744857,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.074, best_floor=0.95, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.0
+    },
+    "Austin": {
+      "peak_hour": 17.7,
+      "window_hours": [
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9976708074534162,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.01814125877793897
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7071428571428572,
+        "mean": 0.9380952380952381,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.01814125877793897,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.018, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.01814125877793897
+    },
+    "Beijing": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Buenos Aires": {
+      "peak_hour": 15.5,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9984472049689441,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.014853137293932995
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9976190476190476,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.014853137293932995,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.015, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.014853137293932995
+    },
+    "Busan": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9968944099378882,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.020889774496554075
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9976190476190476,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.020889774496554075,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.021, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.020889774496554075
+    },
+    "Cape Town": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 0.8571428571428571,
+        "mean": 0.9906832298136646,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.038392756010756306
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 0.8571428571428571,
+        "mean": 0.9916666666666667,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.038392756010756306,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.038, best_floor=0.85, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.038392756010756306
+    },
+    "Chengdu": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9992236024844721,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.01053156829677837
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 0.8571428571428571,
+        "mean": 0.9892857142857143,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.01053156829677837,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.011, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.01053156829677837
+    },
+    "Chicago": {
+      "peak_hour": 16.4,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 1.0,
+        "mean": 0.9880952380952381,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Chongqing": {
+      "peak_hour": 15.2,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9992236024844721,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.01053156829677837
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.5714285714285714,
+        "p05": 1.0,
+        "mean": 0.9928571428571429,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.01053156829677837,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.011, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.01053156829677837
+    },
+    "Dallas": {
+      "peak_hour": 17.7,
+      "window_hours": [
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7142857142857143,
+        "mean": 0.9571428571428572,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Denver": {
+      "peak_hour": 16.1,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 180,
+        "n_zero_days": 4,
+        "min": 0.0,
+        "p05": 0.8785714285714286,
+        "mean": 0.968167701863354,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.15800421456575153
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.5642857142857143,
+        "mean": 0.9119047619047619,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.35,
+      "new_sigma": 0.15800421456575153,
+      "floor_delta": -0.5,
+      "rationale": "σ-aware: σ_train=0.158, best_floor=0.35, capped=0.35, actual_σ_fp=2.17%",
+      "orig_sigma": 0.06412021892764444
+    },
+    "Guangzhou": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Helsinki": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Hong Kong": {
+      "status": "NO_TRAIN_DATA",
+      "peak_hour": 14.5
+    },
+    "Houston": {
+      "peak_hour": 17.4,
+      "window_hours": [
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9984472049689441,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.014853137293932995
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7142857142857143,
+        "mean": 0.9511904761904761,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.014853137293932995,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.015, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.014853137293932995
+    },
+    "Istanbul": {
+      "status": "NO_TRAIN_DATA",
+      "peak_hour": 15.0
+    },
+    "Jakarta": {
+      "peak_hour": 13.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.14285714285714285,
+        "p05": 0.7142857142857143,
+        "mean": 0.9340062111801242,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.12660641493936997
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.2857142857142857,
+        "p05": 1.0,
+        "mean": 0.9940476190476191,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.35,
+      "new_floor": 0.35,
+      "new_sigma": 0.12660641493936997,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.127, best_floor=0.35, capped=0.35, actual_σ_fp=1.09%",
+      "orig_sigma": 0.12660641493936997
+    },
+    "Jeddah": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 0.9928571428571429,
+        "mean": 0.9904761904761905,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Karachi": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9988095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Kuala Lumpur": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9976190476190476,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Lagos": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 183,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.42857142857142855,
+        "mean": 0.8680124223602484,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.18859377679907618
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 97,
+        "n_zero_days": 23,
+        "min": 0.0,
+        "p05": 0.0,
+        "mean": 0.6392857142857142,
+        "median": 0.8571428571428571,
+        "p95": 1.0
+      },
+      "orig_floor": 0.45,
+      "new_floor": 0.45,
+      "new_sigma": 0.18859377679907618,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.189, best_floor=0.45, capped=0.45, actual_σ_fp=0.54%",
+      "orig_sigma": 0.17776559390044616
+    },
+    "London": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 1.0,
+        "mean": 0.9984472049689441,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.02106313659355673
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9988095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.02106313659355673,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.021, best_floor=0.95, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.02106313659355673
+    },
+    "Los Angeles": {
+      "peak_hour": 18.1,
+      "window_hours": [
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 1.0,
+        "mean": 0.9976708074534162,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.023497772356854452
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7142857142857143,
+        "mean": 0.944047619047619,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.023497772356854452,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.023, best_floor=0.85, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.023497772356854452
+    },
+    "Lucknow": {
+      "peak_hour": 14.8,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 183,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 1.0,
+        "mean": 0.9790372670807453,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.11127876971808229
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.9928571428571429,
+        "mean": 0.9833333333333333,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.5,
+      "new_floor": 0.35,
+      "new_sigma": 0.11127876971808229,
+      "floor_delta": -0.15000000000000002,
+      "rationale": "σ-aware: σ_train=0.111, best_floor=0.35, capped=0.35, actual_σ_fp=0.54%",
+      "orig_sigma": 0.08459115534433011
+    },
+    "Madrid": {
+      "peak_hour": 16.0,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Manila": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9968944099378882,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.020889774496554075
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 0.9928571428571429,
+        "mean": 0.9928571428571429,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.020889774496554075,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.021, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.020889774496554075
+    },
+    "Mexico City": {
+      "peak_hour": 15.5,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9961180124223602,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.023290511219778386
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 0.8571428571428571,
+        "mean": 0.9880952380952381,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.023290511219778386,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.023, best_floor=0.85, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.023290511219778386
+    },
+    "Miami": {
+      "peak_hour": 17.3,
+      "window_hours": [
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7142857142857143,
+        "mean": 0.9535714285714285,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Milan": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Moscow": {
+      "status": "NO_TRAIN_DATA",
+      "peak_hour": 15.0
+    },
+    "Munich": {
+      "peak_hour": 14.8,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "NYC": {
+      "peak_hour": 15.8,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.8571428571428571,
+        "mean": 0.9797619047619047,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Panama City": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 0.8571428571428571,
+        "mean": 0.9891304347826086,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.04081087138258745
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 114,
+        "n_zero_days": 6,
+        "min": 0.0,
+        "p05": 0.4071428571428572,
+        "mean": 0.9380952380952381,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.04081087138258745,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.041, best_floor=0.85, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.04081087138258745
+    },
+    "Paris": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.42857142857142855,
+        "p05": 1.0,
+        "mean": 0.9930124223602484,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.05643569319251544
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9988095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.6,
+      "new_sigma": 0.05643569319251544,
+      "floor_delta": -0.25,
+      "rationale": "σ-aware: σ_train=0.056, best_floor=0.60, capped=0.60, actual_σ_fp=0.54%",
+      "orig_sigma": 0.05643569319251544
+    },
+    "San Francisco": {
+      "peak_hour": 16.7,
+      "window_hours": [
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9992236024844721,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.01053156829677837
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.8571428571428571,
+        "mean": 0.9738095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.01053156829677837,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.011, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.01053156829677837
+    },
+    "Sao Paulo": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.7142857142857143,
+        "p05": 0.9928571428571429,
+        "mean": 0.9904761904761905,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Seattle": {
+      "peak_hour": 13.8,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.7142857142857143,
+        "mean": 0.9523809523809523,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Seoul": {
+      "peak_hour": 14.8,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9988095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Shanghai": {
+      "peak_hour": 14.6,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Shenzhen": {
+      "peak_hour": 14.3,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.42857142857142855,
+        "p05": 0.7142857142857143,
+        "mean": 0.9262422360248447,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.12222204223260108
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.2857142857142857,
+        "p05": 1.0,
+        "mean": 0.9928571428571429,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.55,
+      "new_floor": 0.55,
+      "new_sigma": 0.12222204223260108,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.122, best_floor=0.55, capped=0.55, actual_σ_fp=0.00%",
+      "orig_sigma": 0.12222204223260108
+    },
+    "Singapore": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Taipei": {
+      "peak_hour": 14.5,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9988095238095238,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Tel Aviv": {
+      "status": "NO_TRAIN_DATA",
+      "peak_hour": 14.5
+    },
+    "Tokyo": {
+      "peak_hour": 14.7,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Toronto": {
+      "peak_hour": 15.5,
+      "window_hours": [
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 119,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 0.9928571428571429,
+        "mean": 0.9857142857142858,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Warsaw": {
+      "peak_hour": 14.8,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.0
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.0,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.000, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.0
+    },
+    "Wellington": {
+      "peak_hour": 14.0,
+      "window_hours": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 183,
+        "n_zero_days": 1,
+        "min": 0.0,
+        "p05": 1.0,
+        "mean": 0.9945652173913043,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.07372097807744857
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 1.0,
+        "p05": 1.0,
+        "mean": 1.0,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.07372097807744857,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.074, best_floor=0.95, capped=0.85, actual_σ_fp=0.54%",
+      "orig_sigma": 0.0
+    },
+    "Wuhan": {
+      "peak_hour": 15.0,
+      "window_hours": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "train": {
+        "n_calendar_days": 184,
+        "n_observed_days": 184,
+        "n_zero_days": 0,
+        "min": 0.8571428571428571,
+        "p05": 1.0,
+        "mean": 0.9992236024844721,
+        "median": 1.0,
+        "p95": 1.0,
+        "sigma": 0.01053156829677837
+      },
+      "test": {
+        "n_calendar_days": 120,
+        "n_observed_days": 120,
+        "n_zero_days": 0,
+        "min": 0.5714285714285714,
+        "p05": 1.0,
+        "mean": 0.9928571428571429,
+        "median": 1.0,
+        "p95": 1.0
+      },
+      "orig_floor": 0.85,
+      "new_floor": 0.85,
+      "new_sigma": 0.01053156829677837,
+      "floor_delta": 0.0,
+      "rationale": "σ-aware: σ_train=0.011, best_floor=0.95, capped=0.85, actual_σ_fp=0.00%",
+      "orig_sigma": 0.01053156829677837
+    }
+  },
+  "p24_curve_breakpoints_high_only": {
+    "cities_processed": 47,
+    "bin_edges": [
+      0.0,
+      0.001,
+      0.05,
+      0.1,
+      0.2,
+      0.3,
+      0.5,
+      2.0
+    ],
+    "bin_labels": [
+      "exact 0",
+      "(0, 0.05)",
+      "[0.05, 0.10)",
+      "[0.10, 0.20)",
+      "[0.20, 0.30)",
+      "[0.30, 0.50)",
+      "[0.50, inf)"
+    ],
+    "global_summary": [
+      {
+        "bin_idx": 0,
+        "label": "exact 0",
+        "shortfall_lo": 0.0,
+        "shortfall_hi": 0.001,
+        "n_samples": 5001,
+        "error_mean": 0.7653913756362518,
+        "error_std": 0.23351618376875857
+      },
+      {
+        "bin_idx": 1,
+        "label": "(0, 0.05)",
+        "shortfall_lo": 0.001,
+        "shortfall_hi": 0.05,
+        "n_samples": 28,
+        "error_mean": 0.7074578629535344,
+        "error_std": 0.2652401176982024
+      },
+      {
+        "bin_idx": 2,
+        "label": "[0.05, 0.10)",
+        "shortfall_lo": 0.05,
+        "shortfall_hi": 0.1,
+        "n_samples": 14,
+        "error_mean": 0.8640727726618883,
+        "error_std": 0.18423731935697385
+      },
+      {
+        "bin_idx": 3,
+        "label": "[0.10, 0.20)",
+        "shortfall_lo": 0.1,
+        "shortfall_hi": 0.2,
+        "n_samples": 17,
+        "error_mean": 0.737956051116765,
+        "error_std": 0.24832881313944055
+      },
+      {
+        "bin_idx": 4,
+        "label": "[0.20, 0.30)",
+        "shortfall_lo": 0.2,
+        "shortfall_hi": 0.3,
+        "n_samples": 11,
+        "error_mean": 0.8020234634077802,
+        "error_std": 0.244399649557436
+      },
+      {
+        "bin_idx": 5,
+        "label": "[0.30, 0.50)",
+        "shortfall_lo": 0.3,
+        "shortfall_hi": 0.5,
+        "n_samples": 3,
+        "error_mean": 0.7179001805626042,
+        "error_std": 0.31196949628532605
+      },
+      {
+        "bin_idx": 6,
+        "label": "[0.50, inf)",
+        "shortfall_lo": 0.5,
+        "shortfall_hi": 2.0,
+        "n_samples": 7,
+        "error_mean": 0.9152025395584117,
+        "error_std": 0.1600571951647281
+      }
+    ]
+  }
+}

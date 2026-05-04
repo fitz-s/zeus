@@ -772,7 +772,18 @@ def write_status(cycle_summary: dict = None) -> None:
     if initial_bankroll is None:
         initial_bankroll = (cycle_summary or {}).get("wallet_balance_usd")
     if initial_bankroll is None:
-        initial_bankroll = round(float(settings.capital_base_usd), 2)
+        # Removed 2026-05-04: previously fell back to settings.capital_base_usd
+        # ($150 fiction). Now query the on-chain wallet via bankroll_provider;
+        # if the provider has no usable value (None / wallet unreachable + no
+        # cache), leave initial_bankroll as None so downstream renders it as
+        # null + flags DATA_DEGRADED rather than smuggling a config literal.
+        try:
+            from src.runtime.bankroll_provider import current as _bankroll_current
+            _record = _bankroll_current()
+        except Exception:
+            _record = None
+        if _record is not None:
+            initial_bankroll = round(float(_record.value_usd), 2)
     if effective_bankroll is None:
         effective_bankroll = round(float(initial_bankroll or 0.0) + float(total_pnl or 0.0), 2)
     status["portfolio"]["realized_pnl"] = round(float(realized_pnl or 0.0), 2)
@@ -918,7 +929,11 @@ def write_status(cycle_summary: dict = None) -> None:
     if current_regime_started_at:
         compatibility_inputs["strategy_tracker_current_regime_started_at"] = current_regime_started_at
     if risk_details.get("initial_bankroll") is None:
-        compatibility_inputs["bankroll_fallback_source"] = "settings.capital_base_usd"
+        # Removed 2026-05-04: previously labelled fallback source as
+        # settings.capital_base_usd. Live truth now flows from
+        # bankroll_provider.current(); when it returns None the field stays
+        # null and DATA_DEGRADED surfaces upstream — no config-literal smuggle.
+        compatibility_inputs["bankroll_fallback_source"] = "bankroll_provider"
     if compatibility_inputs:
         status["truth"]["compatibility_inputs"] = compatibility_inputs
 

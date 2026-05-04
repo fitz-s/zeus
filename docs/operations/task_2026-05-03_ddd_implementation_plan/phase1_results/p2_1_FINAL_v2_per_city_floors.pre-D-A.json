@@ -1,0 +1,536 @@
+{
+  "_metadata": {
+    "created": "2026-05-03",
+    "authority": "RERUN_PLAN_v2.md C1",
+    "algorithm": "final_floor = max(p05_train, 0.35); policy overrides on top",
+    "trigger": "fire if cov < floor  [NO sigma-band]",
+    "paris_note": "Paris pending workstream A resync; rerun for Paris after A completes."
+  },
+  "policy_overrides": {
+    "Denver": 0.85,
+    "Lagos": 0.45
+  },
+  "per_city": {
+    "Amsterdam": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Ankara": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Atlanta": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Auckland": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 1,
+      "sigma_diagnostic": 0.073721
+    },
+    "Austin": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0163,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.018141
+    },
+    "Beijing": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Buenos Aires": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0109,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.014853
+    },
+    "Busan": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0217,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.02089
+    },
+    "Cape Town": {
+      "p05": 0.857143,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 0.8571,
+      "policy_override": null,
+      "final_floor": 0.8571,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.038393
+    },
+    "Chengdu": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.010532
+    },
+    "Chicago": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Chongqing": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.010532
+    },
+    "Dallas": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Denver": {
+      "p05": 0.878571,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 0.8786,
+      "policy_override": 0.85,
+      "final_floor": 0.85,
+      "train_FP_rate": 0.038,
+      "n_zero_train": 4,
+      "sigma_diagnostic": 0.158004
+    },
+    "Guangzhou": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Helsinki": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Hong Kong": {
+      "status": "NO_TRAIN_DATA"
+    },
+    "Houston": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0109,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.014853
+    },
+    "Istanbul": {
+      "status": "NO_TRAIN_DATA"
+    },
+    "Jakarta": {
+      "p05": 0.714286,
+      "p10": 0.757143,
+      "p25": 0.857143,
+      "recommended_floor_empirical": 0.7143,
+      "policy_override": null,
+      "final_floor": 0.7143,
+      "train_FP_rate": 0.1033,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.126606
+    },
+    "Jeddah": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Karachi": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Kuala Lumpur": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Lagos": {
+      "p05": 0.428571,
+      "p10": 0.571429,
+      "p25": 0.857143,
+      "recommended_floor_empirical": 0.4286,
+      "policy_override": 0.45,
+      "final_floor": 0.45,
+      "train_FP_rate": 0.0598,
+      "n_zero_train": 1,
+      "sigma_diagnostic": 0.188594
+    },
+    "London": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.021063
+    },
+    "Los Angeles": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0109,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.023498
+    },
+    "Lucknow": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0489,
+      "n_zero_train": 1,
+      "sigma_diagnostic": 0.111279
+    },
+    "Madrid": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Manila": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0217,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.02089
+    },
+    "Mexico City": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0272,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.023291
+    },
+    "Miami": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Milan": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Moscow": {
+      "status": "NO_TRAIN_DATA"
+    },
+    "Munich": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "NYC": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Panama City": {
+      "p05": 0.857143,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 0.8571,
+      "policy_override": null,
+      "final_floor": 0.8571,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.040811
+    },
+    "Paris": {
+      "status": "EXCLUDED_WORKSTREAM_A"
+    },
+    "San Francisco": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.010532
+    },
+    "Sao Paulo": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Seattle": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Seoul": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Shanghai": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Shenzhen": {
+      "p05": 0.714286,
+      "p10": 0.714286,
+      "p25": 0.857143,
+      "recommended_floor_empirical": 0.7143,
+      "policy_override": null,
+      "final_floor": 0.7143,
+      "train_FP_rate": 0.1087,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.122222
+    },
+    "Singapore": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Taipei": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Tel Aviv": {
+      "status": "NO_TRAIN_DATA"
+    },
+    "Tokyo": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Toronto": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Warsaw": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.0
+    },
+    "Wellington": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 1,
+      "sigma_diagnostic": 0.073721
+    },
+    "Wuhan": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": 0.0054,
+      "n_zero_train": 0,
+      "sigma_diagnostic": 0.010532
+    }
+  }
+}

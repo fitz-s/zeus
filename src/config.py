@@ -11,6 +11,7 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 import json
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Optional
 
@@ -115,9 +116,11 @@ class Settings:
         path = path or (CONFIG_DIR / "settings.json")
         self._data = _load_json(path)
         required = [
-            "capital_base_usd",
+            # capital_base_usd removed 2026-05-04 — bankroll truth flows from
+            # src.runtime.bankroll_provider.current(); no config-literal default.
             "discovery",
             "ensemble",
+            "entry_forecast",
             "calibration",
             "day0",
             "edge",
@@ -140,9 +143,8 @@ class Settings:
     def mode(self) -> str:
         return get_mode()
 
-    @property
-    def capital_base_usd(self) -> float:
-        return float(self._data["capital_base_usd"])
+    # capital_base_usd property removed 2026-05-04 — see _bankroll_doctrine_2026_05_04
+    # in config/settings.json. Live bankroll: src.runtime.bankroll_provider.current().
 
     @property
     def bias_correction_enabled(self) -> bool:
@@ -153,6 +155,89 @@ class Settings:
     def feature_flags(self) -> dict:
         """Feature flags dict. Strict — missing key = startup KeyError (B001)."""
         return dict(self._data["feature_flags"])
+
+
+class EntryForecastRolloutMode(StrEnum):
+    BLOCKED = "blocked"
+    SHADOW = "shadow"
+    CANARY = "canary"
+    LIVE = "live"
+
+
+class EntryForecastSourceTransport(StrEnum):
+    ENSEMBLE_SNAPSHOTS_V2_DB_READER = "ensemble_snapshots_v2_db_reader"
+
+
+class EntryForecastCalibrationPolicyId(StrEnum):
+    ECMWF_OPEN_DATA_USES_TIGGE_LOCALDAY_CAL_V1 = "ecmwf_open_data_uses_tigge_localday_cal_v1"
+
+
+@dataclass(frozen=True)
+class EntryForecastConfig:
+    source_id: str
+    source_transport: EntryForecastSourceTransport
+    authority_family: str
+    high_track: str
+    low_track: str
+    target_horizon_days: int
+    warm_horizon_days: int
+    source_cycle_policy: str
+    allow_short_horizon_06_18: bool
+    rollout_mode: EntryForecastRolloutMode
+    calibration_policy_id: EntryForecastCalibrationPolicyId
+    require_active_market_future_coverage: bool
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "source_id",
+            "authority_family",
+            "high_track",
+            "low_track",
+            "source_cycle_policy",
+        ):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"entry_forecast.{field_name} must not be empty")
+        if self.target_horizon_days < 1 or self.target_horizon_days > 10:
+            raise ValueError("entry_forecast.target_horizon_days must be in [1, 10]")
+        if self.warm_horizon_days < 1 or self.warm_horizon_days > 10:
+            raise ValueError("entry_forecast.warm_horizon_days must be in [1, 10]")
+        if self.warm_horizon_days < self.target_horizon_days:
+            raise ValueError("entry_forecast.warm_horizon_days must cover target_horizon_days")
+
+
+def _entry_forecast_bool(data: dict, key: str) -> bool:
+    value = data[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"settings['entry_forecast']['{key}'] must be a bool")
+    return value
+
+
+def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig:
+    """Strict live-entry forecast source config.
+
+    Missing or invalid config fails closed before forecast entry can size or
+    submit. ``rollout_mode='blocked'`` is the safe default in settings.json.
+    """
+
+    cfg = config or settings
+    data = cfg["entry_forecast"]
+    return EntryForecastConfig(
+        source_id=str(data["source_id"]).strip(),
+        source_transport=EntryForecastSourceTransport(data["source_transport"]),
+        authority_family=str(data["authority_family"]).strip(),
+        high_track=str(data["high_track"]).strip(),
+        low_track=str(data["low_track"]).strip(),
+        target_horizon_days=int(data["target_horizon_days"]),
+        warm_horizon_days=int(data["warm_horizon_days"]),
+        source_cycle_policy=str(data["source_cycle_policy"]).strip(),
+        allow_short_horizon_06_18=_entry_forecast_bool(data, "allow_short_horizon_06_18"),
+        rollout_mode=EntryForecastRolloutMode(data["rollout_mode"]),
+        calibration_policy_id=EntryForecastCalibrationPolicyId(data["calibration_policy_id"]),
+        require_active_market_future_coverage=_entry_forecast_bool(
+            data,
+            "require_active_market_future_coverage",
+        ),
+    )
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:

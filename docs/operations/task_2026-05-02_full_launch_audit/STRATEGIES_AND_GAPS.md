@@ -7,6 +7,55 @@
 
 ---
 
+## 0. Evidence lock / catalog truth (Stage 0, 2026-05-02)
+
+**Status**: evidence lock added after `Zeus_May2_review_ strategy_update.md` and critic plan review. This section is not authority; it records current repo truth that later implementation packets must reconcile before changing live strategy behavior.
+
+### 0.1 Repo reconciliation snapshot
+
+| Surface | Current observation | Stage 0 consequence |
+|---|---|---|
+| Branch / initial Stage 0 HEAD | `healthcheck-riskguard-live-label-2026-05-02` at `95dc0257` (`Fix live riskguard label in healthcheck`) | Historical Stage 0 starting point. The review artifact's `pr37-followup-2026-05-02` branch claim is historical evidence, not current branch truth. |
+| Branch / Stage 1 full-PR review head | Pushed through `97bd37e9` (`Require promotion evidence for live buy-no`) before full-PR review fixes | Later implementation commits are authoritative via git history; this evidence-lock section is not a live HEAD pointer. |
+| Dirty / untracked evidence | `REMAINING_TASKS.md` is modified; May 2 review artifacts and the strategy execution plan packet are untracked local evidence | Do not treat uncommitted packet docs as accepted authority. |
+| Active router status | `task_2026-05-02_full_launch_audit/` and `task_2026-05-02_strategy_update_execution_plan/` are now registered in `docs/operations/AGENTS.md` | Future agents can route these packet surfaces without topology hidden-doc failures. |
+| Current data fact drift | `current_data_state.md` still describes harvester live writes as dormant, while `REMAINING_TASKS.md` records `ZEUS_HARVESTER_LIVE_ENABLED=1` propagated | Any settlement/learning/harvester claim requires fresh current-data reconciliation before implementation. |
+| Source-contract caution | Paris remains a current source-contract quarantine/caution path in `current_source_validity.md` | Any live strategy gate must block affected Paris city/date/metric candidates until release evidence is complete. |
+| Bankroll truth | `config/settings.json` still carries `capital_base_usd: 150`; `$5` live caps mask the structural debt | Do not lift caps or claim bankroll truth until a separate truth-chain packet lands. |
+| Resolved live ops receipts | `REMAINING_TASKS.md` marks riskguard fail-closed/flapping, data-ingest catch-up, and 15-minute opening cadence restart as done/resolved | Treat these as receipt-verification items, not fresh strategy implementation blockers. |
+
+### 0.2 Strategy authority surfaces
+
+The phrase "strategy catalog" is overloaded. Stage 0 must keep these surfaces distinct:
+
+| Surface | Current value / behavior | Meaning |
+|---|---|---|
+| `src/engine/cycle_runner.py::KNOWN_STRATEGIES` | `settlement_capture`, `shoulder_sell`, `center_buy`, `opening_inertia` | Buildable engine strategy universe. |
+| `src/engine/cycle_runtime.py::CANONICAL_STRATEGY_KEYS` | Same four-key set | Runtime canonical decision/evidence normalization set. |
+| `src/state/portfolio.py::CANONICAL_STRATEGY_KEYS` | Same four-key set | Portfolio/read-model canonical strategy set. |
+| `src/control/control_plane.py::LIVE_SAFE_STRATEGIES` | Same four-key set, including `shoulder_sell` | Boot-time allowlist from the older four-key expansion; not sufficient to prove current live-entry eligibility. |
+| `src/control/control_plane.py::_LIVE_ALLOWED_STRATEGIES` | `settlement_capture`, `center_buy`, `opening_inertia` | Current runtime live-entry allowlist; excludes `shoulder_sell`. |
+| `src/strategy/kelly.py::STRATEGY_KELLY_MULTIPLIERS` | `settlement_capture=1.0`, `center_buy=1.0`, `opening_inertia=0.5`, `shoulder_sell=0.0`, `shoulder_buy=0.0`, `center_sell=0.0` | Current live sizing surface; positive-size keys match `_LIVE_ALLOWED_STRATEGIES`. |
+| `src/state/edge_observation.py::STRATEGY_KEYS` | Four legacy keys | Reporting/edge-observation cohort surface; cannot yet represent dormant inverse keys as first-class live/report cohorts. |
+| `src/state/attribution_drift.py` classifier | Four-rule classifier with recall limits when `discovery_mode` is absent | Drift detection can miss or refuse to classify `opening_inertia` / `settlement_capture` rows; evidence layer is not yet taxonomy-complete. |
+
+### 0.3 Stage 0 verdict
+
+1. The repo already has pieces of the final stricter design: strict runtime live allowlist, zero Kelly for `shoulder_sell` / dormant inverse keys, and some `strategy_key_unclassified` fail-closed paths.
+2. The repo does **not** yet have one unified strategy authority surface. Stage 1 must reconcile boot allowlist, runtime allowlist, sizing, classifier, DB/reporting, and attribution surfaces before claiming live catalog acceptance.
+3. Stage 4 reporting remains necessary, but minimum evidence representation (`discovery_mode`, direction, bin role, phase, execution mode, shadow/live status) must be available before Stage 1/2 taxonomy acceptance.
+4. `STRATEGIES_AND_GAPS.md` remains a design dossier. It is now patched with this evidence lock so future implementation starts from current repo truth rather than the older draft dependency order.
+
+### 0.4 Stage 1 rollback/allowlist verdict (2026-05-02)
+
+Critic review rejected adding a new runtime taxonomy rollback flag. The safer rollback surface already exists in `src/control/control_plane.py::_LIVE_ALLOWED_STRATEGIES`: only `settlement_capture`, `center_buy`, and `opening_inertia` are runtime-live, while `LIVE_SAFE_STRATEGIES` remains the boot/catalog superset that includes `shoulder_sell`. A negative feature flag such as `DISABLE_NEW_TAXONOMY` would create a second authority surface whose default or typo behavior could live-open the taxonomy. Stage 1 therefore treats `is_strategy_enabled()` as the execution seam: `shoulder_sell` can be phase-compatible and reportable, but still cannot reach live intent until a future promotion packet updates the runtime-live allowlist, sizing, evidence, and tests together.
+
+### 0.5 Stage 1 native buy-NO live verdict (2026-05-02)
+
+`NATIVE_MULTIBIN_BUY_NO_LIVE=true` is necessary but not sufficient for live buy-NO. Runtime now also requires canonical native NO quote evidence on the decision and explicit promotion authority for the `(strategy_key, discovery_mode, direction)` context. The default approved context set is empty, so Day0 `settlement_capture` buy-NO remains hard-blocked even if an operator flips the live flag locally. A future promotion packet must add the context, promotion evidence validation, execution tests, sizing evidence, and reporting cohort together.
+
+---
+
 ## 1. Current strategies (what's actually running)
 
 ### 1.1 DiscoveryMode → strategy_key map
@@ -16,7 +65,7 @@
 | `OPENING_HUNT` | every 15 min (was 30, lowered 2026-05-02) | `opening_inertia` | Always — when `hours_since_open < 24` AND `hours_to_resolution >= 24` |
 | `UPDATE_REACTION` | cron at **07:00 / 09:00 / 19:00 / 21:00 UTC** (4×/day) | `center_buy` | `edge.direction == "buy_yes"` AND `not edge.bin.is_shoulder` |
 | `UPDATE_REACTION` | (same cron) | `shoulder_sell` | `edge.direction == "buy_no"` AND `edge.bin.is_shoulder` |
-| `UPDATE_REACTION` | (same cron) | `opening_inertia` | Fallback when neither center_buy nor shoulder_sell matches |
+| `UPDATE_REACTION` | (same cron) | `unclassified` / no live `strategy_key` | Fail-closed when neither `center_buy` nor `shoulder_sell` matches; inverse/dormant quadrants must not masquerade as `opening_inertia` |
 | `DAY0_CAPTURE` | every 15 min | `settlement_capture` | when `hours_to_resolution < 6` (see gap §3.1) |
 
 ### 1.2 EntryMethod (2 wired)

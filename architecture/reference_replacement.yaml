@@ -164,6 +164,25 @@ entries:
       Code-grounded reference for risk management and strategy classification.
       Contains exact formulas, risk escalation rules, and sizing parameters.
 
+  - path: docs/reference/zeus_oracle_density_discount_reference.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - src/strategy/oracle_penalty.py
+      - scripts/bridge_oracle_to_calibration.py
+      - tests/test_bridge_oracle_to_calibration.py
+    unique_remaining:
+      - Data Density Discount design rationale
+      - Mismatch versus DDD versus Platt-regime-absorption relationship
+      - anomaly-based coverage discount parameter framing
+      - Day0 absolute observation-gap rail notes
+    allowed_action: keep_conditional
+    rationale: >
+      Conditional reference for oracle penalty and DDD work. Runtime behavior
+      must still be encoded in source, tests, and manifests before it becomes
+      binding.
+
   - path: docs/reference/zeus_math_spec.md
     default_read: false
     replacement_status: partial_replacement_candidate

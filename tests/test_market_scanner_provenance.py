@@ -963,6 +963,47 @@ class TestSourceContractGate:
         assert held["token_id"] == "token_yes_primary"
         assert held["no_token_id"] == "token_no_primary"
 
+    def test_pending_source_conversion_blocks_config_only_reentry(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        monkeypatch.setenv(
+            ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV,
+            str(quarantine_path),
+        )
+        monkeypatch.setattr(
+            ms.runtime_config,
+            "runtime_cities",
+            lambda: ms.runtime_config.load_cities(),
+        )
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source=(
+                "https://www.wunderground.com/history/daily/fr/"
+                "bonneuil-en-france/LFPB"
+            ),
+        )
+        monkeypatch.setattr(ms, "_get_active_events", lambda: [event])
+
+        parsed = _parse_event(
+            event,
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+
+        assert parsed is not None
+        assert parsed["source_contract"]["status"] == "MATCH"
+        assert quarantine_path.exists() is False
+        pending = ms.pending_source_contract_conversion("Paris", path=quarantine_path)
+        assert pending is not None
+        assert pending["status"] == "pending_release"
+        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
+        assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
+
     def test_source_quarantine_release_requires_conversion_evidence_refs(self, tmp_path):
         quarantine_path = tmp_path / "source_contract_quarantine.json"
         ms.upsert_source_contract_quarantine(

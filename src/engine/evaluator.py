@@ -29,6 +29,8 @@ from src.config import (
     CONFIG_DIR,
     PROJECT_ROOT,
     City,
+    EntryForecastConfig,
+    EntryForecastRolloutMode,
     day0_n_mc,
     edge_n_bootstrap,
     ensemble_crosscheck_member_count,
@@ -36,8 +38,11 @@ from src.config import (
     ensemble_member_count,
     ensemble_n_mc,
     ensemble_primary_model,
+    entry_forecast_config,
+    get_mode,
     settings,
 )
+from src.data.executable_forecast_reader import read_executable_forecast
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -48,10 +53,11 @@ from src.contracts import (
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
+from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
-from src.signal.ensemble_signal import EnsembleSignal, select_hours_for_target_date
+from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
 from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import model_agreement
@@ -66,6 +72,7 @@ from src.state.portfolio import (
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size, strategy_kelly_multiplier
+from src.engine.ddd_wiring import DDDFailClosed, evaluate_ddd_for_decision
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.selection_family import (
@@ -108,6 +115,8 @@ DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
 NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
 NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
+NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION = "buy_no_native_quote_available"
+NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
 
 
 class FeeRateUnavailableError(RuntimeError):
@@ -698,6 +707,46 @@ def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
     return MetricIdentity.from_raw(text)
 
 
+def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None, str | None]:
+    try:
+        return entry_forecast_config(), None
+    except Exception as exc:
+        return None, f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
+
+
+def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
+    if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
+        return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
+    if cfg.rollout_mode is EntryForecastRolloutMode.SHADOW:
+        return "ENTRY_FORECAST_ROLLOUT_SHADOW"
+    if cfg.rollout_mode is EntryForecastRolloutMode.CANARY:
+        return "ENTRY_FORECAST_ROLLOUT_CANARY"
+    if cfg.rollout_mode is EntryForecastRolloutMode.LIVE:
+        return None
+    return "ENTRY_FORECAST_ROLLOUT_MODE_UNKNOWN"
+
+
+def _entry_forecast_city_id(city: City) -> str:
+    return city.name.upper().replace(" ", "_")
+
+
+def _entry_forecast_market_family(candidate: MarketCandidate, temperature_metric: MetricIdentity) -> str:
+    return str(
+        candidate.event_id
+        or candidate.slug
+        or f"{candidate.city.name}|{candidate.target_date}|{temperature_metric.temperature_metric}"
+    )
+
+
+def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
+    for outcome in support_outcomes:
+        for key in ("condition_id", "market_id", "question_id"):
+            value = str(outcome.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
     if conn is None:
         return {}
@@ -728,11 +777,11 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if edge.bin.is_shoulder:
+    if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
-    if edge.direction == "buy_yes":
+    if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
-    return "opening_inertia"
+    return "unclassified"
 
 
 def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -740,23 +789,23 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if edge.bin.is_shoulder:
+    if edge.direction == "buy_no" and edge.bin.is_shoulder:
         return "shoulder_sell"
-    if edge.direction == "buy_yes":
+    if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return None
 
 
-def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str:
+def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
-    if hypothesis.is_shoulder:
+    if hypothesis.direction == "buy_no" and hypothesis.is_shoulder:
         return "shoulder_sell"
-    if hypothesis.direction == "buy_yes":
+    if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"
-    return "opening_inertia"
+    return None
 
 
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -1053,7 +1102,7 @@ def _record_selection_family_facts(
             recorded_at=recorded_at,
             meta={
                 "active_fdr_selected": bool(row.get("active_fdr_selected")),
-                "hypothesis_strategy_key": row.get("hypothesis_strategy_key", row.get("strategy_key", "")),
+                "hypothesis_strategy_key": row.get("hypothesis_strategy_key") or row.get("strategy_key", ""),
                 "p_model": row["p_model"],
                 "p_market": row["p_market"],
                 "p_posterior": row["p_posterior"],
@@ -1257,6 +1306,22 @@ def evaluate_candidate(
                 applied_validations=["day0_observation", "observation_quality_gate"],
             )]
 
+    entry_forecast_cfg: EntryForecastConfig | None = None
+    if get_mode() == "live":
+        entry_forecast_cfg, live_entry_forecast_blocker = _live_entry_forecast_config_or_blocker()
+        if live_entry_forecast_blocker is None and entry_forecast_cfg is not None:
+            live_entry_forecast_blocker = _live_entry_forecast_rollout_blocker(entry_forecast_cfg)
+        if live_entry_forecast_blocker is not None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[live_entry_forecast_blocker],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["entry_forecast_rollout", "legacy_entry_primary_fetch_blocked"],
+            )]
+
     # Build the complete support vector first. Closed/non-accepting shoulder
     # children still define p_raw topology; only executable children get token
     # payloads for quote and order paths.
@@ -1401,34 +1466,85 @@ def evaluate_candidate(
 
     primary_model = ensemble_primary_model()
 
-    # Fetch ENS
-    try:
-        ens_result = fetch_ensemble(
-            city,
-            forecast_days=ens_forecast_days,
-            model=primary_model,
-            role="entry_primary",
+    if entry_forecast_cfg is not None:
+        if is_day0_mode:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED"],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
+            )]
+        if conn is None or not hasattr(conn, "execute"):
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=["ENTRY_FORECAST_READER_DB_UNAVAILABLE"],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
+            )]
+        decision_instant = decision_time or datetime.now(timezone.utc)
+        track = track_for_metric(entry_forecast_cfg, temperature_metric.temperature_metric)
+        reader_result = read_executable_forecast(
+            conn,
+            city_id=_entry_forecast_city_id(city),
+            city_name=city.name,
+            city_timezone=city.timezone,
+            target_local_date=target_d,
+            temperature_metric=temperature_metric.temperature_metric,
+            source_id=entry_forecast_cfg.source_id,
+            source_transport=entry_forecast_cfg.source_transport.value,
+            data_version=data_version_for_track(track),
+            track=track,
+            strategy_key="entry_forecast",
+            market_family=_entry_forecast_market_family(candidate, temperature_metric),
+            condition_id=_entry_forecast_condition_id(support_outcomes),
+            decision_time=decision_instant,
         )
-    except SourceNotEnabled as e:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[str(e)],
-            availability_status="DATA_STALE",
-            selected_method=selected_method,
-            applied_validations=["ens_fetch", "forecast_source_policy"],
-        )]
-    except Exception as e:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[str(e)],
-            availability_status=_availability_status_for_error(e),
-            selected_method=selected_method,
-            applied_validations=["ens_fetch"],
-        )]
+        if not reader_result.ok or reader_result.bundle is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[reader_result.reason_code],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
+            )]
+        ens_result = reader_result.bundle.to_ens_result()
+    else:
+        # Fetch ENS
+        try:
+            ens_result = fetch_ensemble(
+                city,
+                forecast_days=ens_forecast_days,
+                model=primary_model,
+                role="entry_primary",
+            )
+        except SourceNotEnabled as e:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[str(e)],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=["ens_fetch", "forecast_source_policy"],
+            )]
+        except Exception as e:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[str(e)],
+                availability_status=_availability_status_for_error(e),
+                selected_method=selected_method,
+                applied_validations=["ens_fetch"],
+            )]
     if ens_result is None:
         return [EdgeDecision(
             False,
@@ -1481,26 +1597,32 @@ def evaluate_candidate(
             selected_method=selected_method,
             applied_validations=["ens_fetch", "forecast_source_evidence"],
         )]
-    try:
-        ens_times = _forecast_times_as_strings(ens_result["times"])
-    except (KeyError, TypeError) as e:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[str(e)],
-            availability_status="DATA_STALE",
-            selected_method=selected_method,
-            applied_validations=["ens_fetch"],
-        )]
-    try:
-        ens_tz_hours = select_hours_for_target_date(
-            target_d,
-            city.timezone,
-            times=ens_times,
-        )
-    except ValueError:
+    period_extrema_members = ens_result.get("period_extrema_members")
+    using_period_extrema = period_extrema_members is not None
+    if using_period_extrema:
+        ens_times = []
         ens_tz_hours = None
+    else:
+        try:
+            ens_times = _forecast_times_as_strings(ens_result["times"])
+        except (KeyError, TypeError) as e:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[str(e)],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=["ens_fetch"],
+            )]
+        try:
+            ens_tz_hours = select_hours_for_target_date(
+                target_d,
+                city.timezone,
+                times=ens_times,
+            )
+        except ValueError:
+            ens_tz_hours = None
     day0_temporal_context = None
     required_hour_indices = ens_tz_hours
     if is_day0_mode:
@@ -1532,7 +1654,7 @@ def evaluate_candidate(
                     selected_method=selected_method,
                     applied_validations=["day0_observation", "ens_fetch"],
                 )]
-    if not _validate_ensemble_for_required_hours(
+    if not using_period_extrema and not _validate_ensemble_for_required_hours(
         ens_result,
         required_hour_indices=required_hour_indices,
     ):
@@ -1548,27 +1670,29 @@ def evaluate_candidate(
 
     epistemic = EpistemicContext.enter_cycle(fallback_override=decision_time)
     settlement_semantics = SettlementSemantics.for_city(city)
-    
-    try:
-        ens = EnsembleSignal(
-            ens_result["members_hourly"],
-            ens_times,
-            city, 
-            target_d, 
-            settlement_semantics=settlement_semantics,
-            decision_time=decision_time,
-            temperature_metric=temperature_metric,
-        )
-    except ValueError as e:
-        return [EdgeDecision(
-            False,
-            decision_id=_decision_id(),
-            rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[str(e)],
-            availability_status="DATA_STALE",
-            selected_method=selected_method,
-            applied_validations=["ens_fetch"],
-        )]
+
+    ens = None
+    if not using_period_extrema:
+        try:
+            ens = EnsembleSignal(
+                ens_result["members_hourly"],
+                ens_times,
+                city,
+                target_d,
+                settlement_semantics=settlement_semantics,
+                decision_time=decision_time,
+                temperature_metric=temperature_metric,
+            )
+        except ValueError as e:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[str(e)],
+                availability_status="DATA_STALE",
+                selected_method=selected_method,
+                applied_validations=["ens_fetch"],
+            )]
 
     decision_reference = ens_result.get("fetch_time")
     lead_days = max(0.0, lead_days_to_date_start(target_d, city.timezone, decision_reference))
@@ -1708,11 +1832,58 @@ def evaluate_candidate(
     else:
         # 2026-04-30 BLOCKER #2 fix: pass n_mc explicitly (mirrors
         # monitor_refresh.py:205). Same rationale as the day0 branch above.
-        p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
+        if using_period_extrema:
+            expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
+            if ens_result.get("members_unit") != expected_members_unit:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=["EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH"],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=["entry_forecast_reader", "members_unit"],
+                )]
+            member_extrema = np.asarray(period_extrema_members, dtype=float)
+            if (
+                member_extrema.ndim != 1
+                or len(member_extrema) < ensemble_member_count()
+                or not np.isfinite(member_extrema).all()
+            ):
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=["EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID"],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=["entry_forecast_reader", "period_extrema_members_adapter"],
+                )]
+            p_raw = p_raw_vector_from_maxes(
+                member_extrema,
+                city,
+                settlement_semantics,
+                bins,
+                n_mc=ensemble_n_mc(),
+            )
+            ensemble_spread = TemperatureDelta(
+                float(np.std(member_extrema)),
+                city.settlement_unit,
+            )
+            analysis_member_extrema = member_extrema
+            entry_validations = [
+                "entry_forecast_reader",
+                "entry_readiness",
+                "period_extrema_members_adapter",
+                "mc_instrument_noise",
+            ]
+        else:
+            assert ens is not None
+            p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
+            ensemble_spread = ens.spread()
+            analysis_member_extrema = ens.member_extrema
+            entry_validations = ["ens_fetch", "mc_instrument_noise"]
         day0_forecast_context = None
-        ensemble_spread = ens.spread()
-        analysis_member_extrema = ens.member_extrema
-        entry_validations = ["ens_fetch", "mc_instrument_noise"]
         lead_days_for_calibration = lead_days
 
     if not _valid_probability_vector(p_raw, len(bins)):
@@ -1726,8 +1897,14 @@ def evaluate_candidate(
             applied_validations=entry_validations,
         )]
 
-    # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate)
-    snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+    # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
+    # Executable reader rows already have an audited ensemble_snapshots_v2 id;
+    # reuse it instead of writing a second legacy snapshot for the same source run.
+    if using_period_extrema:
+        snapshot_id = str(ens_result.get("executable_snapshot_id") or "")
+    else:
+        assert ens is not None
+        snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
     if not snapshot_id:
         return [EdgeDecision(
             False,
@@ -1764,7 +1941,7 @@ def evaluate_candidate(
         conn,
         snapshot_id,
         p_raw,
-        bias_corrected=ens.bias_corrected,
+        bias_corrected=bool(getattr(ens, "bias_corrected", False)),
         p_raw_topology=p_raw_topology,
     )
     if p_raw_persisted is False:
@@ -2194,9 +2371,9 @@ def evaluate_candidate(
     entry_validations.append("alpha_posterior")
     if probe_native_no_quotes:
         if native_no_quote_unavailable_labels:
-            entry_validations.append("buy_no_native_quote_unavailable")
+            entry_validations.append(NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION)
         else:
-            entry_validations.append("buy_no_native_quote_available")
+            entry_validations.append(NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION)
 
     forecast_source = _forecast_source_key(
         source_id=ens_result.get("source_id"),
@@ -2553,6 +2730,80 @@ def evaluate_candidate(
             ))
             continue
 
+        # ── DDD v2 gate (RERUN_PLAN_v2.md §5 D-E live wiring, 2026-05-03) ──
+        # Two-Rail Data Density Discount: Rail 1 HALT for catastrophic-coverage
+        # days, Rail 2 produces a sizing discount. F2 fail-CLOSED on
+        # NO_TRAIN_DATA / EXCLUDED / unconfigured cities. Feature-flagged so
+        # operator can disable without redeploying code. Skipped entirely when
+        # conn is None (legacy test paths exercise evaluate_candidate without
+        # a DB; production always passes a live connection).
+        ddd_discount = 0.0
+        if conn is not None and _strict_feature_flag("ddd_v2_enabled", default=True):
+            metric_name = temperature_metric.temperature_metric
+            if metric_name == "high":
+                peak_hour_for_metric = city.historical_peak_hour
+            else:
+                # LOW peak heuristic: 12h offset from HIGH peak (mirrors
+                # p2_consolidated_v2.py heuristic_fallback path). Cities
+                # configured with a dedicated LOW hour can add it later.
+                peak_hour_for_metric = (city.historical_peak_hour - 12) % 24
+
+            try:
+                ddd_result = evaluate_ddd_for_decision(
+                    conn=conn,
+                    city=city.name,
+                    target_date=target_date,
+                    metric=metric_name,
+                    peak_hour=peak_hour_for_metric,
+                    season=season,
+                    mismatch_rate=oracle.error_rate,
+                    decision_time=decision_time,
+                )
+            except DDDFailClosed as exc:
+                decisions.append(EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage=exc.code,
+                    rejection_reasons=[str(exc)],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "ddd_v2_fail_closed"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                ))
+                continue
+
+            if ddd_result.action == "HALT":
+                decisions.append(EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage="DDD_HALT",
+                    rejection_reasons=[
+                        f"DDD Rail 1 HALT: cov={ddd_result.diagnostic.get('current_cov'):.3f} "
+                        f"< 0.35 with window_elapsed="
+                        f"{ddd_result.diagnostic.get('window_elapsed'):.2f}"
+                    ],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "ddd_v2_halt"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                ))
+                continue
+
+            # Rail 2 DISCOUNT path — keep the discount value; applied to km below.
+            # Note: result.discount is already max(mismatch_rate, raw_discount)
+            # so it composes oracle penalty cleanly. We subtract the
+            # mismatch_rate component because oracle.penalty_multiplier already
+            # encodes that gate; only the *additional* DDD-derived shortfall
+            # discount layers on top of Kelly here.
+            raw_ddd = ddd_result.diagnostic.get("final_discount_pre_mismatch") or 0.0
+            ddd_discount = float(raw_ddd)
+            if ddd_discount > 0.0:
+                decision_validations.append(f"ddd_v2_discount_{ddd_discount:.4f}")
+
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
         if oracle.status == OracleStatus.CAUTION:
@@ -2582,6 +2833,7 @@ def evaluate_candidate(
                 lead_days=lead_days_for_calibration,
                 portfolio_heat=current_heat,
                 strategy_key=strategy_key,
+                city=city.name,
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -2625,6 +2877,12 @@ def evaluate_candidate(
         if oracle.penalty_multiplier < 1.0:
             km *= oracle.penalty_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
+
+        # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
+        # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
+        # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
+        if ddd_discount > 0.0:
+            km *= max(0.0, 1.0 - ddd_discount)
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:
@@ -2651,7 +2909,7 @@ def evaluate_candidate(
                 fee_rate=fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
-                safety_cap_usd=settings["live_safety_cap_usd"],
+                safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -2778,7 +3036,7 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            safety_cap_usd=settings["live_safety_cap_usd"],
+            safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

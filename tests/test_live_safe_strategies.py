@@ -1,26 +1,34 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-04-30
-# Lifecycle: created=2026-04-26; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Last reused/audited: 2026-05-02
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-02; last_reused=2026-05-02
 # Purpose: G6 antibody — pin LIVE_SAFE_STRATEGIES typed frozenset + boot-time
-#          refusal to launch live daemon when any non-allowlisted strategy is
-#          enabled. Closes the gap between universe-of-strategies (KNOWN_STRATEGIES,
-#          4 entries) and live-execution-permitted-strategies (1 entry today).
+#          refusal to launch live daemon when any non-boot-safe strategy is
+#          enabled. Keeps the buildable universe, boot/catalog-safe set, and
+#          runtime-live execution boundary named separately.
 # Reuse: Covers src/control/control_plane.py public LIVE_SAFE_STRATEGIES + helper
 #        assert_live_safe_strategies_under_live_mode. If a future refactor
-#        broadens the allowlist or removes the boot guard, these tests fire.
+#        broadens the boot/catalog allowlist, confuses it with runtime live
+#        entry, or removes the boot guard, these tests fire.
 # Authority basis: docs/operations/task_2026-04-26_g6_live_safe_strategies/plan.md
 #   §4 antibody design + parent packet
 #   docs/operations/task_2026-04-26_live_readiness_completion/plan.md §5 K1.G6.
+#   Reused/audited for docs/operations/task_2026-05-02_strategy_update_execution_plan/PLAN.md
+#   Stage 0 catalog-truth lock: boot-safe, runtime-live, sizing, and reporting
+#   strategy surfaces must not be mistaken for one authority surface.
 """G6 antibody — LIVE_SAFE_STRATEGIES typed frozenset + boot-time refusal.
 
 Cross-module relationship pinned:
     KNOWN_STRATEGIES (cycle_runner.py)  ⊇  LIVE_SAFE_STRATEGIES (control_plane.py)
-    (every name in the live allowlist exists in the engine's universe)
+    (every name in the boot/catalog set exists in the engine's universe)
 
 Behavioral pin:
     LIVE_SAFE_STRATEGIES == {"opening_inertia", "center_buy",
     "settlement_capture", "shoulder_sell"} after the 2026-04-29
-    operator-approved expansion.
+    operator-approved boot/catalog expansion.
+
+Runtime live-entry authority:
+    _LIVE_ALLOWED_STRATEGIES == {"opening_inertia", "center_buy",
+    "settlement_capture"}; shoulder_sell remains blocked at is_strategy_enabled().
 
 Boot guard:
     Runtime is live-only. Any enabled strategy outside LIVE_SAFE_STRATEGIES
@@ -58,7 +66,7 @@ def test_live_safe_strategies_is_frozenset_of_str():
 
 
 def test_live_safe_strategies_pins_current_allowlist():
-    """Pin current operator-approved set (2026-04-29 expansion).
+    """Pin current operator-approved boot/catalog set (2026-04-29 expansion).
 
     Future expansion REQUIRES an explicit packet — accidental list growth
     via copy/paste is caught here. See parent packet
@@ -76,12 +84,12 @@ def test_live_safe_strategies_pins_current_allowlist():
 
 
 def test_live_safe_strategies_subset_of_known_strategies():
-    """Cross-module invariant: every live-safe name must exist in the engine's universe.
+    """Cross-module invariant: every boot-safe name must exist in the engine's universe.
 
     KNOWN_STRATEGIES (src/engine/cycle_runner.py) is the buildable universe.
-    LIVE_SAFE_STRATEGIES is the live-execution subset. A name in the allowlist
-    that the engine doesn't recognize would silently never run — appearing
-    safe but providing no live coverage. This test fires before that drift.
+    LIVE_SAFE_STRATEGIES is the boot/catalog-safe subset. A name in the
+    allowlist that the engine doesn't recognize would silently never run —
+    appearing safe but providing no coverage. This test fires before that drift.
     """
     from src.control.control_plane import LIVE_SAFE_STRATEGIES
     from src.engine.cycle_runner import KNOWN_STRATEGIES
@@ -91,6 +99,79 @@ def test_live_safe_strategies_subset_of_known_strategies():
         f"LIVE_SAFE_STRATEGIES contains names unknown to the engine: {sorted(orphans)}. "
         f"Either add them to KNOWN_STRATEGIES or remove from the allowlist."
     )
+
+
+def test_stage0_strategy_authority_surfaces_are_explicitly_split():
+    """Stage 0 catalog truth: buildable, boot-safe, live-allowed, sizing, and reporting surfaces differ by design.
+
+    This is not a license to keep them divergent forever. It prevents the
+    dangerous weaker claim "catalog matches code" from passing when only one
+    surface was checked. The May 2 strategy update requires all of these
+    surfaces to be named before Stage 1 changes live strategy behavior.
+    """
+    from src.control import control_plane
+    from src.engine import cycle_runtime
+    from src.engine.cycle_runner import KNOWN_STRATEGIES
+    from src.state.edge_observation import STRATEGY_KEYS as EDGE_OBSERVATION_KEYS
+    from src.state.portfolio import CANONICAL_STRATEGY_KEYS as PORTFOLIO_KEYS
+    from src.strategy.kelly import STRATEGY_KELLY_MULTIPLIERS
+
+    buildable = set(KNOWN_STRATEGIES)
+    runtime_canonical = set(cycle_runtime.CANONICAL_STRATEGY_KEYS)
+    portfolio_canonical = set(PORTFOLIO_KEYS)
+    boot_safe = set(control_plane.LIVE_SAFE_STRATEGIES)
+    live_allowed = set(control_plane._LIVE_ALLOWED_STRATEGIES)
+    positive_sizing = {
+        strategy_key
+        for strategy_key, multiplier in STRATEGY_KELLY_MULTIPLIERS.items()
+        if multiplier > 0.0
+    }
+    reportable = set(EDGE_OBSERVATION_KEYS)
+
+    assert buildable == runtime_canonical == portfolio_canonical == reportable == boot_safe
+    assert live_allowed == {"settlement_capture", "center_buy", "opening_inertia"}
+    assert positive_sizing == live_allowed
+    assert "shoulder_sell" in boot_safe
+    assert "shoulder_sell" not in live_allowed
+    assert STRATEGY_KELLY_MULTIPLIERS["shoulder_sell"] == 0.0
+    assert STRATEGY_KELLY_MULTIPLIERS["shoulder_buy"] == 0.0
+    assert STRATEGY_KELLY_MULTIPLIERS["center_sell"] == 0.0
+
+
+def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
+    """Stage 1 rollback verdict: do not create a second taxonomy feature flag.
+
+    The rollback boundary is the runtime-live strategy allowlist. Adding a
+    separate negative flag such as DISABLE_NEW_TAXONOMY would create a second
+    authority surface whose typo/default behavior can live-open the taxonomy.
+    """
+    from src.config import settings
+    from src.control import control_plane
+    from src.strategy.kelly import STRATEGY_KELLY_MULTIPLIERS
+
+    flags = settings["feature_flags"]
+
+    assert "DISABLE_NEW_TAXONOMY" not in flags
+    assert "ENABLE_NEW_TAXONOMY" not in flags
+    assert "NEW_TAXONOMY_LIVE" not in flags
+    assert control_plane._LIVE_ALLOWED_STRATEGIES == {
+        "settlement_capture",
+        "center_buy",
+        "opening_inertia",
+    }
+    assert control_plane.is_strategy_enabled("settlement_capture") is True
+    assert control_plane.is_strategy_enabled("center_buy") is True
+    assert control_plane.is_strategy_enabled("opening_inertia") is True
+    assert control_plane.is_strategy_enabled("shoulder_sell") is False
+    assert control_plane.is_strategy_enabled("shoulder_buy") is False
+    assert control_plane.is_strategy_enabled("center_sell") is False
+
+    positive_sizing = {
+        strategy_key
+        for strategy_key, multiplier in STRATEGY_KELLY_MULTIPLIERS.items()
+        if multiplier > 0.0
+    }
+    assert positive_sizing == control_plane._LIVE_ALLOWED_STRATEGIES
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +302,15 @@ def test_boot_helper_refuses_when_unsafe_strategy_enabled(monkeypatch):
 
     monkeypatch.setenv("ZEUS_MODE", "live")
 
-    # Inject a ghost strategy into KNOWN_STRATEGIES for this test only so that
-    # it appears in the enabled set but NOT in the allowlist.
+    # Inject a ghost strategy into both KNOWN_STRATEGIES and the stricter
+    # runtime-live surface so it appears enabled but NOT boot-safe.
     extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
     monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
+    monkeypatch.setattr(
+        cp,
+        "_LIVE_ALLOWED_STRATEGIES",
+        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
+    )
 
     # Snapshot + restore _control_state to avoid leaking into other tests.
     original_state = dict(cp._control_state)
@@ -304,10 +390,16 @@ def test_boot_helper_with_cold_cache_refuses_via_default_true_semantic(monkeypat
 
     monkeypatch.setenv("ZEUS_MODE", "live")
 
-    # Extend KNOWN_STRATEGIES with a synthetic ghost so cold-cache default-True
-    # surfaces it as offender even when all 4 real KNOWN are now allowlisted.
+    # Extend both KNOWN_STRATEGIES and the stricter runtime-live surface with a
+    # synthetic ghost so cold-cache default-True surfaces it as offender even
+    # when all 4 real KNOWN are boot-safe.
     extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
     monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
+    monkeypatch.setattr(
+        cp,
+        "_LIVE_ALLOWED_STRATEGIES",
+        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
+    )
 
     original_state = dict(cp._control_state)
     monkeypatch.setattr(cp, "_control_state", {})  # empty: cold cache
@@ -423,6 +515,11 @@ def test_boot_helper_round_trip_refuses_when_db_gate_missing(monkeypatch, tmp_pa
 
     extended_known = cycle_runner.KNOWN_STRATEGIES | {"_test_ghost_strategy"}
     monkeypatch.setattr(cycle_runner, "KNOWN_STRATEGIES", extended_known)
+    monkeypatch.setattr(
+        cp,
+        "_LIVE_ALLOWED_STRATEGIES",
+        set(cp._LIVE_ALLOWED_STRATEGIES) | {"_test_ghost_strategy"},
+    )
 
     db_path = tmp_path / "empty.db"
 
