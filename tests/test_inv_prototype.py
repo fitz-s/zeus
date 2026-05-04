@@ -261,3 +261,113 @@ def test_all_drift_findings_is_idempotent():
         "F5+F10 regression: all_drift_findings() returned different findings "
         "across calls (lengths matched but content drifted)."
     )
+
+
+def test_validate_caches_lazy_findings_without_mutating_drift(monkeypatch):
+    """Review-crash antibody: validate() must not re-read lazy targets on every
+    call, and caching must not append findings to drift_findings."""
+    calls = []
+
+    def fake_validate_test_reference(inv_id, test_ref):
+        calls.append((inv_id, test_ref))
+        return [DriftFinding(inv_id, "test", test_ref, "TEST_NOT_FOUND", "synthetic")]
+
+    monkeypatch.setattr(_mod, "_validate_test_reference", fake_validate_test_reference)
+    inv = _mod.INV(
+        id="INV_CACHE",
+        statement="cache lazy validation",
+        enforcement={"test": ["tests/test_x.py::test_missing"], "schema": []},
+    )
+
+    first = inv.validate()
+    second = inv.validate()
+    third = inv.validate()
+
+    assert first == second == third
+    assert calls == [("INV_CACHE", "tests/test_x.py::test_missing")]
+    assert inv.drift_findings == []
+
+
+def test_decorator_resolves_async_test_reference(monkeypatch, tmp_path):
+    """Review-crash antibody: async def tests are real test citations."""
+    test_file = tmp_path / "tests" / "test_async_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "class TestAsyncContract:\n"
+        "    async def test_async_guard(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "REPO_ROOT", tmp_path)
+
+    findings = _mod._validate_test_reference(
+        "INV_ASYNC",
+        "tests/test_async_contract.py::TestAsyncContract::test_async_guard",
+    )
+
+    assert findings == []
+
+
+def test_decorator_rejects_same_test_name_in_wrong_class(monkeypatch, tmp_path):
+    """Review-crash antibody: TestClass::test_name must resolve inside that class."""
+    test_file = tmp_path / "tests" / "test_class_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "class OtherClass:\n"
+        "    def test_same_name(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "REPO_ROOT", tmp_path)
+
+    findings = _mod._validate_test_reference(
+        "INV_CLASS",
+        "tests/test_class_contract.py::ExpectedClass::test_same_name",
+    )
+
+    assert [finding.kind for finding in findings] == ["TEST_CLASS_NOT_FOUND"]
+
+
+def test_decorator_rejects_unqualified_reference_to_class_method(monkeypatch, tmp_path):
+    """Review-crash antibody: file::test_name resolves only top-level tests."""
+    test_file = tmp_path / "tests" / "test_class_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "class TestOnlyClassMethod:\n"
+        "    def test_method_only(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "REPO_ROOT", tmp_path)
+
+    findings = _mod._validate_test_reference(
+        "INV_CLASS",
+        "tests/test_class_contract.py::test_method_only",
+    )
+
+    assert [finding.kind for finding in findings] == ["TEST_NOT_FOUND"]
+
+
+def test_schema_citation_must_name_existing_content(monkeypatch, tmp_path):
+    """Review-crash antibody: schema citations cannot pass by file existence alone."""
+    schema = tmp_path / "architecture" / "schema.sql"
+    schema.parent.mkdir(parents=True)
+    schema.write_text(
+        "CREATE TABLE position_events (event_type TEXT CHECK (event_type IN ('SETTLED')));\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "REPO_ROOT", tmp_path)
+
+    assert _mod._validate_schema_column_reference(
+        "INV_SCHEMA",
+        "architecture/schema.sql::position_events.event_type",
+    ) == []
+
+    file_only = _mod._validate_schema_column_reference("INV_SCHEMA", "architecture/schema.sql")
+    assert [finding.kind for finding in file_only] == ["SCHEMA_TARGET_MISSING"]
+
+    missing = _mod._validate_schema_column_reference(
+        "INV_SCHEMA",
+        "architecture/schema.sql::missing_column",
+    )
+    assert [finding.kind for finding in missing] == ["SCHEMA_TARGET_NOT_FOUND"]
