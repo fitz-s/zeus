@@ -140,15 +140,18 @@ claims:
 
   - claim_id: ORACLE_PENALTY_THRESHOLD
     claim_status: replaced
-    assertion: "Oracle penalty uses <3% incidental, 3-10% caution, and >10% blacklist thresholds from data/oracle_error_rates.json."
+    assertion: "Oracle penalty uses Beta-binomial posterior_upper_95 thresholds (0.05 caution, 0.10 blacklist) over (m, n) error counts from data/oracle_error_rates.json. Replaces the pre-rebuild flat <3%/3-10%/>10% rate-only classifier."
     source:
       kind: executable_contract
       path: src/strategy/oracle_penalty.py
       locator: get_oracle_info
     proof_targets:
       - kind: executable_contract
-        path: src/strategy/oracle_penalty.py
-        locator: CAUTION_THRESHOLD
+        path: src/strategy/oracle_estimator.py
+        locator: CAUTION_P95_LOWER
+      - kind: executable_contract
+        path: src/strategy/oracle_estimator.py
+        locator: BLACKLIST_P95_LOWER
       - kind: machine_manifest
         path: architecture/history_lore.yaml
         locator: ORACLE_TRUNCATION_BIAS

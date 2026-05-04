@@ -1,6 +1,9 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
+# Last reused/audited: 2026-05-04
 # Authority basis: RERUN_PLAN_v2.md §5 D-E (live wiring) + F2 (fail-CLOSED)
+# Lifecycle: created=2026-05-03; last_reviewed=2026-05-04; last_reused=2026-05-04
+# Purpose: DDD live wiring coverage, including may4math F4 city-timezone window elapsed refinement.
+# Reuse: Verify DDD v2 config fixtures and city timezone semantics before relying on these tests.
 """Tests for src.engine.ddd_wiring (live DDD evaluator helper).
 
 Coverage:
@@ -70,6 +73,18 @@ def test_compute_window_elapsed_midwindow():
         "2026-05-02", peak_hour=15.0, decision_time=decision
     )
     assert 0.40 <= elapsed <= 0.50
+
+
+def test_compute_window_elapsed_uses_city_timezone_when_provided():
+    decision = datetime(2026, 5, 2, 6, 30, tzinfo=timezone.utc)
+    elapsed = compute_window_elapsed(
+        "2026-05-02",
+        peak_hour=15.0,
+        decision_time=decision,
+        timezone_name="Asia/Tokyo",
+    )
+
+    assert elapsed == pytest.approx(0.5)
 
 
 # ── DB-backed helpers ────────────────────────────────────────────────────────
@@ -345,7 +360,7 @@ def test_fail_closed_unconfigured_city(conn, floors_and_nstar):
 
 def test_rail1_halt_when_cov_zero(conn, floors_and_nstar):
     """No observations at all → cov=0, Rail 1 fires (window_elapsed > 0.5)."""
-    decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+    decision = datetime(2026, 5, 3, 3, 0, tzinfo=timezone.utc)
     result = evaluate_ddd_for_decision(
         conn=conn,
         city="NYC",
@@ -425,7 +440,7 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
 
 def test_lagos_zero_cov_halts(conn, floors_and_nstar):
     """Lagos with no observations → Rail 1 HALT (matches replay finding)."""
-    decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+    decision = datetime(2026, 5, 3, 3, 0, tzinfo=timezone.utc)
     result = evaluate_ddd_for_decision(
         conn=conn,
         city="Lagos",

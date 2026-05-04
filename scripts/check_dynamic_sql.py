@@ -89,6 +89,14 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 # module; no user input is interpolated. Per the scanner contract
 # (interpolated identifier from internal whitelist → bump baseline), this
 # is an explicit registration, not a relaxation.
+#
+# 2026-05-04 (A5 oracle/Kelly evidence rebuild): src/state/db.py grew from
+# 21 → 22. The new site is the ALTER TABLE loop at db.py:1480-1486 that adds
+# 5 probability_trace_fact columns (market_phase_source, market_start_at,
+# market_end_at, settlement_day_entry_utc, uma_resolved_source). The {col}
+# interpolation is iterated over a hardcoded literal tuple — no user input,
+# no untrusted source. Per scanner contract (internal whitelist → bump),
+# this is an explicit registration matching the calibration/store.py rule.
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
@@ -115,7 +123,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/market_topology_repo.py": 4,
     "src/state/readiness_repo.py": 4,
     "src/state/source_run_repo.py": 4,
-    "src/state/db.py": 21,
+    "src/state/db.py": 22,
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
     "src/state/schema/v2_schema.py": 1,

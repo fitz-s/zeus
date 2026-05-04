@@ -1,98 +1,123 @@
-# Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: DESIGN_PHASE2_5_TRANSFER_POLICY_REPLACEMENT.md
-#                  + may4math.md Finding 1+2 (full domain key required for
-#                    calibration transfer; validate via OOS evidence not
-#                    string mapping)
-"""ForecastCalibrationDomain — the canonical shape of a calibration domain key.
+"""Forecast calibration domain identity.
 
-Used by:
-  * calibration_transfer_policy.evaluate_calibration_transfer (Phase 2.5)
-  * Platt model bucket key (cycle/source_id/horizon_profile in
-    platt_models_v2 + calibration_pairs_v2 — see Phase 2 schema migration)
-  * evaluator: derive forecast domain from ens_result, compare against
-    Platt model's domain via load_platt_model_v2
+This is the Phase 2.5 base contract from may4math: source/cycle/metric/domain
+identity is data, not prose. Runtime wiring can adopt it later without changing
+the object shape.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal
 
 
-_VALID_CYCLES_FOR_ENTRY_PRIMARY = frozenset({"00", "12"})
-_VALID_HORIZON_PROFILES = frozenset({"full", "short"})
-_ISO_HHMM_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})")
+Metric = Literal["high", "low"]
 
 
-@dataclass(frozen=True)
+class ForecastCalibrationDomainMismatch(ValueError):
+    """Raised when a forecast and calibrator describe different domains."""
+
+
+@dataclass(frozen=True, slots=True)
 class ForecastCalibrationDomain:
-    """A 6-tuple identifying a calibration domain.
-
-    Two forecasts share the same calibration domain iff all six fields
-    match. Two domains can be calibration-transfer-equivalent if a row
-    exists in validated_calibration_transfers with matching train/test
-    domain pairs (and current OOS evidence).
-
-    Field semantics:
-        source_id: e.g., 'tigge_mars' (archive), 'ecmwf_open_data' (real-time public).
-                   Distinguishes physical product (resolution, packaging, latency).
-        cycle_hour_utc: '00' or '12' for entry-primary; 06/18 not in TIGGE.
-        horizon_profile: 'full' (00z/12z, 240+ lead) | 'short' (06z/18z, ~120 lead).
-        metric: 'high' | 'low' (max/min temperature).
-        season: 'DJF' | 'MAM' | 'JJA' | 'SON' (local-time hemisphere-flipped).
-        data_version: e.g., 'tigge_mx2t6_local_calendar_day_max_v1'.
-                      Provenance string distinguishing track/version.
-
-    Equality is structural — frozen dataclass auto-generates __eq__/__hash__.
-    """
-
     source_id: str
-    cycle_hour_utc: str
-    horizon_profile: str
-    metric: str
-    season: str
     data_version: str
+    source_cycle_hour_utc: int
+    horizon_profile: str
+    metric: Metric
+    cluster: str
+    season: str
+    input_space: str
+    city_local_cycle_hour: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source_id.strip():
+            raise ValueError("source_id is required")
+        if not self.data_version.strip():
+            raise ValueError("data_version is required")
+        if not 0 <= self.source_cycle_hour_utc <= 23:
+            raise ValueError(
+                f"source_cycle_hour_utc must be in [0, 23], got {self.source_cycle_hour_utc}"
+            )
+        if self.metric not in ("high", "low"):
+            raise ValueError(f"metric must be 'high' or 'low', got {self.metric!r}")
+        if not self.cluster.strip():
+            raise ValueError("cluster is required")
+        if not self.season.strip():
+            raise ValueError("season is required")
+        if not self.input_space.strip():
+            raise ValueError("input_space is required")
+        if self.city_local_cycle_hour is not None and not 0 <= self.city_local_cycle_hour <= 23:
+            raise ValueError(
+                f"city_local_cycle_hour must be in [0, 23], got {self.city_local_cycle_hour}"
+            )
+
+    @property
+    def key(self) -> str:
+        local_hour = "na" if self.city_local_cycle_hour is None else f"{self.city_local_cycle_hour:02d}"
+        return ":".join((
+            self.source_id,
+            self.data_version,
+            f"cycle{self.source_cycle_hour_utc:02d}z",
+            self.horizon_profile,
+            self.metric,
+            self.cluster,
+            self.season,
+            self.input_space,
+            f"local{local_hour}",
+        ))
+
+    def mismatch_fields(self, other: "ForecastCalibrationDomain") -> tuple[str, ...]:
+        fields = (
+            "source_id",
+            "data_version",
+            "source_cycle_hour_utc",
+            "horizon_profile",
+            "metric",
+            "cluster",
+            "season",
+            "input_space",
+            "city_local_cycle_hour",
+        )
+        return tuple(field for field in fields if getattr(self, field) != getattr(other, field))
 
     def matches(self, other: "ForecastCalibrationDomain") -> bool:
-        """Exact 6-field match."""
-        return self == other
+        return not self.mismatch_fields(other)
 
-    def is_categorically_invalid(self) -> bool:
-        """Quick check for hard-block conditions.
+    def assert_matches(self, other: "ForecastCalibrationDomain") -> None:
+        mismatches = self.mismatch_fields(other)
+        if mismatches:
+            raise ForecastCalibrationDomainMismatch(
+                "CALIBRATION_DOMAIN_MISMATCH: " + ",".join(mismatches)
+            )
 
-        Returns True when this domain CANNOT serve entry_primary regardless
-        of validated_calibration_transfers state. Specifically:
-        - cycle not in {'00','12'} for full-horizon entry path
-        """
-        if self.horizon_profile == "full" and self.cycle_hour_utc not in _VALID_CYCLES_FOR_ENTRY_PRIMARY:
-            return True
-        if self.horizon_profile not in _VALID_HORIZON_PROFILES:
-            return True
-        return False
+
+# ----------------------------------------------------------------------
+# PR #55 helpers (preserved through PR #56 merge): standalone utilities
+# that don't depend on the domain class above. Used by evaluator and
+# monitor_refresh to thread Phase-2 stratification keys from ens_result
+# into get_calibrator. Kept here so callers have one canonical import
+# site for forecast-domain-related helpers.
+# ----------------------------------------------------------------------
+
+import re as _re
+from typing import Optional
+
+_ISO_HHMM_RE = _re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})")
 
 
 def parse_cycle_from_issue_time(issue_time_iso: Optional[str]) -> Optional[str]:
-    """Extract cycle_hour_utc from an ISO-8601 issue_time string.
+    """Extract cycle_hour_utc (2-char HH) from an ISO-8601 issue_time string.
 
-    Returns the 2-character HH portion (e.g., '00','06','12','18') if the
-    string is well-formed; None otherwise. Tolerates trailing timezone
+    Returns None for unparseable input.  Tolerates trailing timezone
     designators including 'Z' and '+HH:MM'.
-
-    Example:
-        parse_cycle_from_issue_time('2026-05-02T12:00:00+00:00')  # → '12'
-        parse_cycle_from_issue_time('2026-05-02T00:00:00Z')       # → '00'
-        parse_cycle_from_issue_time(None)                         # → None
-        parse_cycle_from_issue_time('not-a-date')                 # → None
     """
     if not isinstance(issue_time_iso, str):
         return None
     match = _ISO_HHMM_RE.match(issue_time_iso)
     if match is None:
         return None
-    hh = match.group(4)
-    return hh
+    return match.group(4)
 
 
 def derive_phase2_keys_from_ens_result(
@@ -107,16 +132,11 @@ def derive_phase2_keys_from_ens_result(
     2026-05-04, so we derive it from cycle (00/12 → 'full', else 'short').
 
     Copilot review #4 + #5 (2026-05-04): horizon_profile derivation when
-    ``ens_result['horizon_profile']`` is absent — pre-fix this axis was
-    always None and stratification was effectively dead.
-
+    ``ens_result['horizon_profile']`` is absent.
     Codex P1 review #7 (2026-05-04): handle ``datetime`` issue_time in
-    addition to str — pre-fix the registered-ingest path (datetime) silently
-    routed 12z snapshots to the schema-default 00z bucket.
+    addition to str — the registered-ingest path puts a datetime here.
 
-    Returns (None, None, None) if ens_result is malformed — callers fall back
-    to schema-default bucket selection (which the store loader is itself
-    responsible for failing-closed on for OpenData; see store.py loader).
+    Returns (None, None, None) on malformed input.
     """
     if not isinstance(ens_result, dict):
         return None, None, None
@@ -136,8 +156,7 @@ def derive_phase2_keys_from_ens_result(
         if isinstance(hp, str) and hp:
             horizon_profile = hp
         if horizon_profile is None and cycle is not None:
-            # 00/12 are full-horizon TIGGE/OpenData runs; other cycles (06/18)
-            # are short-horizon. Matches scripts/rebuild_calibration_pairs_v2.py.
+            # 00/12 → full-horizon TIGGE/OpenData runs; other cycles → short.
             horizon_profile = "full" if cycle in ("00", "12") else "short"
     except (TypeError, AttributeError, KeyError):
         return None, None, None
@@ -147,15 +166,10 @@ def derive_phase2_keys_from_ens_result(
 def derive_source_id_from_data_version(data_version: Optional[str]) -> Optional[str]:
     """Map a data_version string to its canonical source_id.
 
-    Currently:
-        'tigge_*'           → 'tigge_mars'
-        'ecmwf_opendata_*'  → 'ecmwf_open_data'
-        anything else       → None  (caller should reject as
-                                     UNKNOWN_FORECAST_SOURCE_FAMILY)
-
-    Conservative: returns None for unrecognized prefixes rather than
-    guessing. Callers (evaluator) should treat None as a categorical
-    rejection signal.
+    'tigge_*'           → 'tigge_mars'
+    'ecmwf_opendata_*'  → 'ecmwf_open_data'
+    anything else       → None  (caller should reject as
+                                 UNKNOWN_FORECAST_SOURCE_FAMILY)
     """
     if not isinstance(data_version, str) or not data_version:
         return None

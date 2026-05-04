@@ -1,132 +1,30 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: PR #55 review round 1 — Copilot reviews #1/#4/#5,
-#                  Codex P1 reviews #6/#7
-"""Relationship tests for the round-1 PR review fixes.
+# Last reused/audited: 2026-05-04 (post PR #56 merge)
+# Authority basis: PR #55 review round 1 — Copilot reviews #4/#5,
+#                  Codex P1 review #7. Authority-threshold tests
+#                  (Copilot #1) and transfer-policy tests were dropped
+#                  when PR #56 superseded the calibration_transfer_policy
+#                  Phase 2.5 stack with MarketPhaseEvidence.
+"""Relationship tests for surviving PR #55 review-round-1 fixes.
 
-Each test pins a specific reviewer finding so a future regression that
-re-introduces the same bug fails CI.
-
-Round-1 findings covered here:
-  * Copilot #1 — authority filter must be threshold (>=), not exact match.
+Covers:
   * Copilot #4 + #5 — horizon_profile must be derived from cycle when
     ens_result producers don't populate it.
   * Codex P1 #7 — issue_time may be a datetime on the registered-ingest
     path, not just a str; phase-2 cycle extraction must handle both.
 
-Other round-1 findings (Copilot #2 store loader, Copilot #3 ensemble_client
-guard, Codex P1 #6 transfer-gate calibrator domain) are exercised in
-test_phase2_review_round1_fixes_part2.py to keep this file focused.
+Both fixes live in
+``src.calibration.forecast_calibration_domain.derive_phase2_keys_from_ens_result``,
+which both evaluator and monitor_refresh delegate to.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 
-import pytest
-
 from src.calibration.forecast_calibration_domain import (
-    ForecastCalibrationDomain,
     derive_phase2_keys_from_ens_result,
 )
-from src.data.calibration_transfer_policy import (
-    _AUTHORITY_RANK,
-    _authority_threshold_clause,
-    evaluate_calibration_transfer,
-)
-
-
-# ---- Copilot review #1 — authority threshold ordering ---------------------
-
-
-def test_authority_threshold_clause_unverified_admits_verified():
-    clause, params = _authority_threshold_clause("UNVERIFIED")
-    assert "authority IN" in clause
-    assert "UNVERIFIED" in params
-    assert "VERIFIED" in params
-
-
-def test_authority_threshold_clause_verified_excludes_unverified():
-    clause, params = _authority_threshold_clause("VERIFIED")
-    assert "authority IN" in clause
-    assert "VERIFIED" in params
-    assert "UNVERIFIED" not in params
-
-
-def test_authority_threshold_clause_unknown_tier_fails_closed():
-    clause, params = _authority_threshold_clause("FAKE_TIER")
-    # Unknown tier → exact-match (so an operator typo never accidentally
-    # widens the policy by matching no rows in IN(...)).
-    assert "authority = ?" in clause
-    assert params == ["FAKE_TIER"]
-
-
-def test_authority_rank_includes_known_tiers():
-    # Guard against silent removal of either tier — would skew the SQL.
-    assert _AUTHORITY_RANK["UNVERIFIED"] < _AUTHORITY_RANK["VERIFIED"]
-
-
-def _make_validated_transfers_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE validated_calibration_transfers (
-            transfer_id TEXT PRIMARY KEY,
-            train_source_id TEXT, train_cycle_hour_utc TEXT,
-            train_horizon_profile TEXT, train_data_version TEXT,
-            train_metric TEXT, train_season TEXT,
-            test_source_id TEXT, test_cycle_hour_utc TEXT,
-            test_horizon_profile TEXT, test_data_version TEXT,
-            test_metric TEXT, test_season TEXT,
-            authority TEXT,
-            validated_at TEXT,
-            expires_at TEXT
-        )
-        """
-    )
-
-
-def _domain(source_id: str, cycle: str, dv: str) -> ForecastCalibrationDomain:
-    return ForecastCalibrationDomain(
-        source_id=source_id,
-        cycle_hour_utc=cycle,
-        horizon_profile="full",
-        metric="high",
-        season="winter",
-        data_version=dv,
-        # `season` is part of the key but not categorically invalid.
-    )
-
-
-def test_evaluate_transfer_unverified_admits_verified_row():
-    """Caller passing minimum_authority='UNVERIFIED' should match a stored
-    row whose authority is VERIFIED.  Pre-fix this returned SHADOW_ONLY
-    because the SQL filter was `authority = ?` (exact-match).
-    """
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    _make_validated_transfers_table(conn)
-    conn.execute(
-        """
-        INSERT INTO validated_calibration_transfers VALUES
-        ('xfer-1','tigge_mars','00','full','tigge_high_v1','high','winter',
-         'ecmwf_open_data','12','full','ecmwf_opendata_high_v1','high','winter',
-         'VERIFIED','2026-05-04T00:00:00','2026-12-31T00:00:00')
-        """
-    )
-    forecast = _domain("ecmwf_open_data", "12", "ecmwf_opendata_high_v1")
-    calibrator = _domain("tigge_mars", "00", "tigge_high_v1")
-    result = evaluate_calibration_transfer(
-        conn,
-        forecast_domain=forecast,
-        calibrator_domain=calibrator,
-        minimum_authority="UNVERIFIED",
-    )
-    assert result.status == "LIVE_ELIGIBLE", (
-        f"Copilot #1 regression: UNVERIFIED minimum should admit VERIFIED row. "
-        f"Got {result.status} ({result.reason_codes})"
-    )
-    assert result.matched_transfer_id == "xfer-1"
 
 
 # ---- Copilot reviews #4 + #5 + Codex P1 #7 — phase2 keys derivation -------

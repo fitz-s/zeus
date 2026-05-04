@@ -81,7 +81,13 @@ from src.state.portfolio import (
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
-from src.strategy.kelly import dynamic_kelly_mult, kelly_size, strategy_kelly_multiplier
+from src.strategy.kelly import (
+    dynamic_kelly_mult,
+    kelly_size,
+    observed_target_day_fraction,
+    phase_aware_kelly_multiplier,
+    strategy_kelly_multiplier,
+)
 from src.engine.ddd_wiring import DDDFailClosed, evaluate_ddd_for_decision
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
@@ -181,6 +187,18 @@ class MarketCandidate:
     # cycle_runtime. Storing the enum (not the str) keeps downstream
     # dispatch type-safe; cycle_runtime serializes to .value for SQL.
     market_phase: Optional["MarketPhase"] = None
+    # PR #56 review (Copilot + Codex P1, 2026-05-04): full provenance
+    # of how ``market_phase`` was determined. Pre-fix the evaluator
+    # hardcoded ``_phase_source="verified_gamma"`` whenever
+    # ``market_phase`` was non-None, silently dropping the actual
+    # provenance from MarketPhaseEvidence and skipping the 0.7×
+    # ``fallback_f1`` haircut in the A6 phase-aware Kelly resolver.
+    # Now cycle_runtime stamps the evidence's ``phase_source`` here so
+    # the evaluator passes the real value through. Valid values match
+    # MarketPhaseEvidence.phase_source: ``verified_gamma`` |
+    # ``fallback_f1`` | ``onchain_resolved`` | ``unknown`` | None
+    # (legacy fixture / pre-evidence path).
+    market_phase_source: Optional[str] = None
 
 
 @dataclass
@@ -1413,7 +1431,16 @@ def evaluate_candidate(
     temperature_metric = _normalize_temperature_metric(
         getattr(candidate, "temperature_metric", None)
     )
-    is_day0_mode = candidate.discovery_mode == "day0_capture"
+    # Phase-axis dispatch (PR #53 P3+P4 closure of the 7th unmigrated
+    # site flagged by critic R5 ATTACK 3 / A3-M1). Flag OFF default:
+    # byte-equal to the legacy ``discovery_mode == "day0_capture"`` rule.
+    # Flag ON: routes through MarketPhase per-candidate, eliminating the
+    # phase/method incoherence where strategy_key dispatch could pick
+    # settlement_capture while EntryMethod stayed on ENS_MEMBER_COUNTING.
+    # See ``src/engine/dispatch.py`` module docstring §"KNOWN UNMIGRATED
+    # SIBLING" for the closure narrative.
+    from src.engine.dispatch import is_settlement_day_dispatch
+    is_day0_mode = is_settlement_day_dispatch(candidate)
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
@@ -2304,22 +2331,12 @@ def evaluate_candidate(
         derive_phase2_keys_from_ens_result(ens_result if isinstance(ens_result, dict) else None)
     )
 
-    # Phase 2.5 (2026-05-04, may4math.md F2 + critic-opus BLOCKER 6 +
-    # Codex P1 review #6): the calibration transfer gate must use the
-    # ACTUAL bucket the calibrator was loaded from, not a hardcoded TIGGE
-    # domain.  Pre-fix, even when an exact-match OpenData bucket existed
-    # (e.g., source_id='ecmwf_open_data', cycle='12', horizon='full'),
-    # this gate compared the OpenData forecast against TIGGE and rejected
-    # as SHADOW_ONLY — a false rejection.
-    #
-    # Order: load calibrator FIRST so the gate sees the loaded bucket
-    # identity (attached as cal._bucket_*).  The transfer gate is still
-    # the LAST line of defense before sizing — it remains sufficient
-    # because (a) load_platt_model_v2 fails-closed on missing
-    # stratification keys for OpenData (Copilot review #2 fix), so
-    # mis-loaded buckets become exceptions before this point, and (b)
-    # calibrator loading is a SELECT with no side effects, so loading
-    # then rejecting is equivalent to never loading.
+    # Phase 2 (2026-05-04, may4math.md F1): cycle-stratified Platt bucket
+    # selection. None defaults preserve legacy behavior — load_platt_model_v2
+    # hits schema-default bucket ('00','tigge_mars','full') when any field is
+    # unavailable.  Phase 2.5 transfer gate (PR #55) replaced by PR #56's
+    # MarketPhaseEvidence + oracle_evidence_status — see docs/operations/
+    # task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md.
     cal, cal_level = get_calibrator(
         conn, city, target_date,
         temperature_metric=temperature_metric.temperature_metric,
@@ -2328,103 +2345,6 @@ def evaluate_candidate(
         horizon_profile=_phase2_horizon_profile,
     )
 
-    if (
-        isinstance(_phase2_data_version, str)
-        and _phase2_data_version.startswith("ecmwf_opendata_")
-    ):
-        try:
-            from src.calibration.forecast_calibration_domain import (
-                ForecastCalibrationDomain,
-            )
-            from src.data.calibration_transfer_policy import (
-                evaluate_calibration_transfer,
-            )
-            from src.types.metric_identity import (
-                HIGH_LOCALDAY_MAX,
-                LOW_LOCALDAY_MIN,
-            )
-
-            # Construct calibrator_domain from the loaded bucket's actual
-            # identity (Codex P1 #6).  When all four bucket attrs are set,
-            # the calibrator came from a Phase-2-stratified row and we use
-            # those values; the gate then resolves to LIVE_ELIGIBLE via
-            # DOMAIN_EXACT_MATCH when forecast and bucket match.  When attrs
-            # are missing (legacy table fallback, on-the-fly refit, no
-            # calibrator at all), default to legacy TIGGE — gate rejects
-            # cross-domain as before.
-            _legacy_dv = (
-                HIGH_LOCALDAY_MAX.data_version
-                if temperature_metric.is_high()
-                else LOW_LOCALDAY_MIN.data_version
-            )
-            _bucket_sid = getattr(cal, "_bucket_source_id", None) if cal is not None else None
-            _bucket_cyc = getattr(cal, "_bucket_cycle", None) if cal is not None else None
-            _bucket_hp = getattr(cal, "_bucket_horizon_profile", None) if cal is not None else None
-            _bucket_dv = getattr(cal, "_bucket_data_version", None) if cal is not None else None
-            if _bucket_sid and _bucket_cyc and _bucket_hp and _bucket_dv:
-                _calibrator_domain = ForecastCalibrationDomain(
-                    source_id=_bucket_sid,
-                    cycle_hour_utc=_bucket_cyc,
-                    horizon_profile=_bucket_hp,
-                    metric=temperature_metric.temperature_metric,
-                    season=_cal_season,
-                    data_version=_bucket_dv,
-                )
-            else:
-                _calibrator_domain = ForecastCalibrationDomain(
-                    source_id="tigge_mars",
-                    cycle_hour_utc="00",
-                    horizon_profile="full",
-                    metric=temperature_metric.temperature_metric,
-                    season=_cal_season,
-                    data_version=_legacy_dv,
-                )
-            _forecast_domain = ForecastCalibrationDomain(
-                source_id=_phase2_source_id or "ecmwf_open_data",
-                cycle_hour_utc=_phase2_cycle or "00",
-                horizon_profile=_phase2_horizon_profile or "full",
-                metric=temperature_metric.temperature_metric,
-                season=_cal_season,
-                data_version=_phase2_data_version,
-            )
-            _transfer = evaluate_calibration_transfer(
-                conn,
-                forecast_domain=_forecast_domain,
-                calibrator_domain=_calibrator_domain,
-            )
-        except Exception as _exc:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
-                rejection_stage="CALIBRATION_TRANSFER_FAULT",
-                rejection_reasons=[
-                    f"evaluate_calibration_transfer raised: {type(_exc).__name__}: {_exc}"
-                ],
-                availability_status="DATA_UNAVAILABLE",
-                selected_method=selected_method,
-                applied_validations=entry_validations,
-                decision_snapshot_id=snapshot_id,
-                p_raw=p_raw,
-            )]
-        if not _transfer.live_eligible:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
-                rejection_stage="CALIBRATION_TRANSFER_SHADOW_ONLY"
-                if _transfer.status == "SHADOW_ONLY"
-                else "CALIBRATION_TRANSFER_BLOCKED",
-                rejection_reasons=[
-                    f"OpenData calibration transfer not approved: "
-                    f"forecast={_forecast_domain.source_id}/{_forecast_domain.cycle_hour_utc} "
-                    f"calibrator={_calibrator_domain.source_id}/{_calibrator_domain.cycle_hour_utc} "
-                    f"status={_transfer.status} reasons={list(_transfer.reason_codes)}"
-                ],
-                availability_status="DATA_UNAVAILABLE",
-                selected_method=selected_method,
-                applied_validations=entry_validations,
-                decision_snapshot_id=snapshot_id,
-                p_raw=p_raw,
-            )]
     if cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
@@ -3162,7 +3082,7 @@ def evaluate_candidate(
                     metric=metric_name,
                     peak_hour=peak_hour_for_metric,
                     season=season,
-                    mismatch_rate=oracle.error_rate,
+                    mismatch_rate=oracle.posterior_upper_95,
                     decision_time=decision_time,
                 )
             except DDDFailClosed as exc:
@@ -3233,12 +3153,18 @@ def evaluate_candidate(
             decision_validations.append("global_heat_throttled_50pct")
 
         try:
+            # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
+            # does NOT fold the pre-A4 strategy_kelly_multiplier into km.
+            # The phase-aware factor below replaces that role with the full
+            # 4-source resolver (strategy_phase × oracle × observed_fraction
+            # × phase_source). Keeping strategy_key=strategy_key here would
+            # double-apply the strategy_default factor.
             km = dynamic_kelly_mult(
                 base=settings["sizing"]["kelly_multiplier"],
                 ci_width=edge.ci_upper - edge.ci_lower,
                 lead_days=lead_days_for_calibration,
                 portfolio_heat=current_heat,
-                strategy_key=strategy_key,
+                strategy_key=None,
                 city=city.name,
             )
         except ValueError as exc:
@@ -3272,17 +3198,77 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        per_strategy_multiplier = strategy_kelly_multiplier(strategy_key)
-        decision_validations.append(f"strategy_kelly_multiplier_{per_strategy_multiplier:g}x")
+        # A6 phase-aware Kelly resolver (PLAN.md §A6 + PLAN_v3 §6.P5).
+        # Combines the four authority sources at open-time:
+        #   - StrategyProfile.kelly_for_phase(market_phase) (registry)
+        #   - oracle_penalty.get_oracle_info(city, metric)   (A3)
+        #   - observed_target_day_fraction(...)              (city-local
+        #                                                     elapsed-day,
+        #                                                     floored at 0.3)
+        #   - phase_source quality factor (0.7× for fallback_f1)
+        # phase_source defaults to "verified_gamma" when candidate.market_phase
+        # is tagged (cycle_runtime tags via A5 builder when market dict has
+        # explicit endDate). Phase=None falls back to the strategy's default
+        # multiplier in the resolver — fail-soft path mirrors pre-A6 behavior
+        # for legacy/test fixtures that don't tag phase.
+        from datetime import date as _A6_date
+        try:
+            _a6_target_date = _A6_date.fromisoformat(candidate.target_date)
+        except (TypeError, ValueError):
+            _a6_target_date = None
+
+        if _a6_target_date is None:
+            # Fall back to legacy strategy default — phase + fraction can't
+            # be computed without a parseable target_date.
+            phase_aware_factor = strategy_kelly_multiplier(strategy_key)
+            decision_validations.append(
+                f"phase_aware_kelly_legacy_{phase_aware_factor:g}x_no_target_date"
+            )
+        else:
+            _phase_value = (
+                candidate.market_phase.value if candidate.market_phase is not None else None
+            )
+            # PR #56 review (Copilot + Codex P1, 2026-05-04): read the
+            # real MarketPhaseEvidence.phase_source stamped onto the
+            # candidate by cycle_runtime instead of hardcoding
+            # ``verified_gamma``. Pre-fix the resolver never saw
+            # ``fallback_f1`` even when Gamma omitted endDate, skipping
+            # the documented 0.7× haircut and over-sizing Kelly. Falls
+            # back to None for legacy fixture / pre-evidence callers
+            # that don't stamp the field — the resolver treats None as
+            # "no haircut applied" (back-compat with pre-A6 behavior).
+            _phase_source = getattr(candidate, "market_phase_source", None)
+            phase_aware_factor = phase_aware_kelly_multiplier(
+                strategy_key=strategy_key,
+                market_phase=_phase_value,
+                city=city,
+                temperature_metric=temperature_metric.temperature_metric,
+                decision_time_utc=decision_time,
+                target_local_date=_a6_target_date,
+                phase_source=_phase_source,
+            )
+            decision_validations.append(
+                f"phase_aware_kelly_{phase_aware_factor:g}x"
+                f"_phase={_phase_value or 'NA'}"
+                f"_src={_phase_source or 'NA'}"
+            )
+        km *= phase_aware_factor
 
         if policy.threshold_multiplier > 1.0:
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
 
-        # Oracle penalty: reduce Kelly for CAUTION cities (3–10% error rate)
+        # Oracle penalty was previously applied here as a separate
+        # multiplication. Post-A6 the oracle factor is folded into
+        # phase_aware_kelly_multiplier (above), so this block intentionally
+        # has no live behavior — kept as a no-op shell that logs CAUTION
+        # cases for backward-compat with existing log consumers expecting
+        # the "strategy_policy_threshold_*" annotation. Removable in the
+        # follow-up cleanup PR.
         if oracle.penalty_multiplier < 1.0:
-            km *= oracle.penalty_multiplier
-            decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
+            decision_validations.append(
+                f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
+            )
 
         # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount

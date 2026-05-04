@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-03; last_reused=2026-05-03
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-04; last_reused=2026-05-04
 # Purpose: Bridge oracle shadow snapshots into the reviewed oracle error-rate config artifact.
 # Reuse: Review source snapshots and high-track settlement filtering before applying output.
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (storage path centralization + atomic write + heartbeat).
 """Bridge oracle shadow snapshots to calibration data.
 
 Compares oracle-time WU/HKO snapshots (captured by
@@ -54,8 +55,19 @@ logging.basicConfig(
 logger = logging.getLogger("oracle_bridge")
 
 ROOT = Path(__file__).resolve().parent.parent
-SNAPSHOT_DIR = ROOT / "raw" / "oracle_shadow_snapshots"
-ORACLE_FILE = ROOT / "data" / "oracle_error_rates.json"
+
+# Storage paths centralized in src.state.paths (PLAN.md §A2 + D-10).
+# Re-resolved on each call so ZEUS_STORAGE_ROOT env override propagates
+# into the bridge without reimport. Kept as module-level callables for
+# readability inside the existing single-file procedural style.
+from src.state.paths import (  # noqa: E402  (path-bootstrap above must run first)
+    oracle_artifact_heartbeat_path,
+    oracle_error_rates_path,
+    oracle_snapshot_dir,
+    write_heartbeat,
+    write_json_atomic,
+)
+
 DB_PATH = ROOT / "state" / "zeus-world.db"
 
 
@@ -83,10 +95,11 @@ def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
 def _load_snapshots() -> dict[str, dict[str, dict]]:
     """Load all shadow snapshots, keyed by city → date → snapshot."""
     result: dict[str, dict[str, dict]] = defaultdict(dict)
-    if not SNAPSHOT_DIR.exists():
+    snapshot_dir = oracle_snapshot_dir()
+    if not snapshot_dir.exists():
         return result
 
-    for city_dir in sorted(SNAPSHOT_DIR.iterdir()):
+    for city_dir in sorted(snapshot_dir.iterdir()):
         if not city_dir.is_dir():
             continue
         for snap_file in sorted(city_dir.glob("*.json")):
@@ -143,7 +156,7 @@ def bridge(dry_run: bool = False) -> dict:
 
     snapshots = _load_snapshots()
     if not snapshots:
-        logger.info("No shadow snapshots found in %s", SNAPSHOT_DIR)
+        logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
         conn.close()
         return {"cities": 0, "comparisons": 0}
 
@@ -179,9 +192,10 @@ def bridge(dry_run: bool = False) -> dict:
         return p_count, f_max
 
     # Existing oracle error rates (to preserve historical data)
+    oracle_file = oracle_error_rates_path()
     existing: dict[str, dict] = {}
-    if ORACLE_FILE.exists():
-        with open(ORACLE_FILE) as f:
+    if oracle_file.exists():
+        with open(oracle_file) as f:
             existing = json.load(f)
 
     city_stats: dict[str, dict] = {}
@@ -263,6 +277,8 @@ def bridge(dry_run: bool = False) -> dict:
     # This bridge only measures HIGH track (daily_high snapshots), so only
     # the "high" subkey is updated here. LOW starts empty and is populated
     # when LOW oracle snapshot infrastructure is added (future phase).
+    from src.strategy.oracle_penalty import summarize_oracle_posterior
+
     for city_name, snap_stats in city_stats.items():
         if city_name not in existing:
             existing[city_name] = {}
@@ -286,29 +302,85 @@ def bridge(dry_run: bool = False) -> dict:
 
         city_entry["high"]["snapshot_data"] = snap_stats
 
-        # Combine snapshot error rate with historical same-source error rate
-        hist_rate = city_entry["high"].get("oracle_error_rate", 0.0)
+        # PLAN.md §A3: write raw counts at the top level so the reader
+        # can compute the Beta-binomial posterior. Pre-A3 the bridge
+        # wrote only `oracle_error_rate` (point estimate), losing the
+        # n/m split needed for evidence-graded classification. The
+        # downstream reader (oracle_penalty) now treats absence of n/m
+        # as MISSING (mult 0.5) — files that bridge wrote pre-A3 will
+        # carry only oracle_error_rate and degrade until the next bridge
+        # run.
+        n = int(snap_stats["snapshot_comparisons"])
+        m = int(snap_stats["snapshot_mismatch"])
+        city_entry["high"]["n"] = n
+        city_entry["high"]["mismatches"] = m
+        city_entry["high"]["last_observed_date"] = (
+            max(snap_stats["snapshot_dates"]) if snap_stats.get("snapshot_dates") else None
+        )
+
+        # Keep oracle_error_rate as a derived convenience field — readers
+        # compute their own posterior, but operators still grep for the
+        # raw rate when triaging. ``error_rate = m/n`` is the maximum-
+        # likelihood estimate; the posterior_mean lives in the reader.
         snap_rate = snap_stats["snapshot_error_rate"]
+        city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
+        posterior = summarize_oracle_posterior(
+            n=n,
+            mismatches=m,
+            metric="high",
+            source_role="oracle_shadow_snapshot",
+            last_date=city_entry["high"]["last_observed_date"] or "",
+            city=city_name,
+        )
+        city_entry["high"].update({
+            "metric": "high",
+            "source_role": posterior.source_role,
+            "posterior_mean": round(posterior.posterior_mean, 6),
+            "posterior_upper_95": round(posterior.posterior_upper_95, 6),
+            "posterior_prob_gt_03": round(posterior.posterior_prob_gt_03, 6),
+            "posterior_prob_gt_10": round(posterior.posterior_prob_gt_10, 6),
+            "penalty_multiplier": round(posterior.penalty_multiplier, 6),
+        })
 
-        # Use the higher of the two as the effective oracle_error_rate
-        combined_rate = max(hist_rate, snap_rate)
-        city_entry["high"]["oracle_error_rate"] = combined_rate
-
-        # Update status
-        if combined_rate > 0.10:
-            city_entry["high"]["status"] = "BLACKLIST"
-        elif combined_rate > 0.03:
-            city_entry["high"]["status"] = "CAUTION"
-        elif combined_rate > 0.0:
-            city_entry["high"]["status"] = "INCIDENTAL"
+        # Status field is now informational. The reader recomputes
+        # status via oracle_estimator.classify(m, n, age) on each
+        # `get_oracle_info` call — operators changing thresholds in code
+        # should NOT need a bridge re-run. We still emit a status hint
+        # for human readability of the JSON dump.
+        if n < 10:
+            city_entry["high"]["status_hint"] = "INSUFFICIENT_SAMPLE"
+        elif m == 0:
+            city_entry["high"]["status_hint"] = "OK_pending_p95"
+        elif snap_rate > 0.10:
+            city_entry["high"]["status_hint"] = "BLACKLIST"
+        elif snap_rate > 0.03:
+            city_entry["high"]["status_hint"] = "CAUTION"
         else:
-            city_entry["high"]["status"] = "OK"
+            city_entry["high"]["status_hint"] = "INCIDENTAL"
+        # Drop the old top-level "status" field; the reader's classify()
+        # is the authority. Keep a one-cycle compat shim so anything
+        # ad-hoc reading the JSON doesn't crash on missing key.
+        city_entry["high"]["status"] = city_entry["high"]["status_hint"]
 
     if not dry_run:
-        ORACLE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(ORACLE_FILE, "w") as f:
-            json.dump(existing, f, indent=2)
-        logger.info("Updated %s with %d snapshot cities", ORACLE_FILE, len(city_stats))
+        # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous
+        # plain open()+json.dump could leave a partial file on crash;
+        # the reader (oracle_penalty.reload) catches that as a JSON error
+        # and silently keeps the previous cache, masking the bridge crash.
+        # Atomic + heartbeat surfaces the failure mode for §A3 readers.
+        meta = write_json_atomic(oracle_file, existing, writer_identity="bridge_oracle_to_calibration")
+        write_heartbeat(
+            "oracle_error_rates",
+            {
+                **meta,
+                "snapshot_cities": len(city_stats),
+                "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
+                "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
+            },
+            heartbeat_path=oracle_artifact_heartbeat_path(),
+        )
+        logger.info("Updated %s with %d snapshot cities (sha256=%s)",
+                    oracle_file, len(city_stats), meta["sha256"][:12])
 
         # Signal the oracle penalty module to reload
         try:
@@ -317,7 +389,7 @@ def bridge(dry_run: bool = False) -> dict:
         except ImportError:
             pass  # OK if not running inside Zeus process
     else:
-        logger.info("[DRY RUN] Would update %s with %d cities", ORACLE_FILE, len(city_stats))
+        logger.info("[DRY RUN] Would update %s with %d cities", oracle_file, len(city_stats))
 
     conn.close()
     return {

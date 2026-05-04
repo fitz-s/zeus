@@ -1,9 +1,8 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
-# Authority basis: PLAN_v3 PR-B; oracle fail-closed gate removed in favor of
-#                  graceful fallback via oracle_penalty.py. Live trading must
-#                  not halt when oracle artifacts missing; oracle is sizing
-#                  modifier, not truth gate.
+# Last reused/audited: 2026-05-04
+# Authority basis: PLAN_v3 PR-B (oracle fail-closed gate removed in favor of
+#                  graceful fallback via oracle_penalty.py; oracle is sizing
+#                  modifier, not truth gate) + docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 + §A3 (Bug review Finding A closure: missing != OK; missing now → MISSING with mult=0.5; reload still non-fatal).
 """Verify evaluator no longer halts when oracle_error_rates.json is missing.
 
 Pre-PR-B behaviour: missing/stale oracle file → ORACLE_EVIDENCE_UNAVAILABLE
@@ -33,32 +32,48 @@ def test_evaluator_module_has_no_oracle_evidence_gate():
     assert not hasattr(evaluator_module, "_oracle_evidence_row")
 
 
-def test_oracle_penalty_returns_ok_when_file_missing(monkeypatch, tmp_path):
-    """Graceful fallback contract that PR-B relies on for live resilience."""
-    missing_path = tmp_path / "definitely_does_not_exist.json"
-    assert not missing_path.exists()
-    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", missing_path)
+def _redirect_storage(monkeypatch, tmp_path):
+    """PLAN.md §A2 idiom: redirect oracle paths to tmp_path via env var
+    rather than monkey-patching the (now-removed) _ORACLE_FILE constant.
+    """
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    return tmp_path / "data" / "oracle_error_rates.json"
+
+
+def test_oracle_penalty_returns_missing_when_file_missing(monkeypatch, tmp_path):
+    """A3 contract (Bug review Finding A closure): a missing oracle file
+    yields MISSING (mult=0.5), NOT silent OK (mult=1.0). The PR-B floor
+    still holds — reload doesn't raise, evaluator continues — but the
+    sizing penalty is no longer hidden.
+    """
+    target = _redirect_storage(monkeypatch, tmp_path)
+    assert not target.exists()
+    oracle_penalty._reset_for_test()
     oracle_penalty.reload()
 
     info = oracle_penalty.get_oracle_info("Chicago", "high")
-    assert info.status == oracle_penalty.OracleStatus.OK
-    assert info.penalty_multiplier == 1.0
+    assert info.status == oracle_penalty.OracleStatus.MISSING
+    assert info.penalty_multiplier == 0.5
 
 
 def test_oracle_penalty_reload_picks_up_new_file(monkeypatch, tmp_path):
     """reload() must re-read from disk so cron-written updates take effect
-    without daemon restart."""
+    without daemon restart. Uses post-A3 schema (n + mismatches)."""
     import json as _json
 
-    path = tmp_path / "oracle_error_rates.json"
-    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", path)
+    path = _redirect_storage(monkeypatch, tmp_path)
 
-    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": 0.40}}}))
+    # n=25, m=10 → posterior_upper_95 ≈ 0.564 → BLACKLIST.
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"n": 25, "mismatches": 10}}}))
+    oracle_penalty._reset_for_test()
     oracle_penalty.reload()
     info = oracle_penalty.get_oracle_info("Shenzhen", "high")
     assert info.status == oracle_penalty.OracleStatus.BLACKLIST
 
-    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": 0.0}}}))
+    # n=100, m=0 → posterior_upper_95 ≈ 0.029 → OK.
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"n": 100, "mismatches": 0}}}))
+    oracle_penalty._reset_for_test()
     oracle_penalty.reload()
     info = oracle_penalty.get_oracle_info("Shenzhen", "high")
     assert info.status == oracle_penalty.OracleStatus.OK
@@ -70,41 +85,59 @@ def test_oracle_penalty_reload_swallows_malformed_json(monkeypatch, tmp_path):
     A concurrent bridge write can leave oracle_error_rates.json half-written.
     The evaluator calls reload() every cycle; an unhandled json.JSONDecodeError
     would resurrect the exact halt-live-trading failure PR #40 fixed.
-    Contract: malformed file → keep previous cache (or empty) + log warning.
+    Contract (post-A3): malformed file → cache marked MALFORMED; subsequent
+    get_oracle_info returns MALFORMED records (mult = previous × 0.7).
+
+    Note: §A2 ships atomic writers for the bridge so this half-written
+    failure mode is now blocked at the writer level too — but the reader
+    contract still holds for any non-bridge writer or legacy artifact.
     """
     import json as _json
 
-    path = tmp_path / "oracle_error_rates.json"
-    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", path)
+    path = _redirect_storage(monkeypatch, tmp_path)
 
-    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": 0.0}}}))
+    # Step 1: load a clean record so previous_good is cached.
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"n": 100, "mismatches": 0}}}))
+    oracle_penalty._reset_for_test()
     oracle_penalty.reload()
-    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
+    pre = oracle_penalty.get_oracle_info("Shenzhen", "high")
+    assert pre.status == oracle_penalty.OracleStatus.OK
 
+    # Step 2: clobber with garbage. reload must not raise.
     path.write_text("{not valid json,,,")
     oracle_penalty.reload()
-    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
-    assert oracle_penalty.get_oracle_info("Anywhere", "high").status == oracle_penalty.OracleStatus.OK
+    post = oracle_penalty.get_oracle_info("Shenzhen", "high")
+    assert post.status == oracle_penalty.OracleStatus.MALFORMED
+    # Other cities also degrade to MALFORMED under malformed cache.
+    assert oracle_penalty.get_oracle_info("Anywhere", "high").status == oracle_penalty.OracleStatus.MALFORMED
 
 
 def test_oracle_penalty_reload_swallows_bad_value_types(monkeypatch, tmp_path):
     """Bad numeric values (e.g., string instead of float) must not crash reload."""
     import json as _json
 
-    path = tmp_path / "oracle_error_rates.json"
-    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", path)
+    path = _redirect_storage(monkeypatch, tmp_path)
 
-    path.write_text(_json.dumps({"Shenzhen": {"high": {"oracle_error_rate": "not-a-number"}}}))
+    # Bad type for n — bridge schema violation. reload must coerce or
+    # treat the record as absent; downstream get_oracle_info must not raise.
+    path.write_text(_json.dumps({"Shenzhen": {"high": {"n": "not-a-number", "mismatches": 0}}}))
+    oracle_penalty._reset_for_test()
     oracle_penalty.reload()
-    assert oracle_penalty.get_oracle_info("Shenzhen", "high").status == oracle_penalty.OracleStatus.OK
+    # Either MISSING (record discarded) or MALFORMED (cache state); both
+    # are acceptable — the contract is "no raise + degraded sizing".
+    info = oracle_penalty.get_oracle_info("Shenzhen", "high")
+    assert info.status in (
+        oracle_penalty.OracleStatus.MISSING,
+        oracle_penalty.OracleStatus.MALFORMED,
+    )
+    assert info.penalty_multiplier <= 0.5
 
 
 def test_evaluate_candidate_produces_decision_when_oracle_file_missing(monkeypatch, tmp_path):
     """Evaluator must not reject or raise when oracle artifact is absent."""
     from tests.test_center_buy_repair import _candidate, _patch_evaluator
 
-    missing_path = tmp_path / "oracle_error_rates.json"
-    monkeypatch.setattr(oracle_penalty, "_ORACLE_FILE", missing_path)
+    _redirect_storage(monkeypatch, tmp_path)
     oracle_penalty.reload()
     clob = _patch_evaluator(monkeypatch, entry_price=0.05)
 

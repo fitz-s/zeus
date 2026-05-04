@@ -37,17 +37,40 @@ from src.state.portfolio import (
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_STRATEGY_KEYS = {
-    "settlement_capture",
-    "shoulder_sell",
-    "center_buy",
-    "opening_inertia",
-}
-STRATEGY_KEYS_BY_DISCOVERY_MODE = {
-    "day0_capture": frozenset({"settlement_capture"}),
-    "opening_hunt": frozenset({"opening_inertia"}),
-    "update_reaction": frozenset({"center_buy", "shoulder_sell"}),
-}
+
+# H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
+# CANONICAL_STRATEGY_KEYS frozenset and STRATEGY_KEYS_BY_DISCOVERY_MODE
+# inverse map were the 6th and 7th unmigrated sites flagged in the rebuild
+# review — exactly the anti-pattern Bug review §D called out
+# ("strategy identity remains a function of DiscoveryMode + edge shape").
+# Both now derive from the strategy registry's live_status field and the
+# new per-strategy cycle_axis_dispatch_mode field. The registry owns the
+# truth; cycle_runtime only filters at use-sites.
+def _canonical_strategy_keys() -> frozenset[str]:
+    """Strategies cycle_runtime treats as canonical for telemetry/attribution.
+
+    Equals the registry's ``live_safe_keys()`` — every boot-allowed strategy
+    (live + shadow) is canonical because shadow strategies still emit
+    decisions that need attribution. Recomputed on every call so registry
+    swaps in tests propagate without import-order surprises.
+    """
+    from src.strategy.strategy_profile import live_safe_keys
+    return live_safe_keys()
+
+
+def _strategy_keys_by_discovery_mode() -> dict[str, frozenset[str]]:
+    """Inverse of cycle_axis_dispatch_mode: discovery_mode → set of strategies
+    routed under that mode by legacy clauses 1-4 short-circuit. Recomputed on
+    every call (cheap; registry has 6 entries)."""
+    from src.strategy.strategy_profile import cycle_axis_dispatch_inverse
+    return cycle_axis_dispatch_inverse()
+
+
+# Module-level read for backward-compat. Tests / external callers that
+# imported these names get a snapshot equivalent to the pre-H2 behavior.
+# Prefer the helpers above for fresh reads (e.g., post-_reload_for_test).
+CANONICAL_STRATEGY_KEYS = _canonical_strategy_keys()
+STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
@@ -80,7 +103,7 @@ _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
 
 def _resolve_strategy_key(decision) -> str:
     strategy_key = str(getattr(decision, "strategy_key", "") or "").strip()
-    return strategy_key if strategy_key in CANONICAL_STRATEGY_KEYS else ""
+    return strategy_key if strategy_key in _canonical_strategy_keys() else ""
 
 
 def _discovery_mode_value(mode) -> str:
@@ -89,7 +112,7 @@ def _discovery_mode_value(mode) -> str:
 
 def _strategy_phase_rejection_reason(strategy_key: str, mode) -> str | None:
     mode_value = _discovery_mode_value(mode)
-    allowed = STRATEGY_KEYS_BY_DISCOVERY_MODE.get(mode_value)
+    allowed = _strategy_keys_by_discovery_mode().get(mode_value)
     if allowed is None:
         return f"strategy_phase_unknown_mode:{mode_value or 'unknown'}"
     if strategy_key not in allowed:
@@ -1505,16 +1528,19 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     _now_utc,
                 )
                 # P4 site 1 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
-                # Flag OFF (default): byte-equal legacy
-                # ``hours_to_settlement <= 6.0`` (anchored on city-local
-                # end-of-target_date). Flag ON: respect the position's
-                # market-phase axis A — DAY0_WINDOW transition fires when
-                # the market is in MarketPhase.SETTLEMENT_DAY (city-local
-                # 00:00 of target_date through Polymarket endDate 12:00
-                # UTC). The wider window matches operator framing
-                # "all 24 hours before midnight of the local market" and
-                # closes the legacy bug where west-of-UTC cities fired
-                # DAY0_WINDOW AFTER Polymarket trading already closed.
+                # Flag ON (default post-A6 2026-05-04): respect the
+                # position's market-phase axis A — DAY0_WINDOW transition
+                # fires when the market is in MarketPhase.SETTLEMENT_DAY
+                # (city-local 00:00 of target_date through Polymarket
+                # endDate 12:00 UTC). The wider window matches operator
+                # framing "all 24 hours before midnight of the local
+                # market" and closes the legacy bug where west-of-UTC
+                # cities fired DAY0_WINDOW AFTER Polymarket trading
+                # already closed.
+                # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal
+                # legacy ``hours_to_settlement <= 6.0`` anchored on
+                # city-local end-of-target_date — kept as escape hatch
+                # for legacy fixtures and rollback.
                 from src.engine.dispatch import should_enter_day0_window
                 _enter_day0 = should_enter_day0_window(
                     target_date_str=pos.target_date,
@@ -2022,13 +2048,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
         # P4 site 2 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
-        # Flag OFF (default): byte-equal legacy filter on hours_to_resolution
-        # (anchored at UTC endDate − now via market_scanner._parse_event).
-        # Flag ON: replace with phase-axis SETTLEMENT_DAY membership
-        # (anchored at city-local 00:00 of target_date for entry, 12:00 UTC
-        # of target_date for exit per F1). Closes the D-A drift where
-        # west-of-UTC cities had their DAY0_CAPTURE candidate window open
-        # 18+h AFTER Polymarket trading already closed.
+        # Flag ON (default post-A6 2026-05-04): replace legacy filter
+        # with phase-axis SETTLEMENT_DAY membership (anchored at
+        # city-local 00:00 of target_date for entry, 12:00 UTC of
+        # target_date for exit per F1). Closes the D-A drift where
+        # west-of-UTC cities had their DAY0_CAPTURE candidate window
+        # open 18+h AFTER Polymarket trading already closed.
+        # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal legacy
+        # filter on hours_to_resolution (anchored at UTC endDate − now
+        # via market_scanner._parse_event) — escape hatch for rollback.
         from src.engine.dispatch import (
             filter_market_to_settlement_day,
             market_phase_dispatch_enabled,
@@ -2129,22 +2157,51 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # cycle's frozen decision_time BEFORE the obs gate so P3's
         # phase-based dispatch can read it. Errors are fail-soft: log +
         # leave market_phase=None so dispatch falls back to legacy mode.
-        market_phase = None
-        try:
-            from src.strategy.market_phase import market_phase_from_market_dict
+        #
+        # A5 (PLAN.md §A5): build the full MarketPhaseEvidence record
+        # alongside the bare phase. The evidence carries phase_source
+        # (verified_gamma / fallback_f1 / unknown) + the timestamps used,
+        # so attribution writers can persist the determination provenance
+        # and the A6 Kelly resolver can apply a 0.7× haircut on
+        # fallback_f1. ``market_phase`` (bare enum) is kept for backward
+        # compat with existing dispatch callsites; the evidence object is
+        # the canonical post-A5 source.
+        from src.strategy.market_phase_evidence import (
+            from_market_dict as _build_market_phase_evidence,
+        )
+        from src.state.uma_resolution_listener import lookup_resolution as _lookup_uma
 
-            market_phase = market_phase_from_market_dict(
-                market=market,
-                city_timezone=city.timezone,
-                target_date_str=market["target_date"],
-                decision_time_utc=decision_time,
+        # If a UMA resolution has been observed for this market, propagate
+        # its tx hash so the evidence reports phase_source=onchain_resolved
+        # (strictly stronger than heuristic POST_TRADING).
+        uma_tx_hash = None
+        try:
+            condition_id = market.get("condition_id") or market.get("conditionId")
+            if condition_id and conn is not None:
+                resolved = _lookup_uma(conn, str(condition_id))
+                if resolved is not None:
+                    uma_tx_hash = resolved.tx_hash
+        except Exception as exc:  # noqa: BLE001 - UMA lookup is observability-only
+            deps.logger.warning(
+                "UMA resolution lookup failed for %s: %s",
+                market.get("condition_id") or market.get("conditionId"),
+                exc,
             )
-        except Exception as exc:
+
+        market_phase_evidence = _build_market_phase_evidence(
+            market=market,
+            city_timezone=city.timezone,
+            target_date_str=market.get("target_date", ""),
+            decision_time_utc=decision_time,
+            uma_resolved_source=uma_tx_hash,
+        )
+        market_phase = market_phase_evidence.phase
+        if market_phase_evidence.phase_source == "unknown":
             deps.logger.warning(
                 "MarketPhase tag failed for %s/%s: %s",
                 city.name,
                 market.get("target_date"),
-                exc,
+                market_phase_evidence.failure_reason,
             )
 
         # P3 site 4 of 4 — observation-fetch gate (PLAN_v3 §6.P3).
@@ -2225,6 +2282,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             observation=obs,
             discovery_mode=mode.value,
             market_phase=market_phase,
+            # PR #56 review (Copilot + Codex P1, 2026-05-04): forward the
+            # MarketPhaseEvidence provenance so evaluator's A6 phase-aware
+            # Kelly resolver applies the right haircut (fallback_f1=0.7×).
+            # Pre-fix evaluator hardcoded "verified_gamma" → systematic
+            # over-sizing on Gamma payloads missing endDate.
+            market_phase_source=market_phase_evidence.phase_source,
         )
         summary["candidates"] += 1
 

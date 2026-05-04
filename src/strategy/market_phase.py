@@ -24,7 +24,10 @@ Boundary anchors (locked from PLAN_v3 §1.E1+§2):
   end-of-target_date − 24h (UTC instant)
 - ``SETTLEMENT_DAY → POST_TRADING`` at ``polymarket_end_utc``
   (uniformly 12:00 UTC of ``target_date`` per F1 — verified across 13
-  cities via Gamma API; see INVESTIGATION_EXTERNAL Q1)
+  cities via Gamma API; INVESTIGATION_EXTERNAL Q3 documents 7 cities,
+  CRITIC_REVIEW_R2 spot-checks 6 more = 13 total. See
+  task_2026-05-04_strategy_redesign_day0_endgame/CRITIC_REVIEW_R2.md
+  for the full city list.)
 - ``POST_TRADING → RESOLVED`` at UMA proposePrice settlement (variable;
   caller passes ``uma_resolved=True`` once observed on-chain)
 
@@ -199,9 +202,11 @@ def _parse_utc(value: str) -> datetime:
 
 def _f1_fallback_end_utc(target_local_date: date) -> datetime:
     """F1 invariant: Polymarket weather endDate is uniformly 12:00 UTC of
-    target_date (verified across 13 cities via Gamma API; see
-    INVESTIGATION_EXTERNAL Q1). When the market dict does not carry an
-    explicit ``market_end_at``, fall back to this derived anchor.
+    target_date (verified across 13 cities via Gamma API:
+    INVESTIGATION_EXTERNAL Q3 documents 7 + CRITIC_REVIEW_R2 spot-checks
+    6 = 13 total; see CRITIC_REVIEW_R2.md). When the market dict does
+    not carry an explicit ``market_end_at``, fall back to this derived
+    anchor.
     """
     return datetime.combine(target_local_date, time(12, 0, 0), tzinfo=timezone.utc)
 

@@ -64,20 +64,182 @@ def kelly_size(
     return f_star * kelly_mult * bankroll
 
 
-STRATEGY_KELLY_MULTIPLIERS = {
-    "settlement_capture": 1.0,
-    "center_buy": 1.0,
-    "opening_inertia": 0.5,
-    "shoulder_sell": 0.0,
-    "shoulder_buy": 0.0,
-    "center_sell": 0.0,
-}
-
-
 def strategy_kelly_multiplier(strategy_key: str | None) -> float:
-    """Return the live sizing multiplier for a strategy key, fail-closed."""
+    """Return the live sizing multiplier for a strategy key, fail-closed.
 
-    return STRATEGY_KELLY_MULTIPLIERS.get(str(strategy_key or "").strip(), 0.0)
+    Pre-A4: read from a hardcoded ``STRATEGY_KELLY_MULTIPLIERS`` dict
+    defined in this file. Post-A4: read through
+    ``src.strategy.strategy_profile.kelly_default_multiplier`` which
+    delegates to ``architecture/strategy_profile_registry.yaml`` (single
+    source of truth — see PLAN.md §A4 + Bug review §D). Fail-closed
+    behavior unchanged: unknown / empty key returns 0.0.
+
+    Post-A6: ``phase_aware_kelly_multiplier`` is the canonical entry-time
+    resolver (PLAN.md §A6). This function remains for back-compat with
+    callers that don't yet have phase / oracle / decision_time in scope
+    (e.g., dynamic_kelly_mult cascade-floor checks). New sites should
+    prefer ``phase_aware_kelly_multiplier``.
+    """
+    from src.strategy.strategy_profile import kelly_default_multiplier as _kdm
+    return _kdm(str(strategy_key or "").strip())
+
+
+def observed_target_day_fraction(
+    *,
+    decision_time_utc,
+    target_local_date,
+    city_timezone: str,
+) -> float:
+    """Fraction of the city-local target day that has elapsed at
+    ``decision_time_utc``, clamped to [0.0, 1.0].
+
+    PLAN.md §A6 layer of the phase-aware Kelly resolver. The
+    settlement_capture strategy's edge depends on how much of the
+    target day has been observed: at city-local 00:00 of target_date
+    the fraction is 0 (the day hasn't started — pure forecast play);
+    at city-local 24:00 of target_date the fraction is 1 (the day
+    is fully observed — peak alpha). The resolver scales Kelly
+    proportionally so the bot doesn't bet at full size against an
+    incomplete observation window.
+
+    East/west asymmetry (per PLAN_v3 §3 + Bug review §6.7): at a
+    fixed UTC instant, eastward-of-UTC cities (Wellington) are
+    further into their local day than westward-of-UTC cities (LA).
+    The fraction captures this asymmetry directly — it does NOT need
+    a separate east/west tag.
+
+    Implementation: compute target_local_start (city-local 00:00 of
+    target_local_date) and target_local_end (city-local 00:00 of the
+    next day). Convert decision_time_utc to the city's local clock
+    via astimezone, then compute (decision_local - target_local_start)
+    / (target_local_end - target_local_start) and clamp.
+
+    Note on DST: target_local_end - target_local_start in wall-clock
+    is 23h, 24h, or 25h depending on whether the city had a DST
+    transition during target_date. This is the CORRECT denominator
+    for computing "fraction of the local day elapsed" — the local
+    day's actual length, not a fixed 24h window. Anchoring on a fixed
+    24h would introduce a ±1h fraction skew on DST days.
+    """
+    from datetime import datetime, time, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    if decision_time_utc.tzinfo is None:
+        raise ValueError(
+            f"decision_time_utc must be tz-aware; got naive {decision_time_utc!r}"
+        )
+
+    tz = ZoneInfo(city_timezone)
+    target_local_start = datetime.combine(target_local_date, time(0, 0, 0), tzinfo=tz)
+    target_local_end = datetime.combine(
+        target_local_date + timedelta(days=1), time(0, 0, 0), tzinfo=tz
+    )
+
+    # Convert all three endpoints to UTC before subtracting. Python's
+    # ZoneInfo-aware datetime arithmetic returns the WALL-CLOCK
+    # difference, NOT the actual elapsed UTC duration: a tz-aware
+    # 23h-DST-day from 00:00 to 24:00 yields a 24h timedelta, which
+    # would skew the fraction by ~4% on DST transition days. Going
+    # through UTC fixes this.
+    start_utc = target_local_start.astimezone(timezone.utc)
+    end_utc = target_local_end.astimezone(timezone.utc)
+    decision_utc = decision_time_utc.astimezone(timezone.utc)
+
+    elapsed = (decision_utc - start_utc).total_seconds()
+    total = (end_utc - start_utc).total_seconds()
+    if total <= 0:
+        return 0.0
+    fraction = elapsed / total
+    if fraction < 0.0:
+        return 0.0
+    if fraction > 1.0:
+        return 1.0
+    return fraction
+
+
+# A6 phase-aware Kelly resolver factor floors / overrides.
+#
+# Why each floor exists:
+#
+# - ``OBSERVED_FRACTION_MIN = 0.3``: prevents Wellington-style cities at
+#   12:00 UTC from getting Kelly=0 just because their local target_day
+#   has barely started. Operator-tunable; below 0.3 the day-start case
+#   becomes too punitive on early-Day0 settlement_capture entries.
+# - ``FALLBACK_F1_HAIRCUT = 0.7``: F1 anchor is verified across 13
+#   cities (INVESTIGATION_EXTERNAL Q3 = 7 + CRITIC_REVIEW_R2 spot-check
+#   = 6) but not infallible — a Polymarket schema change could move
+#   endDate. The 0.7× haircut applies until the fallback is verified
+#   for the specific market in question (i.e., explicit market_end_at
+#   parsed cleanly = phase_source==verified_gamma).
+OBSERVED_FRACTION_MIN: float = 0.3
+FALLBACK_F1_HAIRCUT: float = 0.7
+
+
+def phase_aware_kelly_multiplier(
+    *,
+    strategy_key: str,
+    market_phase: str | None,
+    city,
+    temperature_metric: str,
+    decision_time_utc,
+    target_local_date,
+    phase_source: str | None,
+) -> float:
+    """Resolve the live Kelly multiplier from four authority sources.
+
+    Resolver formula (PLAN.md §A6, written to
+    ``decision_chain.kelly_multiplier_used`` at open-time)::
+
+        m_strategy_phase    = registry.get(key).kelly_for_phase(market_phase)
+        m_oracle            = oracle_penalty.get_oracle_info(city, metric).penalty_multiplier
+        m_observed_fraction = max(0.3, observed_target_day_fraction(...))
+        m_phase_source      = 0.7 if phase_source == "fallback_f1" else 1.0
+        kelly_multiplier    = product of the four
+
+    Migration policy (PLAN_v3 §6.P5 OD7): existing positions retain
+    whatever multiplier was on ``decision_chain.kelly_multiplier_used``
+    at THEIR open-time (already persisted). This function is called
+    only at NEW open-time for new candidates. No retroactive recompute.
+
+    Failure modes:
+    - Unknown ``strategy_key``: registry returns 0.0 (fail-closed).
+    - ``market_phase`` is None: ``kelly_for_phase(None)`` returns the
+      strategy's default multiplier — preserves the pre-A5 fail-soft
+      Kelly path. Strict callers should reject phase=None at the
+      dispatch layer (see ``PhaseAuthorityViolation``) before reaching
+      this resolver.
+    - Oracle MISSING / METRIC_UNSUPPORTED: penalty_multiplier=0.5 / 0.0
+      respectively (PLAN.md §A3 multiplier table).
+    """
+    from src.strategy.oracle_penalty import get_oracle_info
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(strategy_key)
+    if profile is None:
+        return 0.0
+    m_strategy_phase = profile.kelly_for_phase(market_phase)
+    if m_strategy_phase <= 0.0:
+        # Phase-blocked strategy — short-circuit so we don't spend time
+        # on oracle / fraction lookups when the answer is already 0.
+        return 0.0
+
+    oracle_info = get_oracle_info(getattr(city, "name", ""), temperature_metric)
+    m_oracle = oracle_info.penalty_multiplier
+    if m_oracle <= 0.0:
+        return 0.0
+
+    m_observed_fraction = max(
+        OBSERVED_FRACTION_MIN,
+        observed_target_day_fraction(
+            decision_time_utc=decision_time_utc,
+            target_local_date=target_local_date,
+            city_timezone=getattr(city, "timezone", ""),
+        ),
+    )
+
+    m_phase_source = FALLBACK_F1_HAIRCUT if phase_source == "fallback_f1" else 1.0
+
+    return m_strategy_phase * m_oracle * m_observed_fraction * m_phase_source
 
 
 # Per-city Kelly multiplier (asymmetric-loss policy layer, 2026-05-03).
@@ -227,7 +389,8 @@ def dynamic_kelly_mult(
     # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
     # Note: This check applies to the upstream Kelly computation before per-strategy
     # gating. The final multiplier step (below) can legitimately produce 0.0 to
-    # disable shadow, dormant, or unknown strategies via STRATEGY_KELLY_MULTIPLIERS.
+    # disable shadow, dormant, or unknown strategies via the registry's
+    # kelly_default_multiplier (was STRATEGY_KELLY_MULTIPLIERS pre-A4).
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
             f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "

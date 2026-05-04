@@ -97,43 +97,12 @@ _EVALUATOR_PATH = Path(__file__).resolve().parents[1] / "src" / "engine" / "eval
 _EVALUATOR_SRC = _EVALUATOR_PATH.read_text(encoding="utf-8")
 
 
-def test_evaluator_imports_evaluate_calibration_transfer():
-    """The new Phase 2.5 transfer evaluator must be referenced in evaluator.py."""
-    assert (
-        "evaluate_calibration_transfer" in _EVALUATOR_SRC
-    ), "BLOCKER 6 regression: evaluate_calibration_transfer no longer referenced"
-
-
-def test_evaluator_calls_evaluate_calibration_transfer_in_gate():
-    """The transfer call site must be inside _evaluate_market_v2's flow.
-
-    Look for the call pattern preceded by the OpenData domain check — that
-    is the gate path BLOCKER 6 added. A bare import that's never invoked
-    would leave the call dead just like the original BLOCKER 6 state.
-    """
-    # The actual gate uses a call expression — assert the call exists, not
-    # just an import line.
-    call_pattern = re.compile(
-        r"evaluate_calibration_transfer\s*\(\s*conn\b",
-        re.MULTILINE,
-    )
-    assert call_pattern.search(_EVALUATOR_SRC) is not None, (
-        "BLOCKER 6 regression: evaluate_calibration_transfer is not actually "
-        "called with conn from evaluator.py. The Phase 2.5 evidence gate is dead code."
-    )
-
-
-def test_evaluator_rejects_with_calibration_transfer_shadow_only_stage():
-    """The rejection_stage tag must include the new SHADOW_ONLY label.
-
-    Phase 2.5's whole point is making 'no evidence' → operator-visible
-    SHADOW_ONLY rejection (instead of silent calibration). A regression
-    that swapped to a generic stage (like SIGNAL_QUALITY) would lose the
-    operational signal even if the gate fires.
-    """
-    assert (
-        "CALIBRATION_TRANSFER_SHADOW_ONLY" in _EVALUATOR_SRC
-    ), "Phase 2.5 SHADOW_ONLY rejection stage label missing from evaluator.py"
+# Phase 2.5 transfer-gate tests removed during PR #56 merge: the
+# evaluate_calibration_transfer + CALIBRATION_TRANSFER_SHADOW_ONLY/BLOCKED
+# rejection stack was replaced by PR #56's MarketPhaseEvidence +
+# oracle_evidence_status.  The evidence-based gate now lives in those
+# modules; tests for it belong with PR #56's
+# tests/test_market_phase_evidence.py + tests/test_oracle_evidence_status.py.
 
 
 def test_evaluator_threads_temperature_metric_to_fetch_ensemble():

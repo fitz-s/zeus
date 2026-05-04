@@ -1,0 +1,236 @@
+# Strategy Profile Registry
+#
+# Created: 2026-05-04
+# Last reused/audited: 2026-05-04
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4
+#                  + Bug review §D (KNOWN_STRATEGIES / STRATEGY_KELLY_MULTIPLIERS scattered)
+#                  + Bug review §E (LIVE_SAFE_STRATEGIES vs _LIVE_ALLOWED_STRATEGIES divergence).
+#
+# This file is the SINGLE source of truth for per-strategy authority. The 5
+# hardcoded sites it consolidates:
+#
+#   src/strategy/kelly.py:67              STRATEGY_KELLY_MULTIPLIERS
+#   src/control/control_plane.py:49       LIVE_SAFE_STRATEGIES (boot allowlist)
+#   src/control/control_plane.py:321      _LIVE_ALLOWED_STRATEGIES (runtime allowlist)
+#   src/engine/cycle_runner.py:77         KNOWN_STRATEGIES (buildable universe)
+#   src/engine/evaluator.py:1416          is_day0_mode (cycle-axis EntryMethod)
+#
+# After PR §A4: every authority above reads strategy_profile.get(key); fail-closed
+# on unknown key. The shoulder_sell divergence (in LIVE_SAFE but not _LIVE_ALLOWED)
+# is resolved by the live_status field — boot+runtime gates derive uniformly.
+#
+# Schema
+# ------
+# Each <strategy_key> entry has the following fields. Schema is enforced by
+# src/strategy/strategy_profile.py at load time; unrecognized fields raise
+# (catches typos before they silently mute a constraint).
+#
+#   thesis: <text>                         Why this strategy generates alpha. Doc-only.
+#   live_status: live | shadow | blocked | deprecated
+#       live       — boot-OK + runtime-OK (entries placed)
+#       shadow     — boot-OK + runtime-blocked (decisions logged for future promotion)
+#       blocked    — boot-rejected + runtime-blocked (cannot run at all)
+#       deprecated — synonym for blocked, with rationale; kept for grep history
+#   allowed_market_phases: [pre_settlement_day, settlement_day, ...]
+#       The market phases (per src/strategy/market_phase.py) where entries are
+#       semantically valid. Empty = no phase allowed (always blocked).
+#   allowed_discovery_modes: [opening_hunt, update_reaction, day0_capture]
+#       Cycle-axis modes the strategy fires under. Pre-PR-#53 this was the
+#       primary dispatch axis; post-#53 it's gated by allowed_market_phases
+#       under flag ON.
+#   cycle_axis_dispatch_mode: <single_mode> | null
+#       The SINGLE discovery_mode under which legacy cycle-axis dispatch
+#       (evaluator clauses 1-4 ordered short-circuit) routes this strategy.
+#       Differs from allowed_discovery_modes: e.g., center_buy nominally
+#       supports [opening_hunt, update_reaction] but the legacy dispatch
+#       short-circuit puts it ONLY in update_reaction (clauses 1-2 fire
+#       first for opening_hunt → opening_inertia). cycle_runtime derives
+#       its STRATEGY_KEYS_BY_DISCOVERY_MODE inverse map from this field.
+#       null for blocked strategies that never dispatch under cycle-axis.
+#       Crucial for H2 critic R6 finding (no hardcoded inverse map).
+#   allowed_directions: [buy_yes | buy_no]
+#       Direction filter; rejects opposite-direction edges that classify into
+#       this strategy via fallback rules.
+#   allowed_bin_topology: [point | finite_range | open_shoulder]
+#       Bin topology gate. shoulder_sell only fires on open_shoulder; center_buy
+#       only on finite_range etc.
+#   metric_support:
+#     high: live | shadow | blocked
+#     low:  live | shadow | blocked
+#       Per-temperature-metric support. LOW is currently METRIC_UNSUPPORTED at
+#       the oracle layer (PLAN.md §A3 D-3); strategies that nominally support
+#       LOW still respect the oracle gate.
+#   kelly_default_multiplier: 0.0 to 1.0
+#       The pre-A6 STRATEGY_KELLY_MULTIPLIERS replacement. Sized via
+#       kelly.strategy_kelly_multiplier(key). A6 layers phase overrides on top.
+#   kelly_phase_overrides:
+#     <market_phase>: 0.0 to 1.0
+#       Phase-aware Kelly multipliers (PLAN.md §A6). Resolver looks up
+#       overrides[market_phase] first, falling back to kelly_default_multiplier.
+#       Phase keys must match src/strategy/market_phase.py::MarketPhase enum
+#       values exactly (lowercase enum value).
+#   min_shadow_decisions: 0+
+#       Promotion gate: shadow→live requires this many shadow decisions logged.
+#       Operator-enforced, not auto-applied here.
+#   min_settled_decisions: 0+
+#       Promotion gate: shadow→live requires this many SETTLED shadow decisions.
+#   promotion_evidence_ref: null | "<doc path>"
+#       Path to the operator-blessed evidence packet that justified live status.
+#       null until the strategy is promoted out of shadow.
+#
+# Initial values
+# --------------
+# Each strategy below mirrors the pre-A4 hardcoded behavior verbatim.
+# - settlement_capture, center_buy, opening_inertia → live (in _LIVE_ALLOWED)
+# - shoulder_sell → shadow (was in LIVE_SAFE only, blocked at runtime — exactly
+#                            the divergence Bug review §E flagged. Resolved here
+#                            by setting live_status=shadow, which derives both
+#                            gates correctly.)
+# - shoulder_buy, center_sell → blocked (not in either allowlist pre-A4)
+#
+# Kelly defaults below mirror STRATEGY_KELLY_MULTIPLIERS. A6 introduces the
+# phase override layer; until A6 ships those keys are advisory.
+
+settlement_capture:
+  thesis: >
+    Day-0 settlement capture: enter the bin closest to the observed
+    same-day temperature reading once enough hours have passed for
+    a high-confidence forecast→observation comparison. Edge source
+    is the observation itself, not the model. Alpha decays slowly
+    (observation-speed, not market-competition-speed).
+  live_status: live
+  allowed_market_phases: [settlement_day]
+  allowed_discovery_modes: [day0_capture]
+  cycle_axis_dispatch_mode: day0_capture
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [point, finite_range]
+  metric_support:
+    high: live
+    low:  blocked   # LOW oracle bridge not yet shipped (PLAN.md §A3 D-3)
+  kelly_default_multiplier: 1.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.5
+    settlement_day: 1.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/reference/zeus_domain_model.md
+
+center_buy:
+  thesis: >
+    Center-bin buy on forecast model accuracy vs market price.
+    Edge source is calibrated probability beating the market mid;
+    alpha decays fast as competing bots arbitrage the same signal.
+  live_status: live
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: update_reaction
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: live
+    low:  blocked
+  kelly_default_multiplier: 1.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 1.0
+    settlement_day: 0.5         # observation contamination penalty
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/reference/zeus_domain_model.md
+
+opening_inertia:
+  thesis: >
+    New-market mispricing on opening tick. Edge source is the time
+    delta between market open and bot arbitrage. Alpha is the fastest
+    of all four strategies — edge halves within ~24h of open.
+  live_status: live
+  allowed_market_phases: [pre_settlement_day]
+  allowed_discovery_modes: [opening_hunt]
+  cycle_axis_dispatch_mode: opening_hunt
+  allowed_directions: [buy_yes, buy_no]
+  allowed_bin_topology: [point, finite_range, open_shoulder]
+  metric_support:
+    high: live
+    low:  blocked
+  kelly_default_multiplier: 0.5
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.5     # half Kelly for opening-tick inertia
+    settlement_day: 0.0          # alpha decayed by then
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/reference/zeus_domain_model.md
+
+shoulder_sell:
+  thesis: >
+    Sell open-shoulder bins exhibiting retail cognitive bias. Edge
+    source is the bias premium; decays as the market matures and
+    competition narrows. Currently SHADOW until promotion evidence
+    accumulates — pre-A4 this was the LIVE_SAFE / _LIVE_ALLOWED
+    divergence flagged by Bug review §E.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: update_reaction
+  allowed_directions: [buy_no]
+  allowed_bin_topology: [open_shoulder]
+  metric_support:
+    high: shadow
+    low:  blocked
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 30
+  promotion_evidence_ref: null   # promote when shadow evidence is mature
+
+shoulder_buy:
+  thesis: >
+    Buy open-shoulder bins post-bias-correction. Theoretically
+    symmetric to shoulder_sell but unproven; dormant pending
+    research. Pre-A4 not in any allowlist (BLOCKED both gates).
+  live_status: blocked
+  allowed_market_phases: []
+  allowed_discovery_modes: []
+  cycle_axis_dispatch_mode: null
+  allowed_directions: []
+  allowed_bin_topology: [open_shoulder]
+  metric_support:
+    high: blocked
+    low:  blocked
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides: {}
+  min_shadow_decisions: 100
+  min_settled_decisions: 30
+  promotion_evidence_ref: null
+
+center_sell:
+  thesis: >
+    Sell center bins on overconfidence in market mid. Theoretically
+    symmetric to center_buy but unproven; dormant pending research.
+    Pre-A4 not in any allowlist (BLOCKED both gates).
+  live_status: blocked
+  allowed_market_phases: []
+  allowed_discovery_modes: []
+  cycle_axis_dispatch_mode: null
+  allowed_directions: []
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: blocked
+    low:  blocked
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides: {}
+  min_shadow_decisions: 100
+  min_settled_decisions: 30
+  promotion_evidence_ref: null

@@ -1,15 +1,16 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-03
-# Authority basis: Operator directive; skip-thin-days-for-oracle-bridge
+# Last reused/audited: 2026-05-04
+# Authority basis: Operator directive; skip-thin-days-for-oracle-bridge + docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (path centralization migration; tests now redirect storage via ZEUS_STORAGE_ROOT instead of @patch on SNAPSHOT_DIR/ORACLE_FILE module constants).
 """Tests for oracle bridge coverage filtering."""
 
 import json
 import sqlite3
+from unittest.mock import patch
+
 import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 from scripts.bridge_oracle_to_calibration import bridge
+
 
 @pytest.fixture
 def mock_db(tmp_path):
@@ -30,36 +31,31 @@ def mock_db(tmp_path):
     conn.commit()
     return db_path, conn
 
-@pytest.fixture
-def mock_snapshots(tmp_path):
-    snap_dir = tmp_path / "raw" / "oracle_shadow_snapshots"
-    snap_dir.mkdir(parents=True)
-    city_dir = snap_dir / "Chicago"
-    city_dir.mkdir()
 
+@pytest.fixture
+def storage_root_with_snapshot(monkeypatch, tmp_path):
+    """Redirect storage to tmp_path and place a synthetic snapshot at the
+    canonical layout that the bridge will discover (no mocks needed)."""
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+    snap_dir = tmp_path / "raw" / "oracle_shadow_snapshots"
+    city_dir = snap_dir / "Chicago"
+    city_dir.mkdir(parents=True)
     snap = {
         "city": "Chicago",
         "target_date": "2026-05-01",
         "daily_high_f": 75.0,
-        "source": "wu_icao_history"
+        "source": "wu_icao_history",
     }
-    with open(city_dir / "2026-05-01.json", "w") as f:
-        json.dump(snap, f)
+    (city_dir / "2026-05-01.json").write_text(json.dumps(snap))
+    return tmp_path
 
-    return snap_dir
 
 @patch("scripts.bridge_oracle_to_calibration.DB_PATH")
-@patch("scripts.bridge_oracle_to_calibration.SNAPSHOT_DIR")
-@patch("scripts.bridge_oracle_to_calibration.ORACLE_FILE")
-def test_bridge_coverage_filtering(mock_oracle_file, mock_snap_dir, mock_db_path, mock_db, mock_snapshots, tmp_path):
+def test_bridge_coverage_filtering(
+    mock_db_path, mock_db, storage_root_with_snapshot, tmp_path
+):
     db_path, conn = mock_db
     mock_db_path.__str__.return_value = str(db_path)
-    mock_snap_dir.exists.return_value = True
-    mock_snap_dir.iterdir.return_value = list(mock_snapshots.iterdir())
-    mock_snap_dir.__truediv__.side_effect = lambda x: mock_snapshots / x
-
-    mock_oracle_file.exists.return_value = False
-    mock_oracle_file.parent = tmp_path / "data"
 
     # 1. Setup settlement
     conn.execute("""

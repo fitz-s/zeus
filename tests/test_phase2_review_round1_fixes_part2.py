@@ -252,51 +252,9 @@ def test_calibrator_object_legacy_fallback_has_none_bucket_attrs():
     assert cal._bucket_data_version is None
 
 
-def test_evaluator_transfer_gate_uses_loaded_bucket_attrs():
-    """Structural assert: evaluator's transfer-gate construction must
-    branch on cal._bucket_* attrs, not hardcoded TIGGE.  Codex P1 #6
-    regression test.
-    """
-    # The reordered code: get_calibrator runs FIRST, then transfer gate
-    # reads cal._bucket_source_id (etc.).  Pin both signals.
-    assert "_bucket_source_id" in _EVALUATOR_SRC, (
-        "Codex P1 #6 regression: evaluator no longer reads cal._bucket_source_id"
-    )
-    # The cal call must come BEFORE the transfer gate.  Find the line numbers.
-    src_lines = _EVALUATOR_SRC.splitlines()
-    transfer_gate_idx = None
-    cal_load_idx = None
-    for idx, line in enumerate(src_lines):
-        if cal_load_idx is None and re.search(
-            r"cal,\s*cal_level\s*=\s*get_calibrator\(", line
-        ):
-            cal_load_idx = idx
-        if transfer_gate_idx is None and "evaluate_calibration_transfer(" in line:
-            transfer_gate_idx = idx
-    assert cal_load_idx is not None, "evaluator must call get_calibrator"
-    assert transfer_gate_idx is not None, "evaluator must call evaluate_calibration_transfer"
-    assert cal_load_idx < transfer_gate_idx, (
-        f"Codex P1 #6 regression: get_calibrator (line {cal_load_idx+1}) must "
-        f"precede evaluate_calibration_transfer (line {transfer_gate_idx+1}) "
-        f"so the gate sees the loaded bucket's actual identity"
-    )
-
-
-def test_evaluator_no_longer_hardcodes_tigge_calibrator_domain():
-    """Pre-fix the gate constructed:
-        calibrator_domain = ForecastCalibrationDomain(
-            source_id="tigge_mars", cycle_hour_utc="00", horizon_profile="full", ...)
-    unconditionally.  Post-fix that branch is reached ONLY in the legacy
-    fallback (else branch), guarded by `_bucket_sid` falsiness.  Pin the
-    structure so a regression that drops the guard re-introduces the
-    false-rejection bug.
-    """
-    # The hardcoded TIGGE domain construction must be inside an else / fallback.
-    # Look for a pattern: `if _bucket_sid` ... `else:` ... `tigge_mars`.
-    assert re.search(
-        r"if\s+_bucket_sid\s+and\s+_bucket_cyc",
-        _EVALUATOR_SRC,
-    ), (
-        "Codex P1 #6 regression: evaluator no longer guards the hardcoded "
-        "TIGGE domain construction behind a `_bucket_sid` check"
-    )
+# Codex P1 #6 transfer-gate ordering tests removed during PR #56 merge:
+# the Phase 2.5 calibration-transfer gate (and its hardcoded-TIGGE branch)
+# was replaced by PR #56's MarketPhaseEvidence + oracle_evidence_status
+# stack.  bucket_* attrs on the calibrator object remain useful for
+# downstream callers (test above pins the round-trip), but the gate that
+# read them is gone, so the ordering/structural asserts no longer apply.
