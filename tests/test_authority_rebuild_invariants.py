@@ -99,6 +99,8 @@ from src.strategy.oracle_estimator import (
 )
 from src.strategy.oracle_status import OracleStatus
 
+from tests._helpers.source_grep import find_forbidden_assignments
+
 
 @pytest.fixture(autouse=True)
 def _reset_module_state(monkeypatch, tmp_path):
@@ -541,26 +543,23 @@ def test_PR56_evaluator_reads_phase_source_from_candidate_not_hardcode():
 
     Source-grep antibody: the literal string "verified_gamma" must NOT
     appear as a hardcoded ``_phase_source`` assignment in evaluator.py.
-    Allowed: docstring/comment references; forbidden: assignment of
-    that literal to the resolver-input variable.
+    Allowed: docstring/comment references (the helper blanks
+    triple-quoted/comment text before grepping); forbidden: assignment
+    of that literal to the resolver-input variable.
     """
-    src = (
+    # Anchor with a leading negative-lookbehind on word chars so the
+    # antibody does NOT match larger identifiers like
+    # ``market_phase_source = "verified_gamma"`` (a different variable that
+    # legitimately propagates the phase_source value through the candidate
+    # pipeline). Codex review on PR #60 caught the suffix-substring drift.
+    matches = find_forbidden_assignments(
         Path(__file__).resolve().parent.parent
-        / "src" / "engine" / "evaluator.py"
-    ).read_text()
-    import re
-    # Match only assignment at start-of-line (with optional indent) —
-    # excludes docstring/comment cross-references that mention the
-    # historical hardcode for context (PR #56 fix commit body etc.).
-    forbidden = re.compile(
-        r'^\s+_phase_source\s*=\s*"verified_gamma"',
-        re.MULTILINE,
+        / "src" / "engine" / "evaluator.py",
+        r'(?<![A-Za-z0-9_])_phase_source\s*=\s*"verified_gamma"',
     )
-    matches = forbidden.findall(src)
     assert not matches, (
-        "evaluator.py hardcodes _phase_source=\"verified_gamma\" at "
-        "module-level/function-body — must read "
-        "candidate.market_phase_source instead. Found "
+        "evaluator.py hardcodes _phase_source=\"verified_gamma\" — must "
+        "read candidate.market_phase_source instead. Found "
         f"{len(matches)} occurrence(s). PR #56 review fix regressed."
     )
 
@@ -759,44 +758,22 @@ def test_H2_cycle_runtime_no_hardcoded_strategy_string_literals():
     most-likely-future-regression pattern: someone re-introduces
     ``frozenset({"settlement_capture", ...})`` because it's fast.
 
-    Search is targeted to TOP-LEVEL frozenset/set/dict literals — not
-    docstrings (which legitimately reference strategy names) — by
-    rejecting only patterns that look like Python set literals
-    containing a strategy name within the first 20 lines after the
-    initial imports.
+    Scope is module-level (``header_only=True``): function bodies that
+    define the canonical helper (e.g. ``_canonical_strategy_keys()``)
+    legitimately enumerate strategies and must NOT trip this antibody.
 
     Allowed: function bodies that reference live_safe_keys() etc.
     Allowed: docstrings/comments mentioning strategy names.
-    Forbidden: ``CANONICAL_STRATEGY_KEYS = {"settlement_capture", ...}``.
+    Forbidden: ``CANONICAL_STRATEGY_KEYS = {"settlement_capture", ...}``
+    at module scope.
     """
-    src = (
+    matches = find_forbidden_assignments(
         Path(__file__).resolve().parent.parent
-        / "src" / "engine" / "cycle_runtime.py"
-    ).read_text()
-
-    # Find the first def or class line — we only care about module-level
-    # data structures BEFORE the first function. (Function bodies may
-    # legitimately enumerate strategies for dispatch; module-level
-    # hardcodes are the regression we're catching.)
-    lines = src.splitlines()
-    cutoff = None
-    for i, line in enumerate(lines):
-        if line.startswith(("def ", "class ")):
-            cutoff = i
-            break
-    assert cutoff is not None, "cycle_runtime.py must define functions"
-    header = "\n".join(lines[:cutoff])
-
-    # Reject any hardcoded set/frozenset/list assignment that contains a
-    # known live strategy name. The migration replaced these with helper
-    # function calls.
-    import re
-    hardcode_pattern = re.compile(
+        / "src" / "engine" / "cycle_runtime.py",
         r"=\s*(?:frozenset\s*\(\s*\{|\{|\[)[^}\]]*"
         r'"(?:settlement_capture|center_buy|opening_inertia|shoulder_sell)"',
-        re.MULTILINE,
+        header_only=True,
     )
-    matches = hardcode_pattern.findall(header)
     assert not matches, (
         "Module-level hardcoded strategy set detected in cycle_runtime.py: "
         f"{matches!r}. Use strategy_profile.live_safe_keys() or "

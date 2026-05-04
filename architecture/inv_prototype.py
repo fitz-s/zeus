@@ -69,22 +69,27 @@ class INV:
     statement: str
     enforcement: dict[str, list[str]] = field(default_factory=dict)
     drift_findings: list[DriftFinding] = field(default_factory=list)
+    _lazy_cache: Optional[list[DriftFinding]] = field(default=None, repr=False, compare=False)
 
     def validate(self) -> list[DriftFinding]:
         """Run lazy validation (test+schema). Returns NEW drift findings.
 
         Pure: must NOT mutate self.drift_findings. Repeated invocation must
-        return the same list (idempotent). Callers that want the union of
-        eager + lazy findings should explicitly concatenate, as
-        all_drift_findings does. Prior implementation (before ultrareview-25
-        F5/F10) appended to self.drift_findings on each call, causing
-        all_drift_findings() to double-count lazy findings on second invocation.
+        return the same list (idempotent) AND not re-run the underlying
+        validators (cached at first call). Prior implementation (before
+        ultrareview-25 F5/F10) appended to self.drift_findings on each call,
+        causing all_drift_findings() to double-count lazy findings on
+        second invocation. The cache also avoids re-reading files on every
+        validate() call when many INVs share enforcement targets.
         """
+        if self._lazy_cache is not None:
+            return self._lazy_cache
         new: list[DriftFinding] = []
         for test_ref in self.enforcement.get("test", []):
             new.extend(_validate_test_reference(self.id, test_ref))
         for schema_ref in self.enforcement.get("schema", []):
             new.extend(_validate_schema_column_reference(self.id, schema_ref))
+        self._lazy_cache = new
         return new
 
 
@@ -124,26 +129,87 @@ def _validate_negative_constraint(inv_id: str, nc_id: str) -> list[DriftFinding]
 # --- Lazy validators (run via validate()) ----------------------------------
 
 def _validate_test_reference(inv_id: str, test_ref: str) -> list[DriftFinding]:
-    """Verify tests/test_x.py::test_y resolves to a real def."""
+    """Verify tests/test_x.py::test_y or tests/test_x.py::TestClass::test_y resolves.
+
+    Resolution rules (review-crash antibodies — see test_inv_prototype.py):
+      - 2 parts (``file::test_name``): match a TOP-LEVEL ``def``/``async def``
+        at column 0. A class method (indented def) does NOT satisfy an
+        unqualified reference — caller must specify the class.
+      - 3 parts (``file::ClassName::test_name``): the named class must
+        exist in the file (else TEST_CLASS_NOT_FOUND), and the def must
+        appear inside that class's block (else TEST_NOT_FOUND). Both
+        ``def`` and ``async def`` count.
+    """
     if "::" not in test_ref:
         return _validate_path_exists(inv_id, "test", test_ref)
-    file_part, test_part = test_ref.split("::", 1)
+    parts = test_ref.split("::")
+    file_part = parts[0]
     file_path = REPO_ROOT / file_part
     if not file_path.exists():
         return [DriftFinding(inv_id, "test", test_ref, "FILE_MISSING",
                              f"test file {file_part!r} not found")]
     text = file_path.read_text()
-    leaf = test_part.split("::")[-1]   # strip TestClass:: prefix if present
-    if re.search(rf"^\s*def\s+{re.escape(leaf)}\b", text, re.MULTILINE):
+
+    if len(parts) == 2:
+        leaf = parts[1]
+        # Module-level def only — column 0, no leading whitespace.
+        if re.search(rf"^(?:async\s+)?def\s+{re.escape(leaf)}\b", text, re.MULTILINE):
+            return []
+        return [DriftFinding(inv_id, "test", test_ref, "TEST_NOT_FOUND",
+                             f"def {leaf!r} not in {file_part}")]
+
+    # 3+ parts: ``file::ClassName::test_name`` (deeper nesting unsupported).
+    class_name = parts[1]
+    leaf = parts[-1]
+    class_match = re.search(rf"^class\s+{re.escape(class_name)}\b", text, re.MULTILINE)
+    if not class_match:
+        return [DriftFinding(inv_id, "test", test_ref, "TEST_CLASS_NOT_FOUND",
+                             f"class {class_name!r} not in {file_part}")]
+    # Bound the class block: from class_match end up to the next module-level
+    # ``class`` or ``def`` (column 0) or EOF.
+    class_start = class_match.end()
+    next_top = re.search(r"^(?:class|def|async\s+def)\b", text[class_start:], re.MULTILINE)
+    class_end = class_start + next_top.start() if next_top else len(text)
+    class_body = text[class_start:class_end]
+    # Method def is indented inside the class body.
+    if re.search(rf"^\s+(?:async\s+)?def\s+{re.escape(leaf)}\b", class_body, re.MULTILINE):
         return []
     return [DriftFinding(inv_id, "test", test_ref, "TEST_NOT_FOUND",
-                         f"def {leaf!r} not in {file_part}")]
+                         f"def {leaf!r} not in class {class_name!r} of {file_part}")]
 
 
 def _validate_schema_column_reference(inv_id: str, schema_ref: str) -> list[DriftFinding]:
-    """Verify schema citation file exists. Column-level checks are out of scope
-    for the prototype (would require SQL parser)."""
-    return _validate_path_exists(inv_id, "schema", schema_ref)
+    """Verify schema citation names existing content (review-crash antibody).
+
+    Citation grammar: ``path::target`` where ``target`` is a dotted
+    identifier (``table.column`` / ``enum_name`` / ``view.column``).
+      - No ``::``: SCHEMA_TARGET_MISSING (file alone is not a citation —
+        the antibody pins that "file existence is not enough").
+      - File missing: FILE_MISSING.
+      - Each dot-separated piece of the target must appear in the file
+        as a whole word (else SCHEMA_TARGET_NOT_FOUND). This is a textual
+        check, not a SQL-parsed one — sufficient for antibody-grade
+        verification without depending on a SQL parser.
+    """
+    if "::" not in schema_ref:
+        if (REPO_ROOT / schema_ref).exists():
+            return [DriftFinding(inv_id, "schema", schema_ref, "SCHEMA_TARGET_MISSING",
+                                 f"schema citation {schema_ref!r} must specify a target "
+                                 f"via '::table.column' / '::enum_name'")]
+        return [DriftFinding(inv_id, "schema", schema_ref, "FILE_MISSING",
+                             f"schema file {schema_ref!r} not found")]
+    file_part, target = schema_ref.split("::", 1)
+    file_path = REPO_ROOT / file_part
+    if not file_path.exists():
+        return [DriftFinding(inv_id, "schema", schema_ref, "FILE_MISSING",
+                             f"schema file {file_part!r} not found")]
+    text = file_path.read_text()
+    missing = [piece for piece in target.split(".")
+               if not re.search(rf"\b{re.escape(piece)}\b", text)]
+    if missing:
+        return [DriftFinding(inv_id, "schema", schema_ref, "SCHEMA_TARGET_NOT_FOUND",
+                             f"schema target piece(s) {missing!r} not found in {file_part}")]
+    return []
 
 
 # --- The decorator ---------------------------------------------------------
@@ -163,11 +229,14 @@ def enforced_by(
     Usage:
         @enforced_by(
             statement="strategy_key is the sole governance key",
-            schema=["architecture/2026_04_02_architecture_kernel.sql"],
+            schema=["architecture/2026_04_02_architecture_kernel.sql::position_current.strategy_key"],
             test=["tests/test_architecture_contracts.py::test_strategy_key_manifest_is_frozen"],
         )
         class INV_04:
             pass
+
+    Schema citations require a ``::table.column`` (or ``::enum_name``)
+    target so file-existence-only doesn't pass review.
     """
     def _wrap(target):
         inv_id = target.__name__
@@ -201,23 +270,31 @@ def enforced_by(
 
 @enforced_by(
     statement="Settlement is not exit.",
-    schema=["architecture/2026_04_02_architecture_kernel.sql"],
+    schema=["architecture/2026_04_02_architecture_kernel.sql::position_events.event_type"],
     test=[
         "tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds",
         "tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_rejects_illegal_fold",
     ],
 )
 class INV_02:
-    """Mixed schema + tests (CITATION_REPAIR'd in BATCH D + SIDECAR-2)."""
+    """Mixed schema + tests (CITATION_REPAIR'd in BATCH D + SIDECAR-2).
+
+    Schema target: ``position_events.event_type`` is the CHECK-constrained
+    enum that distinguishes settlement from exit (the invariant statement).
+    """
 
 
 @enforced_by(
     statement="Lifecycle grammar is finite and authoritative.",
-    schema=["architecture/2026_04_02_architecture_kernel.sql"],
+    schema=["architecture/2026_04_02_architecture_kernel.sql::position_current.phase"],
     semgrep=["zeus-no-direct-phase-assignment"],
 )
 class INV_07:
-    """Schema + semgrep_rule_id (no tests cited, even though hidden tests exist)."""
+    """Schema + semgrep_rule_id (no tests cited, even though hidden tests exist).
+
+    Schema target: ``position_current.phase`` is the CHECK-constrained
+    enum carrying the finite lifecycle grammar.
+    """
 
 
 @enforced_by(

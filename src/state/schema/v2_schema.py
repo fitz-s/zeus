@@ -291,11 +291,28 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 training_allowed INTEGER NOT NULL DEFAULT 1
                     CHECK (training_allowed IN (0, 1)),
                 causality_status TEXT NOT NULL DEFAULT 'OK',
+                cycle TEXT NOT NULL DEFAULT '00',
+                source_id TEXT NOT NULL DEFAULT 'tigge_mars',
+                horizon_profile TEXT NOT NULL DEFAULT 'full',
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
                        forecast_available_at, bin_source, data_version)
             )
         """)
+        # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
+        # idempotent ALTER so legacy DBs migrated via
+        # scripts/migrate_phase2_cycle_stratification.py converge with fresh DBs
+        # built from this canonical schema. Defaults match the migration script.
+        for alter_sql in [
+            "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+            "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+            "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
                 ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
@@ -329,10 +346,26 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
                     CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
                 bucket_key TEXT,
+                cycle TEXT NOT NULL DEFAULT '00',
+                source_id TEXT NOT NULL DEFAULT 'tigge_mars',
+                horizon_profile TEXT NOT NULL DEFAULT 'full',
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active)
             )
         """)
+        # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
+        # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs_v2
+        # block above; defaults match scripts/migrate_phase2_cycle_stratification.py.
+        for alter_sql in [
+            "ALTER TABLE platt_models_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+            "ALTER TABLE platt_models_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+            "ALTER TABLE platt_models_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+        ]:
+            try:
+                conn.execute(alter_sql)
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_platt_models_v2_lookup
                 ON platt_models_v2(temperature_metric, cluster, season, data_version, input_space, is_active)

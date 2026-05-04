@@ -189,7 +189,7 @@ def test_stall_detected_propagates_to_exit_1(tmp_path: Path, capsys: pytest.Capt
     report = run_weekly(
         db_path, end_date=date(2026, 4, 28), window_days=7, n_windows=4,
     )
-    bucket_key = "high:StallCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:StallCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     rec = report["stall_verdicts"][bucket_key]
     # never_promoted + canonical pairs ready → pairs_ready_no_retrain fires
     assert rec["kind"] == "stall_detected"
@@ -240,7 +240,7 @@ def test_per_bucket_threshold_override_actually_overrides(tmp_path: Path):
     db_path = _make_temp_db(tmp_path)
     _seed_v2_model(db_path, metric_identity=HIGH_LOCALDAY_MAX, cluster="OverCity",
                     season="DJF", data_version="tigge_v3", A=1.5, n_samples=60)
-    bucket_key = "high:OverCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:OverCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     report = run_weekly(
         db_path, end_date=date(2026, 4, 28), window_days=7,
         overrides={bucket_key: {"pair_growth": 1.1, "pairs_ready": 7}},
@@ -300,7 +300,7 @@ def test_cross_module_orchestration_drift_detected_map(tmp_path: Path):
     _seed_calibration_pairs(db_path, cluster="OrchCity", season="DJF", n_pairs=50)
 
     report = run_weekly(db_path, end_date=date(2026, 4, 28), window_days=7, n_windows=4)
-    bucket_key = "high:OrchCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:OrchCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     # drift_detected_map present + entry for our bucket
     assert bucket_key in report["drift_detected_map"]
     drift_value = report["drift_detected_map"][bucket_key]

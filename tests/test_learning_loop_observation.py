@@ -238,7 +238,7 @@ def test_v2_legacy_dedup_v2_wins():
     src/calibration/manager.py L172-189 v2-then-legacy fallback model-load
     precedent — per LOW-CITATION-CALIBRATION-3-1 cite-discipline)."""
     conn = _make_conn()
-    # v2 model with model_key 'high:DupCity:DJF:tigge_v3:width_normalized_density'
+    # v2 model with model_key 'high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density'
     save_platt_model_v2(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="DupCity",
         season="DJF", data_version="tigge_v3",
@@ -253,14 +253,14 @@ def test_v2_legacy_dedup_v2_wins():
         INSERT INTO platt_models
         (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, fitted_at, is_active, input_space, authority)
-        VALUES ('high:DupCity:DJF:tigge_v3:width_normalized_density',
+        VALUES ('high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density',
                 99.0, 99.0, 99.0, ?, 999, '2026-04-29T01:00:00+00:00', 1,
                 'raw_probability', 'VERIFIED')
         """,
         (_json.dumps([[99, 99, 99]]),),
     )
     snapshot = compute_learning_loop_state_per_bucket(conn)
-    rec = snapshot["high:DupCity:DJF:tigge_v3:width_normalized_density"]
+    rec = snapshot["high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"]
     assert rec["source"] == "v2"  # v2 wins
     assert rec["active_model_n_samples"] == 60  # v2 value, not legacy 999
 
@@ -301,7 +301,7 @@ def test_per_bucket_retrain_attempts_in_window():
     snapshot = compute_learning_loop_state_per_bucket(
         conn, window_days=7, end_date="2026-04-29",
     )
-    bucket_key = "high:WinTestCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:WinTestCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     rec = snapshot[bucket_key]
     assert rec["n_retrain_attempts_in_window"] == 2  # 2 in-window for this bucket
     assert rec["n_retrain_passed_in_window"] == 1
@@ -329,7 +329,7 @@ def test_last_retrain_promoted_at_only_promoted_versions():
                         cluster="PromoTestCity", season="DJF", data_version="tigge_v3")
 
     snapshot = compute_learning_loop_state_per_bucket(conn)
-    bucket_key = "high:PromoTestCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:PromoTestCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     rec = snapshot[bucket_key]
     assert rec["last_retrain_attempted_at"] == "2026-04-29T01:00:00+00:00"  # most recent (FAIL)
     assert rec["last_retrain_promoted_at"] == "2026-04-20T01:00:00+00:00"  # most recent PASS only
@@ -352,7 +352,7 @@ def test_days_since_last_promotion_math():
     snapshot = compute_learning_loop_state_per_bucket(
         conn, window_days=14, end_date="2026-04-29",
     )
-    bucket_key = "high:DaysTestCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:DaysTestCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     rec = snapshot[bucket_key]
     # End-of-day 2026-04-29 vs start-of-day 2026-04-22 → 7 days (or 7 + ~24h max)
     assert rec["days_since_last_promotion"] in (7, 8)
@@ -375,7 +375,7 @@ def test_sample_quality_driven_by_canonical_pair_count():
         _insert_calibration_pair_raw(conn, cluster="SampleTestCity", season="DJF",
                                       decision_group_id=f"dg-{i}")
     snapshot = compute_learning_loop_state_per_bucket(conn)
-    bucket_key = "high:SampleTestCity:DJF:tigge_v3:width_normalized_density"
+    bucket_key = "high:SampleTestCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"
     rec = snapshot[bucket_key]
     assert rec["n_pairs_verified"] == 9
     assert rec["n_pairs_canonical"] == 9

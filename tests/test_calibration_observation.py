@@ -259,10 +259,13 @@ def test_v2_legacy_dedup_v2_wins():
     assert sources == ["legacy", "v2"]
     # Now simulate true dedup: insert raw legacy with bucket_key MATCHING the
     # v2 model_key string. v2-listed-first should win; legacy duplicate dropped.
-    _insert_legacy_raw(conn, bucket_key="high:TestCity:DJF:v1:raw_probability",
+    # Phase 2 (2026-05-04): v2 model_key now includes cycle/source_id/horizon_profile —
+    # for save_platt_model_v2 above we relied on defaults (00/tigge_mars/full).
+    _insert_legacy_raw(conn,
+                       bucket_key="high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability",
                        A=99.0, B=99.0, C=99.0)
     snapshot2 = compute_platt_parameter_snapshot_per_bucket(conn)
-    rec_collision = snapshot2["high:TestCity:DJF:v1:raw_probability"]
+    rec_collision = snapshot2["high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability"]
     # v2 entry has param_A=1.6 (NOT 99.0 from the planted legacy collision).
     assert rec_collision["source"] == "v2"
     assert rec_collision["param_A"] == 1.6
