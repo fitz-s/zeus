@@ -166,7 +166,8 @@ def observed_target_day_fraction(
 #   has barely started. Operator-tunable; below 0.3 the day-start case
 #   becomes too punitive on early-Day0 settlement_capture entries.
 # - ``FALLBACK_F1_HAIRCUT = 0.7``: F1 anchor is verified across 13
-#   cities but not infallible — a Polymarket schema change could move
+#   cities (INVESTIGATION_EXTERNAL Q3 = 7 + CRITIC_REVIEW_R2 spot-check
+#   = 6) but not infallible — a Polymarket schema change could move
 #   endDate. The 0.7× haircut applies until the fallback is verified
 #   for the specific market in question (i.e., explicit market_end_at
 #   parsed cleanly = phase_source==verified_gamma).

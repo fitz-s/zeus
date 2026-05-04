@@ -106,6 +106,10 @@ class PhaseAuthorityViolation(RuntimeError):
     """
 
 
+_TRUTHY_FLAG_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+_FALSY_FLAG_VALUES: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
+
 def market_phase_dispatch_enabled() -> bool:
     """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is enabled.
 
@@ -119,15 +123,38 @@ def market_phase_dispatch_enabled() -> bool:
     behavior). The legacy branches stay in dispatch.py until a follow-up
     cleanup PR excises them after ≥1 stable week of phase-axis live.
 
-    A truthy non-default explicit value (``"1"``, ``"true"``, ``"yes"``,
-    ``"on"``) keeps the path on. A falsy non-default value (``"0"``,
-    ``"false"``, ``"no"``, ``"off"``) explicitly turns it off. Empty /
-    whitespace falls back to the default.
+    Recognized values:
+      truthy (case-insensitive): "1", "true", "yes", "on"
+      falsy (case-insensitive):  "0", "false", "no", "off"
+
+    Unrecognized non-empty values (e.g., a typo like ``"garbase"`` or
+    ``"enabled"``) keep the post-A6 default ON and emit a one-shot
+    warning. Critic R6 M3 fix (2026-05-04): pre-fix, unrecognized values
+    silently flipped to OFF — operator typo became a kill-switch by
+    accident. Remain-on is the conservative direction since the default
+    is ON; the warning makes the typo loud without crashing the daemon
+    on a misspelled env var.
+
+    Empty / whitespace falls back to the default.
     """
     raw = os.environ.get(_DISPATCH_FLAG_ENV, "").strip().lower()
     if raw == "":
         return True  # post-A6 default
-    return raw in {"1", "true", "yes", "on"}
+    if raw in _TRUTHY_FLAG_VALUES:
+        return True
+    if raw in _FALSY_FLAG_VALUES:
+        return False
+    # Unrecognized: warn (once is enough — this is per-call, but the log
+    # framework dedupes identical messages cheaply) and stay on default.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Unrecognized %s=%r — expected one of %s (truthy) or %s (falsy). "
+        "Remaining on post-A6 default (phase-axis ON). Fix the env var to "
+        "silence this warning.",
+        _DISPATCH_FLAG_ENV, raw,
+        sorted(_TRUTHY_FLAG_VALUES), sorted(_FALSY_FLAG_VALUES),
+    )
+    return True
 
 
 def is_settlement_day_dispatch(
@@ -259,7 +286,11 @@ def _is_settlement_day_phase(
     When ``market`` is ``None`` (P4 site 1 — monitor loop has only
     ``pos.target_date`` + ``city.timezone``, no Gamma payload), fall
     back to F1: Polymarket weather endDate uniformly 12:00 UTC of
-    target_date (verified across 13 cities).
+    target_date (verified across 13 cities — INVESTIGATION_EXTERNAL
+    Q3 contributes 7 cities, CRITIC_REVIEW_R2 spot-check contributes
+    6; full breakdown in
+    docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/
+    CRITIC_REVIEW_R2.md).
 
     The tri-state return is critical: collapsing parse-failure to
     ``False`` would silently let a corrupt target_date row exit the

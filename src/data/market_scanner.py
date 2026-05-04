@@ -1078,8 +1078,10 @@ def _parse_event(
         # surface Polymarket startDate / endDate verbatim onto the parent
         # market dict so ``market_phase_from_market_dict`` consumes the
         # explicit Gamma timestamps instead of always falling through to
-        # the F1 12:00-UTC fallback. F1 is verified across 13 cities but
-        # the design intent is "fallback when Gamma omits", not "only path".
+        # the F1 12:00-UTC fallback. F1 is verified across 13 cities
+        # (INVESTIGATION_EXTERNAL Q3 = 7 + CRITIC_REVIEW_R2 spot-check
+        # = 6) but the design intent is "fallback when Gamma omits",
+        # not "only path".
         "market_start_at": event.get("startDate") or event.get("start_date"),
         "market_end_at": event.get("endDate") or event.get("end_date"),
         "outcomes": outcomes,

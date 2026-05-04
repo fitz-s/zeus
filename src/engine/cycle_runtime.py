@@ -1528,16 +1528,19 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     _now_utc,
                 )
                 # P4 site 1 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
-                # Flag OFF (default): byte-equal legacy
-                # ``hours_to_settlement <= 6.0`` (anchored on city-local
-                # end-of-target_date). Flag ON: respect the position's
-                # market-phase axis A — DAY0_WINDOW transition fires when
-                # the market is in MarketPhase.SETTLEMENT_DAY (city-local
-                # 00:00 of target_date through Polymarket endDate 12:00
-                # UTC). The wider window matches operator framing
-                # "all 24 hours before midnight of the local market" and
-                # closes the legacy bug where west-of-UTC cities fired
-                # DAY0_WINDOW AFTER Polymarket trading already closed.
+                # Flag ON (default post-A6 2026-05-04): respect the
+                # position's market-phase axis A — DAY0_WINDOW transition
+                # fires when the market is in MarketPhase.SETTLEMENT_DAY
+                # (city-local 00:00 of target_date through Polymarket
+                # endDate 12:00 UTC). The wider window matches operator
+                # framing "all 24 hours before midnight of the local
+                # market" and closes the legacy bug where west-of-UTC
+                # cities fired DAY0_WINDOW AFTER Polymarket trading
+                # already closed.
+                # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal
+                # legacy ``hours_to_settlement <= 6.0`` anchored on
+                # city-local end-of-target_date — kept as escape hatch
+                # for legacy fixtures and rollback.
                 from src.engine.dispatch import should_enter_day0_window
                 _enter_day0 = should_enter_day0_window(
                     target_date_str=pos.target_date,
@@ -2045,13 +2048,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
     if "max_hours_to_resolution" in params:
         # P4 site 2 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
-        # Flag OFF (default): byte-equal legacy filter on hours_to_resolution
-        # (anchored at UTC endDate − now via market_scanner._parse_event).
-        # Flag ON: replace with phase-axis SETTLEMENT_DAY membership
-        # (anchored at city-local 00:00 of target_date for entry, 12:00 UTC
-        # of target_date for exit per F1). Closes the D-A drift where
-        # west-of-UTC cities had their DAY0_CAPTURE candidate window open
-        # 18+h AFTER Polymarket trading already closed.
+        # Flag ON (default post-A6 2026-05-04): replace legacy filter
+        # with phase-axis SETTLEMENT_DAY membership (anchored at
+        # city-local 00:00 of target_date for entry, 12:00 UTC of
+        # target_date for exit per F1). Closes the D-A drift where
+        # west-of-UTC cities had their DAY0_CAPTURE candidate window
+        # open 18+h AFTER Polymarket trading already closed.
+        # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal legacy
+        # filter on hours_to_resolution (anchored at UTC endDate − now
+        # via market_scanner._parse_event) — escape hatch for rollback.
         from src.engine.dispatch import (
             filter_market_to_settlement_day,
             market_phase_dispatch_enabled,

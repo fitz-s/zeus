@@ -62,7 +62,7 @@ These ten decisions replace `§0.1 OD-1 through OD-7` from the prior plan draft.
 | H10 | UMA OO Polymarket-default liveness = 7200s (2h); proposePrice settles ≥14h after endDate observed | INVESTIGATION_EXTERNAL Q2 |
 | H11 | PR #51 merge instant: `2026-05-04T03:57:08Z` (commit time of e62710e6) | git log -1 e62710e6 --format=%cI |
 | H12 | Polymarket CLOB exposes resolution rules / endDate / UMA Settle event per market | bug review §4.2 + Polymarket docs |
-| H13 | observed_target_day_fraction across 51 cities at 12:00 UTC ranges from 0.0 (Wellington pre-target) to ~1.0 (LA post-trading-close, but trading already gone) — east-west asymmetry per F4 | PLAN_v3 §3 + bug review §6.7 |
+| H13 | observed_target_day_fraction at UTC=12:00 of target_date ranges from ~0.21 (LA: local target day is 5h in, ~21% elapsed of 24h) to 1.0 (Wellington UTC+12: local target day already complete by UTC noon) — east-west asymmetry per F4. M5 critic R6 fix (2026-05-04): pre-fix this row had LA and Wellington reversed; the correct direction is "westward = lower fraction at fixed UTC, eastward = higher". | PLAN_v3 §3 + bug review §6.7 |
 
 ---
 

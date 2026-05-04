@@ -422,3 +422,55 @@ def test_resolver_parametrized_floor_matrix(
         phase_source=phase_source,
     )
     assert mult == pytest.approx(expected_floor, abs=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────────── #
+#  M4 critic R6: positive antibody against migration-by-absence regress  #
+# ─────────────────────────────────────────────────────────────────── #
+
+
+def test_M4_kelly_module_has_no_recompute_existing_position_helper():
+    """M4 critic R6 pin: the migration policy in §7 of this file's
+    docstring says "existing positions retain whatever multiplier was on
+    decision_chain.kelly_multiplier_used at THEIR open-time". This was
+    pre-fix "pinned by absence" — no test prevented a future PR from
+    adding a recompute helper.
+
+    Positive antibody: enumerate every public callable in src.strategy.kelly
+    and assert that none looks like a "recompute kelly for an existing
+    open position" function. The grep is loose intentionally (matches
+    common naming patterns like recompute_*, rebalance_*, *_for_open_position)
+    so a future regression can't sneak in under a creative name.
+
+    If the team intentionally adds such a helper, this test must be
+    updated and migration policy reviewed: do we recompute every open
+    position on every resolver change? If yes, document the migration
+    strategy explicitly. If no, keep the prohibition.
+    """
+    import inspect
+    from src.strategy import kelly
+
+    forbidden_substrings = (
+        "recompute",
+        "rebalance",
+        "recompute_kelly",
+        "for_open_position",
+        "for_existing_position",
+        "retroactive",
+        "backfill_kelly",
+    )
+
+    public_callables = [
+        name for name, obj in inspect.getmembers(kelly)
+        if callable(obj) and not name.startswith("_")
+    ]
+    offenders = [
+        name for name in public_callables
+        if any(sub in name.lower() for sub in forbidden_substrings)
+    ]
+    assert not offenders, (
+        f"Detected potential recompute-existing-position helper in "
+        f"src.strategy.kelly: {offenders!r}. Migration policy (file "
+        f"docstring §7) forbids retroactive Kelly recomputation. If "
+        f"this was intentional, update both the test and the policy."
+    )

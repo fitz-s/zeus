@@ -1023,10 +1023,15 @@ files:
     authority_role: phase_axis_dispatch
     why: Single locus for D-B mode→phase migration (PLAN_v3 §6.P3) and D-A
       two-clock unification (PLAN_v3 §6.P4). Flag-gated by
-      ZEUS_MARKET_PHASE_DISPATCH; default OFF preserves byte-equal pre-P3
-      legacy dispatch (T6 invariant). Centralizes the read of
-      candidate.market_phase vs candidate.discovery_mode so all per-candidate
-      and obs-fetch sites stay coordinated.
+      ZEUS_MARKET_PHASE_DISPATCH; A6 (2026-05-04 oracle/Kelly evidence
+      rebuild) flipped the default to ON (empty env var → True). Setting
+      ZEUS_MARKET_PHASE_DISPATCH=0 reverts to pre-P3 legacy dispatch and
+      preserves byte-equal behavior (T6 invariant escape hatch). The
+      flag-flip is gradual — tests asserting legacy mode-axis contracts
+      pin "0" explicitly so phase-axis evolution doesn't break them.
+      Centralizes the read of candidate.market_phase vs
+      candidate.discovery_mode so all per-candidate and obs-fetch sites
+      stay coordinated.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py
