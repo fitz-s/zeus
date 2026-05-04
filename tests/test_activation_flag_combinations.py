@@ -178,31 +178,35 @@ def test_inv_a_kill_switch_zero_disables_flags(monkeypatch, tmp_path):
     assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
 
 
-def test_inv_a_default_on_unset_env_treats_flags_as_active(monkeypatch, tmp_path):
-    """Post-2026-05-04: with both env vars unset (operator never set
-    them), the flag predicates default to ON. This pins the new
-    default-on contract.
+def test_inv_a_default_unset_env_post_gate_purge(monkeypatch, tmp_path):
+    """Post-gate-purge 2026-05-04 (PR #54 critic-opus Ask 5 fix-up):
+    rollout-gate flag stays default-ON (kill-switch convention preserved
+    for legacy compat), but the readiness-writer flag is now default-OFF
+    so the writer→reader path no longer recreates the 156-candidate
+    rejection loop. Flipping the writer flag explicitly to "1" re-enables
+    the legacy cutover behavior.
     """
 
     monkeypatch.delenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", raising=False)
     monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
 
     assert evaluator_module._entry_forecast_rollout_gate_flag_on() is True
-    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is True
+    # Default OFF post-gate-purge: writer must be explicitly opted in.
+    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is False
 
 
-def test_inv_a_empty_string_env_treats_flag_as_active(monkeypatch, tmp_path):
-    """Empty-string env var ⇒ default behavior (ON) because the
-    kill-switch only fires on the literal string ``"0"``. This guards
-    against the failure mode where some shell config sets the var to
-    ``""`` accidentally and silently disables the gate.
+def test_inv_a_empty_string_env_post_gate_purge(monkeypatch, tmp_path):
+    """Empty-string env var ⇒ default behavior. For the rollout-gate
+    flag, default is ON (legacy convention). For the readiness-writer
+    flag, default is OFF post-2026-05-04 gate purge.
     """
 
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "")
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "")
 
     assert evaluator_module._entry_forecast_rollout_gate_flag_on() is True
-    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is True
+    # Empty string ≠ "1", so default-OFF wins.
+    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is False
 
 
 def test_inv_a_flag2_alone_writes_blocked_when_evidence_missing(monkeypatch, tmp_path):

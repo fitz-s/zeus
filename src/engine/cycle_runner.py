@@ -808,7 +808,12 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             exc_info=True,
         )
         summary["block_registry_error"] = f"{type(_registry_exc).__name__}: {_registry_exc}"
-    if _risk_allows_new_entries(risk_level) and _heartbeat_status.get("entry", {}).get("allow_submit", True) and _ws_gap_status.get("entry", {}).get("allow_submit", True):
+    # Fail-CLOSED defaults (Ask 1 fix-up post critic-opus PR #54): if a
+    # status dict is missing the "entry" key (contract not guaranteed by
+    # heartbeat_supervisor.summary / ws_gap_guard.summary), default to
+    # not allowing submit so we mirror the explicit fail-closed paths at
+    # cycle_runner.py:752,754 above.
+    if _risk_allows_new_entries(risk_level) and _heartbeat_status.get("entry", {}).get("allow_submit", False) and _ws_gap_status.get("entry", {}).get("allow_submit", False):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
             portfolio_dirty = portfolio_dirty or p_dirty

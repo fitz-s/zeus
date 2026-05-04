@@ -749,11 +749,20 @@ def _entry_forecast_rollout_gate_flag_on() -> bool:
 
 
 def _entry_forecast_readiness_writer_flag_on() -> bool:
-    """Default ON since 2026-05-04 (operator authorization). Kill-switch
-    semantics match ``_entry_forecast_rollout_gate_flag_on``.
+    """Default OFF since 2026-05-04 (gate-purge fix-up per critic-opus PR #54).
+
+    The writer was the SECOND call site of evaluate_entry_forecast_rollout_gate
+    that Stage 1 missed. With rollout_mode='blocked' in config + missing
+    promotion-evidence, the writer would emit BLOCKED readiness_state rows
+    that the reader at evaluator.py:1658+ rejected, recreating the same
+    156-candidates-per-30min loop the rollout-blocker neutering was supposed
+    to eliminate.
+
+    Kill-switch semantics: set the env var to ``"1"`` to re-enable the
+    writer. Empty string and unset both keep the default-OFF behavior.
     """
 
-    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "1") != "0"
+    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "0") == "1"
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
@@ -1609,7 +1618,19 @@ def evaluate_candidate(
     # was non-None. Fix: skip the cutover for Day0 mode and fall through
     # to the legacy fetch_ensemble path so Day0 candidates run their
     # existing signal pipeline as designed.
-    use_executable_forecast_cutover = entry_forecast_cfg is not None and not is_day0_mode
+    # Gate-purge fix-up 2026-05-04 (post-critic-opus PR #54): the
+    # executable_forecast cutover is gated on the writer flag too.  When
+    # the writer is OFF (default since gate retirement), bypass the
+    # cutover entirely and fall through to the legacy fetch_ensemble
+    # path that worked before the writer→reader machinery was wired in.
+    # Without this guard, killing only the writer left the reader emitting
+    # ENTRY_READINESS_MISSING / BLOCKED which still rejected the same 156
+    # candidates per cycle (critic-opus Ask 5).
+    use_executable_forecast_cutover = (
+        entry_forecast_cfg is not None
+        and not is_day0_mode
+        and _entry_forecast_readiness_writer_flag_on()
+    )
 
     if use_executable_forecast_cutover:
         if conn is None or not hasattr(conn, "execute"):
