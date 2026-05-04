@@ -1,0 +1,86 @@
+name: pr-identity-collision-check
+
+# Advisory check for the PR #55 vs #56 ForecastCalibrationDomain
+# class-collision class of bug.  Posts a PR comment when this PR adds
+# an identity-bearing class (under src/types/, src/contracts/, etc.)
+# that another open PR also adds.  Never blocks merge — this is a
+# human attention signal, not a gate.
+#
+# Trigger criteria implemented in scripts/check_pr_identity_collisions.py.
+# Authority basis: docs/operations/PROPOSALS_2026-05-04.md P1.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths:
+      # Match the script's IDENTITY_FILE_PATTERNS so the workflow
+      # itself short-circuits on PRs that can't possibly trigger.
+      - "src/types/**"
+      - "src/contracts/**"
+      - "src/calibration/forecast_*.py"
+      - "src/calibration/manager.py"
+      - "src/strategy/strategy_profile*"
+      - "src/strategy/market_phase*"
+      - "src/strategy/oracle_*"
+      - "src/data/**registry**"
+      - "scripts/check_pr_identity_collisions.py"
+      - ".github/workflows/pr_identity_collision_check.yml"
+
+permissions:
+  contents: read
+  pull-requests: write   # for commenting on the PR
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run identity-collision check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/check_pr_identity_collisions.py \
+              --this-pr ${{ github.event.pull_request.number }} \
+              --repo ${{ github.repository }} \
+              --output-file /tmp/identity_collision_warning.md
+
+      - name: Post warning comment if collision detected
+        if: ${{ hashFiles('/tmp/identity_collision_warning.md') != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/identity_collision_warning.md', 'utf8');
+            // Look for an existing collision-warning comment from this bot;
+            // update in place rather than spamming.
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const marker = "## Identity-collision risk on PR #";
+            const existing = comments.find(c =>
+              c.user.type === "Bot" && c.body && c.body.startsWith(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }

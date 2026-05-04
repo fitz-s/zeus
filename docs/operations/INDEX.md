@@ -74,6 +74,14 @@ to the table above and either archive or annotate its dir with
 |---|---|---|---|
 | _(none currently active — next operator: claim before starting)_ | | | |
 
+## Cross-references (artifacts that live outside `docs/operations/`)
+
+| File | Purpose |
+|---|---|
+| `architecture/improvement_backlog.yaml` | Typed registry for capsule-emitted improvement insights (P3 V1).  Capsule writes here instead of leaving lessons in chat history. |
+| `scripts/check_pr_identity_collisions.py` + `.github/workflows/pr_identity_collision_check.yml` | Pre-merge identity-collision detection (P1).  Posts an advisory comment when two open PRs both add a class with the same name in identity-bearing files. |
+| `src/state/schema_introspection.py` | `has_columns()` helper (P2) — call this from any code path that depends on a column added by a staged migration. |
+
 ## Triage backlog (one-time cleanup, 2026-05-04)
 
 Items above marked **review** or **archive candidate** need an

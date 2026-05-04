@@ -1,0 +1,76 @@
+schema_version: 1
+metadata:
+  created: "2026-05-04"
+  owner_packet: "AGENTS.md context capsule (PROPOSALS_2026-05-04 P3)"
+  purpose: >
+    Operator queue for actionable improvement insights surfaced by the
+    AGENTS.md context capsule.  Each session-end capsule MAY append one
+    or more entries when it identifies project-level lessons that would
+    otherwise be lost to chat history.  Closeout requires either
+    closeout_pr or rationale.
+
+    This file is the V1 of P3 — it gives capsule insights a typed
+    persistence target that survives chat history.  V2 (deferred) wires
+    a topology_doctor admission for "improvement_backlog_write" so the
+    write can be machine-validated; until then this is operator-honor-system.
+
+status_vocabulary:
+  - proposed       # capsule emitted; not yet operator-reviewed
+  - accepted       # operator reviewed, will be implemented
+  - implementing   # work in progress (anchor PR open)
+  - implemented    # closed via closeout_pr
+  - rejected       # operator decided not to act; rationale required
+  - superseded     # replaced by a different entry; supersedes_id required
+
+required_entry_fields:
+  - id
+  - title
+  - raised_at
+  - raised_by
+  - status
+  - detail_doc
+
+optional_entry_fields:
+  - closeout_pr
+  - rationale
+  - supersedes_id
+  - notes
+
+entries:
+  - id: P1-2026-05-04
+    title: "Pre-merge identity-collision detection"
+    raised_at: "2026-05-04"
+    raised_by: "capsule@PR-55-56-merge"
+    status: implementing
+    detail_doc: "docs/operations/PROPOSALS_2026-05-04.md"
+    closeout_pr: 59
+    notes: >
+      Implemented as scripts/check_pr_identity_collisions.py + GitHub
+      Actions workflow .github/workflows/pr_identity_collision_check.yml.
+      Status flips to implemented when PR #59 merges.
+
+  - id: P2-2026-05-04
+    title: "Schema-presence helper standardization (has_columns)"
+    raised_at: "2026-05-04"
+    raised_by: "capsule@PR-55-56-merge"
+    status: implementing
+    detail_doc: "docs/operations/PROPOSALS_2026-05-04.md"
+    closeout_pr: 59
+    notes: >
+      src/state/schema_introspection.py::has_columns landed; existing
+      _v2_table_has_stratification + _v2_pairs_table_has_stratification
+      in src/calibration/store.py refactored to thin wrappers.  Status
+      flips to implemented when PR #59 merges.
+
+  - id: P3-2026-05-04
+    title: "Capsule topology persistence target"
+    raised_at: "2026-05-04"
+    raised_by: "capsule@PR-55-56-merge"
+    status: implementing
+    detail_doc: "docs/operations/PROPOSALS_2026-05-04.md"
+    closeout_pr: 59
+    notes: >
+      V1 lands this YAML registry plus an AGENTS.md pointer so the
+      capsule has a non-chat persistence target.  V2 (topology_doctor
+      admission) deferred — separate entry will be raised when the
+      operator picks an intent vocabulary for improvement_backlog_write.

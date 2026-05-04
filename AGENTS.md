@@ -256,6 +256,16 @@ a repo persistence target. Old `.omc/state/agent-replay-*.jsonl` files are safe
 to delete when no active recovery is in progress — they accumulate across sessions
 and have no cross-session authority.
 
+When the capsule's "1-3 actionable improvement insights" name a project-level
+lesson (not a personal preference, not a one-off observation), append a row to
+`architecture/improvement_backlog.yaml` so the insight survives chat history.
+The capsule's final-response section still summarises; the YAML is the
+permanent record.  Use status `proposed` for fresh entries (operator triages
+to `accepted` later) or `implementing` if you are landing the work in the
+same change.  The capsule MUST NOT widen scope to implement an insight in
+the same change unless the operator explicitly approves — the backlog is the
+queue, not the doer.
+
 **Step 2 — Read the scoped AGENTS.md** for the module you will touch. These
 contain domain rules, common mistakes, and hazard classifications specific to
 that package.

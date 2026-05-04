@@ -1,8 +1,10 @@
-# Improvement proposals — operator review needed
+# Improvement proposals — implementation log
 
 **Created:** 2026-05-04 (post PR #55 + #56 + #58 merge capsule).
-**Status:** proposal only — each item needs operator sign-off on
-trigger criteria / persistence target before implementation.
+**Status (2026-05-04 update):** all three implemented in PR #59 after
+operator directive "深度构思如何设计后在进行剩余任务".  This file is
+preserved as the design rationale; the implementation log lives in
+`architecture/improvement_backlog.yaml`.
 
 These three items came out of the PR-merge capsule; they are not
 yet implemented because each one has a non-obvious "when does this
@@ -143,3 +145,83 @@ P1 and P3 need operator design decisions before code lands.  P1's
 trigger-criteria allowlist and P3's persistence-target shape are the
 gates.  Both are valuable but neither is urgent — the next bloat
 event will tell us which one matters more.
+
+---
+
+## Implementation update — 2026-05-04
+
+Operator directive: implement all three after deep design.  All landed
+in PR #59 with the design choices captured below.
+
+### P1 implemented
+
+- **Script**: `scripts/check_pr_identity_collisions.py`. Parses unified
+  diff for ADDED `class X:` lines, scoped to `IDENTITY_FILE_PATTERNS`
+  allowlist (types/, contracts/, calibration/forecast_*, etc.).
+  Intersects against every other open PR's diff, excludes stacked PRs
+  (same `baseRefOid`), formats a markdown warning.  Advisory — exit 0
+  always.
+- **Workflow**: `.github/workflows/pr_identity_collision_check.yml`.
+  Triggers on `pull_request: opened, synchronize, ready_for_review,
+  reopened` with a paths filter that mirrors the script's allowlist
+  (so unrelated PRs short-circuit).  Posts/updates a sticky comment via
+  `actions/github-script@v7` — single comment per PR, updated on each
+  run instead of spamming.
+- **Tests**: `tests/test_check_pr_identity_collisions.py` — 13 cases
+  covering the parser (added vs modified, decorated dataclass, inherited
+  classes, private `_FooImpl`, empty diff, false-positive avoidance for
+  evaluator/test files, two-PR overlap simulation).
+- **Decisions made**:
+  - Scope: file allowlist, not class-name allowlist.  Cheaper to keep,
+    and method-level changes inside an existing class don't trigger
+    (the bare `class X:` line stays unchanged).
+  - Severity: advisory + sticky comment.  False positives are tolerable;
+    blocking would frustrate hot iteration.
+  - Stacked-PR exclusion: same `baseRefOid` skipped.  Intentional builds
+    don't need a warning.
+
+### P2 implemented
+
+- **Module**: `src/state/schema_introspection.py` with
+  `has_columns(conn, table, *cols, attached=None) -> bool`.  Returns
+  False on PRAGMA failure (table missing, attached DB unavailable).
+- **Refactor**: `src/calibration/store.py`'s
+  `_v2_table_has_stratification` and `_v2_pairs_table_has_stratification`
+  collapse to thin wrappers calling `has_columns`.
+- **Tests**: `tests/test_schema_introspection.py` — 7 cases covering
+  all-present / any-missing / table-missing / vacuous-cols /
+  attached-DB / malformed-pragma / structural assert that the calibration
+  store still imports the helper.
+- **Decisions made**:
+  - Module location: new `src/state/schema_introspection.py` rather
+    than appending to `src/state/db.py`.  Discoverability beats
+    import-graph minimalism here; the name is self-documenting.
+  - Error semantic: return False on `sqlite3.Error`, never propagate.
+    Lets callers chain `if has_columns(...)` without nested try/except.
+
+### P3 implemented (V1)
+
+- **Registry**: `architecture/improvement_backlog.yaml` — typed YAML
+  with `entries[]` (id, title, raised_at, raised_by, status, detail_doc,
+  closeout_pr).  Status vocabulary: proposed / accepted / implementing
+  / implemented / rejected / superseded.  Seeded with P1, P2, P3 in
+  `implementing` state (flips to `implemented` on PR #59 merge).
+- **AGENTS.md update**: capsule guidance §3 now points the
+  "1-3 actionable improvement insights" output at
+  `architecture/improvement_backlog.yaml` so insights survive chat
+  history.  Forbids in-same-change implementation without operator
+  approval (the backlog is the queue, not the doer).
+- **V2 deferred**: topology_doctor admission for
+  `improvement_backlog_write` is the natural next step but needs an
+  intent-vocabulary decision.  Not in this PR — backlog entry to be
+  raised when operator picks the vocabulary.
+- **Decisions made**:
+  - Format: YAML over markdown.  Lints via the existing yaml_bootstrap
+    + topology pipeline; markdown loose enough that bloat would
+    return.
+  - Location: `architecture/` over `docs/operations/`.  Sibling to
+    `core_claims.yaml`, `module_manifest.yaml`, `source_rationale.yaml`
+    — all typed truth artifacts.  `docs/operations/` is for ephemeral
+    operations, which is exactly the bloat we just policed.
+  - Capsule write rule: append, never edit other entries' status.
+    Operator owns the lifecycle transitions.
