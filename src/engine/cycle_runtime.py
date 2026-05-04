@@ -2125,6 +2125,32 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 continue
             raise
 
+        # P2 (PLAN_v3 §6.P2 stage 2): tag the candidate with MarketPhase
+        # axis A using the cycle's frozen decision_time. Per critic R1 C5,
+        # phase MUST be derived from decision_time (not now()), so a
+        # 50-candidate cycle straddling a city's local midnight produces
+        # a single phase per market. Errors here are logged and the
+        # candidate is left untagged (market_phase=None) — phase is an
+        # observability/dispatch tag, not a hard gate, so a parse error
+        # on Gamma payload should not kill the candidate.
+        try:
+            from src.strategy.market_phase import market_phase_from_market_dict
+
+            market_phase = market_phase_from_market_dict(
+                market=market,
+                city_timezone=city.timezone,
+                target_date_str=market["target_date"],
+                decision_time_utc=decision_time,
+            )
+        except Exception as exc:
+            deps.logger.warning(
+                "MarketPhase tag failed for %s/%s: %s",
+                city.name,
+                market.get("target_date"),
+                exc,
+            )
+            market_phase = None
+
         candidate = market_candidate_ctor(
             city=city,
             target_date=market["target_date"],
@@ -2144,6 +2170,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             slug=market.get("slug", ""),
             observation=obs,
             discovery_mode=mode.value,
+            market_phase=market_phase,
         )
         summary["candidates"] += 1
 
@@ -2157,6 +2184,17 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 entry_bankroll=entry_bankroll,
                 decision_time=decision_time,
             )
+            # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
+            # every returned EdgeDecision. evaluate_candidate has 30+
+            # ``return [EdgeDecision(...)]`` sites; stamping at the call
+            # site keeps the contract single-locus instead of threading
+            # ``market_phase=`` into every return. The serialized
+            # ``.value`` form is used so SQL/JSON downstream paths see a
+            # uniform string regardless of caller.
+            if decisions and candidate.market_phase is not None:
+                _phase_value = candidate.market_phase.value
+                for _d in decisions:
+                    _d.market_phase = _phase_value
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
                 if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):

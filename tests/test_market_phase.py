@@ -279,6 +279,85 @@ def test_naive_polymarket_end_utc_rejected() -> None:
 # ---------------------------------------------------------------------- #
 
 
+# ---------------------------------------------------------------------- #
+# Adapter from market dict shape (stage 2 plumbing)
+# ---------------------------------------------------------------------- #
+
+
+def test_adapter_uses_explicit_market_end_at_when_present() -> None:
+    from src.strategy.market_phase import market_phase_from_market_dict
+
+    market = {
+        "market_end_at": "2026-05-08T12:00:00Z",
+        "market_start_at": "2026-05-06T04:04:00Z",
+        "target_date": "2026-05-08",
+    }
+    decision_time = datetime(2026, 5, 7, 23, 0, 0, tzinfo=UTC)  # London SD entry
+
+    phase = market_phase_from_market_dict(
+        market=market,
+        city_timezone="Europe/London",
+        target_date_str="2026-05-08",
+        decision_time_utc=decision_time,
+    )
+    assert phase == MarketPhase.SETTLEMENT_DAY
+
+
+def test_adapter_falls_back_to_f1_anchor_when_end_absent() -> None:
+    """F1 invariant: when market dict lacks ``market_end_at``, the
+    adapter derives 12:00 UTC of target_date as the fallback. This is
+    safe-by-construction because every Polymarket weather market
+    settles at this time per F1.
+    """
+    from src.strategy.market_phase import market_phase_from_market_dict
+
+    market = {"target_date": "2026-05-08"}  # No end_at field at all
+    decision_time = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)  # Exactly endDate
+
+    phase = market_phase_from_market_dict(
+        market=market,
+        city_timezone="Europe/London",
+        target_date_str="2026-05-08",
+        decision_time_utc=decision_time,
+    )
+    # At 12:00 UTC of target_date with F1 fallback → POST_TRADING boundary
+    assert phase == MarketPhase.POST_TRADING
+
+
+def test_adapter_handles_offset_iso8601_variant() -> None:
+    """Gamma can return either ``Z`` or ``+00:00`` suffix; both are
+    accepted.
+    """
+    from src.strategy.market_phase import market_phase_from_market_dict
+
+    for end_str in ["2026-05-08T12:00:00Z", "2026-05-08T12:00:00+00:00"]:
+        market = {"market_end_at": end_str, "target_date": "2026-05-08"}
+        phase = market_phase_from_market_dict(
+            market=market,
+            city_timezone="Europe/London",
+            target_date_str="2026-05-08",
+            decision_time_utc=datetime(2026, 5, 8, 13, 0, 0, tzinfo=UTC),
+        )
+        assert phase == MarketPhase.POST_TRADING
+
+
+def test_adapter_naive_gamma_payload_is_loud_failure() -> None:
+    """A Gamma payload missing tz info would silently drift through
+    naive arithmetic. The adapter raises so cycle_runtime can log and
+    leave the candidate untagged rather than tag with a wrong phase.
+    """
+    from src.strategy.market_phase import market_phase_from_market_dict
+
+    market = {"market_end_at": "2026-05-08T12:00:00", "target_date": "2026-05-08"}  # naive
+    with pytest.raises(ValueError, match="naive datetime"):
+        market_phase_from_market_dict(
+            market=market,
+            city_timezone="Europe/London",
+            target_date_str="2026-05-08",
+            decision_time_utc=datetime(2026, 5, 8, 13, 0, 0, tzinfo=UTC),
+        )
+
+
 def test_settlement_day_entry_dst_aware_london_spring_forward() -> None:
     """London spring-forward 2026-03-29: clocks jump 01:00 GMT → 02:00 BST.
     Target 2026-03-29 (the spring-forward day): city-local end-of-target

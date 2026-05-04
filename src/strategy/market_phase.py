@@ -132,3 +132,73 @@ def market_phase_for_decision(
         return MarketPhase.PRE_TRADING
 
     return MarketPhase.PRE_SETTLEMENT_DAY
+
+
+# ----------------------------------------------------------------------- #
+# Adapter from src.data.market_scanner market dict shape.
+# Owned here so cycle_runtime can call a single function rather than
+# threading parsing logic through the discovery loop.
+# ----------------------------------------------------------------------- #
+
+
+def _parse_utc(value: str) -> datetime:
+    """Parse an ISO 8601 string from Gamma into a UTC datetime.
+    Accepts the ``Z`` suffix variant and the ``+HH:MM`` offset variant.
+    """
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"unexpected naive datetime from Gamma payload: {value!r}; "
+            "every external timestamp must carry tz info per UTC-strict "
+            "directive (operator 2026-05-04)."
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _f1_fallback_end_utc(target_local_date: date) -> datetime:
+    """F1 invariant: Polymarket weather endDate is uniformly 12:00 UTC of
+    target_date (verified across 13 cities via Gamma API; see
+    INVESTIGATION_EXTERNAL Q1). When the market dict does not carry an
+    explicit ``market_end_at``, fall back to this derived anchor.
+    """
+    return datetime.combine(target_local_date, time(12, 0, 0), tzinfo=timezone.utc)
+
+
+def market_phase_from_market_dict(
+    *,
+    market: dict,
+    city_timezone: str,
+    target_date_str: str,
+    decision_time_utc: datetime,
+    uma_resolved: bool = False,
+) -> MarketPhase:
+    """Adapter from ``src.data.market_scanner``'s market dict shape to
+    ``MarketPhase``.
+
+    Reads ``market["market_end_at"]`` and ``market["market_start_at"]``
+    when present; falls back to F1's uniform 12:00 UTC anchor for
+    end_utc and ``None`` for start_utc when absent. The fallback is
+    intentional: per F1, every Polymarket weather market settles at
+    12:00 UTC of its target_date, so a missing endDate is recoverable
+    without a hard error.
+    """
+    target_local_date = date.fromisoformat(target_date_str)
+
+    end_str = market.get("market_end_at") or market.get("endDate") or market.get("end_date")
+    polymarket_end_utc = (
+        _parse_utc(end_str) if end_str else _f1_fallback_end_utc(target_local_date)
+    )
+
+    start_str = market.get("market_start_at") or market.get("startDate") or market.get("start_date")
+    polymarket_start_utc = _parse_utc(start_str) if start_str else None
+
+    return market_phase_for_decision(
+        target_local_date=target_local_date,
+        city_timezone=city_timezone,
+        decision_time_utc=decision_time_utc,
+        polymarket_start_utc=polymarket_start_utc,
+        polymarket_end_utc=polymarket_end_utc,
+        uma_resolved=uma_resolved,
+    )
