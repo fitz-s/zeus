@@ -24,6 +24,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -727,8 +728,14 @@ def main():
         run_single_cycle()
         return
 
-    # APScheduler loop mode
-    scheduler = BlockingScheduler()
+    # APScheduler loop mode.
+    # P0 invariant: scheduler MUST run in UTC. Cron expressions like
+    # ``hour=7,9,19,21`` for update_reaction_times_utc are written
+    # against UTC; without an explicit timezone= kwarg APScheduler
+    # falls back to the host's local tz (CDT/CST on the deployment
+    # box), shifting every cron job by 5h. See PLAN_v3 D-D drift +
+    # operator directive 2026-05-04 "所有的执行时间都需要严格统一用utc".
+    scheduler = BlockingScheduler(timezone=ZoneInfo("UTC"))
     discovery = settings["discovery"]
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
