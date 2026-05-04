@@ -219,6 +219,13 @@ def test_healthcheck_defaults_live_riskguard_label(monkeypatch):
     assert healthcheck._riskguard_label() == "com.zeus.riskguard-live"
 
 
+def test_healthcheck_riskguard_label_override_takes_precedence(monkeypatch):
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_RISKGUARD_LABEL", "com.zeus.riskguard-custom")
+
+    assert healthcheck._riskguard_label() == "com.zeus.riskguard-custom"
+
+
 def test_healthcheck_falls_back_to_launchctl_print_when_list_fails(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"
