@@ -236,11 +236,25 @@ def _trailing_loss_reference(
             "reference": None,
         }
 
+    # SF7 fix (2026-05-04): pre-filter to post-cutover rows at the SQL layer.
+    # Without this, the LIMIT-100 window can be dominated by rows that lack the
+    # top-level `bankroll_truth_source` field (transient writer regressions, or
+    # error-state rows like `bankroll_provider_unavailable`). All such rows fail
+    # `_risk_state_reference_from_row` line 196, so the for-loop falls through to
+    # `inconsistent_history` and the daemon stays DATA_DEGRADED indefinitely —
+    # even when 918 post-cutover rows exist further back in history. Filtering at
+    # the SQL layer means: if no post-cutover row is old enough we get the proper
+    # `insufficient_history` (already bootstrap-allowlisted to GREEN), and only
+    # rows that COULD pass trustworthiness reach the for-loop. Architectural
+    # `inconsistent_history` signal is preserved for genuine post-cutover
+    # disagreement (initial != effective), which is what the lines 302-304
+    # comment intends to gate.
     candidate_rows = risk_conn.execute(
         """
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
+          AND json_extract(details_json, '$.bankroll_truth_source') = 'polymarket_wallet'
         ORDER BY checked_at DESC, id DESC
         LIMIT 100
         """,
