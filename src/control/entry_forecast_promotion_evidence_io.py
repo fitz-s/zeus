@@ -161,6 +161,16 @@ def _parse_evidence_payload_cached(
     corruption re-runs the parse every call (acceptable: corrupt
     files are rare and re-parsing produces consistent error messages
     rather than caching a stale exception object).
+
+    **stat/read_text race note**: ``read_promotion_evidence`` calls
+    ``target.stat()`` and then this function reads ``target.read_text()``
+    via separate syscalls. If ``os.replace`` swaps the inode between
+    the two calls, the reader sees the NEW content but caches under
+    the OLD ``(mtime, size)`` key. The race is bounded because mtime
+    advances monotonically on overwrite — subsequent readers see the
+    new stat, miss the cache with a fresh key, and re-parse. The
+    "wrong-key" entry can never re-collide; it only consumes one of
+    the four LRU slots until evicted. No production failure mode.
     """
 
     target = Path(path_str)

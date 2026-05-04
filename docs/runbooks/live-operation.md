@@ -236,6 +236,21 @@ The lock file persists between writes — that is intentional and not a
 leak. Atomic JSON via `tempfile.mkstemp` + `os.replace` already
 prevents readers from observing partial files.
 
+### Day0 candidates do not produce entry_readiness rows
+
+Phase C-6 routes Day0 candidates around the executable-forecast cutover
+and back to the legacy `fetch_ensemble` path. As a side effect, the
+`_write_entry_readiness_for_candidate` helper at `src/engine/evaluator.py`
+sits inside the cutover branch — it is **never invoked for Day0
+candidates** under any flag combination. Day0 markets will therefore
+have producer_readiness rows (written by ingest) but **no
+`strategy_key='entry_forecast'` rows in `readiness_state`**. This is
+intentional: Day0 has its own observed-so-far signal pipeline (Day0Router
++ remaining_member_extrema_for_day0) and does not need an entry-forecast
+gate row. Operator dashboards / healthchecks that assume "every live
+market has an entry_readiness row" need to scope to OPENING_HUNT mode
+only.
+
 ### Auditing readiness rows
 
 `readiness_state.status='LIVE_ELIGIBLE'` for `strategy_key='entry_forecast'`

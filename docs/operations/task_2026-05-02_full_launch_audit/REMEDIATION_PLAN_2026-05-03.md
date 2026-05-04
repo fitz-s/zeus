@@ -80,15 +80,18 @@ Goal: complete the structural design that PR47 set up, so that the operator can 
 
 Listed for handoff completeness; do **not** implement now.
 
-| ID | Step | Authority required |
-|---|---|---|
-| C1 | Add `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` env flag (default OFF). Wire `evaluate_entry_forecast_rollout_gate` into `evaluator.py:1310-1322` only when flag=1 | Operator |
-| C2 | Add `ZEUS_ENTRY_FORECAST_CALIBRATION_GATE` env flag (default OFF). Wire `evaluate_calibration_transfer_policy` into the same path | Operator |
-| C3 | Add `ZEUS_ENTRY_FORECAST_READINESS_WRITER` env flag (default OFF). Wire `write_entry_readiness` from a new `producer_readiness.py` companion or `ingest_main.py` daemon step. **Critical**: writer flag MUST come on AFTER C1+C2 (otherwise we go fail-OPEN) | Operator |
-| C4 | Update `scripts/healthcheck.py:330-340` to include `entry_forecast_blockers` in `result["healthy"]` predicate, behind `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` flag (default OFF until C1-C3 are stable) | Operator |
-| C5 | After all four flags ON and stable for ≥1 day with smoke cap=$5: increase smoke cap, then remove the cap entirely | Operator |
-| C6 | Day0 cutover: replace `ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED` rejection (`evaluator.py:1469-1478`) with a real Day0 reader path (per code-reviewer BLOCKER-1b) | Operator |
-| C7 | After live trading proven on this stack for ≥1 trading week: archive Phase 0/1 evidence docs, condense them into a single "PR47 retrospective" reference doc | Operator |
+| ID | Step | Authority required | Status |
+|---|---|---|---|
+| C-flock | Add `fcntl.flock(LOCK_EX)` around `_atomic_write_json` via sidecar `<path>.lock` (critic-opus required) | (impl) | **LANDED** `755f7870` |
+| C1 | Add `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE` env flag (default OFF). Wire `evaluate_entry_forecast_rollout_gate` into `evaluator.py:1310-1322` only when flag=1 | Operator (impl ✓) | **LANDED** `755f7870` |
+| C2 | Per-candidate calibration gate at evaluator's read-call-site | (impl) | **SUBSUMED** by C-3 — writer's `_decide_status_and_reasons` enforces calibration internally |
+| C3 | Add `ZEUS_ENTRY_FORECAST_READINESS_WRITER` env flag (default OFF). Wire `write_entry_readiness` from `_write_entry_readiness_for_candidate` in `evaluator.py` | Operator (impl ✓) | **LANDED** `76245454` |
+| C4 | Update `scripts/healthcheck.py` to include `entry_forecast_blockers` in `result["healthy"]` predicate, behind `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` flag (default OFF until C1-C3 are stable) | Operator (impl ✓) | **LANDED** `defc9465` |
+| C5 (B9 carry) | Delete dead knobs `allow_short_horizon_06_18` and `require_active_market_future_coverage` from `EntryForecastConfig` + `settings.json` + tests | (impl) | **LANDED** `defc9465` |
+| C-perf-cache | `functools.lru_cache(maxsize=4)` keyed by `(path, mtime_ns, size)` for `read_promotion_evidence` (critic ATTACK 3 follow-up) | (impl) | **LANDED** `4eeab96e` |
+| C6 | Day0 cutover: replace `ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED` rejection with fall-through to legacy `fetch_ensemble` (per code-reviewer BLOCKER-1b). Original plan said "test only"; actual scope expanded to "rejection-replaced-with-fall-through, test added" | Operator (impl ✓) | **LANDED** `4eeab96e` |
+| C-bankroll | After all four flags ON and stable for ≥1 day with smoke cap=$5: increase smoke cap, then remove the cap entirely (was originally "C5"; renamed to avoid clash with B9 carry) | Operator | **DEFERRED** until activation evidence accumulates |
+| C7 | After live trading proven on this stack for ≥1 trading week: archive Phase 0/1 evidence docs, condense them into a single "PR47 retrospective" reference doc | Operator | **DEFERRED** post-merge |
 
 ---
 
