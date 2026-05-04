@@ -48,11 +48,16 @@ _MARKER = "REGISTRY-GUARDED SHORT-CIRCUIT"
 #
 _ALLOWLIST: frozenset[str] = frozenset(
     {
-        # Current short-circuit identifiers
+        # Current short-circuit identifiers (gate-purge 2026-05-04 Stage 3):
+        # entries_paused and entries_blocked_reason removed from short-circuit;
+        # gates 9/10 now explicit via _heartbeat_status/_ws_gap_status.
         "_risk_allows_new_entries",
         "risk_level",
-        "entries_paused",
-        "entries_blocked_reason",
+        "_heartbeat_status",
+        "_ws_gap_status",
+        "get",
+        "allow_submit",
+        "entry",
         # Python builtins / constants that appear in AST as Name nodes
         "True",
         "False",

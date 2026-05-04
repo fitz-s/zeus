@@ -175,9 +175,10 @@ def _make_deps(
     )
 
 
-# ── Gate 1: fail_closed_tombstone ─────────────────────────────────────────────
+# ── Gate 1: fail_closed_tombstone (retired 2026-05-04) ────────────────────────
 
-def test_gate1_clear_when_tombstone_absent(tmp_path: Path) -> None:
+def test_gate1_always_clear_after_retirement(tmp_path: Path) -> None:
+    """Gate 1 is retired — adapter always returns CLEAR regardless of tombstone presence."""
     from src.control.block_adapters.fail_closed_tombstone import FailClosedTombstoneAdapter
 
     deps = _make_deps(state_dir=tmp_path)
@@ -187,20 +188,21 @@ def test_gate1_clear_when_tombstone_absent(tmp_path: Path) -> None:
     assert block.id == 1
 
 
-def test_gate1_blocking_when_tombstone_exists(tmp_path: Path) -> None:
+def test_gate1_clear_even_when_tombstone_present(tmp_path: Path) -> None:
+    """Gate 1 retired — tombstone file present does NOT block (retirement 2026-05-04)."""
     from src.control.block_adapters.fail_closed_tombstone import FailClosedTombstoneAdapter
 
     (tmp_path / "auto_pause_failclosed.tombstone").write_text("")
     deps = _make_deps(state_dir=tmp_path)
     block = FailClosedTombstoneAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert block.blocking_reason == "entries_paused"
+    assert block.state == BlockState.CLEAR
     assert block.id == 1
 
 
-# ── Gate 2: auto_pause_streak ─────────────────────────────────────────────────
+# ── Gate 2: auto_pause_streak (retired 2026-05-04) ────────────────────────────
 
-def test_gate2_clear_when_no_streak_file(tmp_path: Path) -> None:
+def test_gate2_always_clear_after_retirement(tmp_path: Path) -> None:
+    """Gate 2 is retired — adapter always returns CLEAR regardless of streak file."""
     from src.control.block_adapters.auto_pause_streak import AutoPauseStreakAdapter
 
     deps = _make_deps(state_dir=tmp_path)
@@ -209,38 +211,17 @@ def test_gate2_clear_when_no_streak_file(tmp_path: Path) -> None:
     assert block.blocking_reason is None
 
 
-def test_gate2_blocking_when_streak_threshold_met_and_in_window(tmp_path: Path) -> None:
+def test_gate2_clear_even_when_streak_threshold_met(tmp_path: Path) -> None:
+    """Gate 2 retired — streak file present does NOT block (retirement 2026-05-04)."""
     from datetime import datetime, timezone
 
     from src.control.block_adapters.auto_pause_streak import AutoPauseStreakAdapter
 
-    # Write streak file with count=3 and recent last_seen_at
     streak_data = {
         "reason_code": "SomeException",
         "count": 3,
         "first_seen_at": datetime.now(timezone.utc).isoformat(),
         "last_seen_at": datetime.now(timezone.utc).isoformat(),
-        "threshold": 3,
-        "window_seconds": 300,
-    }
-    (tmp_path / "auto_pause_streak.json").write_text(json.dumps(streak_data))
-    deps = _make_deps(state_dir=tmp_path)
-    block = AutoPauseStreakAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert block.blocking_reason == "auto_pause:SomeException"
-
-
-def test_gate2_clear_when_streak_expired(tmp_path: Path) -> None:
-    from datetime import datetime, timedelta, timezone
-
-    from src.control.block_adapters.auto_pause_streak import AutoPauseStreakAdapter
-
-    old_time = (datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat()
-    streak_data = {
-        "reason_code": "SomeException",
-        "count": 5,
-        "first_seen_at": old_time,
-        "last_seen_at": old_time,
         "threshold": 3,
         "window_seconds": 300,
     }
@@ -294,9 +275,10 @@ def test_gate3_blocking_when_db_entries_gate_active(tmp_path: Path) -> None:
     assert "entries_paused" in (block.blocking_reason or "")
 
 
-# ── Gate 4: entries_paused_flag ───────────────────────────────────────────────
+# ── Gate 4: entries_paused_flag (informational only, gate-purge 2026-05-04) ───
 
-def test_gate4_clear_when_not_paused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate4_always_clear_informational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate 4 is informational — adapter always returns CLEAR (gate-purge Stage 3)."""
     from src.control.block_adapters.entries_paused_flag import EntriesPausedFlagAdapter
     import src.control.control_plane as cp
 
@@ -307,15 +289,15 @@ def test_gate4_clear_when_not_paused(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert block.blocking_reason is None
 
 
-def test_gate4_blocking_when_paused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate4_clear_even_when_paused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate 4 retired from short-circuit — even when paused=True adapter returns CLEAR."""
     from src.control.block_adapters.entries_paused_flag import EntriesPausedFlagAdapter
     import src.control.control_plane as cp
 
     monkeypatch.setattr(cp, "is_entries_paused", lambda: True)
     deps = _make_deps(state_dir=tmp_path)
     block = EntriesPausedFlagAdapter().probe(deps)
-    assert block.state == BlockState.BLOCKING
-    assert block.blocking_reason == "entries_paused"
+    assert block.state == BlockState.CLEAR
 
 
 # ── Gate 5: entries_blocked_reason ────────────────────────────────────────────

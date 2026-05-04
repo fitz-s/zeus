@@ -13,8 +13,7 @@ from datetime import datetime, timezone
 
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
-from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled, pause_entries
-from src.control import auto_pause_streak
+from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
 # 2026-05-04 (live-block antibody — structural fix #4): single source of truth
 # for "why are entries blocked right now?" across all 13 stacked gates.
 # Phase 1 is observational — registry snapshot is logged + emitted into the
@@ -745,6 +744,7 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
+    # entries_blocked_reason — observability only; not consulted by the short-circuit below (gate-purge 2026-05-04).
     if entries_paused and entries_blocked_reason is None:
         entries_blocked_reason = "entries_paused"
     if entries_blocked_reason is None and not bool((_cutover_summary.get("entry") or {}).get("allow_submit", False)):
@@ -808,48 +808,15 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             exc_info=True,
         )
         summary["block_registry_error"] = f"{type(_registry_exc).__name__}: {_registry_exc}"
-    if _risk_allows_new_entries(risk_level) and not entries_paused and entries_blocked_reason is None:
+    if _risk_allows_new_entries(risk_level) and _heartbeat_status.get("entry", {}).get("allow_submit", True) and _ws_gap_status.get("entry", {}).get("allow_submit", True):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
             portfolio_dirty = portfolio_dirty or p_dirty
             tracker_dirty = tracker_dirty or t_dirty
-            # Live-blockers 2026-05-01: clear the streak counter on a clean
-            # entry-path completion so transient burst failures do not
-            # accumulate across long-quiet windows.
-            auto_pause_streak.clear_streak()
         except Exception as exc:
-            # Live-blockers 2026-05-01: a single transient failure must not
-            # permanently lock entries. Increment a streak counter keyed on
-            # reason_code; only escalate to pause_entries() once N=3
-            # consecutive same-reason failures fire within a 5-minute window.
-            reason_code = f"auto_pause:{type(exc).__name__}"
-            count = auto_pause_streak.record_failure(reason_code)
-            summary["auto_pause_streak"] = count
-            summary["auto_pause_streak_reason"] = reason_code
-            if auto_pause_streak.threshold_reached(count):
-                pause_entries(reason_code)
-                # Live-blockers 2026-05-01: pass exc_info=True so the
-                # traceback lands in zeus-live.err. Without it, the auto-pause
-                # log line names the exception class but loses the file:line
-                # of the originating raise — which is what we need to debug
-                # the recurring ValueError loop running since 2026-04-18.
-                logger.error(
-                    "Entry path raised %s (streak=%d) -- entries auto-paused: %s",
-                    type(exc).__name__, count, exc, exc_info=True,
-                )
-                summary["entries_paused"] = True
-                summary["entries_pause_reason"] = reason_code
-            else:
-                # Live-blockers 2026-05-01: same reasoning as the .error() above —
-                # keep the traceback on every deferred-pause log too so we can
-                # pin the originating frame even on cycles that don't escalate
-                # to a full pause.
-                logger.warning(
-                    "Entry path raised %s (streak=%d/%d, NOT pausing yet): %s",
-                    type(exc).__name__, count, auto_pause_streak.STREAK_THRESHOLD, exc,
-                    exc_info=True,
-                )
-                summary["entries_pause_deferred_reason"] = reason_code
+            # Gate-purge 2026-05-04: auto-pause streak machinery retired.
+            # Log the full traceback for diagnostics; daemon does NOT self-pause.
+            logger.error("Entry path raised: %s", exc, exc_info=True)
     else:
         if entries_paused:
             summary["entries_paused"] = True

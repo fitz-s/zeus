@@ -588,10 +588,10 @@ def verify_registry_catches_gates() -> int:
 
     failures: list[str] = []
 
-    # ── 1. Tombstone present → gate 1 BLOCKING ────────────────────────────
+    # ── 1. Tombstone present → gate 1 CLEAR (retired 2026-05-04 Stage 2) ────
     with tempfile.TemporaryDirectory(prefix="repro_registry_") as tmp:
         state_dir = Path(tmp)
-        # Create the tombstone file
+        # Create the tombstone file (gate is retired — adapter always returns CLEAR)
         (state_dir / "auto_pause_failclosed.tombstone").write_text("", encoding="utf-8")
 
         deps = _build_synthetic_deps(state_dir=state_dir)
@@ -599,10 +599,10 @@ def verify_registry_catches_gates() -> int:
         blocks = {b.id: b for b in registry.enumerate_blocks(stage="all")}
         b1 = blocks[1]
 
-        if b1.state in (BlockState.BLOCKING, BlockState.UNKNOWN):
-            print(f"[REGISTRY] Gate 1 (auto_pause_failclosed_tombstone): BLOCKING ✓ reason={b1.blocking_reason}")
+        if b1.state == BlockState.CLEAR:
+            print(f"[REGISTRY] Gate 1 (auto_pause_failclosed_tombstone): CLEAR ✓ (retired — tombstone no longer blocks)")
         else:
-            msg = f"Gate 1 expected BLOCKING when tombstone present, got {b1.state.value!r}"
+            msg = f"Gate 1 expected CLEAR after retirement, got {b1.state.value!r}"
             print(f"[REGISTRY] Gate 1 FAIL: {msg}")
             failures.append(msg)
 

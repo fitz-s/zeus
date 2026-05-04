@@ -275,11 +275,6 @@ def pause_entries(
         logger.error("Failed to persist auto-pause to DB: %s", exc, exc_info=True)
         _control_state["control_db_fault"] = True
         try:
-            with open(state_path("auto_pause_failclosed.tombstone"), "w") as f:
-                f.write(reason_code)
-        except OSError:
-            pass
-        try:
             alert_auto_pause(f"{reason_code}_db_fault")
         except Exception:
             pass
@@ -380,12 +375,8 @@ def refresh_control_state() -> None:
         )
         gates = dict(durable_state.get("strategy_gates", {}))
         
-    try:
-        import os
-        if os.path.exists(state_path("auto_pause_failclosed.tombstone")):
-            entries_paused = True
-    except OSError:
-        pass
+    # Tombstone reader retired 2026-05-04 — gate-purge Stage 2.
+    # entries_paused now comes only from DB control_overrides (gate 3).
 
     for ack in data.get("acks", []):
         if ack.get("status") != "executed":

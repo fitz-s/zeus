@@ -15,6 +15,7 @@ Closeout criteria covered:
 """
 
 import sqlite3
+import pytest
 import src.control.control_plane as cp
 import src.control.heartbeat_supervisor as heartbeat_supervisor
 import src.control.ws_gap_guard as ws_gap_guard
@@ -92,6 +93,7 @@ class TestAutoRauseEntries:
         # polluted by entries_paused=True left behind by auto-pause assertions.
         cp._control_state.clear()
 
+    @pytest.mark.skip(reason="auto-pause streak retired 2026-05-04")
     def test_entry_exception_pauses_entries(self, monkeypatch, tmp_path):
         """Criterion #2/#3/#4: a same-reason ValueError streak in
         _execute_discovery_phase eventually triggers auto-pause with a

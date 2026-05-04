@@ -139,6 +139,7 @@ def test_one_miss_degraded_two_misses_lost():
     assert "miss-2" in (lost.last_error or "")
 
 
+@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — _write_failclosed_tombstone is now a no-op")
 def test_lost_state_writes_tombstone_with_heartbeat_cancel_suspected_reason(tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
     adapter = FakeHeartbeatAdapter([RuntimeError("miss-1"), RuntimeError("miss-2")])
@@ -175,6 +176,7 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert supervisor.gate_for_order_type("FAK") is True
 
 
+@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — recovered heartbeat no longer persists tombstone block")
 def test_recovered_heartbeat_still_blocks_resting_orders_until_tombstone_cleared():
     supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
     supervisor.record_failure("miss-1")
