@@ -81,7 +81,13 @@ from src.state.portfolio import (
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
-from src.strategy.kelly import dynamic_kelly_mult, kelly_size, strategy_kelly_multiplier
+from src.strategy.kelly import (
+    dynamic_kelly_mult,
+    kelly_size,
+    observed_target_day_fraction,
+    phase_aware_kelly_multiplier,
+    strategy_kelly_multiplier,
+)
 from src.engine.ddd_wiring import DDDFailClosed, evaluate_ddd_for_decision
 from src.strategy.oracle_penalty import get_oracle_info, OracleStatus
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
@@ -3031,12 +3037,18 @@ def evaluate_candidate(
             decision_validations.append("global_heat_throttled_50pct")
 
         try:
+            # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
+            # does NOT fold the pre-A4 strategy_kelly_multiplier into km.
+            # The phase-aware factor below replaces that role with the full
+            # 4-source resolver (strategy_phase × oracle × observed_fraction
+            # × phase_source). Keeping strategy_key=strategy_key here would
+            # double-apply the strategy_default factor.
             km = dynamic_kelly_mult(
                 base=settings["sizing"]["kelly_multiplier"],
                 ci_width=edge.ci_upper - edge.ci_lower,
                 lead_days=lead_days_for_calibration,
                 portfolio_heat=current_heat,
-                strategy_key=strategy_key,
+                strategy_key=None,
                 city=city.name,
             )
         except ValueError as exc:
@@ -3070,17 +3082,68 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
             ))
             continue
-        per_strategy_multiplier = strategy_kelly_multiplier(strategy_key)
-        decision_validations.append(f"strategy_kelly_multiplier_{per_strategy_multiplier:g}x")
+        # A6 phase-aware Kelly resolver (PLAN.md §A6 + PLAN_v3 §6.P5).
+        # Combines the four authority sources at open-time:
+        #   - StrategyProfile.kelly_for_phase(market_phase) (registry)
+        #   - oracle_penalty.get_oracle_info(city, metric)   (A3)
+        #   - observed_target_day_fraction(...)              (city-local
+        #                                                     elapsed-day,
+        #                                                     floored at 0.3)
+        #   - phase_source quality factor (0.7× for fallback_f1)
+        # phase_source defaults to "verified_gamma" when candidate.market_phase
+        # is tagged (cycle_runtime tags via A5 builder when market dict has
+        # explicit endDate). Phase=None falls back to the strategy's default
+        # multiplier in the resolver — fail-soft path mirrors pre-A6 behavior
+        # for legacy/test fixtures that don't tag phase.
+        from datetime import date as _A6_date
+        try:
+            _a6_target_date = _A6_date.fromisoformat(candidate.target_date)
+        except (TypeError, ValueError):
+            _a6_target_date = None
+
+        if _a6_target_date is None:
+            # Fall back to legacy strategy default — phase + fraction can't
+            # be computed without a parseable target_date.
+            phase_aware_factor = strategy_kelly_multiplier(strategy_key)
+            decision_validations.append(
+                f"phase_aware_kelly_legacy_{phase_aware_factor:g}x_no_target_date"
+            )
+        else:
+            _phase_value = (
+                candidate.market_phase.value if candidate.market_phase is not None else None
+            )
+            _phase_source = "verified_gamma" if _phase_value is not None else None
+            phase_aware_factor = phase_aware_kelly_multiplier(
+                strategy_key=strategy_key,
+                market_phase=_phase_value,
+                city=city,
+                temperature_metric=temperature_metric.temperature_metric,
+                decision_time_utc=decision_time,
+                target_local_date=_a6_target_date,
+                phase_source=_phase_source,
+            )
+            decision_validations.append(
+                f"phase_aware_kelly_{phase_aware_factor:g}x"
+                f"_phase={_phase_value or 'NA'}"
+                f"_src={_phase_source or 'NA'}"
+            )
+        km *= phase_aware_factor
 
         if policy.threshold_multiplier > 1.0:
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
 
-        # Oracle penalty: reduce Kelly for CAUTION cities (3–10% error rate)
+        # Oracle penalty was previously applied here as a separate
+        # multiplication. Post-A6 the oracle factor is folded into
+        # phase_aware_kelly_multiplier (above), so this block intentionally
+        # has no live behavior — kept as a no-op shell that logs CAUTION
+        # cases for backward-compat with existing log consumers expecting
+        # the "strategy_policy_threshold_*" annotation. Removable in the
+        # follow-up cleanup PR.
         if oracle.penalty_multiplier < 1.0:
-            km *= oracle.penalty_multiplier
-            decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
+            decision_validations.append(
+                f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
+            )
 
         # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount

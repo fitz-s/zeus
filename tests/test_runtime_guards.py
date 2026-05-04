@@ -9177,6 +9177,11 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
     position has DAY0_WINDOW_ENTERED but no entry events; that production-source
     audit is deferred to Batch H.
     """
+    # A6 (PLAN.md §A6): pin legacy cycle-axis explicitly. Pre-A6 the flag
+    # default was OFF; this test was written for that path. Post-A6 the
+    # default flips ON, but the legacy axis is still a valid kill-switch
+    # path the test verifies.
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -9895,6 +9900,14 @@ def test_monitor_refresh_has_no_production_paper_mode_branch():
 
 
 def test_discovery_phase_records_observation_unavailable_as_no_trade(monkeypatch, tmp_path):
+    # A6 (PLAN.md §A6) flipped the ZEUS_MARKET_PHASE_DISPATCH default to ON.
+    # This test was written for the pre-A6 legacy cycle-axis path and uses
+    # a minimal market dict (no temperature_metric) that the post-A6
+    # cycle_runtime would reject during candidate construction. Pin the
+    # legacy axis explicitly so the test's pre-A6 contract holds —
+    # exercising the LEGACY path is still a valid antibody, the kill-switch
+    # mode operators flip to under the post-A6 emergency rollback.
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
     conn.execute(

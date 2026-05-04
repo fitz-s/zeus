@@ -107,11 +107,27 @@ class PhaseAuthorityViolation(RuntimeError):
 
 
 def market_phase_dispatch_enabled() -> bool:
-    """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is set to a truthy
-    value. Default OFF; T6 byte-equal invariant requires that when this
-    is OFF every dispatch site behaves byte-equal to pre-P3.
+    """Return True iff ``ZEUS_MARKET_PHASE_DISPATCH`` is enabled.
+
+    PRE-A6 default: ``"0"`` (OFF). T6 byte-equal invariant required that
+    when this was OFF every dispatch site behaved byte-equal to pre-P3.
+
+    POST-A6 default: ``"1"`` (ON). PLAN.md §A6 + operator directive
+    "做就做到位" (2026-05-04) — phase-axis dispatch becomes the live
+    default; flag remains as an emergency kill-switch via env override
+    (set ``ZEUS_MARKET_PHASE_DISPATCH=0`` to revert to legacy cycle-axis
+    behavior). The legacy branches stay in dispatch.py until a follow-up
+    cleanup PR excises them after ≥1 stable week of phase-axis live.
+
+    A truthy non-default explicit value (``"1"``, ``"true"``, ``"yes"``,
+    ``"on"``) keeps the path on. A falsy non-default value (``"0"``,
+    ``"false"``, ``"no"``, ``"off"``) explicitly turns it off. Empty /
+    whitespace falls back to the default.
     """
-    return os.environ.get(_DISPATCH_FLAG_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get(_DISPATCH_FLAG_ENV, "").strip().lower()
+    if raw == "":
+        return True  # post-A6 default
+    return raw in {"1", "true", "yes", "on"}
 
 
 def is_settlement_day_dispatch(
