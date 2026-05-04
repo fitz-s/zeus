@@ -45,10 +45,8 @@
     "target_horizon_days": 10,
     "warm_horizon_days": 10,
     "source_cycle_policy": "latest_complete_full_horizon",
-    "allow_short_horizon_06_18": false,
-    "rollout_mode": "live",
-    "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1",
-    "require_active_market_future_coverage": true
+    "rollout_mode": "blocked",
+    "calibration_policy_id": "ecmwf_open_data_uses_tigge_localday_cal_v1"
   },
   "calibration": {
     "method": "platt",
