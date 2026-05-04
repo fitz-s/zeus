@@ -2101,15 +2101,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             )
 
         # P3 site 4 of 4 — observation-fetch gate (PLAN_v3 §6.P3).
-        # Flag-gated; OFF preserves byte-equal `mode == DAY0_CAPTURE` legacy.
-        from src.engine.dispatch import (
-            is_settlement_day_dispatch,
-            market_phase_dispatch_enabled,
+        # Routed through the testable helper per critic R4 A7-M2 so the
+        # contract has independent unit tests instead of being inlined.
+        from src.engine.dispatch import should_fetch_settlement_day_observation
+        should_fetch_observation = should_fetch_settlement_day_observation(
+            mode=mode, market_phase=market_phase
         )
-        if market_phase_dispatch_enabled() and market_phase is not None:
-            should_fetch_observation = market_phase == "settlement_day"
-        else:
-            should_fetch_observation = mode == deps.DiscoveryMode.DAY0_CAPTURE
 
         try:
             obs = (

@@ -1,11 +1,11 @@
-# Strategy Redesign v3 — Day0-as-Endgame + Global-Tiled Scheduling
+# Strategy Redesign v3.1 — Day0-as-Endgame + Global-Tiled Scheduling
 
 **Created**: 2026-05-04
-**Last reused/audited**: 2026-05-04 (v3 amendments)
-**Authority basis**: operator directive 2026-05-04 + critic-opus REJECT-AND-RESPLIT verdict on PLAN.md (R1) + critic-opus APPROVED-WITH-CAVEATS verdict on PLAN_v2 (R2) + INVESTIGATION_INTERNAL.md (code-grounded) + INVESTIGATION_EXTERNAL.md (NWP / UMA / Polymarket primary sources)
-**Status**: PLAN-v3 — P0-P5 spine APPROVED-WITH-CAVEATS, P6/P7 REJECT pending mechanism re-spec. Critic R2 said "Start P0 immediately" — D-D APScheduler tz is a confirmed LIVE bug (host tz = America/Chicago, cron firing 5h shifted from documented UTC).
-**Branch / PR**: this plan lives under PR #49 (`activation-evidence-gating-2026-05-04`) until critic-approved
-**Supersedes**: `PLAN.md` (R1, REJECT-AND-RESPLIT). PLAN.md is kept on disk as historical evidence; do not implement from it.
+**Last reused/audited**: 2026-05-04 (v3.1 amendments — critic R3+R4 fixes on PR #53)
+**Authority basis**: operator directive 2026-05-04 + critic-opus REJECT-AND-RESPLIT verdict on PLAN.md (R1) + critic-opus APPROVED-WITH-CAVEATS verdict on PLAN_v2 (R2) + critic-opus APPROVED-WITH-CAVEATS on PR #53 P2 stages 1-3 (R3) + critic-opus APPROVED-WITH-CAVEATS on PR #53 P3 (R4) + INVESTIGATION_INTERNAL.md (code-grounded) + INVESTIGATION_EXTERNAL.md (NWP / UMA / Polymarket primary sources)
+**Status**: PLAN-v3.1 — P0+P1 merged into main via PR #51 (e62710e6); P2 stages 1-3 + P3 D-B mode→phase migration shipped on PR #53 (flag-OFF default, byte-equal preservation). P4 + P5 in follow-up PRs. P6/P7 REJECT pending mechanism re-spec.
+**Branch / PR history**: PR #51 (P0+P1 merged); PR #53 (P2+P3 in flight); P4+P5 follow-up.
+**Supersedes**: `PLAN.md` (R1, REJECT-AND-RESPLIT). PLAN.md is kept on disk as historical evidence; do not implement from it. **NOTE**: this file was renamed from `PLAN_v2.md` to `PLAN_v3.md` in commit fixing critic R4 ATTACK 8 — version label drift. All §6 packet citations should use the new filename.
 
 ## §0.0 UTC-strict execution directive (operator 2026-05-04, post-R2)
 

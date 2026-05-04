@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §6.P2 stage 3 — probability_trace_fact.market_phase column + writer.
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P2 stage 3 — probability_trace_fact.market_phase column + writer.
 """``probability_trace_fact.market_phase`` persistence tests.
 
 Stage 3 of P2 makes the MarketPhase axis A durable. ``init_schema``

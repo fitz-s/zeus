@@ -1,9 +1,9 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §2 + §6.P2 (v3 per §0.1).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1).
 """``MarketPhase`` axis — market-time lifecycle of a Polymarket weather market.
 
-Per PLAN_v2 §2 (axis A), ``MarketPhase`` is computed from
+Per PLAN_v3 §2 (axis A), ``MarketPhase`` is computed from
 ``(target_local_date, city.timezone, decision_time_utc,
 polymarket_start_utc, polymarket_end_utc, uma_resolved)``. It is the
 same for every position on the same market — orthogonal to the
@@ -16,7 +16,7 @@ at point-of-use. A 50-candidate cycle that straddles a boundary must
 see the SAME phase for every candidate of the same market — otherwise
 midnight-straddle pricing would split.
 
-Boundary anchors (locked from PLAN_v2 §1.E1+§2):
+Boundary anchors (locked from PLAN_v3 §1.E1+§2):
 
 - ``PRE_TRADING → PRE_SETTLEMENT_DAY`` at ``polymarket_start_utc``
   (Polymarket ``startDate``, T-2 days before target)
@@ -31,7 +31,7 @@ Boundary anchors (locked from PLAN_v2 §1.E1+§2):
 All boundaries are inclusive on the **later** side: decision_time
 equal to a boundary belongs to the LATER phase (e.g., decision_time ==
 settlement_day_entry_utc → SETTLEMENT_DAY; decision_time ==
-polymarket_end_utc → POST_TRADING). This pins T3 in PLAN_v2 §8.
+polymarket_end_utc → POST_TRADING). This pins T3 in PLAN_v3 §8.
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def market_phase_for_decision(
     caller must upstream-filter PRE_TRADING markets when start time is
     unavailable).
 
-    See PLAN_v2 §2 for the boundary table. T3 in §8 pins inclusive-late
+    See PLAN_v3 §2 for the boundary table. T3 in §8 pins inclusive-late
     semantics; T4 pins the 12:00 UTC POST_TRADING anchor.
     """
     decision_time_utc = _require_zero_utc_offset(decision_time_utc, "decision_time_utc")

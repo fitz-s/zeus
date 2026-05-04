@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §6.P3 + §8 T6 (mode-default preservation post-D-B).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 + §8 T6 (mode-default preservation post-D-B).
 """D-B mode→phase migration tests (PLAN_v3 §6.P3).
 
 The ``ZEUS_MARKET_PHASE_DISPATCH`` flag default OFF preserves byte-equal
@@ -29,6 +29,7 @@ from src.engine.dispatch import (
     is_settlement_day_dispatch,
     market_phase_dispatch_enabled,
     settlement_day_dispatch_for_mode,
+    should_fetch_settlement_day_observation,
 )
 from src.strategy.market_phase import MarketPhase
 
@@ -226,6 +227,152 @@ def test_evaluator_edge_source_flag_on_routes_on_phase(
     )
     assert _edge_source_for(cand, edge_stub) == "settlement_capture", (
         "flag ON should route on market_phase, not discovery_mode"
+    )
+
+
+# ---------------------------------------------------------------------- #
+# Site 4 — cycle_runtime obs-fetch gate (critic R4 A7-M2 fix)
+# ---------------------------------------------------------------------- #
+
+
+def test_obs_fetch_gate_flag_off_day0_capture_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6 byte-equal at site 4: flag OFF + mode=DAY0_CAPTURE ⇒ True
+    regardless of market_phase. Byte-equal to pre-P3 ``mode ==
+    DAY0_CAPTURE`` short-circuit.
+    """
+    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    for phase in [None, MarketPhase.PRE_TRADING, MarketPhase.SETTLEMENT_DAY,
+                  MarketPhase.POST_TRADING]:
+        assert should_fetch_settlement_day_observation(
+            mode=DiscoveryMode.DAY0_CAPTURE, market_phase=phase
+        ) is True
+
+
+def test_obs_fetch_gate_flag_off_other_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6 byte-equal at site 4: flag OFF + non-DAY0_CAPTURE mode ⇒ False
+    regardless of market_phase tagging.
+    """
+    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    for mode in [DiscoveryMode.OPENING_HUNT, DiscoveryMode.UPDATE_REACTION]:
+        for phase in [None, MarketPhase.SETTLEMENT_DAY, MarketPhase.PRE_SETTLEMENT_DAY]:
+            assert should_fetch_settlement_day_observation(
+                mode=mode, market_phase=phase
+            ) is False, (
+                f"flag OFF should not fetch obs for mode={mode}, phase={phase}"
+            )
+
+
+def test_obs_fetch_gate_flag_on_routes_on_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag ON + market_phase=SETTLEMENT_DAY ⇒ True regardless of mode.
+    This is the production behavior P3 enables once the operator flips
+    the flag: dispatch flips from cycle-axis to market-axis.
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    for mode in [DiscoveryMode.OPENING_HUNT, DiscoveryMode.UPDATE_REACTION,
+                 DiscoveryMode.DAY0_CAPTURE]:
+        assert should_fetch_settlement_day_observation(
+            mode=mode, market_phase=MarketPhase.SETTLEMENT_DAY
+        ) is True
+
+    for phase in [MarketPhase.PRE_TRADING, MarketPhase.PRE_SETTLEMENT_DAY,
+                  MarketPhase.POST_TRADING, MarketPhase.RESOLVED]:
+        assert should_fetch_settlement_day_observation(
+            mode=DiscoveryMode.DAY0_CAPTURE,  # mode says DAY0 but phase doesn't
+            market_phase=phase,
+        ) is False
+
+
+def test_obs_fetch_gate_flag_on_untagged_falls_back_to_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-soft: flag ON + market_phase=None (Gamma parse error /
+    off-cycle) falls back to legacy mode-axis. Without this, a single
+    Gamma payload tz error during a DAY0_CAPTURE cycle would silently
+    skip every observation fetch.
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    assert should_fetch_settlement_day_observation(
+        mode=DiscoveryMode.DAY0_CAPTURE, market_phase=None
+    ) is True
+    assert should_fetch_settlement_day_observation(
+        mode=DiscoveryMode.OPENING_HUNT, market_phase=None
+    ) is False
+
+
+# ---------------------------------------------------------------------- #
+# Critic R4 A4-M1 — attribution_drift defers when phase-axis dispatch ON
+# ---------------------------------------------------------------------- #
+
+
+def test_attribution_drift_defers_inference_when_phase_dispatch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critic R4 A4-M1: when ZEUS_MARKET_PHASE_DISPATCH=1, the legacy
+    drift detector at attribution_drift._infer_strategy_from_signature
+    cannot reliably re-apply the entry-time rule (entry now reads
+    market_phase, but trade_decisions row carries discovery_mode only).
+    The function must return None to avoid emitting false-positive
+    drift verdicts.
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    from src.state.attribution_drift import (
+        AttributionSignature,
+        _infer_strategy_from_signature,
+    )
+
+    # Construct a signature that, under the legacy mode-axis rule, would
+    # confidently return "settlement_capture". With the flag ON, the
+    # detector must defer (return None) because phase-axis dispatch may
+    # have written something different at entry time.
+    sig = AttributionSignature(
+        position_id="pos-1",
+        label_strategy="settlement_capture",
+        inferred_strategy=None,
+        bin_topology="point",
+        direction="buy_yes",
+        discovery_mode="day0_capture",  # legacy says settlement_capture
+        bin_label="0-1",
+        is_label_inferable=False,
+    )
+
+    assert _infer_strategy_from_signature(sig) is None, (
+        "with flag ON, _infer_strategy_from_signature must defer to "
+        "insufficient_signal — legacy mode-axis re-application is "
+        "unreliable when entry uses phase-axis"
+    )
+
+
+def test_attribution_drift_uses_legacy_inference_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag OFF: attribution_drift behavior is unchanged. Same legacy
+    mode-axis inference that pre-P3 callers depend on.
+    """
+    monkeypatch.delenv("ZEUS_MARKET_PHASE_DISPATCH", raising=False)
+    from src.state.attribution_drift import (
+        AttributionSignature,
+        _infer_strategy_from_signature,
+    )
+
+    sig = AttributionSignature(
+        position_id="pos-1",
+        label_strategy="settlement_capture",
+        inferred_strategy=None,
+        bin_topology="point",
+        direction="buy_yes",
+        discovery_mode="day0_capture",
+        bin_label="0-1",
+        is_label_inferable=False,
+    )
+
+    assert _infer_strategy_from_signature(sig) == "settlement_capture", (
+        "flag OFF must preserve legacy mode-axis inference"
     )
 
 

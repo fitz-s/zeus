@@ -122,8 +122,28 @@ def _classify_bin_topology(bin_label: str | None) -> BinTopology:
 
 def _infer_strategy_from_signature(sig: AttributionSignature) -> str | None:
     """Re-apply the entry-time _strategy_key_for dispatch rule from
-    src/engine/evaluator.py:420-441. Returns None when discovery_mode is
-    missing AND clauses 3-5 cannot definitively rule out clauses 1-2."""
+    src/engine/evaluator.py. Returns None when discovery_mode is
+    missing AND clauses 3-5 cannot definitively rule out clauses 1-2.
+
+    P3 (PLAN_v3 §6.P3) note + critic R4 ATTACK 4 fix: when
+    ``ZEUS_MARKET_PHASE_DISPATCH`` is ON, entry-time dispatch reads
+    ``candidate.market_phase`` instead of ``candidate.discovery_mode``.
+    The detector encodes the legacy mode-axis rule; with phase-axis
+    dispatch ON, persisted ``strategy_key`` may diverge from any
+    mode-axis re-inference for legitimate reasons (e.g., persisted
+    ``settlement_capture`` on a market in MarketPhase.SETTLEMENT_DAY
+    even though the cycle's ``discovery_mode`` was OPENING_HUNT).
+    Returning a confident inference in that regime would emit
+    false-positive drift verdicts at the upstream caller. We refuse to
+    infer when the flag is ON. Future enhancement (out of P3 scope):
+    join probability_trace_fact.market_phase via decision_id and
+    re-apply the phase-axis rule directly.
+    """
+    # Critic R4 A4-M1 fix: defer when phase-axis dispatch is ON.
+    from src.engine.dispatch import market_phase_dispatch_enabled
+    if market_phase_dispatch_enabled():
+        return None
+
     # Clauses 1-2: discovery_mode-based.
     if sig.discovery_mode == "day0_capture":
         return "settlement_capture"

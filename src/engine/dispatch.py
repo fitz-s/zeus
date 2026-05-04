@@ -1,13 +1,13 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §6.P3 (D-B mode→phase migration; v3 per §0.1).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 (D-B mode→phase migration; v3 per §0.1).
 """D-B dispatch helpers.
 
 PLAN_v3 §6.P3 migrates strategy/observation dispatch from
 ``DiscoveryMode.DAY0_CAPTURE`` (cycle-axis) to
 ``MarketPhase.SETTLEMENT_DAY`` (market-axis). The migration is
 **flag-gated, default OFF**: with the flag unset, dispatch is
-byte-equal to pre-P3 (T6 invariant in PLAN_v2 §8). With the flag set,
+byte-equal to pre-P3 (T6 invariant in PLAN_v3 §8). With the flag set,
 dispatch reads ``candidate.market_phase`` instead of
 ``candidate.discovery_mode``.
 
@@ -94,3 +94,36 @@ def settlement_day_dispatch_for_mode(mode: DiscoveryMode) -> bool:
 
 def _is_day0_capture_legacy(candidate: "MarketCandidate") -> bool:
     return getattr(candidate, "discovery_mode", "") == DiscoveryMode.DAY0_CAPTURE.value
+
+
+def should_fetch_settlement_day_observation(
+    *,
+    mode: DiscoveryMode,
+    market_phase: Optional["MarketPhase"],
+) -> bool:
+    """P3 site 4 dispatch decision: should ``cycle_runtime`` fetch a
+    Day0 observation for this market in this cycle?
+
+    Same flag-gated semantics as ``is_settlement_day_dispatch`` but
+    operates on a (mode, market_phase) tuple because the obs-fetch site
+    fires BEFORE the ``MarketCandidate`` is constructed (it gates the
+    ``observation`` field that goes INTO the ctor). Extracted from an
+    inline ``if/else`` block in cycle_runtime per critic R4 A7-M2 so
+    the contract is independently testable.
+
+    Flag OFF (default, byte-equal to pre-P3): legacy
+    ``mode == DiscoveryMode.DAY0_CAPTURE``.
+
+    Flag ON + ``market_phase`` tagged:
+    ``market_phase == MarketPhase.SETTLEMENT_DAY``.
+
+    Flag ON + ``market_phase is None`` (Gamma parse error / off-cycle):
+    fall back to legacy ``mode == DAY0_CAPTURE`` — fail-soft so a
+    payload tz error never silently disables the obs fetch when the
+    cycle nominally targets Day0.
+    """
+    if not market_phase_dispatch_enabled():
+        return mode == DiscoveryMode.DAY0_CAPTURE
+    if market_phase is None:
+        return mode == DiscoveryMode.DAY0_CAPTURE
+    return market_phase == "settlement_day"

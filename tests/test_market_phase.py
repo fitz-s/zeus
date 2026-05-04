@@ -1,9 +1,9 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md §8 — relationship-test floor T1, T3, T4 (T2 lands after plumbing; T5/T6 land with P3/P4 per sequencing rule).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §8 — relationship-test floor T1, T3, T4 (T2 lands after plumbing; T5/T6 land with P3/P4 per sequencing rule).
 """``MarketPhase`` axis A unit tests.
 
-Per PLAN_v2 §8 the merge-floor for P2 includes 6 invariants. Three are
+Per PLAN_v3 §8 the merge-floor for P2 includes 6 invariants. Three are
 testable against the standalone helper before any plumbing lands:
 
 - T1 — phase-from-decision_time stability (50-candidate cycle straddling
@@ -18,7 +18,7 @@ later commit once the plumbing is in place.
 
 T5 (candidate filter post-D-A) and T6 (mode-default preservation
 post-D-B) are by construction coupled to D-A (P4) and D-B (P3) and
-land with their respective packets — see PLAN_v2 §6 sequencing rule.
+land with their respective packets — see PLAN_v3 §6 sequencing rule.
 """
 from __future__ import annotations
 
@@ -463,7 +463,7 @@ def test_settlement_day_entry_dst_aware_london_spring_forward() -> None:
 
 
 def test_strict_utc_offset_rejected_for_non_utc_tz() -> None:
-    """``_require_utc`` (used inside ``market_phase_for_decision``)
+    """``_require_zero_utc_offset`` (used inside ``market_phase_for_decision``)
     enforces ``utcoffset() == timedelta(0)``. A datetime carrying
     ``ZoneInfo('America/Chicago')`` has tzinfo set but a non-zero
     offset, and the previous ``tzinfo is None`` check would let it
