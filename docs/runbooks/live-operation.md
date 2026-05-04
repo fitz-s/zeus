@@ -292,8 +292,10 @@ When both `_ROLLOUT_GATE=1` and `_READINESS_WRITER=1`, the daemon reads
 `entry_forecast_promotion_evidence.json` 2× per candidate per cycle.
 The Phase C-perf-cache commit (`734012fa` on `main`) wraps
 `read_promotion_evidence` with `functools.lru_cache(maxsize=4)` keyed
-by `(path, mtime_ns, size)`, so re-reads collapse to a stat() call
-plus a cached parse. Cache invalidates automatically on file
-overwrite. INV-C tests in
+by `(path, mtime_ns, size, st_ino, st_ctime_ns)`, so re-reads
+collapse to a stat() call plus a cached parse. The inode and
+metadata-change time fields ensure atomic overwrites via `os.replace`
+(which rotates `st_ino`) invalidate the cache even when `mtime` and
+file size do not change. INV-C tests in
 `tests/test_activation_flag_combinations.py` pin the rotation
 visibility contract.

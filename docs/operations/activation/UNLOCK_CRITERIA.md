@@ -76,7 +76,7 @@ Symbol: ✅ = required + currently green ; ⏳ = required + operator-runnable to
 | ✅ `tests/test_entry_forecast_evaluator_cutover.py::test_phase_c1_flag_on_blocks_when_evidence_lacks_canary_success` | Canary-success required |
 | ✅ `tests/test_activation_flag_combinations.py::test_inv_a_flag1_alone_blocks_when_evidence_missing` | Out-of-order flip 1-only safe |
 | ✅ `tests/test_activation_flag_combinations.py::test_inv_b_flag1_corrupt_evidence_typed_blocker` | Cycle-resilient corruption handling |
-| ✅ `tests/test_activation_flag_combinations.py::test_inv_c_evidence_file_rotation_invalidates_cache` | mtime-based cache invalidation |
+| ✅ `tests/test_activation_flag_combinations.py::test_inv_c_evidence_file_rotation_invalidates_cache` | `(path, mtime_ns, size, st_ino, st_ctime_ns)` cache key invalidation on atomic rewrite |
 | ✅ `tests/test_activation_flag_combinations.py::test_inv_c_rollout_gate_sees_rotated_evidence_without_explicit_cache_clear` | Rotation visible without manual cache-clear |
 | ⏳ `state/entry_forecast_promotion_evidence.json` populated with **real** `operator_approval_id`, `g1_evidence_id`, `canary_success_evidence_id` | Operator runs the runbook recipe |
 | ⏳ `evidence/activation/<date>_c1_rollout_gate.txt` | Producer artifact: blocker code dump |
@@ -87,7 +87,7 @@ Symbol: ✅ = required + currently green ; ⏳ = required + operator-runnable to
 **Forbidden states for flip**:
 - producer `blocker_code` starts with `ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:` (operator must repair the file before flip)
 - producer `evidence_present=False` while operator's stated intent is to enforce the gate (this would mean the gate would block ALL live entry-forecast on first cycle — flip during off-hours only)
-- INV-C tests red (mtime cache invalidation broken; daemon would silently see stale evidence)
+- INV-C tests red (`(path, mtime_ns, size, st_ino, st_ctime_ns)` cache invalidation broken; daemon would silently see stale evidence on atomic rewrite)
 
 ### Flag 3 — `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` (flip third per runbook)
 
