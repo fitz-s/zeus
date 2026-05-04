@@ -416,7 +416,16 @@ def get_calibrator(
 
 
 def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
-    """Reconstruct calibrator from stored model data."""
+    """Reconstruct calibrator from stored model data.
+
+    Codex P1 #6 (2026-05-04): also attach the bucket identity attrs from
+    load_platt_model_v2 — evaluator's transfer gate reads these via
+    ``getattr(cal, '_bucket_*', None)`` to construct the actual
+    calibrator_domain instead of hardcoding TIGGE.  Legacy
+    load_platt_model populates them as None (no Phase 2 stratification on
+    the legacy table) so the gate falls back correctly to the
+    cross-domain rejection path.
+    """
     cal = ExtendedPlattCalibrator()
     cal.A = model_data["A"]
     cal.B = model_data["B"]
@@ -427,6 +436,10 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
         tuple(p) for p in model_data["bootstrap_params"]
     ]
     cal.input_space = model_data.get("input_space", "raw_probability")
+    cal._bucket_cycle = model_data.get("bucket_cycle")
+    cal._bucket_source_id = model_data.get("bucket_source_id")
+    cal._bucket_horizon_profile = model_data.get("bucket_horizon_profile")
+    cal._bucket_data_version = model_data.get("bucket_data_version")
     return cal
 
 

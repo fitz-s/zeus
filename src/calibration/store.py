@@ -83,6 +83,39 @@ def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
     return conn.execute(f"PRAGMA table_info({table_ref})").fetchall()
 
 
+def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bool:
+    """True iff platt_models_v2 has cycle/source_id/horizon_profile columns.
+
+    Codex P1 #6 (2026-05-04): the migration script
+    migrate_phase2_cycle_stratification.py adds these columns via ALTER, so
+    pre-migration DBs and several test fixtures lack them.  The loader must
+    degrade gracefully — skip the WHERE filters and return None for the
+    bucket_* fields — instead of raising OperationalError on legacy callers.
+    """
+    try:
+        rows = _table_info(conn, table_ref)
+    except (sqlite3.Error, ValueError):
+        return False
+    cols = {row[1] for row in rows}
+    return {"cycle", "source_id", "horizon_profile"}.issubset(cols)
+
+
+def _v2_pairs_table_has_stratification(conn: sqlite3.Connection) -> bool:
+    """True iff calibration_pairs_v2 has cycle/source_id/horizon_profile columns.
+
+    Mirrors _v2_table_has_stratification for the pairs table.  Used by
+    add_calibration_pair_v2 to choose between the migrated INSERT form
+    (with stratification columns) and the legacy form.  Pre-migration
+    fixtures lack the columns so legacy form is the safe fallback.
+    """
+    try:
+        rows = conn.execute("PRAGMA table_info(calibration_pairs_v2)").fetchall()
+    except sqlite3.Error:
+        return False
+    cols = {row[1] for row in rows}
+    return {"cycle", "source_id", "horizon_profile"}.issubset(cols)
+
+
 def infer_bin_width_from_label(range_label: str) -> float | None:
     """Infer finite bin width from a stored range label.
 
@@ -239,7 +272,15 @@ def add_calibration_pair_v2(
     # yet still produce well-formed rows. The migration script backfilled
     # historical rows from snapshot_id linkage; this writer is the new-row
     # path.
-    if cycle is None and source_id is None and horizon_profile is None:
+    #
+    # Codex P1 #6 collateral (2026-05-04): degrade gracefully when the
+    # calibration_pairs_v2 schema lacks the cycle/source_id/horizon_profile
+    # columns (test fixtures that build the schema directly).  Pre-fix,
+    # passing any non-None stratification kwarg with a pre-migration
+    # schema raised OperationalError; now we route to the legacy INSERT
+    # form so legacy callers and partial-schema fixtures keep working.
+    _has_strat_pairs = _v2_pairs_table_has_stratification(conn)
+    if cycle is None and source_id is None and horizon_profile is None or not _has_strat_pairs:
         conn.execute("""
             INSERT INTO calibration_pairs_v2
             (city, target_date, temperature_metric, observation_field, range_label,
@@ -604,6 +645,9 @@ def load_platt_model(
     if row is None:
         return None
 
+    # Legacy table has no Phase 2 stratification columns — bucket_* are
+    # None so evaluator's transfer gate falls back to the cross-domain
+    # rejection path when an OpenData forecast lands here.
     return {
         "A": row["param_A"],
         "B": row["param_B"],
@@ -613,6 +657,10 @@ def load_platt_model(
         "brier_insample": row["brier_insample"],
         "fitted_at": row["fitted_at"],
         "input_space": row["input_space"] or "raw_probability",
+        "bucket_cycle": None,
+        "bucket_source_id": None,
+        "bucket_horizon_profile": None,
+        "bucket_data_version": None,
     }
 
 
@@ -695,12 +743,41 @@ def load_platt_model_v2(
     """
     table = _qualified_calibration_read_table(conn, "platt_models_v2")
 
+    # Codex P1 review #6 (2026-05-04): SELECT includes the bucket identity
+    # columns (cycle, source_id, horizon_profile, data_version) so callers
+    # can construct a ForecastCalibrationDomain from the row that was
+    # actually loaded.  The evaluator's calibration-transfer gate uses this
+    # to detect exact-match between forecast and the loaded calibrator
+    # bucket — pre-fix the gate hardcoded calibrator_domain to TIGGE and
+    # produced spurious SHADOW_ONLY rejections when an OpenData calibrator
+    # was actually selected.
+    #
+    # Stratification columns are added by migrate_phase2_cycle_stratification
+    # (cycle/source_id/horizon_profile) — pre-migration DBs don't have them,
+    # and several tests construct the schema directly without running the
+    # migration.  Detect at runtime and degrade gracefully so legacy
+    # callers/fixtures keep working; gate logic in the evaluator
+    # interprets a missing bucket_source_id as "fell back to legacy" and
+    # still rejects cross-domain.
+    _strat_cols = _v2_table_has_stratification(conn, table)
+    if _strat_cols:
+        _v2_select_cols = (
+            "param_A, param_B, param_C, bootstrap_params_json, "
+            "n_samples, brier_insample, fitted_at, input_space, "
+            "cycle, source_id, horizon_profile, data_version"
+        )
+    else:
+        _v2_select_cols = (
+            "param_A, param_B, param_C, bootstrap_params_json, "
+            "n_samples, brier_insample, fitted_at, input_space, "
+            "data_version"
+        )
+
     # Explicit model_key pin — bypasses match filters, still gated by auth/active
     if model_key is not None:
         row = conn.execute(
             f"""
-            SELECT param_A, param_B, param_C, bootstrap_params_json,
-                   n_samples, brier_insample, fitted_at, input_space
+            SELECT {_v2_select_cols}
             FROM {table}
             WHERE model_key = ?
               AND is_active = 1
@@ -710,29 +787,56 @@ def load_platt_model_v2(
             (model_key,),
         ).fetchone()
     elif data_version is not None:
-        # Phase 2 (2026-05-04): if caller passes cycle/source_id/horizon_profile,
-        # filter explicitly. Default behavior (None for any of these) preserves
-        # legacy lookup so un-migrated callers still work — they hit the legacy
-        # 00z/tigge_mars/full bucket via the schema DEFAULT.
+        # Phase 2 (2026-05-04): cycle/source_id/horizon_profile must filter the
+        # SELECT explicitly when the caller has them.  Pre-Copilot-#2-fix the
+        # SELECT silently omitted those filters when None and picked the
+        # newest row by fitted_at, which meant a 12z OpenData call with one
+        # of the three keys missing could load the schema-default 00z TIGGE
+        # bucket.
+        #
+        # Copilot review #2 (2026-05-04): apply explicit policy on missing
+        # stratification keys.
+        #   * For OpenData data_version (ecmwf_opendata_*), there is NO
+        #     legitimate schema default — fail closed (ValueError) so the
+        #     caller learns about the missing key instead of getting silently
+        #     wrong calibration.
+        #   * For TIGGE data_version (tigge_*) — backward compat — apply the
+        #     legacy schema defaults (cycle='00', source_id='tigge_mars',
+        #     horizon_profile='full') so un-migrated tests/tools keep working.
+        if data_version.startswith("ecmwf_opendata_") and (
+            cycle is None or source_id is None or horizon_profile is None
+        ):
+            raise ValueError(
+                "load_platt_model_v2: OpenData data_version "
+                f"{data_version!r} requires all three stratification keys "
+                f"(cycle, source_id, horizon_profile); got "
+                f"cycle={cycle!r}, source_id={source_id!r}, "
+                f"horizon_profile={horizon_profile!r}. "
+                "Caller must thread Phase 2 keys via "
+                "derive_phase2_keys_from_ens_result(ens_result)."
+            )
+        if cycle is None:
+            cycle = "00"
+        if source_id is None:
+            source_id = "tigge_mars"
+        if horizon_profile is None:
+            horizon_profile = "full"
         params: list = [temperature_metric, cluster, season, data_version, input_space]
         extra_filters: list[str] = []
-        if cycle is not None:
-            extra_filters.append("AND cycle = ?")
-            params.append(cycle)
-        if source_id is not None:
-            extra_filters.append("AND source_id = ?")
-            params.append(source_id)
-        if horizon_profile is not None:
-            extra_filters.append("AND horizon_profile = ?")
-            params.append(horizon_profile)
+        if _strat_cols:
+            extra_filters.extend([
+                "AND cycle = ?",
+                "AND source_id = ?",
+                "AND horizon_profile = ?",
+            ])
+            params.extend([cycle, source_id, horizon_profile])
         frozen_clause = ""
         if frozen_as_of is not None:
             frozen_clause = "AND recorded_at <= ?"
             params.append(frozen_as_of)
         row = conn.execute(
             f"""
-            SELECT param_A, param_B, param_C, bootstrap_params_json,
-                   n_samples, brier_insample, fitted_at, input_space
+            SELECT {_v2_select_cols}
             FROM {table}
             WHERE temperature_metric = ?
               AND cluster = ?
@@ -756,8 +860,7 @@ def load_platt_model_v2(
             params.append(frozen_as_of)
         row = conn.execute(
             f"""
-            SELECT param_A, param_B, param_C, bootstrap_params_json,
-                   n_samples, brier_insample, fitted_at, input_space
+            SELECT {_v2_select_cols}
             FROM {table}
             WHERE temperature_metric = ?
               AND cluster = ?
@@ -775,6 +878,18 @@ def load_platt_model_v2(
     if row is None:
         return None
 
+    # Codex P1 #6 (2026-05-04): expose the loaded bucket's identity so callers
+    # can construct an exact-match ForecastCalibrationDomain instead of
+    # hardcoding (tigge_mars/00/full).  When the stratification columns are
+    # absent (pre-migration DB, or test fixture without ALTER), bucket_*
+    # are None — evaluator interprets that as legacy fallback and still
+    # rejects cross-domain.
+    def _row_field(key: str) -> Optional[str]:
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return None
+
     return {
         "A": row["param_A"],
         "B": row["param_B"],
@@ -784,6 +899,10 @@ def load_platt_model_v2(
         "brier_insample": row["brier_insample"],
         "fitted_at": row["fitted_at"],
         "input_space": row["input_space"] or "raw_probability",
+        "bucket_cycle": _row_field("cycle") if _strat_cols else None,
+        "bucket_source_id": _row_field("source_id") if _strat_cols else None,
+        "bucket_horizon_profile": _row_field("horizon_profile") if _strat_cols else None,
+        "bucket_data_version": _row_field("data_version"),
     }
 
 

@@ -135,16 +135,28 @@ def fetch_ensemble(
     #       at evaluator.py:1713 instead of fetch_ensemble at :1717.
     # The exec-forecast reader path already produces typed data_version
     # via the snapshot row, so it inherently can't trigger this guard.
+    # Copilot review #3 (2026-05-04): the original guard fired only when
+    # role == "entry_primary", but the same Open-Meteo-broker mis-provenance
+    # affects any non-entry role too — crosscheck, diagnostic, and monitor
+    # callers that asked for ecmwf_open_data ended up with Open-Meteo
+    # payloads labeled as `source_id="ecmwf_open_data"` (with the registry's
+    # authority_tier / degradation_level), which then propagated downstream
+    # into calibration buckets and decision logs.  Drop the role gate.  Any
+    # caller asking for ecmwf_open_data with no ingest_class now fails
+    # closed regardless of role.  Future role-specific exceptions (e.g., a
+    # diagnostic that *wants* the Open-Meteo broker) should plumb a
+    # different source_id, not widen this guard.
     if (
         source_id == "ecmwf_open_data"
-        and role == "entry_primary"
         and source_spec.ingest_class is None
     ):
         raise SourceNotEnabled(
-            "ecmwf_open_data is registered for entry_primary but has no "
-            "ingest_class — fetch_ensemble would route through the Open-Meteo "
-            "broker (training/serving skew). Use the executable-forecast "
-            "reader path or attach a raw-GRIB ingest_class to the spec."
+            f"ecmwf_open_data has no ingest_class — fetch_ensemble would "
+            f"route through the Open-Meteo broker for role={role!r} and "
+            f"label the result as source_id='ecmwf_open_data' "
+            f"(mis-provenance + training/serving skew). Attach a raw-GRIB "
+            f"ingest_class to the spec, or use the executable-forecast "
+            f"reader path."
         )
 
     if source_spec.ingest_class is not None:

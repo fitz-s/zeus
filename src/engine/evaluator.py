@@ -2304,15 +2304,30 @@ def evaluate_candidate(
         derive_phase2_keys_from_ens_result(ens_result if isinstance(ens_result, dict) else None)
     )
 
-    # Phase 2.5 (2026-05-04, may4math.md F2 + critic-opus BLOCKER 6):
-    # evaluate_calibration_transfer activation. When the live forecast is
-    # NOT the legacy TIGGE training domain (i.e., data_version starts with
-    # 'ecmwf_opendata_'), we are about to apply a Platt model trained on
-    # TIGGE/00z/full to a forecast from a different domain. That is a
-    # cross-domain transfer and cannot be live-eligible without OOS
-    # evidence in validated_calibration_transfers. The gate fails closed
-    # (SHADOW_ONLY) until an operator runs a holdout experiment and
-    # records the transfer authority.
+    # Phase 2.5 (2026-05-04, may4math.md F2 + critic-opus BLOCKER 6 +
+    # Codex P1 review #6): the calibration transfer gate must use the
+    # ACTUAL bucket the calibrator was loaded from, not a hardcoded TIGGE
+    # domain.  Pre-fix, even when an exact-match OpenData bucket existed
+    # (e.g., source_id='ecmwf_open_data', cycle='12', horizon='full'),
+    # this gate compared the OpenData forecast against TIGGE and rejected
+    # as SHADOW_ONLY — a false rejection.
+    #
+    # Order: load calibrator FIRST so the gate sees the loaded bucket
+    # identity (attached as cal._bucket_*).  The transfer gate is still
+    # the LAST line of defense before sizing — it remains sufficient
+    # because (a) load_platt_model_v2 fails-closed on missing
+    # stratification keys for OpenData (Copilot review #2 fix), so
+    # mis-loaded buckets become exceptions before this point, and (b)
+    # calibrator loading is a SELECT with no side effects, so loading
+    # then rejecting is equivalent to never loading.
+    cal, cal_level = get_calibrator(
+        conn, city, target_date,
+        temperature_metric=temperature_metric.temperature_metric,
+        cycle=_phase2_cycle,
+        source_id=_phase2_source_id,
+        horizon_profile=_phase2_horizon_profile,
+    )
+
     if (
         isinstance(_phase2_data_version, str)
         and _phase2_data_version.startswith("ecmwf_opendata_")
@@ -2329,11 +2344,41 @@ def evaluate_candidate(
                 LOW_LOCALDAY_MIN,
             )
 
-            _calibrator_dv = (
+            # Construct calibrator_domain from the loaded bucket's actual
+            # identity (Codex P1 #6).  When all four bucket attrs are set,
+            # the calibrator came from a Phase-2-stratified row and we use
+            # those values; the gate then resolves to LIVE_ELIGIBLE via
+            # DOMAIN_EXACT_MATCH when forecast and bucket match.  When attrs
+            # are missing (legacy table fallback, on-the-fly refit, no
+            # calibrator at all), default to legacy TIGGE — gate rejects
+            # cross-domain as before.
+            _legacy_dv = (
                 HIGH_LOCALDAY_MAX.data_version
                 if temperature_metric.is_high()
                 else LOW_LOCALDAY_MIN.data_version
             )
+            _bucket_sid = getattr(cal, "_bucket_source_id", None) if cal is not None else None
+            _bucket_cyc = getattr(cal, "_bucket_cycle", None) if cal is not None else None
+            _bucket_hp = getattr(cal, "_bucket_horizon_profile", None) if cal is not None else None
+            _bucket_dv = getattr(cal, "_bucket_data_version", None) if cal is not None else None
+            if _bucket_sid and _bucket_cyc and _bucket_hp and _bucket_dv:
+                _calibrator_domain = ForecastCalibrationDomain(
+                    source_id=_bucket_sid,
+                    cycle_hour_utc=_bucket_cyc,
+                    horizon_profile=_bucket_hp,
+                    metric=temperature_metric.temperature_metric,
+                    season=_cal_season,
+                    data_version=_bucket_dv,
+                )
+            else:
+                _calibrator_domain = ForecastCalibrationDomain(
+                    source_id="tigge_mars",
+                    cycle_hour_utc="00",
+                    horizon_profile="full",
+                    metric=temperature_metric.temperature_metric,
+                    season=_cal_season,
+                    data_version=_legacy_dv,
+                )
             _forecast_domain = ForecastCalibrationDomain(
                 source_id=_phase2_source_id or "ecmwf_open_data",
                 cycle_hour_utc=_phase2_cycle or "00",
@@ -2341,14 +2386,6 @@ def evaluate_candidate(
                 metric=temperature_metric.temperature_metric,
                 season=_cal_season,
                 data_version=_phase2_data_version,
-            )
-            _calibrator_domain = ForecastCalibrationDomain(
-                source_id="tigge_mars",
-                cycle_hour_utc="00",
-                horizon_profile="full",
-                metric=temperature_metric.temperature_metric,
-                season=_cal_season,
-                data_version=_calibrator_dv,
             )
             _transfer = evaluate_calibration_transfer(
                 conn,
@@ -2377,7 +2414,9 @@ def evaluate_candidate(
                 if _transfer.status == "SHADOW_ONLY"
                 else "CALIBRATION_TRANSFER_BLOCKED",
                 rejection_reasons=[
-                    f"OpenData→TIGGE calibration transfer not approved: "
+                    f"OpenData calibration transfer not approved: "
+                    f"forecast={_forecast_domain.source_id}/{_forecast_domain.cycle_hour_utc} "
+                    f"calibrator={_calibrator_domain.source_id}/{_calibrator_domain.cycle_hour_utc} "
                     f"status={_transfer.status} reasons={list(_transfer.reason_codes)}"
                 ],
                 availability_status="DATA_UNAVAILABLE",
@@ -2386,14 +2425,6 @@ def evaluate_candidate(
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
             )]
-
-    cal, cal_level = get_calibrator(
-        conn, city, target_date,
-        temperature_metric=temperature_metric.temperature_metric,
-        cycle=_phase2_cycle,
-        source_id=_phase2_source_id,
-        horizon_profile=_phase2_horizon_profile,
-    )
     if cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
