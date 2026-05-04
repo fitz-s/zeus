@@ -733,7 +733,9 @@ def main():
     # ``hour=7,9,19,21`` for update_reaction_times_utc are written
     # against UTC; without an explicit timezone= kwarg APScheduler
     # falls back to the host's local tz (CDT/CST on the deployment
-    # box), shifting every cron job by 5h. See PLAN_v3 D-D drift +
+    # box), shifting every cron job by 5h. See ``docs/operations/
+    # task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v2.md`` §P0
+    # (the file is at v3 per its §0.1 changelog) and §4 D-D drift +
     # operator directive 2026-05-04 "所有的执行时间都需要严格统一用utc".
     scheduler = BlockingScheduler(timezone=ZoneInfo("UTC"))
     discovery = settings["discovery"]

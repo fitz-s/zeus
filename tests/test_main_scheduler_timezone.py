@@ -15,19 +15,28 @@ Operator directive 2026-05-04: "所有的执行时间都需要严格统一用utc
 trading system spans 51 cities across all 24 timezones; UTC is the only
 viable canonical execution clock.
 
-This test is structural (AST-walk of ``src/main.py``); it does not
-import or run the daemon. Failure is loud and pinpointed at construction
-site.
+This test is structural — it AST-walks ``src/main.py`` resolved via the
+repo root, the same approach used by ``tests/test_main_module_scope.py``.
+It deliberately does NOT ``import src.main``, because that triggers
+module-scope side effects (config JSON load, logging setup, etc.) that
+would make the test slow and coupled to runtime config files.
 """
 import ast
 from pathlib import Path
 
-from src import main as zeus_main
+REPO_ROOT = Path(__file__).parent.parent
+MAIN_FILE = REPO_ROOT / "src" / "main.py"
+
+
+def _parse_main() -> ast.Module:
+    return ast.parse(
+        MAIN_FILE.read_text(encoding="utf-8"),
+        filename=str(MAIN_FILE),
+    )
 
 
 def test_main_blocking_scheduler_constructed_with_utc_zoneinfo() -> None:
-    src = Path(zeus_main.__file__).read_text()
-    tree = ast.parse(src)
+    tree = _parse_main()
 
     blocking_scheduler_calls = [
         node
@@ -40,7 +49,7 @@ def test_main_blocking_scheduler_constructed_with_utc_zoneinfo() -> None:
     ]
     assert len(blocking_scheduler_calls) == 1, (
         f"expected exactly one BlockingScheduler(...) construction site in "
-        f"src/main.py; found {len(blocking_scheduler_calls)}. If the daemon "
+        f"{MAIN_FILE}; found {len(blocking_scheduler_calls)}. If the daemon "
         f"now spawns multiple schedulers, every site needs the UTC kwarg."
     )
 
@@ -71,12 +80,11 @@ def test_main_blocking_scheduler_constructed_with_utc_zoneinfo() -> None:
 
 
 def test_zoneinfo_imported_at_module_level() -> None:
-    """The UTC kwarg is only as good as its import site. Ensure the
-    module imports ``ZoneInfo`` from ``zoneinfo`` at the top level so a
-    later refactor cannot accidentally shadow it.
+    """The UTC kwarg is only as good as its import site. Ensure
+    ``src/main.py`` imports ``ZoneInfo`` from ``zoneinfo`` at the top
+    level so a later refactor cannot accidentally shadow it.
     """
-    src = Path(zeus_main.__file__).read_text()
-    tree = ast.parse(src)
+    tree = _parse_main()
 
     found = False
     for node in tree.body:
@@ -89,7 +97,7 @@ def test_zoneinfo_imported_at_module_level() -> None:
             break
 
     assert found, (
-        "src/main.py must contain a top-level "
+        f"{MAIN_FILE} must contain a top-level "
         "``from zoneinfo import ZoneInfo`` import so the BlockingScheduler "
         "tz kwarg resolves correctly. If you must alias, update this test."
     )
