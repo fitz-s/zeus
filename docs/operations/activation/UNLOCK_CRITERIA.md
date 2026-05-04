@@ -38,7 +38,7 @@ python scripts/produce_activation_evidence.py --all \
 
 Each invocation writes a date-stamped artifact per flag plus a `<date>_summary.md` aggregator. Artifacts stay in `evidence/activation/` (under git) so the flip commit can reference them.
 
-The producer is a thin wrapper around `tests/test_activation_flag_combinations.py`. Both are authoritative — the test file pins the relationship invariants; the producer captures the per-environment dry-run snapshot.
+The producer and `tests/test_activation_flag_combinations.py` are companion tools with distinct roles: the test file pins the relationship invariants; the producer captures the per-environment dry-run snapshot. When invoked with `--all`, the producer runs the test suite as a subprocess gate — artifacts are only written if the tests pass. The two tools must both be green before a flag flip is authorized.
 
 ---
 

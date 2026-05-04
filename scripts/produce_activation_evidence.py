@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 from dataclasses import replace
 from datetime import date, datetime, timezone
@@ -384,18 +385,70 @@ def produce_c4_healthcheck_evidence(
 # -------------------------------------------------------------------- #
 
 
+def _run_flag_combination_tests() -> dict[str, Any]:
+    """Run tests/test_activation_flag_combinations.py as a subprocess gate.
+
+    Returns a dict with keys:
+      - passed (bool): True iff pytest exited 0
+      - exit_code (int): raw pytest exit code
+      - output (str): last 40 lines of pytest stdout+stderr (for summary embed)
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_activation_flag_combinations.py",
+         "-x", "--no-header", "-q"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+    )
+    combined = (result.stdout + result.stderr).strip()
+    # Keep only the tail to avoid bloating the summary artifact.
+    tail_lines = combined.splitlines()[-40:]
+    return {
+        "passed": result.returncode == 0,
+        "exit_code": result.returncode,
+        "output": "\n".join(tail_lines),
+    }
+
+
 def produce_all(
     *,
     out_dir: Path,
     promotion_evidence_path: Path,
     check_fn: Callable[[], dict[str, Any]] | None = None,
     as_of: datetime | None = None,
+    skip_tests: bool = False,
 ) -> dict[str, Any]:
-    """Run all three producers and write a markdown summary."""
+    """Run all three producers and write a markdown summary.
+
+    Also invokes ``tests/test_activation_flag_combinations.py`` via pytest
+    so that a green summary bundle can only be produced when the mandatory
+    cross-flag test suite is passing.  Pass ``skip_tests=True`` only from
+    unit tests that already run inside pytest (avoids re-entrant subprocess).
+    """
 
     if as_of is None:
         as_of = datetime.now(UTC)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Gate: run the relationship test suite before producing any artifacts.
+    if not skip_tests:
+        test_result = _run_flag_combination_tests()
+        if not test_result["passed"]:
+            print(
+                "[produce_activation_evidence] ERROR: "
+                "tests/test_activation_flag_combinations.py FAILED "
+                f"(exit {test_result['exit_code']}). "
+                "Artifacts not produced. Fix the test failures first.",
+                file=sys.stderr,
+            )
+            print(test_result["output"], file=sys.stderr)
+            return {
+                "error": "test_gate_failed",
+                "test_exit_code": test_result["exit_code"],
+                "test_output": test_result["output"],
+            }
+    else:
+        test_result = {"passed": True, "exit_code": 0, "output": "(skipped in test context)"}
 
     c1 = produce_c1_rollout_gate_evidence(
         out_dir=out_dir,
@@ -414,19 +467,30 @@ def produce_all(
     )
 
     summary_path = out_dir / f"{_stamp(as_of)}_summary.md"
-    summary_path.write_text(_render_summary(c1=c1, c3=c3, c4=c4, as_of=as_of))
+    summary_path.write_text(
+        _render_summary(c1=c1, c3=c3, c4=c4, as_of=as_of, test_result=test_result)
+    )
 
-    return {"c1": c1, "c3": c3, "c4": c4, "summary_path": str(summary_path)}
+    return {
+        "c1": c1,
+        "c3": c3,
+        "c4": c4,
+        "summary_path": str(summary_path),
+        "test_gate": test_result,
+    }
 
 
-def _render_summary(*, c1, c3, c4, as_of: datetime) -> str:
+def _render_summary(*, c1, c3, c4, as_of: datetime, test_result: dict[str, Any]) -> str:
     rows = [
         ("ZEUS_ENTRY_FORECAST_READINESS_WRITER (C-3)", c3),
         ("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE (C-1)", c1),
         ("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS (C-4)", c4),
     ]
+    test_status = "PASSED" if test_result["passed"] else "FAILED"
     body = [
         f"# Activation evidence summary — {as_of.isoformat()}",
+        "",
+        f"**test_activation_flag_combinations.py gate**: {test_status} (exit {test_result['exit_code']})",
         "",
         "Operator decision matrix (run `python scripts/produce_activation_evidence.py --all` to refresh):",
         "",
@@ -505,6 +569,10 @@ def _main(argv: list[str] | None = None) -> int:
             as_of=as_of,
         )
         print(json.dumps(result, indent=2, default=str))
+        # Propagate test-gate failure as a non-zero exit so CI/operator
+        # scripts can detect that no valid artifacts were written.
+        if result.get("error") == "test_gate_failed":
+            return 1
         return 0
 
     payload: dict[str, Any] = {}
