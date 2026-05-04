@@ -287,86 +287,154 @@ class TestWorktreeVenvDiscovery:
     `ln -s <canonical>/.venv .venv` — recurring friction documented in
     auto-memory.
 
-    These tests exercise the discovery LOGIC by running the hook with a
-    forced-bad PYTEST_BIN and a tmpdir REPO_ROOT, isolating the fall-through
-    behavior from the real repo's venv state.
+    Implementation note (PR #57 review): the original tests duplicated
+    the discovery shell into a probe in this file, which Copilot+Codex
+    correctly flagged as locking in the parser bug (`awk '{print $2}'`
+    truncates paths with spaces) and silently going green if the hook's
+    real discovery drifts. These tests now invoke the actual hook
+    binary in dry-run mode (`ZEUS_HOOK_DRY_RUN=1`) — discovery runs
+    end-to-end against the real script. A dry-run line is printed and
+    the hook exits 0 BEFORE running pytest, so we don't pay the full
+    suite run-time per test.
     """
 
-    def test_falls_through_to_main_worktree_venv_when_local_venv_missing(self, tmp_path):
-        """Hook must locate the canonical `.venv` via `git worktree list
-        --porcelain` when REPO_ROOT/.venv does not exist."""
-        # Build a one-line discovery probe that mirrors the hook's
-        # discovery block. We exercise the same `git worktree list` parse
-        # without invoking the full hook (which would also try to run
-        # pytest — out of scope for this test).
-        probe = textwrap.dedent("""\
-            set -eu
-            REPO_ROOT="$1"
-            PYTEST_BIN="${REPO_ROOT}/.venv/bin/python"
-            if [ ! -x "$PYTEST_BIN" ] && [ -z "${ZEUS_HOOK_PYTEST_BIN:-}" ]; then
-                MAIN_WT=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \\
-                    | awk '/^worktree / {print $2; exit}')
-                if [ -n "$MAIN_WT" ] && [ "$MAIN_WT" != "$REPO_ROOT" ] \\
-                   && [ -x "$MAIN_WT/.venv/bin/python" ]; then
-                    PYTEST_BIN="$MAIN_WT/.venv/bin/python"
-                fi
-            fi
-            echo "RESOLVED=$PYTEST_BIN"
-        """)
-        # Use the real REPO_ROOT (this worktree). If this worktree has no
-        # local .venv but a sibling does, the probe must surface the
-        # sibling. If this worktree DOES have a local .venv (the common
-        # case), the probe just returns that — also acceptable.
-        result = subprocess.run(
-            ["bash", "-c", probe, "--", str(REPO_ROOT)],
-            capture_output=True, text=True, env={**os.environ, "ZEUS_HOOK_PYTEST_BIN": ""},
-        )
-        assert result.returncode == 0, f"probe failed: {result.stderr}"
-        resolved = result.stdout.strip().split("=", 1)[1]
-        # The resolved path must be either the local venv or a discovered
-        # sibling worktree's venv — never an empty/unresolved fallback.
-        assert resolved.endswith("/.venv/bin/python"), (
-            f"resolved path doesn't look like a venv python: {resolved!r}"
-        )
-        # The main worktree's python (canonical) must be executable when
-        # falling through. If the local one exists this is moot; if not,
-        # the probe must have selected a working interpreter.
-        assert Path(resolved).exists(), (
-            f"resolved venv python must exist on disk: {resolved!r}"
+    @staticmethod
+    def _run_hook_dry_run(cwd: str | Path, extra_env: dict | None = None):
+        """Invoke the actual hook in Channel B + dry-run mode.
+
+        Returns CompletedProcess. The DRY_RUN line lives in stderr,
+        formatted as: ``[pre-commit-invariant-test] DRY_RUN: PYTEST_BIN=<path>``
+        """
+        env = {**os.environ, "GIT_INDEX_FILE": "fake-index",
+               "COMMIT_INVARIANT_TEST_SKIP": "0", "ZEUS_HOOK_DRY_RUN": "1"}
+        # Strip prior overrides from outer env so the test controls them
+        env.pop("ZEUS_HOOK_PYTEST_BIN", None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            capture_output=True, text=True, env=env, cwd=str(cwd),
+            timeout=30,
         )
 
-    def test_operator_override_wins_even_when_local_venv_missing(self):
-        """If the operator pinned ZEUS_HOOK_PYTEST_BIN, the fall-through
-        must NOT override that choice — operators override for a reason
-        (e.g., testing a python version). The discovery block guards on
-        `[ -z "${ZEUS_HOOK_PYTEST_BIN:-}" ]` to honor the override."""
-        probe = textwrap.dedent("""\
-            set -eu
-            REPO_ROOT="$1"
-            PYTEST_BIN="${ZEUS_HOOK_PYTEST_BIN:-${REPO_ROOT}/.venv/bin/python}"
-            if [ ! -x "$PYTEST_BIN" ] && [ -z "${ZEUS_HOOK_PYTEST_BIN:-}" ]; then
-                MAIN_WT=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \\
-                    | awk '/^worktree / {print $2; exit}')
-                if [ -n "$MAIN_WT" ] && [ "$MAIN_WT" != "$REPO_ROOT" ] \\
-                   && [ -x "$MAIN_WT/.venv/bin/python" ]; then
-                    PYTEST_BIN="$MAIN_WT/.venv/bin/python"
-                fi
-            fi
-            echo "RESOLVED=$PYTEST_BIN"
-        """)
-        # Operator pin to a deliberately-non-existent path — the discovery
-        # must NOT replace it. The hook's downstream BLOCKED path will then
-        # surface the bad pin to the operator (correct behavior).
-        bad_pin = "/this/path/should/never/exist/python"
+    @staticmethod
+    def _parse_dry_run_pytest_bin(stderr: str) -> str:
+        """Pull the resolved PYTEST_BIN out of the hook's DRY_RUN line."""
+        marker = "DRY_RUN: PYTEST_BIN="
+        for line in stderr.splitlines():
+            if marker in line:
+                return line.split(marker, 1)[1].strip()
+        raise AssertionError(
+            f"hook did not emit DRY_RUN line; stderr was:\n{stderr}"
+        )
+
+    def test_falls_through_to_main_worktree_venv_when_local_venv_missing(self, tmp_path):
+        """Run the actual hook in a fresh `git worktree add`-ed sibling
+        without `.venv`. The hook's discovery must locate the canonical
+        worktree's `.venv/bin/python` and surface the INFO line.
+
+        This is the core regression scenario: fresh worktree first commit
+        currently fails with BLOCKED before this fix.
+        """
+        fresh_wt = tmp_path / "fresh worktree with space"  # space in path — pins parser fix
         result = subprocess.run(
-            ["bash", "-c", probe, "--", str(REPO_ROOT)],
+            ["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(fresh_wt)],
             capture_output=True, text=True,
-            env={**os.environ, "ZEUS_HOOK_PYTEST_BIN": bad_pin},
+        )
+        assert result.returncode == 0, f"git worktree add failed: {result.stderr}"
+        try:
+            assert not (fresh_wt / ".venv").exists(), (
+                "fresh worktree should not have .venv; precondition for the fallback"
+            )
+            run = self._run_hook_dry_run(fresh_wt)
+            assert run.returncode == 0, (
+                f"dry-run hook must exit 0; got {run.returncode}\nstderr={run.stderr}"
+            )
+            # The INFO line announces the fall-through choice.
+            assert "using main-worktree venv" in run.stderr, (
+                f"expected fall-through INFO line; stderr was:\n{run.stderr}"
+            )
+            resolved = self._parse_dry_run_pytest_bin(run.stderr)
+            # The resolved interpreter must be the canonical workspace's
+            # python — which is always at <some main wt>/.venv/bin/python
+            # — and must actually exist.
+            assert resolved.endswith("/.venv/bin/python"), (
+                f"resolved path is not a venv python: {resolved!r}"
+            )
+            assert Path(resolved).exists(), (
+                f"resolved venv python must exist on disk: {resolved!r}"
+            )
+            # Pin the parser fix: resolved path should match an actual
+            # worktree (no truncation at spaces). The fresh worktree
+            # itself has a space — the SIBLING (main) we resolved to
+            # doesn't necessarily, but the parser fix is exercised in
+            # test_parser_preserves_paths_with_spaces below.
+        finally:
+            subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force", str(fresh_wt)],
+                capture_output=True,
+            )
+
+    def test_operator_override_wins_even_when_local_venv_missing(self, tmp_path):
+        """If the operator pinned ZEUS_HOOK_PYTEST_BIN, the fall-through
+        must NOT override that choice. The hook's downstream BLOCKED path
+        surfaces a bad pin (correct behavior); a fall-through that
+        silently corrects an operator's explicit override would mask
+        intentional version-pinning.
+        """
+        fresh_wt = tmp_path / "fresh_pin"
+        subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "worktree", "add", "--detach", str(fresh_wt)],
+            capture_output=True, check=True,
+        )
+        try:
+            bad_pin = "/this/path/should/never/exist/python"
+            run = self._run_hook_dry_run(fresh_wt, extra_env={"ZEUS_HOOK_PYTEST_BIN": bad_pin})
+            assert run.returncode == 0, run.stderr
+            resolved = self._parse_dry_run_pytest_bin(run.stderr)
+            assert resolved == bad_pin, (
+                f"operator pin must win; got {resolved!r} instead of {bad_pin!r}. "
+                f"Discovery fall-through silently overrode the explicit pin."
+            )
+            # And the INFO fall-through line must NOT have been emitted —
+            # operator override suppresses the discovery branch entirely.
+            assert "using main-worktree venv" not in run.stderr, (
+                f"INFO fall-through fired despite explicit operator pin: {run.stderr}"
+            )
+        finally:
+            subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "worktree", "remove", "--force", str(fresh_wt)],
+                capture_output=True,
+            )
+
+    def test_parser_preserves_paths_with_spaces(self, tmp_path):
+        """The discovery parses `git worktree list --porcelain` to find
+        the canonical worktree. The parser must preserve paths with
+        spaces — a naive `awk '{print $2}'` truncates at the first space
+        (Copilot+Codex P2 on the initial PR push).
+
+        Strategy: stage a fake porcelain output file with a space-bearing
+        path, run only the parser line through bash, assert the full
+        path comes through.
+        """
+        # The exact parser line from the hook (no copy-paste of more
+        # logic — just the one substitution + head we want to pin).
+        porcelain = "worktree /Users/alice/Work Trees/zeus\nHEAD abc123\nbranch refs/heads/main\n\nworktree /tmp/fresh_wt\nHEAD def456\nbranch refs/heads/feature\n"
+        fixture = tmp_path / "porcelain.txt"
+        fixture.write_text(porcelain)
+        # This invocation MUST mirror the hook's discovery byte-for-byte.
+        # Linked to the hook by:
+        #   1. The hook reads `sed -n 's/^worktree //p' | head -n1`
+        #   2. The end-to-end tests above run the actual hook
+        # If a future PR changes the parser in the hook, the e2e tests
+        # catch the contract drift; this test pins the regex pattern
+        # itself for the space-with-paths edge case.
+        result = subprocess.run(
+            ["sh", "-c", "sed -n 's/^worktree //p' < \"$1\" | head -n1", "--", str(fixture)],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
-        resolved = result.stdout.strip().split("=", 1)[1]
-        assert resolved == bad_pin, (
-            f"operator pin must win; got {resolved!r} instead of {bad_pin!r}. "
-            f"The discovery fall-through silently overrode the operator's "
-            f"explicit ZEUS_HOOK_PYTEST_BIN — regression."
+        assert result.stdout.strip() == "/Users/alice/Work Trees/zeus", (
+            f"parser truncated path with spaces: got {result.stdout.strip()!r}. "
+            f"awk '{{print $2}}' would emit '/Users/alice/Work' — confirm sed/head is in the hook."
         )
