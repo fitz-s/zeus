@@ -486,24 +486,32 @@ def save_platt_model_v2(
     brier_insample: Optional[float] = None,
     input_space: str = "raw_probability",
     authority: str = "VERIFIED",
+    cycle: str = "00",
+    source_id: str = "tigge_mars",
+    horizon_profile: str = "full",
 ) -> None:
     """Save a fitted Platt model to platt_models_v2.
 
     Requires metric_identity (4A.4 — no legacy default). Derives model_key
-    from (temperature_metric, cluster, season, data_version, input_space).
-    Uses INSERT OR REPLACE on model_key.
+    from (temperature_metric, cluster, season, data_version, cycle, source_id,
+    horizon_profile, input_space). Phase 2 (2026-05-04): cycle, source_id,
+    horizon_profile added per may4math.md Finding 1 / DESIGN_PHASE2.
+    Defaults match legacy 00z TIGGE archive for backward compat with un-migrated
+    callers; production callers MUST pass explicit values from the calibration
+    pair source.
     """
     model_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}"
-        f":{data_version}:{input_space}"
+        f":{data_version}:{cycle}:{source_id}:{horizon_profile}:{input_space}"
     )
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("""
         INSERT INTO platt_models_v2
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, brier_insample, fitted_at, is_active, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+         n_samples, brier_insample, fitted_at, is_active, authority,
+         cycle, source_id, horizon_profile)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
     """, (
         model_key,
         metric_identity.temperature_metric,
@@ -511,6 +519,7 @@ def save_platt_model_v2(
         param_A, param_B, param_C,
         json.dumps(bootstrap_params),
         n_samples, brier_insample, now, authority,
+        cycle, source_id, horizon_profile,
     ))
 
 
@@ -522,19 +531,23 @@ def deactivate_model_v2(
     season: str,
     data_version: str,
     input_space: str = "raw_probability",
+    cycle: str = "00",
+    source_id: str = "tigge_mars",
+    horizon_profile: str = "full",
 ) -> int:
     """Delete the existing platt_models_v2 row for a bucket before refit.
 
     Returns the number of rows deleted (0 or 1). Called by refit_platt_v2.py
     before save_platt_model_v2. Deletion (not soft-deactivation) is required
     because UNIQUE(model_key) means the old row must be removed before the
-    new INSERT can succeed with the same key. Audit trail lives in git commit
-    history and the new row's fitted_at timestamp — no separate soft-delete
-    log is needed for this internal pipeline operation.
+    new INSERT can succeed with the same key.
+
+    Phase 2 (2026-05-04): cycle, source_id, horizon_profile added to model_key
+    per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION.md.
     """
     model_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}"
-        f":{data_version}:{input_space}"
+        f":{data_version}:{cycle}:{source_id}:{horizon_profile}:{input_space}"
     )
     result = conn.execute(
         "DELETE FROM platt_models_v2 WHERE model_key = ?",
@@ -581,6 +594,9 @@ def load_platt_model_v2(
     input_space: str = "width_normalized_density",
     frozen_as_of: Optional[str] = None,
     model_key: Optional[str] = None,
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> Optional[dict]:
     """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
 
@@ -662,7 +678,21 @@ def load_platt_model_v2(
             (model_key,),
         ).fetchone()
     elif data_version is not None:
+        # Phase 2 (2026-05-04): if caller passes cycle/source_id/horizon_profile,
+        # filter explicitly. Default behavior (None for any of these) preserves
+        # legacy lookup so un-migrated callers still work — they hit the legacy
+        # 00z/tigge_mars/full bucket via the schema DEFAULT.
         params: list = [temperature_metric, cluster, season, data_version, input_space]
+        extra_filters: list[str] = []
+        if cycle is not None:
+            extra_filters.append("AND cycle = ?")
+            params.append(cycle)
+        if source_id is not None:
+            extra_filters.append("AND source_id = ?")
+            params.append(source_id)
+        if horizon_profile is not None:
+            extra_filters.append("AND horizon_profile = ?")
+            params.append(horizon_profile)
         frozen_clause = ""
         if frozen_as_of is not None:
             frozen_clause = "AND recorded_at <= ?"
@@ -679,6 +709,7 @@ def load_platt_model_v2(
               AND input_space = ?
               AND is_active = 1
               AND authority = 'VERIFIED'
+              {' '.join(extra_filters)}
               {frozen_clause}
             ORDER BY fitted_at DESC
             LIMIT 1

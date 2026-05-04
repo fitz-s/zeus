@@ -194,15 +194,29 @@ def get_calibrator(
     city: City,
     target_date: str,
     temperature_metric: Literal["high", "low"] = "high",
+    *,
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> tuple[Optional[ExtendedPlattCalibrator], int]:
     """Get the best available calibrator for a city+date+metric.
+
+    Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): added
+    cycle/source_id/horizon_profile keyword params for cycle-stratified Platt
+    bucket selection. When all three are None (default), legacy behavior is
+    preserved — load_platt_model_v2 hits the schema-default bucket (00z TIGGE
+    full horizon). Production callers (evaluator) MUST thread non-None values
+    derived from the forecast's actual provenance (issue_time → cycle,
+    data_version → source_id, registry → horizon_profile) so that 12z OpenData
+    forecasts no longer silently use 00z TIGGE-trained calibration.
 
     Phase 9C L3 CRITICAL (2026-04-18): added `temperature_metric` param +
     metric-aware hierarchical fallback. Pre-P9C, this function was metric-
     blind and read exclusively from legacy `platt_models` table — a LOW
     candidate would silently receive a HIGH Platt model. Post-P9C:
 
-      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season)
+      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season,
+         data_version, cycle, source_id, horizon_profile)
       2. If v2 miss, fall back to legacy platt_models (HIGH historical continuity)
       3. Remaining hierarchical fallback (pool clusters / seasons / global) is
          preserved; v2 lookup is tried first at each tier.
@@ -248,7 +262,8 @@ def get_calibrator(
         temperature_metric, cluster, season
     )
 
-    # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC)
+    # Try primary bucket — v2 FIRST (metric-aware), then legacy (HIGH BC).
+    # Phase 2 (2026-05-04): thread cycle/source_id/horizon_profile into v2 load.
     model_data = load_platt_model_v2(
         conn,
         temperature_metric=temperature_metric,
@@ -257,6 +272,9 @@ def get_calibrator(
         data_version=expected_data_version,
         frozen_as_of=primary_frozen,
         model_key=primary_model_key,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
     )
     if model_data is None and temperature_metric == "high":
         # Legacy fallback only for HIGH — LOW has never existed in legacy
