@@ -292,11 +292,14 @@ def test_produce_all_writes_summary_artifact(tmp_path: Path):
         promotion_evidence_path=evidence_path,
         check_fn=fake_check,
         as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
+        skip_tests=True,  # already running inside pytest; avoids re-entrant subprocess
     )
 
     assert summary["c1"]["ready_to_flip"] is True
     assert summary["c3"]["ready_to_flip"] is True
     assert summary["c4"]["ready_to_flip"] is True
+    # test_gate key is present and reports passed (skip_tests=True means exit 0)
+    assert summary["test_gate"]["passed"] is True
 
     summary_path = Path(summary["summary_path"])
     assert summary_path.exists()
@@ -307,6 +310,8 @@ def test_produce_all_writes_summary_artifact(tmp_path: Path):
     assert "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE" in body
     assert "ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS" in body
     assert "ready_to_flip" in body
+    # Test gate status must appear in summary so operator can see it
+    assert "test_activation_flag_combinations.py gate" in body
 
 
 def test_artifact_paths_are_dated_and_unique(tmp_path: Path):
