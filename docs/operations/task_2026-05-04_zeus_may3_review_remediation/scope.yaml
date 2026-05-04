@@ -1,0 +1,43 @@
+$schema: ../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: lock_candidate
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/PLAN.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/scope.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/LOCK_DECISION.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/PLAN_LOCKED.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/critic_round5_response.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T-1_*.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T0_*.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/INVARIANTS_LEDGER.md
+
+allow_companions:
+  - docs/operations/AGENTS.md
+  - docs/operations/current_state.md
+  - docs/operations/known_gaps.md
+  - docs/to-do-list/known_gaps.md
+  - docs/to-do-list/known_gaps_archive.md
+
+out_of_scope:
+  - src/**
+  - scripts/**
+  - tests/**
+  - architecture/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - This scope covers plan finalization only, not T1/T2/T3 implementation.
+  - Implementation packets must create narrower phase scopes before touching source, scripts, tests, workflows, or architecture manifests.
+  - Operator-only artifacts may be added under this packet after secret redaction.

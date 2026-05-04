@@ -115,6 +115,11 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md` | active remediation plan | PR47 post-multi-angle-review deep plan; Phase A (docs/tests/registries) + Phase B (src/ structural completion, no daemon imports) + Phase C deferred |
 | `task_2026-05-02_live_entry_data_contract/CURRENT_ROLLOUT_MODE.md` | single-source-of-truth | Declared rollout_mode; canary `test_settings_json_rollout_mode_matches_plan_declaration` asserts agreement with `config/settings.json:entry_forecast.rollout_mode` |
 | `task_2026-05-02_live_entry_data_contract/PREMISE_ERRATUM_2026-05-03.md` | erratum record | DB-probe resolution of LIVE_ELIGIBLE/HORIZON_OUT_OF_RANGE per-track vs aggregate figure mismatch |
+| `task_2026-05-04_zeus_may3_review_remediation/` | lock-candidate planning packet container | Round-5 corrected-live remediation plan packet; not implementation authority until locked by `LOCK_DECISION.md` |
+| `task_2026-05-04_zeus_may3_review_remediation/PLAN.md` | topology planning entrypoint | Routeable entrypoint for the Round-5 plan; points to `MASTER_PLAN_v2.md` as detailed payload |
+| `task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md` | lock-candidate remediation plan | Serialized T-1/T0/T1/T2/T3/T4 plan for corrected-live safety and orchestrated-delivery execution |
+| `task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md` | lock-candidate orchestration runbook | Skill-derived coordinator prompt, role split, idle boot, critic-gate, verifier, and co-tenant staging protocol for the Round-5 plan |
+| `task_2026-05-04_zeus_may3_review_remediation/scope.yaml` | packet scope | Plan-finalization scope sidecar; source/script/test implementation requires narrower phase scopes |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When
