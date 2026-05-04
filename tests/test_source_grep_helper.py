@@ -206,6 +206,156 @@ def test_strip_does_not_choke_on_unterminated_triple_quote(tmp_path):
     assert len(out) == len(src)
 
 
+# ---------------------------------------------------------------------------
+# header_only=True (module-level scope)
+# ---------------------------------------------------------------------------
+
+
+def test_header_only_excludes_function_body_match(tmp_path):
+    """Pattern that matches inside a function body but NOT at module
+    scope must return empty when ``header_only=True``."""
+    src = textwrap.dedent('''\
+        # module-level imports only
+        import os
+
+        def helper():
+            CANONICAL = {"a", "b"}
+            return CANONICAL
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    # Without header_only: pattern matches the function body
+    bare = find_forbidden_assignments(
+        fixture, r'CANONICAL\s*=\s*\{', header_only=False,
+    )
+    assert len(bare) == 1, (
+        f"baseline must match function-body assignment: {bare!r}"
+    )
+    # With header_only: nothing before the first def
+    scoped = find_forbidden_assignments(
+        fixture, r'CANONICAL\s*=\s*\{', header_only=True,
+    )
+    assert scoped == [], (
+        f"header_only=True must skip function bodies; got {scoped!r}"
+    )
+
+
+def test_header_only_catches_module_level_assignment(tmp_path):
+    """Inverse: a hardcoded set at module scope MUST trip the antibody
+    even with header_only=True (that's the whole point)."""
+    src = textwrap.dedent('''\
+        CANONICAL = {"a", "b"}
+
+        def helper():
+            return None
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'CANONICAL\s*=\s*\{', header_only=True,
+    )
+    assert len(matches) == 1, (
+        f"header_only=True must still catch module-level assignment: "
+        f"{matches!r}"
+    )
+
+
+def test_header_only_truncates_at_first_class(tmp_path):
+    """Cutoff line is the first def OR class at column 0."""
+    src = textwrap.dedent('''\
+        TOP = 1
+
+        class Foo:
+            BAD = {"x"}
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'BAD\s*=\s*\{', header_only=True,
+    )
+    assert matches == [], (
+        f"class-body assignment must be excluded; got {matches!r}"
+    )
+
+
+def test_header_only_truncates_at_first_async_def(tmp_path):
+    """``async def`` at column 0 is also a cutoff anchor."""
+    src = textwrap.dedent('''\
+        TOP = 1
+
+        async def fetch():
+            BAD = {"x"}
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'BAD\s*=\s*\{', header_only=True,
+    )
+    assert matches == [], (
+        f"async-def-body assignment must be excluded; got {matches!r}"
+    )
+
+
+def test_header_only_returns_whole_src_when_no_def_or_class(tmp_path):
+    """Pure-data file (no def/class) is treated as all-header."""
+    src = textwrap.dedent('''\
+        CONFIG = {"a": 1}
+        OTHER = "value"
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'CONFIG\s*=', header_only=True,
+    )
+    assert len(matches) == 1, (
+        f"file with no def/class should treat whole src as header; "
+        f"got {matches!r}"
+    )
+
+
+def test_header_only_keeps_decorators_in_header(tmp_path):
+    """Decorators (``@...``) precede the ``def`` and stay in the
+    header. They don't typically match antibody data-shape patterns,
+    so this is a benign convention rather than a hazard."""
+    src = textwrap.dedent('''\
+        TOP = 1
+
+        @decorator
+        def foo():
+            BAD = {"x"}
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    # The function-body BAD assignment is excluded.
+    matches = find_forbidden_assignments(
+        fixture, r'BAD\s*=\s*\{', header_only=True,
+    )
+    assert matches == [], f"function body must be excluded; got {matches!r}"
+
+
+def test_header_only_still_strips_docstring_in_header(tmp_path):
+    """Triple-quoted module docstring is still blanked, even within
+    the header — strip happens BEFORE truncation."""
+    src = textwrap.dedent('''\
+        """Module docs.
+
+        References ``BAD = "x"`` in narrative form.
+        """
+        OK = 1
+
+        def helper():
+            return None
+    ''')
+    fixture = tmp_path / "subject.py"
+    fixture.write_text(src)
+    matches = find_forbidden_assignments(
+        fixture, r'BAD\s*=\s*"x"', header_only=True,
+    )
+    assert matches == [], (
+        f"docstring-in-header reference must be blanked; got {matches!r}"
+    )
+
+
 def test_strip_blanks_triple_quoted_used_as_non_docstring():
     """Limitation acknowledgment: triple-quoted strings used as data
     (e.g., embedded SQL) ARE blanked. Antibodies that need to inspect

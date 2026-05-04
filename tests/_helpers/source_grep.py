@@ -3,6 +3,10 @@
 # Authority basis: oracle/Kelly evidence rebuild context capsule §insight-2
 #                  + PR #56 H2 + PR #56 review fix (recurring "regex matched
 #                    my own commit message about why we banned this" footgun).
+#                  + post-PR #56/#57 migration: ``header_only`` param added so
+#                    antibodies that need "module-level only" scope (e.g. ban a
+#                    hardcoded set BEFORE the first def/class) can stop
+#                    re-implementing the cutoff loop bespoke per call site.
 """Source-grep helpers for antibody tests.
 
 Antibody tests that grep source for forbidden patterns (e.g.
@@ -33,14 +37,24 @@ Layout invariants
   path so it can be imported as ``from tests._helpers.source_grep
   import find_forbidden_assignments``).
 
-Migration note for existing antibodies
---------------------------------------
-``test_authority_rebuild_invariants.py`` has two source-grep
-antibodies (``test_H2_cycle_runtime_no_hardcoded_strategy_string_literals``,
-``test_PR56_evaluator_reads_phase_source_from_candidate_not_hardcode``)
-that today implement bespoke "exclude docstring lines" tightening.
-A follow-up commit on PR #56's branch can migrate them to use this
-helper after PR #56 merges; cross-PR refactors are out of scope here.
+``header_only=True`` (module-level scope)
+-----------------------------------------
+Some antibodies care only about MODULE-LEVEL declarations — code
+appearing BEFORE the first ``def``/``class`` line. Example: forbid a
+hardcoded ``CANONICAL_STRATEGY_KEYS = {...}`` constant while allowing
+function bodies to legitimately enumerate strategies for dispatch.
+Without scoping, the antibody would false-positive on the helper
+function that defines the canonical set.
+
+Pre-helper, each call site re-implemented the cutoff::
+
+    lines = src.splitlines()
+    cutoff = next(i for i, l in enumerate(lines)
+                  if l.startswith(("def ", "class ")))
+    header = "\\n".join(lines[:cutoff])
+
+``header_only=True`` does this once, after the strip, so the strip's
+line/column preservation still holds for failure reporting.
 """
 from __future__ import annotations
 
@@ -134,17 +148,45 @@ def strip_python_comments_and_strings(src: str) -> str:
     return "".join(out)
 
 
+def _truncate_to_module_header(src: str) -> str:
+    """Return ``src`` truncated at the first line that starts with
+    ``def ``, ``class ``, or ``async def `` at column 0.
+
+    Used by ``header_only=True`` to scope antibodies to module-level
+    declarations only. Decorators (``@...``) on module-level functions
+    are kept in the header (they precede the ``def``); this is fine
+    because antibody patterns target hardcoded data structures, not
+    decorator syntax.
+
+    If no module-level def/class is found, returns ``src`` unchanged
+    (the entire file is treated as header).
+    """
+    lines = src.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith(("def ", "class ", "async def ")):
+            return "".join(lines[:i])
+    return src
+
+
 def find_forbidden_assignments(
     source_file: Path,
     forbidden_pattern: str,
     *,
     flags: int = re.MULTILINE,
+    header_only: bool = False,
 ) -> list[str]:
     """Search ``source_file`` for ``forbidden_pattern`` in CODE only.
 
-    Comments and string literals (including docstrings) are stripped
-    before the regex runs. Returns the list of matched substrings
-    (empty = clean).
+    Comments and triple-quoted strings (the docstring vehicle) are
+    stripped before the regex runs. Returns the list of matched
+    substrings (empty = clean).
+
+    When ``header_only=True``, the search is further scoped to
+    module-level code — everything before the first
+    ``def``/``class``/``async def`` line at column 0. Use this when
+    forbidding a hardcoded data structure at module scope while
+    allowing function bodies to legitimately reference the same
+    names (e.g. a helper that returns the canonical set).
 
     Use in antibody tests that need to forbid a specific pattern
     appearing in module-level or function-body code, without
@@ -154,18 +196,23 @@ def find_forbidden_assignments(
 
         matches = find_forbidden_assignments(
             REPO_ROOT / "src/foo.py",
-            r'^\\s+CANONICAL_KEYS\\s*=\\s*\\{',
+            r'CANONICAL_KEYS\\s*=\\s*\\{',
+            header_only=True,
         )
         assert not matches, (
-            f"Re-introduced hardcoded CANONICAL_KEYS: {matches!r}"
+            f"Re-introduced hardcoded CANONICAL_KEYS at module scope: "
+            f"{matches!r}"
         )
 
     Pre-helper, the same antibody required an inline ``^\\s+`` anchor
-    to dodge its own docstring's reference to the pattern — bespoke
-    per call site.
+    to dodge its own docstring's reference to the pattern AND a
+    bespoke pre-search splitlines/cutoff loop to enforce module
+    scope — both bespoke per call site.
     """
     src = source_file.read_text()
     stripped = strip_python_comments_and_strings(src)
+    if header_only:
+        stripped = _truncate_to_module_header(stripped)
     return re.compile(forbidden_pattern, flags).findall(stripped)
 
 
@@ -174,6 +221,7 @@ def find_all_in_code(
     pattern: str,
     *,
     flags: int = re.MULTILINE,
+    header_only: bool = False,
 ) -> Iterable[re.Match]:
     """Iterate over ``re.Match`` objects for ``pattern`` in code (post-strip).
 
@@ -181,7 +229,12 @@ def find_all_in_code(
     objects (with ``.span()`` for line/column reporting) instead of
     just matched strings. Use when failure messages need to cite line
     numbers — the strip preserves offsets.
+
+    ``header_only=True`` scopes the search to module-level code (see
+    ``find_forbidden_assignments`` for details).
     """
     src = source_file.read_text()
     stripped = strip_python_comments_and_strings(src)
+    if header_only:
+        stripped = _truncate_to_module_header(stripped)
     return re.compile(pattern, flags).finditer(stripped)
