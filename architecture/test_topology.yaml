@@ -29,6 +29,17 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
+    # All packet-specific test files registered here so topology_doctor
+    # accepts them as trusted; the rebuild floor (test_authority_rebuild_invariants)
+    # is the cross-packet grep target.
+    tests/test_attribution_cohort_boundary.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_state_paths.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_oracle_evidence_status.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_strategy_profile_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_market_phase_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_authority_rebuild_invariants.py: {created: "2026-05-04", last_used: "2026-05-04"}
     # PR #19 fix-plan packet (Phase 1+2+3+4 antibody tests, 2026-04-26).
     # P4-fix2 (post-review MAJOR from code-reviewer, 2026-04-26):
     # categories: core_law_antibody: registration is insufficient —

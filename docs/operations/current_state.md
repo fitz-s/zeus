@@ -37,6 +37,7 @@ active work surfaces and current-fact companions.
 | `docs/operations/task_2026-05-01_tigge_5_01_backfill/work_log.md` | DEFERRED/OPEN until TIGGE 2026-05-01 embargo clears | 2026-04-29 retry succeeded; original 2026-05-01 issue remains embargoed until 2026-05-03T00:00Z. |
 | `docs/operations/task_2026-05-01_ultrareview25_remediation/PLAN.md` | OPERATOR-DEFERRED planning residue | Keeps F12/F16 and follow-up routing context until operator confirms closure or archives it. |
 | `docs/operations/task_2026-05-02_review_crash_remediation/PLAN.md` | PLANNED / awaiting operator approval | Current crash-review remediation plan; do not archive until approved/refuted/closed. |
+| `docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md` | ACTIVE — branch ready for critic | Oracle/Kelly evidence rebuild closes Bug review Findings A/B/C/D/E/F + 7th-site dispatch closure. Branch `oracle-kelly-evidence-rebuild-2026-05-04` (8 commits A1-A8); pending critic-opus R6 adversarial review per memory L11 before merge. ZEUS_MARKET_PHASE_DISPATCH default flips ON post-merge — operator-controlled kill-switch via env override. |
 
 ## Current fact and checklist companions
 

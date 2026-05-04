@@ -1408,10 +1408,41 @@ files:
   src/strategy/oracle_penalty.py:
     zone: K3_extension
     authority_role: oracle_error_rate_penalty
-    why: Per-city oracle error rate classification and Kelly sizing penalty multiplier. Loads data/oracle_error_rates.json.
+    why: Per-city oracle error rate classification and Kelly sizing penalty multiplier. Post-A3 (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A3) the 9-status enum + Beta-binomial posterior replace the legacy 4-status point-estimate; loads via paths.oracle_error_rates_path() instead of a hardcoded constant.
     hazards:
     - ORACLE_TRUNCATION_BIAS
     downstream:
+    - src/engine/evaluator.py
+    - src/strategy/kelly.py
+  src/strategy/oracle_status.py:
+    zone: K3_extension
+    authority_role: oracle_status_enum
+    why: 9-status OracleStatus enum (post-A3 rebuild). Split into its own module to break the oracle_penalty <-> oracle_estimator circular import.
+    downstream:
+    - src/strategy/oracle_penalty.py
+    - src/strategy/oracle_estimator.py
+  src/strategy/oracle_estimator.py:
+    zone: K3_extension
+    authority_role: oracle_evidence_classifier
+    why: Beta-binomial posterior helpers (Beta(1,1) prior; posterior_mean, posterior_upper_95, classify) for the 9-status oracle rebuild. Pure math; no JSON-loading concerns.
+    downstream:
+    - src/strategy/oracle_penalty.py
+  src/strategy/strategy_profile.py:
+    zone: K3_extension
+    authority_role: strategy_profile_registry_loader
+    why: Single-source loader for architecture/strategy_profile_registry.yaml (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A4). Replaces 5 hardcoded sets (STRATEGY_KELLY_MULTIPLIERS, LIVE_SAFE_STRATEGIES, _LIVE_ALLOWED_STRATEGIES, KNOWN_STRATEGIES, evaluator's is_day0_mode). Schema-enforced at load; ProfileNotFound on unknown key.
+    downstream:
+    - src/strategy/kelly.py
+    - src/control/control_plane.py
+    - src/engine/cycle_runner.py
+    - src/engine/evaluator.py
+  src/strategy/market_phase_evidence.py:
+    zone: K3_extension
+    authority_role: phase_provenance_record
+    why: MarketPhaseEvidence dataclass + builder (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A5 + Bug review Finding F). Wraps the bare MarketPhase enum with phase_source provenance (verified_gamma / fallback_f1 / onchain_resolved / unknown) so dispatch can reject phase=None for live-authority callers and the Kelly resolver can apply quality-aware degradation (0.7× on fallback_f1).
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/dispatch.py
     - src/engine/evaluator.py
   src/strategy/selection_family.py:
     zone: K3_extension
@@ -1729,6 +1760,27 @@ files:
     downstream:
     - src/riskguard/riskguard.py
     - src/state/portfolio.py
+  src/state/cohort_boundary.py:
+    zone: K2_runtime
+    authority_role: migration_cohort_discriminator
+    why: PR #51 UTC-fix migration cohort boundary helper (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A1 + D-5/D-6). Discriminator at `2026-05-04T03:57:08Z` (PR #51 merge instant); reporters bucket attribution rows by `recorded_at` against this constant. No DB column added — discriminator is git-log fact, re-derived lazily at report time.
+    downstream: []
+  src/state/paths.py:
+    zone: K2_runtime
+    authority_role: storage_path_locator
+    why: Single locus for ZEUS_STORAGE_ROOT-aware artifact paths + atomic JSON writer + heartbeat (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A2 + D-10). Replaces 3 hardcoded `Path(__file__).parent.parent.parent / "data"` patterns and consolidates the previously-scattered `_atomic_write_json` private helpers.
+    downstream:
+    - src/strategy/oracle_penalty.py
+    - src/strategy/strategy_profile.py
+    - scripts/bridge_oracle_to_calibration.py
+    - scripts/oracle_snapshot_listener.py
+  src/state/uma_resolution_listener.py:
+    zone: K2_runtime
+    authority_role: uma_onchain_resolution_listener
+    why: Pluggable UMA OO `SettlementResolved` event listener (PLAN.md task_2026-05-04_oracle_kelly_evidence_rebuild §A5 + Bug review Finding F). Provides UmaRpcClient ABC + parse_settle_event + record_resolution + lookup_resolution + poll_uma_resolutions. Default no-RPC mode returns [] (production today); operator wires UmaHttpRpcClient via settings to flip from heuristic POST_TRADING to onchain_resolved phase determination.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/strategy/market_phase_evidence.py
   src/state/projection.py:
     zone: K0_frozen_kernel
     authority_role: canonical_projection_law
