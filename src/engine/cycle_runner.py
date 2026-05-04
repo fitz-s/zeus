@@ -610,33 +610,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         pos.chain_state in {"quarantined", "quarantine_expired"}
         for pos in portfolio.positions
     )
-    # ONE-TIME smoke test portfolio cap — see settings.json note.
-    # Blocks new entries once the sum of cost_basis_usd across all non-terminal
-    # positions reaches the configured ceiling. Remove this branch together
-    # with the setting after the first full lifecycle has been observed.
-    try:
-        smoke_test_cap = settings["smoke_test_portfolio_cap_usd"]
-    except KeyError:
-        smoke_test_cap = None
-    open_cost_basis_usd = 0.0
-    if smoke_test_cap is not None:
-        # Slice B1 SEMANTIC FIX (PR #19 finding 9, 2026-04-26):
-        # the prior inline set {settled, voided, admin_closed, economically_closed}
-        # disagreed with portfolio.py + cycle_runner sweep set + LEGAL_LIFECYCLE_FOLDS
-        # ground truth. ECONOMICALLY_CLOSED is NOT terminal (folds to
-        # {ECONOMICALLY_CLOSED, SETTLED, VOIDED}); QUARANTINED IS terminal
-        # (folds to {QUARANTINED}). Routing through is_terminal_state aligns
-        # this exposure-block sum with the canonical terminal definition.
-        # Net behavior change: economically_closed positions now contribute
-        # to open_cost_basis_usd until on-chain settle; quarantined positions
-        # no longer inflate the sum.
-        open_cost_basis_usd = sum(
-            float(getattr(pos, "cost_basis_usd", 0.0) or 0.0)
-            for pos in portfolio.positions
-            if not is_terminal_state(getattr(pos, "state", ""))
-        )
-        summary["smoke_test_open_cost_basis_usd"] = round(open_cost_basis_usd, 4)
-        summary["smoke_test_portfolio_cap_usd"] = float(smoke_test_cap)
+    # 2026-05-04 bankroll truth-chain cleanup tail: the legacy ONE-TIME
+    # `smoke_test_portfolio_cap_usd` aggregate-exposure brake (added 2026-04-12
+    # after the first live cycle placed 12 orders intending $60 instead of one
+    # $5 trade) has been removed. Smoke-testing must run as a separate one-off
+    # script, not as a perma-gate that throttles real live trading. Per-cycle
+    # exposure discipline now lives in the existing posture / RiskGuard /
+    # max-exposure gates only.
     # INV-26 / O2-c posture gate: consult committed runtime_posture.yaml.
     # Posture is recorded in `summary["posture"]` for operator visibility on
     # every cycle. It also blocks new entries when non-NORMAL — but only as
@@ -741,8 +721,6 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
     elif entry_bankroll <= 0:
         entries_blocked_reason = "entry_bankroll_non_positive"
-    elif smoke_test_cap is not None and open_cost_basis_usd >= float(smoke_test_cap):
-        entries_blocked_reason = f"smoke_test_portfolio_cap_reached({open_cost_basis_usd:.2f}>={float(smoke_test_cap):.2f})"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
 

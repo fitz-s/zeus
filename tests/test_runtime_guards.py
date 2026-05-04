@@ -295,13 +295,17 @@ NYC = City(
 
 
 class _CycleSettingsStub:
+    # 2026-05-04 bankroll truth-chain cleanup: capital_base_usd and
+    # smoke_test_portfolio_cap_usd are no longer read by production code.
+    # The stub keeps both kwargs as harmless slots so existing call sites
+    # (e.g. _CycleSettingsStub(capital_base_usd=150.0,
+    # smoke_test_portfolio_cap_usd=None)) don't need editing; both values
+    # are stored but ignored. __getitem__ raises KeyError for any key.
     def __init__(self, *, capital_base_usd: float = 150.0, smoke_test_portfolio_cap_usd=None):
         self.capital_base_usd = capital_base_usd
         self._smoke_test_portfolio_cap_usd = smoke_test_portfolio_cap_usd
 
     def __getitem__(self, key: str):
-        if key == "smoke_test_portfolio_cap_usd":
-            return self._smoke_test_portfolio_cap_usd
         raise KeyError(key)
 
 

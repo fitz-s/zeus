@@ -1,7 +1,5 @@
 {
-  "_bankroll_doctrine_2026_05_04": "Bankroll truth comes solely from on-chain wallet via src.runtime.bankroll_provider.current() (5-min stale-cache window). Removed: capital_base_usd ($150 fiction) and live_safety_cap_usd ($5 per-trade rail). smoke_test_portfolio_cap_usd retained pending operator review \u2014 it's a one-time aggregate exposure brake (April 2026 incident), not a per-trade cap.",
-  "smoke_test_portfolio_cap_usd": 5.0,
-  "_smoke_test_portfolio_cap_usd_note": "ONE-TIME smoke test guard: portfolio-wide filled+pending exposure cap. Blocks new entries once total cost-basis across all non-terminal positions exceeds this. Not a permanent feature \u2014 remove after the first full entry\u2192fill\u2192settlement lifecycle has been observed. Added 2026-04-12 after first live cycle placed 12 orders (2 matched) intending $60 exposure when operator expected a single $5 test trade.",
+  "_bankroll_doctrine_2026_05_04": "Bankroll truth comes solely from on-chain wallet via src.runtime.bankroll_provider.current() (5-min stale-cache window). Removed in this cleanup: capital_base_usd ($150 fiction), live_safety_cap_usd ($5 per-trade rail), and smoke_test_portfolio_cap_usd ($5 aggregate brake). Smoke testing must run as a separate one-off script, not as a perma-gate that throttles real live trading. Per-cycle exposure discipline now lives in posture / RiskGuard / max-exposure gates only.",
   "discovery": {
     "opening_hunt_interval_min": 15,
     "update_reaction_times_utc": [

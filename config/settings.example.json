@@ -1,8 +1,6 @@
 {
   "_SETUP": "Copy this file to settings.json and fill in the operator-specific values marked null.",
-  "_bankroll_doctrine_2026_05_04": "Bankroll truth comes solely from on-chain wallet via src.runtime.bankroll_provider.current(). Removed in 2026-05-04 cleanup: capital_base_usd ($150 fiction) and live_safety_cap_usd ($5 per-trade rail).",
-  "smoke_test_portfolio_cap_usd": null,
-  "_smoke_test_portfolio_cap_usd_note": "Portfolio-wide filled+pending exposure cap for initial validation window. Set by operator; remove once first full lifecycle has been observed.",
+  "_bankroll_doctrine_2026_05_04": "Bankroll truth comes solely from on-chain wallet via src.runtime.bankroll_provider.current(). Removed in 2026-05-04 cleanup: capital_base_usd ($150 fiction), live_safety_cap_usd ($5 per-trade rail), and smoke_test_portfolio_cap_usd ($5 aggregate brake — smoke testing belongs in one-off scripts, not as a live-cycle perma-gate).",
   "discovery": {
     "opening_hunt_interval_min": 30,
     "update_reaction_times_utc": [
