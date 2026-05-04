@@ -688,12 +688,20 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             n_edges_after_fdr INTEGER,
             rejection_stage TEXT,
             availability_status TEXT,
+            -- P2 (PLAN_v3 §6.P2 stage 3): MarketPhase axis A tag for
+            -- decision-time cohort attribution. Additive, default NULL
+            -- for legacy rows; legacy-DB ALTER TABLE migration below.
+            market_phase TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
             ON probability_trace_fact(city, target_date, recorded_at);
         CREATE INDEX IF NOT EXISTS idx_probability_trace_snapshot
             ON probability_trace_fact(decision_snapshot_id);
+        -- NB: idx_probability_trace_market_phase lives in the ALTER block
+        -- below (must be created AFTER the ALTER TABLE adds the column on
+        -- legacy DBs; fresh DBs hit the same path through the
+        -- duplicate-column-swallowed retry).
 
         -- Selection-family facts for active candidate-family FDR accounting.
         CREATE TABLE IF NOT EXISTS selection_family_fact (
@@ -1420,6 +1428,25 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             conn.execute(f"ALTER TABLE trade_decisions ADD COLUMN {col} REAL DEFAULT 0.0;")
         except sqlite3.OperationalError:
             pass
+
+    # P2 (PLAN_v3 §6.P2 stage 3, 2026-05-04): probability_trace_fact gains
+    # ``market_phase`` for decision-time cohort attribution. Legacy DBs
+    # predate this column; CREATE TABLE IF NOT EXISTS would no-op so the
+    # writer at log_probability_trace_fact would fail with
+    # "table probability_trace_fact has no column named market_phase".
+    # ALTER TABLE catches legacy DBs; OperationalError on duplicate-column
+    # is swallowed for fresh DBs.
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN market_phase TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_probability_trace_market_phase "
+            "ON probability_trace_fact(market_phase);"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     # REOPEN-1 (2026-04-23): forecasts writer at src/data/forecasts_append.py:256-262
     # inserts rebuild_run_id + data_source_version; legacy DBs predate the CREATE
@@ -3372,6 +3399,21 @@ def log_probability_trace_fact(
     except (TypeError, ValueError):
         alpha = None
 
+    # P2 (PLAN_v3 §6.P2 stage 3): MarketPhase axis A — decision tag.
+    # EdgeDecision.market_phase is the str-form ``.value`` stamped at the
+    # cycle_runtime call site after evaluate_candidate returns; falls back
+    # to the candidate's tag if the decision was constructed before
+    # stage-2 plumbing (legacy / test fixtures). None when neither side
+    # carries a tag (off-cycle / manual writes).
+    market_phase_value: str | None = None
+    decision_phase = getattr(decision, "market_phase", None)
+    if decision_phase is not None:
+        market_phase_value = decision_phase.value if hasattr(decision_phase, "value") else str(decision_phase)
+    else:
+        candidate_phase = getattr(candidate, "market_phase", None)
+        if candidate_phase is not None:
+            market_phase_value = candidate_phase.value if hasattr(candidate_phase, "value") else str(candidate_phase)
+
     conn.execute(
         """
         INSERT INTO probability_trace_fact (
@@ -3402,9 +3444,10 @@ def log_probability_trace_fact(
             n_edges_after_fdr,
             rejection_stage,
             availability_status,
+            market_phase,
             recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trace_id) DO UPDATE SET
             decision_id=excluded.decision_id,
             decision_snapshot_id=excluded.decision_snapshot_id,
@@ -3432,6 +3475,7 @@ def log_probability_trace_fact(
             n_edges_after_fdr=excluded.n_edges_after_fdr,
             rejection_stage=excluded.rejection_stage,
             availability_status=excluded.availability_status,
+            market_phase=excluded.market_phase,
             recorded_at=excluded.recorded_at
         """,
         (
@@ -3462,6 +3506,7 @@ def log_probability_trace_fact(
             _trace_int(getattr(decision, "n_edges_after_fdr", None)),
             rejection_stage or None,
             availability_status or None,
+            market_phase_value,
             recorded_at,
         ),
     )
