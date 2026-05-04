@@ -2077,10 +2077,44 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             for outcome in market.get("outcomes", [])
             if not (outcome.get("range_low") is None and outcome.get("range_high") is None)
         ]
+
+        # P2 stage 2 (PLAN_v3 §6.P2) — derive MarketPhase axis A from the
+        # cycle's frozen decision_time BEFORE the obs gate so P3's
+        # phase-based dispatch can read it. Errors are fail-soft: log +
+        # leave market_phase=None so dispatch falls back to legacy mode.
+        market_phase = None
+        try:
+            from src.strategy.market_phase import market_phase_from_market_dict
+
+            market_phase = market_phase_from_market_dict(
+                market=market,
+                city_timezone=city.timezone,
+                target_date_str=market["target_date"],
+                decision_time_utc=decision_time,
+            )
+        except Exception as exc:
+            deps.logger.warning(
+                "MarketPhase tag failed for %s/%s: %s",
+                city.name,
+                market.get("target_date"),
+                exc,
+            )
+
+        # P3 site 4 of 4 — observation-fetch gate (PLAN_v3 §6.P3).
+        # Flag-gated; OFF preserves byte-equal `mode == DAY0_CAPTURE` legacy.
+        from src.engine.dispatch import (
+            is_settlement_day_dispatch,
+            market_phase_dispatch_enabled,
+        )
+        if market_phase_dispatch_enabled() and market_phase is not None:
+            should_fetch_observation = market_phase == "settlement_day"
+        else:
+            should_fetch_observation = mode == deps.DiscoveryMode.DAY0_CAPTURE
+
         try:
             obs = (
                 fetch_day0_observation(city, market["target_date"], decision_time, deps=deps)
-                if mode == deps.DiscoveryMode.DAY0_CAPTURE
+                if should_fetch_observation
                 else None
             )
         except Exception as e:
@@ -2125,32 +2159,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 continue
             raise
 
-        # P2 (PLAN_v3 §6.P2 stage 2): tag the candidate with MarketPhase
-        # axis A using the cycle's frozen decision_time. Per critic R1 C5,
-        # phase MUST be derived from decision_time (not now()), so a
-        # 50-candidate cycle straddling a city's local midnight produces
-        # a single phase per market. Errors here are logged and the
-        # candidate is left untagged (market_phase=None) — phase is an
-        # observability/dispatch tag, not a hard gate, so a parse error
-        # on Gamma payload should not kill the candidate.
-        try:
-            from src.strategy.market_phase import market_phase_from_market_dict
-
-            market_phase = market_phase_from_market_dict(
-                market=market,
-                city_timezone=city.timezone,
-                target_date_str=market["target_date"],
-                decision_time_utc=decision_time,
-            )
-        except Exception as exc:
-            deps.logger.warning(
-                "MarketPhase tag failed for %s/%s: %s",
-                city.name,
-                market.get("target_date"),
-                exc,
-            )
-            market_phase = None
-
+        # market_phase already computed above (used by both the obs-fetch
+        # gate at P3 site 4 and the candidate tag below).
         candidate = market_candidate_ctor(
             city=city,
             target_date=market["target_date"],

@@ -944,7 +944,11 @@ def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_so
 
 
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 1 of 3 in evaluator (PLAN_v3 §6.P3). Migration is flag-gated
+    # via ``is_settlement_day_dispatch``; flag OFF preserves byte-equal
+    # legacy behavior (T6).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -956,7 +960,9 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
 
 
 def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 2 of 3 in evaluator (PLAN_v3 §6.P3).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -968,7 +974,9 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
 
 
 def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str | None:
-    if candidate.discovery_mode == DiscoveryMode.DAY0_CAPTURE.value:
+    # P3 site 3 of 3 in evaluator (PLAN_v3 §6.P3).
+    from src.engine.dispatch import is_settlement_day_dispatch
+    if is_settlement_day_dispatch(candidate):
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
