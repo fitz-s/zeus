@@ -1,10 +1,15 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-28
+# Last reused/audited: 2026-05-04
 # Authority basis: round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L305-308 +
 # ATTRIBUTION_DRIFT packet BATCH 3 dispatch (end-to-end runner tests). Per
 # Fitz "test relationships, not just functions" — these tests verify the
 # CROSS-MODULE wire-up: synthetic DB → run_weekly() → JSON report shape +
 # exit-code behavior + drift_positions evidence + custom report-out path.
+#
+# A6 audit (2026-05-04, rebuild fixes branch): like test_attribution_drift,
+# this file exercises the legacy-mode-axis dispatch detector and must pin
+# ZEUS_MARKET_PHASE_DISPATCH=0. See test_attribution_drift.py docstring
+# for the structural rationale.
 """End-to-end tests for scripts/attribution_drift_weekly.py.
 
 Four tests covering: report structural shape, decay-verdict propagation
@@ -40,6 +45,13 @@ main = _mod.main
 from src.state.db import init_schema  # noqa: E402
 # Reuse the helper from BATCH 1 of EDGE_OBSERVATION test bed.
 from tests.test_edge_observation import _insert_settled  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_mode_axis_dispatch(monkeypatch):
+    """Pin every test in this file to ZEUS_MARKET_PHASE_DISPATCH=0 — see
+    file docstring for the A6 rationale."""
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
 
 
 def _make_temp_db(tmp_path: Path) -> Path:

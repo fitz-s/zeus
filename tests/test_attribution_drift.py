@@ -1,11 +1,21 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-02
+# Last reused/audited: 2026-05-04
 # Authority basis: round3_verdict.md §1 #2 (R3 next packet) + ULTIMATE_PLAN.md
 # L305-308 (silent attribution drift detector). Per Fitz "test relationships,
 # not just functions" — these tests verify the CROSS-MODULE invariant that
 # detect_attribution_drift correctly re-applies the entry-time
 # _strategy_key_for dispatch rule from src/engine/evaluator.py:420-441 on
 # persisted row attributes and surfaces label/semantics mismatches.
+#
+# A6 audit (2026-05-04, rebuild fixes branch): _infer_strategy_from_signature
+# defers (returns None) when ZEUS_MARKET_PHASE_DISPATCH is ON, because the
+# legacy mode-axis detector cannot re-infer phase-axis dispatch decisions
+# without the persisted market_phase column from probability_trace_fact.
+# A6 flipped the env-var default to ON, so every test in this file would
+# now see insufficient_signal verdicts. The autouse fixture below pins the
+# detector to legacy mode-axis. Phase-axis re-inference is queued as a
+# future packet (see attribution_drift.py:_infer_strategy_from_signature
+# docstring "Future enhancement (out of P3 scope)").
 """BATCH 1 tests for attribution_drift.
 
 Eight relationship tests covering:
@@ -39,6 +49,16 @@ from src.state.attribution_drift import (
     detect_drifts_in_window,
 )
 from tests.test_edge_observation import _insert_settled
+
+
+# --- A6 flag pin (autouse) -------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_mode_axis_dispatch(monkeypatch):
+    """Pin every test in this file to ZEUS_MARKET_PHASE_DISPATCH=0 — see
+    file docstring for the A6 rationale."""
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
 
 
 # --- Helpers ---------------------------------------------------------------

@@ -1,7 +1,24 @@
-"""Runtime contract tests for Day0 observation context propagation."""
+"""Runtime contract tests for Day0 observation context propagation.
+
+A6 audit (2026-05-04): the two ``test_execute_discovery_phase_*`` tests
+below validate the LEGACY day0 dispatch (mode → fetch). After A6 flipped
+``ZEUS_MARKET_PHASE_DISPATCH`` default to ON, the runtime instead routes
+the fetch decision through ``should_fetch_settlement_day_observation``,
+which (correctly) refuses to fetch when the market is already in
+POST_TRADING phase. The test fixtures use ``target_date=2026-04-01`` and
+``decision_time=2026-04-01T15:30Z`` — POST_TRADING for NYC. Under flag
+ON the getter is never called and the captured fields stay empty.
+
+These two tests are pinned to flag=OFF because they assert the
+legacy-mode-axis dispatch contract. Phase-axis equivalents should be
+added in a future packet (PLAN_v3 §6 follow-up); they need fixtures
+whose decision_time falls inside the SETTLEMENT_DAY window.
+"""
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
-# Authority basis: Day0 runtime observation context relationship protection; source authority gate fixture refresh.
+# Last reused/audited: 2026-05-04
+# Authority basis: Day0 runtime observation context relationship protection;
+#   A6 follow-up (rebuild fixes branch) — pin the two flag-sensitive tests
+#   to legacy-mode-axis until phase-axis fixtures land.
 
 from __future__ import annotations
 
@@ -19,7 +36,9 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.signal.forecast_uncertainty import day0_nowcast_context
 
 
-def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_getter():
+def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_getter(monkeypatch):
+    # Pin legacy mode-axis dispatch — see module docstring §A6 audit.
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     captured: dict[str, object] = {}
 
     def getter(city, target_date=None, reference_time=None):
@@ -33,7 +52,7 @@ def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_ge
         DiscoveryMode=DiscoveryMode,
         get_current_observation=getter,
         find_weather_markets=lambda **kwargs: [{
-            "city": SimpleNamespace(name="NYC"),
+            "city": SimpleNamespace(name="NYC", timezone="America/New_York"),
             "target_date": "2026-04-01",
             "hours_since_open": 1.0,
             "hours_to_resolution": 6.0,
@@ -70,7 +89,9 @@ def test_execute_discovery_phase_passes_target_date_and_decision_time_to_day0_ge
     assert captured["reference_time"] == decision_time
 
 
-def test_execute_discovery_phase_falls_back_for_legacy_day0_getter_signature():
+def test_execute_discovery_phase_falls_back_for_legacy_day0_getter_signature(monkeypatch):
+    # Pin legacy mode-axis dispatch — see module docstring §A6 audit.
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
     captured = {"legacy_calls": 0}
 
     def legacy_getter(city):
@@ -82,7 +103,7 @@ def test_execute_discovery_phase_falls_back_for_legacy_day0_getter_signature():
         DiscoveryMode=DiscoveryMode,
         get_current_observation=legacy_getter,
         find_weather_markets=lambda **kwargs: [{
-            "city": SimpleNamespace(name="NYC"),
+            "city": SimpleNamespace(name="NYC", timezone="America/New_York"),
             "target_date": "2026-04-01",
             "hours_since_open": 1.0,
             "hours_to_resolution": 6.0,
