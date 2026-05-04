@@ -449,6 +449,24 @@ scripts:
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   parse_change_log.py: {class: utility}
   post_sequential_fillback.sh: {class: runtime_support, canonical_command: "bash scripts/post_sequential_fillback.sh <sequential_wrapper_pid>"}
+  produce_activation_evidence.py:
+    class: diagnostic_report_writer
+    module_owner: control
+    packet: docs/operations/activation/UNLOCK_CRITERIA.md
+    lifecycle: long_lived
+    status: active
+    reason: "Operator-runnable evidence factory for Phase-C flag flips. Dry-runs the three activation flags (C1/C3/C4) against in-memory DB and emits date-stamped artifacts under evidence/activation/ for operator review. Must NOT be treated as a flip authorizer; see UNLOCK_CRITERIA.md for the full evidence-gated unlock checklist."
+    canonical_command: "python3 scripts/produce_activation_evidence.py --all --out-dir evidence/activation/ --evidence state/entry_forecast_promotion_evidence.json"
+    read_targets: [state/entry_forecast_promotion_evidence.json, state/risk_state.db]
+    write_targets: [evidence/activation, stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    promotion_barrier: "Artifacts are operator evidence for the flip commit; they do not authorize the flip. Flip requires all listed tests green AND producer-summary ready_to_flip=True within 7 days."
+    required_helpers: [src.control.entry_forecast_promotion_evidence_io, src.control.entry_forecast_rollout, src.data.entry_readiness_writer, src.engine.evaluator]
+    required_tests: [tests/test_produce_activation_evidence.py, tests/test_activation_flag_combinations.py]
   profit_validation_replay.py: {class: diagnostic_report_writer, write_targets: [docs/reports/shadow_replay_report.md, stdout]}
   rebuild_calibration.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy simplified-p_raw rebuild retired}
   rebuild_calibration_pairs_canonical.py:
