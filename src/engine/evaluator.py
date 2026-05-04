@@ -48,7 +48,10 @@ from src.control.entry_forecast_promotion_evidence_io import (
     read_promotion_evidence,
 )
 from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
+from src.data.calibration_transfer_policy import evaluate_calibration_transfer_policy
+from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
+from src.data.forecast_target_contract import ForecastTargetScope
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -731,10 +734,15 @@ def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None
 
 
 ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
+ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG = "ZEUS_ENTRY_FORECAST_READINESS_WRITER"
 
 
 def _entry_forecast_rollout_gate_flag_on() -> bool:
     return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG) == "1"
+
+
+def _entry_forecast_readiness_writer_flag_on() -> bool:
+    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG) == "1"
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
@@ -800,6 +808,87 @@ def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
             if value:
                 return value
     return ""
+
+
+def _write_entry_readiness_for_candidate(
+    conn,
+    *,
+    cfg: EntryForecastConfig,
+    city: City,
+    target_local_date: date,
+    temperature_metric: "MetricIdentity",
+    market_family: str,
+    condition_id: str,
+    decision_time: datetime,
+) -> None:
+    """Phase C-3 activation: when ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=1``,
+    write the per-candidate ``readiness_state`` row with
+    ``strategy_key='entry_forecast'`` so the live evaluator path's
+    subsequent ``read_executable_forecast`` call can find it.
+
+    The writer enforces all three gates (rollout / calibration /
+    promotion-evidence) at write time. Default OFF preserves the
+    fail-closed-by-construction state where no daemon path writes
+    entry_readiness rows and the reader recurrently blocks on
+    ``ENTRY_READINESS_MISSING``.
+
+    The ``ForecastTargetScope`` constructed here uses placeholder
+    temporal fields (``source_cycle_time``, ``target_window_*``,
+    ``required_step_hours``). The writer ignores those — it only
+    consumes ``city_id``/``city_timezone``/``target_local_date``/
+    ``temperature_metric``/``data_version``. Loading the proper
+    temporal fields would require a DB lookup the writer does not
+    need; using placeholders is correct here. If a future caller
+    needs full scope semantics, refactor the writer to accept the raw
+    fields it actually uses (city/target/metric/data_version) and
+    drop the scope dataclass coupling.
+    """
+
+    if conn is None:
+        return
+    try:
+        evidence = read_promotion_evidence()
+    except PromotionEvidenceCorruption:
+        evidence = None
+
+    rollout_decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
+    track = track_for_metric(cfg, temperature_metric.temperature_metric)
+    data_version = data_version_for_track(track)
+    calibration_decision = evaluate_calibration_transfer_policy(
+        config=cfg,
+        source_id=cfg.source_id,
+        forecast_data_version=data_version,
+        live_promotion_approved=bool(
+            evidence is not None and evidence.calibration_promotion_approved
+        ),
+    )
+
+    placeholder_scope = ForecastTargetScope(
+        city_id=_entry_forecast_city_id(city),
+        city_name=city.name,
+        city_timezone=city.timezone,
+        target_local_date=target_local_date,
+        temperature_metric=temperature_metric.temperature_metric,
+        source_cycle_time=decision_time,
+        data_version=data_version,
+        target_window_start_utc=decision_time,
+        target_window_end_utc=decision_time,
+        required_step_hours=(),
+        market_refs=(),
+    )
+
+    write_entry_readiness(
+        conn,
+        scope=placeholder_scope,
+        rollout_decision=rollout_decision,
+        calibration_decision=calibration_decision,
+        promotion_evidence=evidence,
+        config=cfg,
+        market_family=market_family,
+        condition_id=condition_id,
+        producer_readiness_id="entry-readiness-via-evaluator",
+        computed_at=decision_time,
+    )
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -1544,6 +1633,21 @@ def evaluate_candidate(
             )]
         decision_instant = decision_time or datetime.now(timezone.utc)
         track = track_for_metric(entry_forecast_cfg, temperature_metric.temperature_metric)
+        market_family_for_read = _entry_forecast_market_family(candidate, temperature_metric)
+        condition_id_for_read = _entry_forecast_condition_id(support_outcomes)
+
+        if _entry_forecast_readiness_writer_flag_on():
+            _write_entry_readiness_for_candidate(
+                conn,
+                cfg=entry_forecast_cfg,
+                city=city,
+                target_local_date=target_d,
+                temperature_metric=temperature_metric,
+                market_family=market_family_for_read,
+                condition_id=condition_id_for_read,
+                decision_time=decision_instant,
+            )
+
         reader_result = read_executable_forecast(
             conn,
             city_id=_entry_forecast_city_id(city),
@@ -1556,8 +1660,8 @@ def evaluate_candidate(
             data_version=data_version_for_track(track),
             track=track,
             strategy_key="entry_forecast",
-            market_family=_entry_forecast_market_family(candidate, temperature_metric),
-            condition_id=_entry_forecast_condition_id(support_outcomes),
+            market_family=market_family_for_read,
+            condition_id=condition_id_for_read,
             decision_time=decision_instant,
         )
         if not reader_result.ok or reader_result.bundle is None:
