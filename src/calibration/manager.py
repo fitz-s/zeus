@@ -249,12 +249,53 @@ def get_calibrator(
     # in MetricIdentity (metric_identity.py:78-90) and are imported lazily to
     # avoid pulling the typed-atom module into every test that touches the
     # calibration manager.
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-    expected_data_version = (
-        HIGH_LOCALDAY_MAX.data_version
-        if temperature_metric == "high"
-        else LOW_LOCALDAY_MIN.data_version
+    #
+    # Phase 2.6 (2026-05-04): source-family-aware data_version resolution.
+    # When caller passes ``source_id``, derive the matching data_version per
+    # the source-family registry — so OpenData live forecasts hit OpenData
+    # Platt buckets, not TIGGE-trained ones (BLOCKER 3 fix). Fallback to
+    # legacy TIGGE-only constants when source_id is None (back-compat).
+    from src.types.metric_identity import (
+        HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity,
     )
+    if source_id is not None:
+        # Map source_id back to a source_family that MetricIdentity knows about.
+        if source_id == "tigge_mars":
+            _source_family = "tigge"
+        elif source_id == "ecmwf_open_data":
+            _source_family = "ecmwf_opendata"
+        else:
+            _source_family = None
+        if _source_family is not None:
+            try:
+                expected_data_version = (
+                    MetricIdentity.for_metric_with_source_family(
+                        temperature_metric, _source_family
+                    ).data_version
+                )
+            except ValueError:
+                # Unknown family at this layer → fall back to legacy TIGGE
+                # constants. Caller should still rule out unknown sources at
+                # an earlier rejection gate (UNKNOWN_FORECAST_SOURCE_FAMILY).
+                expected_data_version = (
+                    HIGH_LOCALDAY_MAX.data_version
+                    if temperature_metric == "high"
+                    else LOW_LOCALDAY_MIN.data_version
+                )
+        else:
+            # source_id provided but unknown — legacy fallback (no live route
+            # for this source through cycle-stratified Platt).
+            expected_data_version = (
+                HIGH_LOCALDAY_MAX.data_version
+                if temperature_metric == "high"
+                else LOW_LOCALDAY_MIN.data_version
+            )
+    else:
+        expected_data_version = (
+            HIGH_LOCALDAY_MAX.data_version
+            if temperature_metric == "high"
+            else LOW_LOCALDAY_MIN.data_version
+        )
 
     # F1 (2026-05-03): resolve config-pinned frozen_as_of + model_key for this
     # bucket. Both default to None → legacy behavior preserved.
