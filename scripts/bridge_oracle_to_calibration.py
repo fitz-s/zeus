@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-03; last_reused=2026-05-03
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-04; last_reused=2026-05-04
 # Purpose: Bridge oracle shadow snapshots into the reviewed oracle error-rate config artifact.
 # Reuse: Review source snapshots and high-track settlement filtering before applying output.
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (storage path centralization + atomic write + heartbeat).
 """Bridge oracle shadow snapshots to calibration data.
 
 Compares oracle-time WU/HKO snapshots (captured by
@@ -54,8 +55,19 @@ logging.basicConfig(
 logger = logging.getLogger("oracle_bridge")
 
 ROOT = Path(__file__).resolve().parent.parent
-SNAPSHOT_DIR = ROOT / "raw" / "oracle_shadow_snapshots"
-ORACLE_FILE = ROOT / "data" / "oracle_error_rates.json"
+
+# Storage paths centralized in src.state.paths (PLAN.md §A2 + D-10).
+# Re-resolved on each call so ZEUS_STORAGE_ROOT env override propagates
+# into the bridge without reimport. Kept as module-level callables for
+# readability inside the existing single-file procedural style.
+from src.state.paths import (  # noqa: E402  (path-bootstrap above must run first)
+    oracle_artifact_heartbeat_path,
+    oracle_error_rates_path,
+    oracle_snapshot_dir,
+    write_heartbeat,
+    write_json_atomic,
+)
+
 DB_PATH = ROOT / "state" / "zeus-world.db"
 
 
@@ -83,10 +95,11 @@ def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
 def _load_snapshots() -> dict[str, dict[str, dict]]:
     """Load all shadow snapshots, keyed by city → date → snapshot."""
     result: dict[str, dict[str, dict]] = defaultdict(dict)
-    if not SNAPSHOT_DIR.exists():
+    snapshot_dir = oracle_snapshot_dir()
+    if not snapshot_dir.exists():
         return result
 
-    for city_dir in sorted(SNAPSHOT_DIR.iterdir()):
+    for city_dir in sorted(snapshot_dir.iterdir()):
         if not city_dir.is_dir():
             continue
         for snap_file in sorted(city_dir.glob("*.json")):
@@ -143,7 +156,7 @@ def bridge(dry_run: bool = False) -> dict:
 
     snapshots = _load_snapshots()
     if not snapshots:
-        logger.info("No shadow snapshots found in %s", SNAPSHOT_DIR)
+        logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
         conn.close()
         return {"cities": 0, "comparisons": 0}
 
@@ -179,9 +192,10 @@ def bridge(dry_run: bool = False) -> dict:
         return p_count, f_max
 
     # Existing oracle error rates (to preserve historical data)
+    oracle_file = oracle_error_rates_path()
     existing: dict[str, dict] = {}
-    if ORACLE_FILE.exists():
-        with open(ORACLE_FILE) as f:
+    if oracle_file.exists():
+        with open(oracle_file) as f:
             existing = json.load(f)
 
     city_stats: dict[str, dict] = {}
@@ -305,10 +319,24 @@ def bridge(dry_run: bool = False) -> dict:
             city_entry["high"]["status"] = "OK"
 
     if not dry_run:
-        ORACLE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(ORACLE_FILE, "w") as f:
-            json.dump(existing, f, indent=2)
-        logger.info("Updated %s with %d snapshot cities", ORACLE_FILE, len(city_stats))
+        # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous
+        # plain open()+json.dump could leave a partial file on crash;
+        # the reader (oracle_penalty.reload) catches that as a JSON error
+        # and silently keeps the previous cache, masking the bridge crash.
+        # Atomic + heartbeat surfaces the failure mode for §A3 readers.
+        meta = write_json_atomic(oracle_file, existing, writer_identity="bridge_oracle_to_calibration")
+        write_heartbeat(
+            "oracle_error_rates",
+            {
+                **meta,
+                "snapshot_cities": len(city_stats),
+                "comparisons": sum(s["snapshot_comparisons"] for s in city_stats.values()),
+                "mismatches": sum(s["snapshot_mismatch"] for s in city_stats.values()),
+            },
+            heartbeat_path=oracle_artifact_heartbeat_path(),
+        )
+        logger.info("Updated %s with %d snapshot cities (sha256=%s)",
+                    oracle_file, len(city_stats), meta["sha256"][:12])
 
         # Signal the oracle penalty module to reload
         try:
@@ -317,7 +345,7 @@ def bridge(dry_run: bool = False) -> dict:
         except ImportError:
             pass  # OK if not running inside Zeus process
     else:
-        logger.info("[DRY RUN] Would update %s with %d cities", ORACLE_FILE, len(city_stats))
+        logger.info("[DRY RUN] Would update %s with %d cities", oracle_file, len(city_stats))
 
     conn.close()
     return {

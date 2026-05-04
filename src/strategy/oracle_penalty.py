@@ -15,13 +15,11 @@ from __future__ import annotations
 import json
 import logging
 from enum import Enum
-from pathlib import Path
 from typing import NamedTuple
 
-logger = logging.getLogger(__name__)
+from src.state.paths import oracle_error_rates_path
 
-_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-_ORACLE_FILE = _DATA_DIR / "oracle_error_rates.json"
+logger = logging.getLogger(__name__)
 
 # ── thresholds ────────────────────────────────────────────────────────
 INCIDENTAL_THRESHOLD = 0.03   # < 3% → no penalty
@@ -73,11 +71,12 @@ def _load() -> dict[tuple[str, str], OracleInfo]:
 
     Legacy flat shape is loaded as (city, "high") entries only; LOW starts empty.
     """
-    if not _ORACLE_FILE.exists():
-        logger.warning("oracle_error_rates.json not found at %s — all cities OK", _ORACLE_FILE)
+    oracle_file = oracle_error_rates_path()
+    if not oracle_file.exists():
+        logger.warning("oracle_error_rates.json not found at %s — all cities OK", oracle_file)
         return {}
 
-    with open(_ORACLE_FILE) as f:
+    with open(oracle_file) as f:
         raw = json.load(f)
 
     result: dict[tuple[str, str], OracleInfo] = {}
