@@ -490,3 +490,92 @@ def test_oracle_estimator_sanity_anchors():
     assert posterior_upper_95(0, 100) < posterior_upper_95(5, 100) < posterior_upper_95(50, 100)
     # Anti-monotone in n at fixed m=0
     assert posterior_upper_95(0, 10) > posterior_upper_95(0, 100) > posterior_upper_95(0, 1000)
+
+
+# ─────────────────────────────────────────────────────────────────── #
+#  H2 critic R6: cycle_runtime strategy structures derive from registry  #
+# ─────────────────────────────────────────────────────────────────── #
+
+
+def test_H2_cycle_runtime_canonical_keys_match_registry_live_safe():
+    """H2 critic R6 pin: cycle_runtime's canonical strategy set must equal
+    ``strategy_profile.live_safe_keys()``. Pre-fix this was a hardcoded
+    4-element frozenset at cycle_runtime.py:40 — Bug review §D's
+    "strategy identity scattered" anti-pattern.
+
+    The HARDCODE COULD reappear (e.g., a tired engineer adds a 5th
+    strategy and back-fills the frozenset for symmetry). That regression
+    would split brain between registry and runtime; this test forces
+    the equality so the runtime can never drift independently.
+    """
+    from src.engine import cycle_runtime
+    from src.strategy.strategy_profile import live_safe_keys
+
+    assert cycle_runtime._canonical_strategy_keys() == live_safe_keys()
+
+
+def test_H2_cycle_runtime_inverse_map_matches_registry_dispatch_modes():
+    """H2 critic R6 pin: cycle_runtime's discovery_mode -> strategies map
+    must equal ``strategy_profile.cycle_axis_dispatch_inverse()``.
+    Pre-fix this was a hardcoded dict at cycle_runtime.py:46 — the 7th
+    unmigrated site flagged in the rebuild review.
+
+    A future change that adds a strategy to the registry's
+    cycle_axis_dispatch_mode field MUST surface in cycle_runtime
+    automatically; a regression that re-hardcodes the map breaks that
+    contract."""
+    from src.engine import cycle_runtime
+    from src.strategy.strategy_profile import cycle_axis_dispatch_inverse
+
+    assert cycle_runtime._strategy_keys_by_discovery_mode() == cycle_axis_dispatch_inverse()
+
+
+def test_H2_cycle_runtime_no_hardcoded_strategy_string_literals():
+    """Source-grep antibody: cycle_runtime.py must not contain strategy
+    name string literals at module top-level. Catches the
+    most-likely-future-regression pattern: someone re-introduces
+    ``frozenset({"settlement_capture", ...})`` because it's fast.
+
+    Search is targeted to TOP-LEVEL frozenset/set/dict literals — not
+    docstrings (which legitimately reference strategy names) — by
+    rejecting only patterns that look like Python set literals
+    containing a strategy name within the first 20 lines after the
+    initial imports.
+
+    Allowed: function bodies that reference live_safe_keys() etc.
+    Allowed: docstrings/comments mentioning strategy names.
+    Forbidden: ``CANONICAL_STRATEGY_KEYS = {"settlement_capture", ...}``.
+    """
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "engine" / "cycle_runtime.py"
+    ).read_text()
+
+    # Find the first def or class line — we only care about module-level
+    # data structures BEFORE the first function. (Function bodies may
+    # legitimately enumerate strategies for dispatch; module-level
+    # hardcodes are the regression we're catching.)
+    lines = src.splitlines()
+    cutoff = None
+    for i, line in enumerate(lines):
+        if line.startswith(("def ", "class ")):
+            cutoff = i
+            break
+    assert cutoff is not None, "cycle_runtime.py must define functions"
+    header = "\n".join(lines[:cutoff])
+
+    # Reject any hardcoded set/frozenset/list assignment that contains a
+    # known live strategy name. The migration replaced these with helper
+    # function calls.
+    import re
+    hardcode_pattern = re.compile(
+        r"=\s*(?:frozenset\s*\(\s*\{|\{|\[)[^}\]]*"
+        r'"(?:settlement_capture|center_buy|opening_inertia|shoulder_sell)"',
+        re.MULTILINE,
+    )
+    matches = hardcode_pattern.findall(header)
+    assert not matches, (
+        "Module-level hardcoded strategy set detected in cycle_runtime.py: "
+        f"{matches!r}. Use strategy_profile.live_safe_keys() or "
+        "strategy_profile.cycle_axis_dispatch_inverse() instead."
+    )

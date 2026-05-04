@@ -274,6 +274,7 @@ def test_schema_load_rejects_unknown_field(tmp_path: Path):
         "  live_status: live\n"
         "  allowed_market_phazes: [settlement_day]\n"  # TYPO
         "  allowed_discovery_modes: [day0_capture]\n"
+        "  cycle_axis_dispatch_mode: day0_capture\n"
         "  allowed_directions: [buy_yes]\n"
         "  allowed_bin_topology: [point]\n"
         "  metric_support: {high: live, low: blocked}\n"
@@ -295,6 +296,7 @@ def test_schema_load_rejects_invalid_live_status(tmp_path: Path):
         "  live_status: maybe\n"  # INVALID
         "  allowed_market_phases: [settlement_day]\n"
         "  allowed_discovery_modes: [day0_capture]\n"
+        "  cycle_axis_dispatch_mode: day0_capture\n"
         "  allowed_directions: [buy_yes]\n"
         "  allowed_bin_topology: [point]\n"
         "  metric_support: {high: live, low: blocked}\n"
@@ -316,6 +318,7 @@ def test_schema_load_rejects_kelly_default_out_of_range(tmp_path: Path):
         "  live_status: live\n"
         "  allowed_market_phases: [settlement_day]\n"
         "  allowed_discovery_modes: [day0_capture]\n"
+        "  cycle_axis_dispatch_mode: day0_capture\n"
         "  allowed_directions: [buy_yes]\n"
         "  allowed_bin_topology: [point]\n"
         "  metric_support: {high: live, low: blocked}\n"
@@ -337,6 +340,7 @@ def test_schema_load_rejects_kelly_phase_override_out_of_range(tmp_path: Path):
         "  live_status: live\n"
         "  allowed_market_phases: [settlement_day]\n"
         "  allowed_discovery_modes: [day0_capture]\n"
+        "  cycle_axis_dispatch_mode: day0_capture\n"
         "  allowed_directions: [buy_yes]\n"
         "  allowed_bin_topology: [point]\n"
         "  metric_support: {high: live, low: blocked}\n"
@@ -358,6 +362,7 @@ def test_schema_load_rejects_invalid_metric_support(tmp_path: Path):
         "  live_status: live\n"
         "  allowed_market_phases: [settlement_day]\n"
         "  allowed_discovery_modes: [day0_capture]\n"
+        "  cycle_axis_dispatch_mode: day0_capture\n"
         "  allowed_directions: [buy_yes]\n"
         "  allowed_bin_topology: [point]\n"
         "  metric_support: {high: maybe, low: blocked}\n"  # INVALID

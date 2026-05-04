@@ -38,6 +38,16 @@
 #       Cycle-axis modes the strategy fires under. Pre-PR-#53 this was the
 #       primary dispatch axis; post-#53 it's gated by allowed_market_phases
 #       under flag ON.
+#   cycle_axis_dispatch_mode: <single_mode> | null
+#       The SINGLE discovery_mode under which legacy cycle-axis dispatch
+#       (evaluator clauses 1-4 ordered short-circuit) routes this strategy.
+#       Differs from allowed_discovery_modes: e.g., center_buy nominally
+#       supports [opening_hunt, update_reaction] but the legacy dispatch
+#       short-circuit puts it ONLY in update_reaction (clauses 1-2 fire
+#       first for opening_hunt → opening_inertia). cycle_runtime derives
+#       its STRATEGY_KEYS_BY_DISCOVERY_MODE inverse map from this field.
+#       null for blocked strategies that never dispatch under cycle-axis.
+#       Crucial for H2 critic R6 finding (no hardcoded inverse map).
 #   allowed_directions: [buy_yes | buy_no]
 #       Direction filter; rejects opposite-direction edges that classify into
 #       this strategy via fallback rules.
@@ -91,6 +101,7 @@ settlement_capture:
   live_status: live
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
+  cycle_axis_dispatch_mode: day0_capture
   allowed_directions: [buy_yes]
   allowed_bin_topology: [point, finite_range]
   metric_support:
@@ -115,6 +126,7 @@ center_buy:
   live_status: live
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: update_reaction
   allowed_directions: [buy_yes]
   allowed_bin_topology: [finite_range]
   metric_support:
@@ -139,6 +151,7 @@ opening_inertia:
   live_status: live
   allowed_market_phases: [pre_settlement_day]
   allowed_discovery_modes: [opening_hunt]
+  cycle_axis_dispatch_mode: opening_hunt
   allowed_directions: [buy_yes, buy_no]
   allowed_bin_topology: [point, finite_range, open_shoulder]
   metric_support:
@@ -165,6 +178,7 @@ shoulder_sell:
   live_status: shadow
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: update_reaction
   allowed_directions: [buy_no]
   allowed_bin_topology: [open_shoulder]
   metric_support:
@@ -189,6 +203,7 @@ shoulder_buy:
   live_status: blocked
   allowed_market_phases: []
   allowed_discovery_modes: []
+  cycle_axis_dispatch_mode: null
   allowed_directions: []
   allowed_bin_topology: [open_shoulder]
   metric_support:
@@ -208,6 +223,7 @@ center_sell:
   live_status: blocked
   allowed_market_phases: []
   allowed_discovery_modes: []
+  cycle_axis_dispatch_mode: null
   allowed_directions: []
   allowed_bin_topology: [finite_range]
   metric_support:

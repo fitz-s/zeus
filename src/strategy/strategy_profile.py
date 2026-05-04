@@ -103,6 +103,7 @@ class StrategyProfile:
     live_status: str
     allowed_market_phases: frozenset[str]
     allowed_discovery_modes: frozenset[str]
+    cycle_axis_dispatch_mode: Optional[str]
     allowed_directions: frozenset[str]
     allowed_bin_topology: frozenset[str]
     metric_support: dict[str, str]
@@ -240,6 +241,7 @@ _REQUIRED_FIELDS = {
     "live_status",
     "allowed_market_phases",
     "allowed_discovery_modes",
+    "cycle_axis_dispatch_mode",
     "allowed_directions",
     "allowed_bin_topology",
     "metric_support",
@@ -249,6 +251,11 @@ _REQUIRED_FIELDS = {
     "min_settled_decisions",
     "promotion_evidence_ref",
 }
+
+
+_VALID_DISCOVERY_MODES: frozenset[str] = frozenset({
+    "day0_capture", "opening_hunt", "update_reaction",
+})
 
 
 def _build_profile(key: str, raw: dict) -> StrategyProfile:
@@ -281,6 +288,19 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
             f"{key}.kelly_default_multiplier={kelly_default!r}: must be numeric in [0.0, 1.0]"
         )
 
+    cycle_axis_mode = raw["cycle_axis_dispatch_mode"]
+    if cycle_axis_mode is not None:
+        if not isinstance(cycle_axis_mode, str):
+            raise RegistrySchemaError(
+                f"{key}.cycle_axis_dispatch_mode: must be a discovery_mode string or null, "
+                f"got {type(cycle_axis_mode).__name__}"
+            )
+        if cycle_axis_mode not in _VALID_DISCOVERY_MODES:
+            raise RegistrySchemaError(
+                f"{key}.cycle_axis_dispatch_mode={cycle_axis_mode!r}: must be one of "
+                f"{sorted(_VALID_DISCOVERY_MODES)} or null"
+            )
+
     return StrategyProfile(
         key=key,
         thesis=str(raw["thesis"]).strip(),
@@ -291,6 +311,7 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         allowed_discovery_modes=_coerce_frozenset(
             raw["allowed_discovery_modes"], field_name="allowed_discovery_modes", key=key
         ),
+        cycle_axis_dispatch_mode=cycle_axis_mode if cycle_axis_mode else None,
         allowed_directions=_coerce_frozenset(
             raw["allowed_directions"], field_name="allowed_directions", key=key
         ),
@@ -387,6 +408,29 @@ def live_allowed_keys() -> frozenset[str]:
     return frozenset(
         k for k, p in _ensure_loaded().items() if p.is_runtime_live()
     )
+
+
+def cycle_axis_dispatch_inverse() -> dict[str, frozenset[str]]:
+    """Return the discovery_mode → strategies inverse map for cycle-axis dispatch.
+
+    Each strategy's ``cycle_axis_dispatch_mode`` field names the SINGLE
+    legacy mode under which the strategy is routed by evaluator clauses 1-4.
+    This helper inverts that field so cycle_runtime can reject strategies
+    that fall outside the cycle-axis dispatch contract for the active mode.
+
+    Replaces the pre-A4-then-restored hardcoded
+    ``STRATEGY_KEYS_BY_DISCOVERY_MODE`` in cycle_runtime.py — H2 critic R6
+    finding (no hardcoded inverse map outside the registry).
+
+    Strategies whose ``cycle_axis_dispatch_mode`` is None (blocked) are
+    omitted from the returned map.
+    """
+    out: dict[str, set[str]] = {}
+    for key, profile in _ensure_loaded().items():
+        mode = profile.cycle_axis_dispatch_mode
+        if mode:
+            out.setdefault(mode, set()).add(key)
+    return {mode: frozenset(keys) for mode, keys in out.items()}
 
 
 def kelly_default_multiplier(strategy_key: str) -> float:

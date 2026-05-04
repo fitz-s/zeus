@@ -37,17 +37,40 @@ from src.state.portfolio import (
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_STRATEGY_KEYS = {
-    "settlement_capture",
-    "shoulder_sell",
-    "center_buy",
-    "opening_inertia",
-}
-STRATEGY_KEYS_BY_DISCOVERY_MODE = {
-    "day0_capture": frozenset({"settlement_capture"}),
-    "opening_hunt": frozenset({"opening_inertia"}),
-    "update_reaction": frozenset({"center_buy", "shoulder_sell"}),
-}
+
+# H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
+# CANONICAL_STRATEGY_KEYS frozenset and STRATEGY_KEYS_BY_DISCOVERY_MODE
+# inverse map were the 6th and 7th unmigrated sites flagged in the rebuild
+# review — exactly the anti-pattern Bug review §D called out
+# ("strategy identity remains a function of DiscoveryMode + edge shape").
+# Both now derive from the strategy registry's live_status field and the
+# new per-strategy cycle_axis_dispatch_mode field. The registry owns the
+# truth; cycle_runtime only filters at use-sites.
+def _canonical_strategy_keys() -> frozenset[str]:
+    """Strategies cycle_runtime treats as canonical for telemetry/attribution.
+
+    Equals the registry's ``live_safe_keys()`` — every boot-allowed strategy
+    (live + shadow) is canonical because shadow strategies still emit
+    decisions that need attribution. Recomputed on every call so registry
+    swaps in tests propagate without import-order surprises.
+    """
+    from src.strategy.strategy_profile import live_safe_keys
+    return live_safe_keys()
+
+
+def _strategy_keys_by_discovery_mode() -> dict[str, frozenset[str]]:
+    """Inverse of cycle_axis_dispatch_mode: discovery_mode → set of strategies
+    routed under that mode by legacy clauses 1-4 short-circuit. Recomputed on
+    every call (cheap; registry has 6 entries)."""
+    from src.strategy.strategy_profile import cycle_axis_dispatch_inverse
+    return cycle_axis_dispatch_inverse()
+
+
+# Module-level read for backward-compat. Tests / external callers that
+# imported these names get a snapshot equivalent to the pre-H2 behavior.
+# Prefer the helpers above for fresh reads (e.g., post-_reload_for_test).
+CANONICAL_STRATEGY_KEYS = _canonical_strategy_keys()
+STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
@@ -80,7 +103,7 @@ _D4_ASYMMETRIC_EXIT_TRIGGERS = frozenset({
 
 def _resolve_strategy_key(decision) -> str:
     strategy_key = str(getattr(decision, "strategy_key", "") or "").strip()
-    return strategy_key if strategy_key in CANONICAL_STRATEGY_KEYS else ""
+    return strategy_key if strategy_key in _canonical_strategy_keys() else ""
 
 
 def _discovery_mode_value(mode) -> str:
@@ -89,7 +112,7 @@ def _discovery_mode_value(mode) -> str:
 
 def _strategy_phase_rejection_reason(strategy_key: str, mode) -> str | None:
     mode_value = _discovery_mode_value(mode)
-    allowed = STRATEGY_KEYS_BY_DISCOVERY_MODE.get(mode_value)
+    allowed = _strategy_keys_by_discovery_mode().get(mode_value)
     if allowed is None:
         return f"strategy_phase_unknown_mode:{mode_value or 'unknown'}"
     if strategy_key not in allowed:
