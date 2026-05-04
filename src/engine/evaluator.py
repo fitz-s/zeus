@@ -2217,6 +2217,42 @@ def evaluate_candidate(
     # for cycle-stratified Platt bucket selection. None defaults preserve
     # legacy behavior — load_platt_model_v2 hits schema-default bucket
     # ('00','tigge_mars','full') when any field is unavailable.
+    #
+    # Phase 2.6 (2026-05-04, may4math.md F2): if ens_result carries an
+    # explicit data_version, it MUST resolve to a registered source_family
+    # (tigge / ecmwf_opendata). Unknown data_versions cannot be routed to
+    # a Platt bucket safely — manager.get_calibrator would derive a wrong
+    # expected_data_version from the source_family registry, silently
+    # mis-matching the bucket. Reject upfront with a structured stage so
+    # operators see the unknown provenance instead of getting a degraded
+    # uncalibrated path. Missing/None data_version still falls through
+    # for legacy snapshots that predate the provenance contract.
+    _phase2_data_version: Optional[str] = None
+    try:
+        if isinstance(ens_result, dict):
+            _dv = ens_result.get("data_version")
+            if isinstance(_dv, str) and _dv:
+                _phase2_data_version = _dv
+    except Exception:
+        pass
+    if _phase2_data_version is not None:
+        from src.types.metric_identity import source_family_from_data_version
+        if source_family_from_data_version(_phase2_data_version) is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="UNKNOWN_FORECAST_SOURCE_FAMILY",
+                rejection_reasons=[
+                    f"forecast data_version {_phase2_data_version!r} does not "
+                    "resolve to a registered source_family (tigge/ecmwf_opendata); "
+                    "calibrator routing would silently mis-match the bucket"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
     _phase2_cycle: Optional[str] = None
     _phase2_source_id: Optional[str] = None
     _phase2_horizon_profile: Optional[str] = None
