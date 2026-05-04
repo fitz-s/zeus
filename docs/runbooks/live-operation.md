@@ -181,6 +181,26 @@ pre-Phase-C.
 | `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` | `entry_forecast_blockers` participates in `result["healthy"]` predicate in `scripts/healthcheck.py`. Surfaces entry-forecast block in launchctl/dashboards. |
 | `ZEUS_ENTRY_FORECAST_CALIBRATION_GATE` | RESERVED — Phase C-3 subsumed C-2's calibration check via writer-side enforcement; this flag is currently unused. |
 
+### Flip authorization (evidence-gated)
+
+**Authority**: `docs/operations/activation/UNLOCK_CRITERIA.md`. Each
+flip must produce an evidence bundle under `evidence/activation/`
+AND pass the relationship tests in
+`tests/test_activation_flag_combinations.py` BEFORE the flag is set
+in the running daemon. The flip commit body cites the evidence
+bundle path; flips without evidence are unauthorized.
+
+Run the producer:
+
+```bash
+python scripts/produce_activation_evidence.py --all \
+  --out-dir evidence/activation/ \
+  --evidence state/entry_forecast_promotion_evidence.json
+```
+
+Inspect `evidence/activation/<date>_summary.md` for per-flag
+`ready_to_flip` verdicts. Stale (>7 day) bundles do not authorize.
+
 ### Recommended flip order
 
 1. **`ZEUS_ENTRY_FORECAST_READINESS_WRITER=1` first.** Without it, the
@@ -196,16 +216,20 @@ pre-Phase-C.
 3. **`ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS=1` last.** Surfaces
    any blockers in `result["healthy"]` so the operator dashboard
    reflects entry-forecast state. Flip last so the dashboard signal
-   matches the system's actual gating posture.
+   matches the system's actual gating posture; UNLOCK_CRITERIA §Flag 3
+   requires ≥24h of flags 1+2 stable before this flip.
 
-**Out-of-order risk**: flipping `_HEALTHCHECK_BLOCKERS=1` before
-`_READINESS_WRITER=1` will pull `result["healthy"]` to False with
-`ENTRY_READINESS_MISSING` everywhere — alarms but no actual issue.
-Flipping `_ROLLOUT_GATE=1` without `_READINESS_WRITER=1` and
-`rollout_mode='live'` means the gate checks pass (if evidence is
-populated) but the reader still finds no row — silent recurrent
-BLOCKED on `ENTRY_READINESS_MISSING`. Neither out-of-order combination
-opens an unsafe path; both stay fail-closed.
+**Out-of-order safety**: relationship tests INV-A through INV-E in
+`tests/test_activation_flag_combinations.py` pin that no flag-subset
+opens an unsafe path; all out-of-order combinations stay fail-closed.
+Operationally:
+- `_HEALTHCHECK_BLOCKERS=1` before `_READINESS_WRITER=1` pulls
+  `result["healthy"]` False with `ENTRY_READINESS_MISSING` everywhere
+  — alarms with no actionable underlying state.
+- `_ROLLOUT_GATE=1` without `_READINESS_WRITER=1` and
+  `rollout_mode='live'`: the gate checks pass (if evidence is
+  populated) but the reader still finds no row — silent recurrent
+  BLOCKED on `ENTRY_READINESS_MISSING`.
 
 ### Required prerequisite: populate promotion evidence
 
@@ -262,11 +286,14 @@ treat `LIVE_ELIGIBLE` rows as "passed the gate combinator at write
 time" — actual live submission requires the read-side validation to
 also pass.
 
-### Performance note (deferred)
+### Performance note
 
 When both `_ROLLOUT_GATE=1` and `_READINESS_WRITER=1`, the daemon reads
-`entry_forecast_promotion_evidence.json` 2× per candidate per cycle
-(~200 file reads/cycle uncached). On local APFS this is negligible
-(<10ms/cycle); on a network filesystem this could matter. A future
-performance commit will add `lru_cache(maxsize=1)` keyed by mtime to
-`read_promotion_evidence`. Not required for initial activation.
+`entry_forecast_promotion_evidence.json` 2× per candidate per cycle.
+The Phase C-perf-cache commit (`734012fa` on `main`) wraps
+`read_promotion_evidence` with `functools.lru_cache(maxsize=4)` keyed
+by `(path, mtime_ns, size)`, so re-reads collapse to a stat() call
+plus a cached parse. Cache invalidates automatically on file
+overwrite. INV-C tests in
+`tests/test_activation_flag_combinations.py` pin the rotation
+visibility contract.
