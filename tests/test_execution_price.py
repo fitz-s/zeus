@@ -208,7 +208,6 @@ class TestEvaluatorWiring:
             fee_rate=0.05,
             sizing_bankroll=1000.0,
             kelly_multiplier=0.25,
-            safety_cap_usd=None,
         )
         # Must equal the fee-adjusted size (not the larger bare-float size)
         from src.contracts.execution_price import ExecutionPrice
@@ -526,12 +525,10 @@ class TestEvaluatorWiring:
         size_no_fee = _size_at_execution_price_boundary(
             p_posterior=p_posterior, entry_price=bare_entry,
             fee_rate=0.0, sizing_bankroll=1000.0, kelly_multiplier=0.25,
-            safety_cap_usd=None,
         )
         size_with_fee = _size_at_execution_price_boundary(
             p_posterior=p_posterior, entry_price=bare_entry,
             fee_rate=0.05, sizing_bankroll=1000.0, kelly_multiplier=0.25,
-            safety_cap_usd=None,
         )
 
         assert size_with_fee < size_no_fee, "Fee-adjusted entry price must produce smaller position size"

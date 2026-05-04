@@ -204,7 +204,6 @@ class EdgeDecision:
     sizing_bankroll: float = 0.0
     kelly_multiplier_used: float = 0.0
     execution_fee_rate: float = 0.0
-    safety_cap_usd: float | None = None
 
     # Heavy Bound Domain Objects (Phase 2 encapsulation)
     edge_context: Optional[EdgeContext] = None
@@ -452,12 +451,15 @@ def _size_at_execution_price_boundary(
     fee_rate: float,
     sizing_bankroll: float,
     kelly_multiplier: float,
-    safety_cap_usd: float | None,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
     P10E: shadow-off rollback path removed — fee-adjusted typed price is the
     only path. No feature flag; assert_kelly_safe() runs unconditionally.
+
+    Per-trade safety cap parameter removed 2026-05-04 along with
+    ``live_safety_cap_usd``; per-cycle exposure discipline now lives in
+    posture / RiskGuard / max-exposure gates only.
     """
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(
@@ -477,7 +479,6 @@ def _size_at_execution_price_boundary(
         ep_fee_adjusted,
         sizing_bankroll,
         kelly_multiplier,
-        safety_cap_usd=safety_cap_usd,
     )
 
     # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
@@ -3078,7 +3079,6 @@ def evaluate_candidate(
                 fee_rate=fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
-                safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -3205,7 +3205,6 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

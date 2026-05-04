@@ -33,7 +33,6 @@ def kelly_size(
     entry_price: ExecutionPrice,
     bankroll: float,
     kelly_mult: float = 0.25,
-    safety_cap_usd: float | None = None,
 ) -> float:
     """Compute position size using fractional Kelly criterion. Spec §5.1.
 
@@ -42,8 +41,11 @@ def kelly_size(
         assert_kelly_safe() is called unconditionally, raising
         ExecutionPriceContractError if the price is not suitable for Kelly
         sizing). Bare floats are forbidden at this boundary (P10E).
-    safety_cap_usd: optional hard ceiling in USD. When provided, clips output
-        and emits a structured log record with the original pre-clip size.
+
+    Per-trade safety cap was removed 2026-05-04 along with
+    ``live_safety_cap_usd``. Per-cycle exposure discipline now lives in
+    posture / RiskGuard / max-exposure gates only (see
+    ``config/settings.json::_bankroll_doctrine_2026_05_04``).
     """
     # DT#5 P10E: strict — assert_kelly_safe() runs unconditionally.
     entry_price.assert_kelly_safe()
@@ -59,15 +61,7 @@ def kelly_size(
         return 0.0
 
     f_star = (p_posterior - price_value) / (1.0 - price_value)
-    raw_proposal = f_star * kelly_mult * bankroll
-
-    if safety_cap_usd is not None and raw_proposal > safety_cap_usd:
-        logger.info(
-            "kelly_sized",
-            extra={"capped_by_safety_cap": True, "raw_proposal": raw_proposal},
-        )
-        return safety_cap_usd
-    return raw_proposal
+    return f_star * kelly_mult * bankroll
 
 
 STRATEGY_KELLY_MULTIPLIERS = {
