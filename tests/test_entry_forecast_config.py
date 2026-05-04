@@ -58,12 +58,10 @@ def test_entry_forecast_config_loads_strict_field_types() -> None:
     assert cfg.target_horizon_days == 10
     assert cfg.warm_horizon_days == 10
     assert cfg.source_cycle_policy == "latest_complete_full_horizon"
-    assert cfg.allow_short_horizon_06_18 is False
     assert isinstance(cfg.rollout_mode, EntryForecastRolloutMode)
     assert cfg.calibration_policy_id is (
         EntryForecastCalibrationPolicyId.ECMWF_OPEN_DATA_USES_TIGGE_LOCALDAY_CAL_V1
     )
-    assert cfg.require_active_market_future_coverage is True
 
 
 def test_entry_forecast_blocked_override_constructs_cleanly() -> None:
@@ -133,16 +131,6 @@ def test_entry_forecast_invalid_rollout_mode_fails_closed(tmp_path) -> None:
     path.write_text(json.dumps(data))
 
     with pytest.raises(ValueError, match="paper"):
-        entry_forecast_config(Settings(path=path))
-
-
-def test_entry_forecast_boolean_fields_are_strict(tmp_path) -> None:
-    data = _settings_data()
-    data["entry_forecast"]["allow_short_horizon_06_18"] = "false"
-    path = tmp_path / "settings-string-bool.json"
-    path.write_text(json.dumps(data))
-
-    with pytest.raises(TypeError, match="allow_short_horizon_06_18"):
         entry_forecast_config(Settings(path=path))
 
 

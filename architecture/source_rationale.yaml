@@ -576,21 +576,17 @@ files:
   src/control/entry_forecast_rollout.py:
     zone: K1_governance
     authority_role: entry_forecast_promotion_gate
-    why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. NOT YET INVOKED FROM DAEMON; activation deferred to Phase C operator-controlled flag rollout per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
+    why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. PHASE C-1 wired into src/engine/evaluator.py behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF — daemon behavior at flag-default is byte-equal to pre-Phase-C). Operator flips the flag per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
     hazards:
-    - NOT_DAEMON_WIRED
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
     downstream:
-    - src/control/entry_forecast_promotion_evidence_io.py
-    - src/data/entry_readiness_writer.py
     - tests/test_entry_forecast_rollout.py
   src/control/entry_forecast_promotion_evidence_io.py:
     zone: K1_governance
     authority_role: entry_forecast_promotion_evidence_persistence
-    why: Phase B1 atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json. Strict schema, treats corruption as EVIDENCE_MISSING. NOT YET INVOKED FROM DAEMON; Phase C activates via single import site behind feature flag.
+    why: Phase B1 atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json. Strict schema, treats corruption as PromotionEvidenceCorruption. Phase C-flock adds fcntl.flock around writes to prevent concurrent-writer races. PHASE C-1 wired into src/engine/evaluator.py (read-side) behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF). Write-side remains operator-script-only.
     hazards:
-    - NOT_DAEMON_WIRED
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_entry_forecast_promotion_evidence_io.py
@@ -963,21 +959,18 @@ files:
   src/data/calibration_transfer_policy.py:
     zone: K2_runtime
     authority_role: calibration_transfer_gate
-    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
+    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF).
     hazards:
-    - NOT_DAEMON_WIRED
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
     downstream:
     - src/data/entry_forecast_shadow.py
-    - src/data/entry_readiness_writer.py
     - tests/test_calibration_transfer_policy.py
   src/data/entry_forecast_shadow.py:
     zone: K2_runtime
     authority_role: entry_forecast_shadow_evaluator
-    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. Phase B6 adds optional rollout_decision parameter so the LIVE_ELIGIBLE branch is reachable when caller supplies a permitting rollout decision (tested only). NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
+    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
     hazards:
-    - NOT_DAEMON_WIRED
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
@@ -986,9 +979,8 @@ files:
   src/data/entry_readiness_writer.py:
     zone: K2_runtime
     authority_role: entry_forecast_readiness_writer
-    why: Phase B3 pure writer that turns rollout + calibration + promotion-evidence verdicts into readiness_state rows with strategy_key='entry_forecast'. Refuses to land LIVE_ELIGIBLE unless every gate is aligned at write time. NOT YET INVOKED FROM DAEMON; Phase C activates via single import site behind feature flag.
+    why: Phase B3 pure writer that turns rollout + calibration + promotion-evidence verdicts into readiness_state rows with strategy_key='entry_forecast'. Refuses to land LIVE_ELIGIBLE unless every gate is aligned at write time. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF). Operator activates by setting the env var.
     hazards:
-    - NOT_DAEMON_WIRED
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_entry_readiness_writer.py

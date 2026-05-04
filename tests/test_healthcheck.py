@@ -599,3 +599,88 @@ def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path
     assert "execution_quality_level" in result["riskguard_contract_missing_keys"]
     assert result["recommended_commands"] == []
     assert result["healthy"] is False
+
+
+def test_phase_c4_flag_off_healthy_unaffected_by_entry_forecast_blockers(monkeypatch, tmp_path):
+    """Phase C-4: with ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS unset
+    (default OFF), a populated ``entry_forecast_blockers`` list does
+    NOT flip ``result["healthy"]`` to False. This preserves the legacy
+    "GREEN even if entry-forecast is BLOCKED" behavior so daemons in
+    flag-default state see no observability change.
+    """
+
+    status_path = tmp_path / "status_summary-live.json"
+    risk_path = tmp_path / "risk_state-live.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        risk={"level": "GREEN", "details": {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": [],
+            "recommended_strategy_gates": [],
+        }},
+        portfolio={"open_positions": 0, "total_exposure_usd": 0.0},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS", raising=False)
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    # World DB intentionally absent → entry_forecast_blockers populated
+    monkeypatch.setattr(healthcheck, "_world_db_path", lambda: tmp_path / "absent_world.db")
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entry_forecast_blockers"] == ["ENTRY_FORECAST_WORLD_DB_MISSING"]
+    assert result["healthy"] is True
+
+
+def test_phase_c4_flag_on_healthy_false_when_entry_forecast_blocked(monkeypatch, tmp_path):
+    """Phase C-4: with the flag ON, a populated
+    ``entry_forecast_blockers`` list pulls ``result["healthy"]`` False
+    even when every other sub-check is green. This closes the
+    fail-OPEN seam critic-opus ATTACK 4 surfaced (healthcheck used to
+    stay GREEN even when the live entry-forecast layer was BLOCKED).
+    """
+
+    status_path = tmp_path / "status_summary-live.json"
+    risk_path = tmp_path / "risk_state-live.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        risk={"level": "GREEN", "details": {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": [],
+            "recommended_strategy_gates": [],
+        }},
+        portfolio={"open_positions": 0, "total_exposure_usd": 0.0},
+    )))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS", "1")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(healthcheck, "_world_db_path", lambda: tmp_path / "absent_world.db")
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["entry_forecast_blockers"] == ["ENTRY_FORECAST_WORLD_DB_MISSING"]
+    assert result["healthy"] is False

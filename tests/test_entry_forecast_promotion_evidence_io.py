@@ -13,6 +13,7 @@ import pytest
 from src.control.entry_forecast_promotion_evidence_io import (
     PROMOTION_EVIDENCE_SCHEMA_VERSION,
     PromotionEvidenceCorruption,
+    clear_evidence_read_cache,
     evidence_to_dict,
     read_promotion_evidence,
     write_promotion_evidence,
@@ -158,9 +159,135 @@ def test_atomic_write_does_not_leave_tmp_files(tmp_path: Path) -> None:
     assert target.exists()
 
 
+def test_repeated_reads_use_cache_when_file_unchanged(tmp_path: Path) -> None:
+    """Phase C-perf-cache: a second read of the same file with no
+    mtime change reuses the cached parse rather than re-running the
+    JSON deserialization.
+    """
+
+    from src.control import entry_forecast_promotion_evidence_io as evidence_io
+
+    target = tmp_path / "evidence.json"
+    write_promotion_evidence(_evidence(), path=target)
+
+    clear_evidence_read_cache()
+    info_before = evidence_io._parse_evidence_payload_cached.cache_info()
+
+    first = read_promotion_evidence(path=target)
+    info_after_first = evidence_io._parse_evidence_payload_cached.cache_info()
+
+    second = read_promotion_evidence(path=target)
+    info_after_second = evidence_io._parse_evidence_payload_cached.cache_info()
+
+    assert first is not None and second is not None
+    assert first == second
+    assert info_after_first.misses == info_before.misses + 1
+    # Second call is a cache hit — no additional miss recorded.
+    assert info_after_second.misses == info_after_first.misses
+    assert info_after_second.hits == info_after_first.hits + 1
+
+
+def test_cache_invalidates_on_mtime_change(tmp_path: Path) -> None:
+    """Phase C-perf-cache: rewriting the file with new content (and
+    therefore new mtime / size) must invalidate the cache so the
+    next read picks up the fresh value.
+    """
+
+    import time
+
+    target = tmp_path / "evidence.json"
+    clear_evidence_read_cache()
+
+    write_promotion_evidence(_evidence(operator_approval_id="op-A"), path=target)
+    first = read_promotion_evidence(path=target)
+    assert first is not None and first.operator_approval_id == "op-A"
+
+    # Sleep so mtime_ns ticks even on coarse-resolution filesystems.
+    time.sleep(0.01)
+    write_promotion_evidence(_evidence(operator_approval_id="op-B"), path=target)
+    second = read_promotion_evidence(path=target)
+
+    assert second is not None
+    assert second.operator_approval_id == "op-B"
+
+
+def test_corruption_does_not_pollute_cache(tmp_path: Path) -> None:
+    """Phase C-perf-cache: when the parser raises
+    ``PromotionEvidenceCorruption``, ``functools.lru_cache`` does NOT
+    cache the result. The next call re-runs the parse and re-raises
+    consistently. This is the documented behavior — a corrupt file
+    should keep raising until operator fixes it.
+    """
+
+    target = tmp_path / "broken.json"
+    target.write_text("not json {{{")
+    clear_evidence_read_cache()
+
+    with pytest.raises(PromotionEvidenceCorruption):
+        read_promotion_evidence(path=target)
+    with pytest.raises(PromotionEvidenceCorruption):
+        read_promotion_evidence(path=target)
+
+
 def test_evidence_to_dict_for_audit_logging() -> None:
     payload = evidence_to_dict(_evidence())
 
     assert payload["operator_approval_id"] == "operator-1"
     assert payload["status_snapshot"]["status"] == "LIVE_ELIGIBLE"
     assert isinstance(payload["status_snapshot"]["blockers"], list)
+
+
+def test_write_creates_sidecar_lock_file(tmp_path: Path) -> None:
+    """Phase C-flock: writer must hold an exclusive flock on a sidecar
+    file so two concurrent writers cannot race and clobber payloads.
+    The lock file is the inode-stable companion of the target;
+    persistence after the write is acceptable (next write reuses it).
+    """
+
+    target = tmp_path / "evidence.json"
+    write_promotion_evidence(_evidence(), path=target)
+
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    assert lock_path.exists(), "expected sidecar .lock file to exist after write"
+
+
+def test_concurrent_in_process_writes_serialize_and_last_write_wins(tmp_path: Path) -> None:
+    """Two in-process threads writing serialized payloads cannot
+    interleave at the JSON-write step. The final on-disk file must be
+    a complete payload from one of the writers — never a partial mix.
+    Atomic ``os.replace`` guarantees this even without flock.
+
+    Scope note: this test exercises in-process threads (shared GIL,
+    same interpreter). It does NOT validate cross-process flock
+    semantics on the deployed filesystem. ``fcntl.flock`` is
+    documented unreliable on NFS without ``lockd``; the Zeus state
+    directory lives on local APFS so this is not an active risk, but
+    a subprocess-based test would be required to fully validate
+    cross-process serialization.
+    """
+
+    import threading
+
+    target = tmp_path / "evidence.json"
+    evidence_a = _evidence(operator_approval_id="op-A")
+    evidence_b = _evidence(operator_approval_id="op-B")
+
+    barrier = threading.Barrier(2)
+
+    def writer(payload):
+        def run():
+            barrier.wait(timeout=5.0)
+            write_promotion_evidence(payload, path=target)
+        return run
+
+    t1 = threading.Thread(target=writer(evidence_a))
+    t2 = threading.Thread(target=writer(evidence_b))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    assert not t1.is_alive() and not t2.is_alive()
+
+    parsed = read_promotion_evidence(path=target)
+    assert parsed is not None
+    assert parsed.operator_approval_id in {"op-A", "op-B"}

@@ -1,31 +1,37 @@
 # Created: 2026-05-03
 # Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md Phase B1 atomic JSON I/O for EntryForecastPromotionEvidence.
+# Authority basis: docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md Phase B1 atomic JSON I/O + Phase C-flock concurrent-writer protection for EntryForecastPromotionEvidence.
 """Atomic JSON read/write for ``EntryForecastPromotionEvidence``.
 
-DAEMON ACTIVATION: NOT YET WIRED. This module is importable but is not
-imported from any daemon hot-path file (``src/main.py``,
-``src/ingest_main.py``, ``src/engine/*``, ``src/execution/*``,
-``src/state/db.py`` runtime callers, ``scripts/healthcheck.py``
-``result["healthy"]`` predicate). Phase C will register a single import
-site behind an operator-controlled feature flag. See
-``docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md``.
+Phase C activation status: read-side wired into ``src/engine/evaluator.py``
+behind ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` env flag (default OFF).
+Write-side remains operator-script-only — no daemon writer in the
+default activation path.
 
 The promotion evidence carries the operator approval, G1 attestation,
 calibration promotion approval, and canary-success attestation that
 ``evaluate_entry_forecast_rollout_gate`` requires before authorizing
 canary or live entry-forecast orders. Storage on disk so an operator
 script can populate it atomically without taking the daemon down.
+
+Concurrent-writer protection: writes hold an exclusive ``fcntl.flock``
+on a sidecar lock file at ``<path>.lock`` for the duration of the
+write. Atomic JSON via tempfile + ``os.replace`` already prevents the
+reader from observing a partial file; the flock prevents two
+concurrent writers from racing and clobbering each other's payloads.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import functools
 import json
 import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
 from src.data.live_entry_status import LiveEntryForecastStatus
@@ -44,19 +50,42 @@ class PromotionEvidenceCorruption(ValueError):
     """
 
 
+@contextlib.contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive ``fcntl.flock`` on ``<path>.lock`` for write coordination.
+
+    Uses a sidecar ``.lock`` file rather than locking the target file
+    directly because the target is replaced (different inode) on each
+    write. Lock-file inode is stable across writes.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        os.replace(tmp_path, str(path))
-    except Exception:
+    with _exclusive_lock(path):
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _serialize_status(status: LiveEntryForecastStatus) -> dict[str, Any]:
@@ -114,21 +143,37 @@ def write_promotion_evidence(
     _atomic_write_json(target, payload)
 
 
-def read_promotion_evidence(
-    *,
-    path: Path | None = None,
+@functools.lru_cache(maxsize=4)
+def _parse_evidence_payload_cached(
+    path_str: str,
+    _mtime_ns: int,  # cache-key-only; not consumed in body
+    _size: int,  # cache-key-only; not consumed in body
 ) -> EntryForecastPromotionEvidence | None:
-    """Return parsed promotion evidence, or ``None`` if the file is absent.
+    """Strict-parse a promotion-evidence payload.
 
-    Strict parsing: any structural defect raises
-    :class:`PromotionEvidenceCorruption`. Callers must treat corruption
-    as ``EVIDENCE_MISSING`` for rollout-gate purposes — never silently
-    accept a malformed payload as valid evidence.
+    Phase C-perf-cache (critic ATTACK 3 follow-up): cache keyed by
+    ``(path, mtime_ns, size)`` so the daemon does not re-parse the
+    file 200×/cycle when both ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
+    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON. The cache
+    invalidates automatically when ``mtime_ns`` or ``size`` changes —
+    operator script writes new evidence, mtime ticks, next read
+    re-parses. ``functools.lru_cache`` does not cache exceptions, so
+    corruption re-runs the parse every call (acceptable: corrupt
+    files are rare and re-parsing produces consistent error messages
+    rather than caching a stale exception object).
+
+    **stat/read_text race note**: ``read_promotion_evidence`` calls
+    ``target.stat()`` and then this function reads ``target.read_text()``
+    via separate syscalls. If ``os.replace`` swaps the inode between
+    the two calls, the reader sees the NEW content but caches under
+    the OLD ``(mtime, size)`` key. The race is bounded because mtime
+    advances monotonically on overwrite — subsequent readers see the
+    new stat, miss the cache with a fresh key, and re-parse. The
+    "wrong-key" entry can never re-collide; it only consumes one of
+    the four LRU slots until evicted. No production failure mode.
     """
 
-    target = path or DEFAULT_PROMOTION_EVIDENCE_PATH
-    if not target.exists():
-        return None
+    target = Path(path_str)
     try:
         raw = json.loads(target.read_text())
     except json.JSONDecodeError as exc:
@@ -157,6 +202,41 @@ def read_promotion_evidence(
         calibration_promotion_approved=approved,
         canary_success_evidence_id=raw.get("canary_success_evidence_id"),
     )
+
+
+def read_promotion_evidence(
+    *,
+    path: Path | None = None,
+) -> EntryForecastPromotionEvidence | None:
+    """Return parsed promotion evidence, or ``None`` if the file is absent.
+
+    Strict parsing: any structural defect raises
+    :class:`PromotionEvidenceCorruption`. Callers must treat corruption
+    as ``EVIDENCE_MISSING`` for rollout-gate purposes — never silently
+    accept a malformed payload as valid evidence.
+
+    Phase C-perf-cache (critic ATTACK 3 follow-up): the parse is cached
+    by ``(path, mtime_ns, size)``. The cache invalidates automatically
+    on file change. Successful parses are cached up to LRU(maxsize=4);
+    corruption raises and is not cached (re-parses on every call).
+    """
+
+    target = path or DEFAULT_PROMOTION_EVIDENCE_PATH
+    try:
+        stat = target.stat()
+    except FileNotFoundError:
+        return None
+    return _parse_evidence_payload_cached(str(target), stat.st_mtime_ns, stat.st_size)
+
+
+def clear_evidence_read_cache() -> None:
+    """Drop the lru_cache backing :func:`read_promotion_evidence`.
+
+    Test fixtures use this between assertions so a cached parse from a
+    previous test does not leak into the next.
+    """
+
+    _parse_evidence_payload_cached.cache_clear()
 
 
 def evidence_to_dict(evidence: EntryForecastPromotionEvidence) -> dict[str, Any]:

@@ -182,10 +182,8 @@ class EntryForecastConfig:
     target_horizon_days: int
     warm_horizon_days: int
     source_cycle_policy: str
-    allow_short_horizon_06_18: bool
     rollout_mode: EntryForecastRolloutMode
     calibration_policy_id: EntryForecastCalibrationPolicyId
-    require_active_market_future_coverage: bool
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -205,18 +203,23 @@ class EntryForecastConfig:
             raise ValueError("entry_forecast.warm_horizon_days must cover target_horizon_days")
 
 
-def _entry_forecast_bool(data: dict, key: str) -> bool:
-    value = data[key]
-    if not isinstance(value, bool):
-        raise TypeError(f"settings['entry_forecast']['{key}'] must be a bool")
-    return value
-
-
 def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig:
     """Strict live-entry forecast source config.
 
     Missing or invalid config fails closed before forecast entry can size or
-    submit. ``rollout_mode='blocked'`` is the safe default in settings.json.
+    submit.
+
+    Phase C-5 removed two dead knobs: ``allow_short_horizon_06_18`` and
+    ``require_active_market_future_coverage``. They were loaded into
+    ``EntryForecastConfig`` but never read by production code, creating a
+    false sense of operator control. The actual safety property they
+    appeared to govern is enforced elsewhere:
+    ``allow_short_horizon_06_18`` was redundant with
+    ``config/source_release_calendar.yaml:live_authorization=false`` for
+    06/18 cycle profiles; ``require_active_market_future_coverage``
+    duplicated the producer-readiness gate. Removing the knobs eliminates
+    the risk of an operator flipping a dead knob and assuming a safety
+    behavior change occurred.
     """
 
     cfg = config or settings
@@ -230,13 +233,8 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
         target_horizon_days=int(data["target_horizon_days"]),
         warm_horizon_days=int(data["warm_horizon_days"]),
         source_cycle_policy=str(data["source_cycle_policy"]).strip(),
-        allow_short_horizon_06_18=_entry_forecast_bool(data, "allow_short_horizon_06_18"),
         rollout_mode=EntryForecastRolloutMode(data["rollout_mode"]),
         calibration_policy_id=EntryForecastCalibrationPolicyId(data["calibration_policy_id"]),
-        require_active_market_future_coverage=_entry_forecast_bool(
-            data,
-            "require_active_market_future_coverage",
-        ),
     )
 
 

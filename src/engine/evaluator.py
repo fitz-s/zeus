@@ -8,6 +8,7 @@ import json
 import logging
 import hashlib
 import math
+import os
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -42,7 +43,15 @@ from src.config import (
     get_mode,
     settings,
 )
+from src.control.entry_forecast_promotion_evidence_io import (
+    PromotionEvidenceCorruption,
+    read_promotion_evidence,
+)
+from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
+from src.data.calibration_transfer_policy import evaluate_calibration_transfer_policy
+from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
+from src.data.forecast_target_contract import ForecastTargetScope
 from src.contracts import (
     EntryMethod,
     Direction,
@@ -708,13 +717,67 @@ def _normalize_temperature_metric(value: str | None) -> MetricIdentity:
 
 
 def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None, str | None]:
+    """Load entry-forecast config; surface a typed blocker on parse failure.
+
+    Phase C tightening (per code-reviewer MED-3 / B8 deferred): catch only
+    the parse-failure exception classes. Letting unrelated exceptions
+    (KeyboardInterrupt, OOM, programmer errors raising
+    ``RuntimeError``/``AttributeError``) propagate is the correct
+    behavior — masking them as ``ENTRY_FORECAST_CONFIG_INVALID:...``
+    would pollute the operator's blocker stream and hide real bugs.
+    """
+
     try:
         return entry_forecast_config(), None
-    except Exception as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         return None, f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
 
 
+ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
+ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG = "ZEUS_ENTRY_FORECAST_READINESS_WRITER"
+
+
+def _entry_forecast_rollout_gate_flag_on() -> bool:
+    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG) == "1"
+
+
+def _entry_forecast_readiness_writer_flag_on() -> bool:
+    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG) == "1"
+
+
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
+    """Return a blocker reason or ``None`` for the live entry-forecast cutover.
+
+    Phase C-1 activation: when ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=1``,
+    defer to ``evaluate_entry_forecast_rollout_gate`` which checks
+    operator approval, G1 evidence, calibration promotion approval,
+    canary success evidence, and the bundled status snapshot. The
+    promotion-evidence file is read at every cycle from
+    ``state/entry_forecast_promotion_evidence.json``.
+
+    Default OFF preserves the legacy rollout-mode-only check so this
+    Phase-C wiring is byte-equal to pre-Phase-C behavior at flag
+    default; operator flips the flag to enforce the full gate.
+
+    ``PromotionEvidenceCorruption`` (raised when the on-disk file
+    fails strict parsing) is caught here and surfaced as the explicit
+    ``ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT`` blocker rather than
+    propagating up and crashing the cycle. This is the single
+    activation site the critic-opus review demanded; future call sites
+    must re-implement the same try/except discipline or factor out a
+    shared helper.
+    """
+
+    if _entry_forecast_rollout_gate_flag_on():
+        try:
+            evidence = read_promotion_evidence()
+        except PromotionEvidenceCorruption as exc:
+            return f"ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:{exc}"
+        decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
+        if decision.may_submit_live_orders:
+            return None
+        return decision.reason_codes[0] if decision.reason_codes else "ENTRY_FORECAST_ROLLOUT_GATE_BLOCKED"
+
     if cfg.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         return "ENTRY_FORECAST_ROLLOUT_BLOCKED"
     if cfg.rollout_mode is EntryForecastRolloutMode.SHADOW:
@@ -745,6 +808,87 @@ def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
             if value:
                 return value
     return ""
+
+
+def _write_entry_readiness_for_candidate(
+    conn,
+    *,
+    cfg: EntryForecastConfig,
+    city: City,
+    target_local_date: date,
+    temperature_metric: "MetricIdentity",
+    market_family: str,
+    condition_id: str,
+    decision_time: datetime,
+) -> None:
+    """Phase C-3 activation: when ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=1``,
+    write the per-candidate ``readiness_state`` row with
+    ``strategy_key='entry_forecast'`` so the live evaluator path's
+    subsequent ``read_executable_forecast`` call can find it.
+
+    The writer enforces all three gates (rollout / calibration /
+    promotion-evidence) at write time. Default OFF preserves the
+    fail-closed-by-construction state where no daemon path writes
+    entry_readiness rows and the reader recurrently blocks on
+    ``ENTRY_READINESS_MISSING``.
+
+    The ``ForecastTargetScope`` constructed here uses placeholder
+    temporal fields (``source_cycle_time``, ``target_window_*``,
+    ``required_step_hours``). The writer ignores those — it only
+    consumes ``city_id``/``city_timezone``/``target_local_date``/
+    ``temperature_metric``/``data_version``. Loading the proper
+    temporal fields would require a DB lookup the writer does not
+    need; using placeholders is correct here. If a future caller
+    needs full scope semantics, refactor the writer to accept the raw
+    fields it actually uses (city/target/metric/data_version) and
+    drop the scope dataclass coupling.
+    """
+
+    if conn is None:
+        return
+    try:
+        evidence = read_promotion_evidence()
+    except PromotionEvidenceCorruption:
+        evidence = None
+
+    rollout_decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
+    track = track_for_metric(cfg, temperature_metric.temperature_metric)
+    data_version = data_version_for_track(track)
+    calibration_decision = evaluate_calibration_transfer_policy(
+        config=cfg,
+        source_id=cfg.source_id,
+        forecast_data_version=data_version,
+        live_promotion_approved=bool(
+            evidence is not None and evidence.calibration_promotion_approved
+        ),
+    )
+
+    placeholder_scope = ForecastTargetScope(
+        city_id=_entry_forecast_city_id(city),
+        city_name=city.name,
+        city_timezone=city.timezone,
+        target_local_date=target_local_date,
+        temperature_metric=temperature_metric.temperature_metric,
+        source_cycle_time=decision_time,
+        data_version=data_version,
+        target_window_start_utc=decision_time,
+        target_window_end_utc=decision_time,
+        required_step_hours=(),
+        market_refs=(),
+    )
+
+    write_entry_readiness(
+        conn,
+        scope=placeholder_scope,
+        rollout_decision=rollout_decision,
+        calibration_decision=calibration_decision,
+        promotion_evidence=evidence,
+        config=cfg,
+        market_family=market_family,
+        condition_id=condition_id,
+        producer_readiness_id="entry-readiness-via-evaluator",
+        computed_at=decision_time,
+    )
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -1466,17 +1610,17 @@ def evaluate_candidate(
 
     primary_model = ensemble_primary_model()
 
-    if entry_forecast_cfg is not None:
-        if is_day0_mode:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
-                rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED"],
-                availability_status="DATA_UNAVAILABLE",
-                selected_method=selected_method,
-                applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
-            )]
+    # Phase C-6 (REMEDIATION_PLAN_2026-05-03.md): Day0 candidates use the
+    # observed-so-far signal pipeline (Day0Router + remaining_member_extrema_for_day0),
+    # not the executable-forecast cutover. Pre-Phase-C-6 the cutover path
+    # blanket-rejected Day0 candidates with ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED,
+    # which silently disabled all Day0 trading whenever entry_forecast_cfg
+    # was non-None. Fix: skip the cutover for Day0 mode and fall through
+    # to the legacy fetch_ensemble path so Day0 candidates run their
+    # existing signal pipeline as designed.
+    use_executable_forecast_cutover = entry_forecast_cfg is not None and not is_day0_mode
+
+    if use_executable_forecast_cutover:
         if conn is None or not hasattr(conn, "execute"):
             return [EdgeDecision(
                 False,
@@ -1489,6 +1633,21 @@ def evaluate_candidate(
             )]
         decision_instant = decision_time or datetime.now(timezone.utc)
         track = track_for_metric(entry_forecast_cfg, temperature_metric.temperature_metric)
+        market_family_for_read = _entry_forecast_market_family(candidate, temperature_metric)
+        condition_id_for_read = _entry_forecast_condition_id(support_outcomes)
+
+        if _entry_forecast_readiness_writer_flag_on():
+            _write_entry_readiness_for_candidate(
+                conn,
+                cfg=entry_forecast_cfg,
+                city=city,
+                target_local_date=target_d,
+                temperature_metric=temperature_metric,
+                market_family=market_family_for_read,
+                condition_id=condition_id_for_read,
+                decision_time=decision_instant,
+            )
+
         reader_result = read_executable_forecast(
             conn,
             city_id=_entry_forecast_city_id(city),
@@ -1501,8 +1660,8 @@ def evaluate_candidate(
             data_version=data_version_for_track(track),
             track=track,
             strategy_key="entry_forecast",
-            market_family=_entry_forecast_market_family(candidate, temperature_metric),
-            condition_id=_entry_forecast_condition_id(support_outcomes),
+            market_family=market_family_for_read,
+            condition_id=condition_id_for_read,
             decision_time=decision_instant,
         )
         if not reader_result.ok or reader_result.bundle is None:
