@@ -1610,17 +1610,17 @@ def evaluate_candidate(
 
     primary_model = ensemble_primary_model()
 
-    if entry_forecast_cfg is not None:
-        if is_day0_mode:
-            return [EdgeDecision(
-                False,
-                decision_id=_decision_id(),
-                rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED"],
-                availability_status="DATA_UNAVAILABLE",
-                selected_method=selected_method,
-                applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
-            )]
+    # Phase C-6 (REMEDIATION_PLAN_2026-05-03.md): Day0 candidates use the
+    # observed-so-far signal pipeline (Day0Router + remaining_member_extrema_for_day0),
+    # not the executable-forecast cutover. Pre-Phase-C-6 the cutover path
+    # blanket-rejected Day0 candidates with ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED,
+    # which silently disabled all Day0 trading whenever entry_forecast_cfg
+    # was non-None. Fix: skip the cutover for Day0 mode and fall through
+    # to the legacy fetch_ensemble path so Day0 candidates run their
+    # existing signal pipeline as designed.
+    use_executable_forecast_cutover = entry_forecast_cfg is not None and not is_day0_mode
+
+    if use_executable_forecast_cutover:
         if conn is None or not hasattr(conn, "execute"):
             return [EdgeDecision(
                 False,

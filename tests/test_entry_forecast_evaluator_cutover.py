@@ -372,6 +372,74 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     assert row["expires_at"] is not None
 
 
+def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
+    """Phase C-6: a Day0 candidate with ``entry_forecast_cfg`` set must
+    NOT be hard-rejected with ``ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED``.
+    It must fall through to the legacy ``fetch_ensemble`` path so the
+    existing Day0 signal pipeline can run.
+
+    Pre-Phase-C-6 the rejection silently killed Day0 trading whenever
+    PR47 entry_forecast_cfg was loaded (i.e., every live cycle). The
+    fix relies on the cutover-guard expression
+    ``entry_forecast_cfg is not None and not is_day0_mode``.
+    """
+
+    cfg_live = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: cfg_live)
+
+    fetch_calls = []
+
+    def stub_fetch(city, *, forecast_days, model, role):
+        fetch_calls.append((city.name, forecast_days, model, role))
+        # Raise SourceNotEnabled to short-circuit downstream processing
+        # without a full fixture; we only need to prove the legacy
+        # fetch was reached, not that it produced a usable result.
+        from src.contracts import SourceNotEnabled
+        raise SourceNotEnabled("test stub")
+
+    monkeypatch.setattr(evaluator_module, "fetch_ensemble", stub_fetch)
+
+    from src.data.observation_client import Day0ObservationContext
+
+    candidate = _candidate_with_outcomes()
+    candidate.discovery_mode = DiscoveryMode.DAY0_CAPTURE.value
+    # Day0 candidates carry a Day0ObservationContext whose ``source``
+    # must match the city's settlement_source_type policy (London is
+    # wu_icao → allowed=['wu_api']). Required fields for Day0 quality
+    # gates: high_so_far, low_so_far, current_temp, source,
+    # observation_time, unit. Without these, pre-cutover Day0 quality
+    # checks at evaluator.py:~1390 short-circuit before reaching the
+    # Phase-C-6 cutover-guard at evaluator.py:1618.
+    candidate.observation = Day0ObservationContext(
+        high_so_far=70.0,
+        low_so_far=50.0,
+        current_temp=60.0,
+        source="wu_api",
+        observation_time=datetime(2026, 5, 3, 11, tzinfo=UTC).isoformat(),
+        unit="C",
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=object(),
+        clob=object(),
+        limits=object(),
+        decision_time=datetime(2026, 5, 3, 12, tzinfo=UTC),
+    )
+
+    assert len(decisions) == 1
+    decision = decisions[0]
+    # The rejection must NOT be the Phase-C-6-removed code; control
+    # reached the legacy fetch (which our stub raised SourceNotEnabled
+    # from), so the rejection comes from there instead.
+    assert "ENTRY_FORECAST_DAY0_EXECUTABLE_PATH_NOT_WIRED" not in (decision.rejection_reasons or [])
+    assert fetch_calls, "legacy fetch_ensemble should have been called for Day0"
+    assert fetch_calls[0][0] == "London"
+    assert fetch_calls[0][3] == "entry_primary"
+
+
 def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monkeypatch) -> None:
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")

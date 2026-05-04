@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import json
 import os
 import tempfile
@@ -142,21 +143,27 @@ def write_promotion_evidence(
     _atomic_write_json(target, payload)
 
 
-def read_promotion_evidence(
-    *,
-    path: Path | None = None,
+@functools.lru_cache(maxsize=4)
+def _parse_evidence_payload_cached(
+    path_str: str,
+    _mtime_ns: int,  # cache-key-only; not consumed in body
+    _size: int,  # cache-key-only; not consumed in body
 ) -> EntryForecastPromotionEvidence | None:
-    """Return parsed promotion evidence, or ``None`` if the file is absent.
+    """Strict-parse a promotion-evidence payload.
 
-    Strict parsing: any structural defect raises
-    :class:`PromotionEvidenceCorruption`. Callers must treat corruption
-    as ``EVIDENCE_MISSING`` for rollout-gate purposes — never silently
-    accept a malformed payload as valid evidence.
+    Phase C-perf-cache (critic ATTACK 3 follow-up): cache keyed by
+    ``(path, mtime_ns, size)`` so the daemon does not re-parse the
+    file 200×/cycle when both ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
+    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON. The cache
+    invalidates automatically when ``mtime_ns`` or ``size`` changes —
+    operator script writes new evidence, mtime ticks, next read
+    re-parses. ``functools.lru_cache`` does not cache exceptions, so
+    corruption re-runs the parse every call (acceptable: corrupt
+    files are rare and re-parsing produces consistent error messages
+    rather than caching a stale exception object).
     """
 
-    target = path or DEFAULT_PROMOTION_EVIDENCE_PATH
-    if not target.exists():
-        return None
+    target = Path(path_str)
     try:
         raw = json.loads(target.read_text())
     except json.JSONDecodeError as exc:
@@ -185,6 +192,41 @@ def read_promotion_evidence(
         calibration_promotion_approved=approved,
         canary_success_evidence_id=raw.get("canary_success_evidence_id"),
     )
+
+
+def read_promotion_evidence(
+    *,
+    path: Path | None = None,
+) -> EntryForecastPromotionEvidence | None:
+    """Return parsed promotion evidence, or ``None`` if the file is absent.
+
+    Strict parsing: any structural defect raises
+    :class:`PromotionEvidenceCorruption`. Callers must treat corruption
+    as ``EVIDENCE_MISSING`` for rollout-gate purposes — never silently
+    accept a malformed payload as valid evidence.
+
+    Phase C-perf-cache (critic ATTACK 3 follow-up): the parse is cached
+    by ``(path, mtime_ns, size)``. The cache invalidates automatically
+    on file change. Successful parses are cached up to LRU(maxsize=4);
+    corruption raises and is not cached (re-parses on every call).
+    """
+
+    target = path or DEFAULT_PROMOTION_EVIDENCE_PATH
+    try:
+        stat = target.stat()
+    except FileNotFoundError:
+        return None
+    return _parse_evidence_payload_cached(str(target), stat.st_mtime_ns, stat.st_size)
+
+
+def clear_evidence_read_cache() -> None:
+    """Drop the lru_cache backing :func:`read_promotion_evidence`.
+
+    Test fixtures use this between assertions so a cached parse from a
+    previous test does not leak into the next.
+    """
+
+    _parse_evidence_payload_cached.cache_clear()
 
 
 def evidence_to_dict(evidence: EntryForecastPromotionEvidence) -> dict[str, Any]:
