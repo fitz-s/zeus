@@ -1405,11 +1405,17 @@ def _replay_one_settlement(
     target_date: str,
     settlement: dict,
     temperature_metric: Literal["high", "low"] = "high",
+    *,
+    sizing_bankroll: float,
 ) -> Optional[ReplayOutcome]:
     """Replay the evaluator pipeline for one city × target_date.
 
     Uses stored member_maxes from ensemble_snapshots to recompute p_raw,
     then runs through calibration, alpha fusion, edge detection, and sizing.
+
+    sizing_bankroll is required keyword-only — no config literal default,
+    in line with the 2026-05-04 bankroll truth-chain cleanup. Callers must
+    explicitly choose a sizing bankroll per replay run.
     """
     if False:
         _ = None.selected_method
@@ -1612,7 +1618,7 @@ def _replay_one_settlement(
                 p_posterior=edge.p_posterior,
                 entry_price=edge.entry_price,
                 fee_rate=_replay_fee_rate,
-                sizing_bankroll=settings.capital_base_usd,
+                sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=k_mult,
                 safety_cap_usd=None,
             )
@@ -2375,6 +2381,8 @@ def run_replay(
     overrides: Optional[dict] = None,
     allow_snapshot_only_reference: bool = False,
     temperature_metric: Literal["high", "low"] = "high",
+    *,
+    sizing_bankroll: Optional[float] = None,
 ) -> ReplaySummary:
     """Run the Decision Replay Engine.
 
@@ -2419,6 +2427,29 @@ def run_replay(
         )
     if mode == TRADE_HISTORY_LANE:
         return run_trade_history_audit(start_date, end_date)
+
+    # 2026-05-04 bankroll truth-chain cleanup: replay sizing modes need a
+    # bankroll. Doctrine — on-chain wallet is the only truth source. When the
+    # caller does not pass sizing_bankroll explicitly, fall through to
+    # bankroll_provider.current() (5-min stale-cache window). The prior
+    # behaviour pulled from settings.capital_base_usd ($150 fiction); that
+    # config literal has been removed.
+    if sizing_bankroll is None:
+        from src.runtime.bankroll_provider import current as _bankroll_current
+        _record = _bankroll_current()
+        if _record is None:
+            raise ValueError(
+                "run_replay: sizing_bankroll was not provided and "
+                "bankroll_provider has no usable on-chain value (wallet "
+                "unreachable + no recent cache). Pass an explicit "
+                "sizing_bankroll (scenario value or snapshot) or restore "
+                "wallet connectivity."
+            )
+        sizing_bankroll = float(_record.value_usd)
+    if float(sizing_bankroll) <= 0.0:
+        raise ValueError(
+            f"run_replay: sizing_bankroll must be positive (got {sizing_bankroll!r})"
+        )
 
     run_id = str(uuid.uuid4())[:12]
     conn = get_trade_connection_with_world()
@@ -2480,6 +2511,7 @@ def run_replay(
             target_date,
             settlement,
             temperature_metric=temperature_metric,
+            sizing_bankroll=sizing_bankroll,
         )
         if outcome is None:
             continue

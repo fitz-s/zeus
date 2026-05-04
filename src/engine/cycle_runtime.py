@@ -956,20 +956,23 @@ def _orange_favorable_exit_decision(pos, exit_context, exit_decision):
 
 
 def entry_bankroll_for_cycle(portfolio, clob, *, deps):
-    config_cap = float(deps.settings.capital_base_usd)
-
-    # P7: Live — wallet_balance is the PRIMARY bankroll source.
-    # config_cap acts as an upper-bound safety cap only.
+    # On-chain wallet balance is the SOLE bankroll truth source for live entry
+    # sizing. Removed 2026-05-04: the prior `min(balance, settings.capital_base_usd)`
+    # truncation hard-clipped the real wallet at the $150 fiction even when
+    # the venue returned a higher value, producing the structural failure
+    # documented in docs/operations/task_2026-05-01_bankroll_truth_chain/.
+    # Bankroll fallback semantics now live entirely in
+    # src.runtime.bankroll_provider (5-min stale-cache window); when the
+    # provider/clob returns no usable value the cycle blocks new entries.
     try:
         balance = float(clob.get_balance())
     except Exception as exc:
         deps.logger.warning("Wallet balance fetch failed: %s", exc)
         return None, {
-            "config_cap_usd": config_cap,
             "wallet_balance_usd": None,
             "dynamic_cap_usd": None,
             "entry_block_reason": "wallet_query_failed",
-            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "entry_bankroll_contract": "live_wallet_only",
             "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
@@ -977,21 +980,19 @@ def entry_bankroll_for_cycle(portfolio, clob, *, deps):
     if balance <= 0.0:
         deps.logger.warning("Wallet balance $%.2f — blocking new entries.", balance)
         return None, {
-            "config_cap_usd": config_cap,
             "wallet_balance_usd": balance,
             "dynamic_cap_usd": None,
             "entry_block_reason": "entry_bankroll_non_positive",
-            "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+            "entry_bankroll_contract": "live_wallet_only",
             "bankroll_truth_source": "wallet_balance",
             "wallet_balance_used": True,
         }
 
-    effective_bankroll = min(balance, config_cap)
-    return max(0.0, effective_bankroll), {
-        "config_cap_usd": config_cap,
+    effective_bankroll = balance
+    return effective_bankroll, {
         "wallet_balance_usd": balance,
         "dynamic_cap_usd": effective_bankroll,
-        "entry_bankroll_contract": "live_wallet_primary_capped_by_config",
+        "entry_bankroll_contract": "live_wallet_only",
         "bankroll_truth_source": "wallet_balance",
         "wallet_balance_used": True,
     }

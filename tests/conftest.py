@@ -27,12 +27,15 @@ def _bankroll_provider_test_isolation(monkeypatch):
 
     Default behaviour: every test gets a deterministic
     ``BankrollOfRecord(value_usd=150.0, source='polymarket_wallet',
-    authority='canonical')`` so legacy tests (which expected
-    ``initial_bankroll == capital_base_usd == 150``) continue to pass without
-    edits. Tests that need a different wallet value monkeypatch
-    ``src.runtime.bankroll_provider.current`` over this default. Live fetches
-    are explicitly forbidden — ``_fetch_balance`` raises if any path slips
-    through the default.
+    authority='canonical')`` as an arbitrary but stable fixture value.
+    Historical note: the 150.0 number predates the 2026-05-04 bankroll
+    truth-chain cleanup (when production stopped relying on the now-removed
+    ``settings.capital_base_usd = 150`` literal). The fixture keeps the same
+    number purely to avoid churn in legacy assertions; it carries no
+    production semantics. Tests that need a different wallet value
+    monkeypatch ``src.runtime.bankroll_provider.current`` over this default.
+    Live fetches are explicitly forbidden — ``_fetch_balance`` raises if any
+    path slips through the default.
     """
     from datetime import datetime, timezone
 

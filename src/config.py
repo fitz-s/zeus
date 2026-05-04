@@ -116,7 +116,8 @@ class Settings:
         path = path or (CONFIG_DIR / "settings.json")
         self._data = _load_json(path)
         required = [
-            "capital_base_usd",
+            # capital_base_usd removed 2026-05-04 — bankroll truth flows from
+            # src.runtime.bankroll_provider.current(); no config-literal default.
             "discovery",
             "ensemble",
             "entry_forecast",
@@ -142,9 +143,8 @@ class Settings:
     def mode(self) -> str:
         return get_mode()
 
-    @property
-    def capital_base_usd(self) -> float:
-        return float(self._data["capital_base_usd"])
+    # capital_base_usd property removed 2026-05-04 — see _bankroll_doctrine_2026_05_04
+    # in config/settings.json. Live bankroll: src.runtime.bankroll_provider.current().
 
     @property
     def bias_correction_enabled(self) -> bool:

@@ -87,6 +87,8 @@ class TestP1CrashRecoveryDBFirst:
 
         with (
             patch("src.state.portfolio.get_mode", return_value="test"),
+            # 2026-05-04: capital_base_usd removed; this MagicMock attr is now
+            # a harmless test stub — production code no longer reads it.
             patch("src.state.portfolio.settings", MagicMock(capital_base_usd="150")),
             patch("src.state.portfolio.POSITIONS_PATH", positions_path),
             patch("src.state.db.get_connection", return_value=sqlite3.connect(str(db_path))),

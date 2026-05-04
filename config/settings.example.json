@@ -1,8 +1,6 @@
 {
   "_SETUP": "Copy this file to settings.json and fill in the operator-specific values marked null.",
-  "capital_base_usd": null,
-  "live_safety_cap_usd": null,
-  "_live_safety_cap_usd_note": "Runtime safety rail. Kelly output is hard-clipped to this ceiling. Set by operator.",
+  "_bankroll_doctrine_2026_05_04": "Bankroll truth comes solely from on-chain wallet via src.runtime.bankroll_provider.current(). Removed in 2026-05-04 cleanup: capital_base_usd ($150 fiction) and live_safety_cap_usd ($5 per-trade rail).",
   "smoke_test_portfolio_cap_usd": null,
   "_smoke_test_portfolio_cap_usd_note": "Portfolio-wide filled+pending exposure cap for initial validation window. Set by operator; remove once first full lifecycle has been observed.",
   "discovery": {

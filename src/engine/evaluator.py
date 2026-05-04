@@ -2909,7 +2909,7 @@ def evaluate_candidate(
                 fee_rate=fee_rate,
                 sizing_bankroll=sizing_bankroll,
                 kelly_multiplier=km * risk_throttle,
-                safety_cap_usd=settings["live_safety_cap_usd"],
+                safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -3036,7 +3036,7 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            safety_cap_usd=settings["live_safety_cap_usd"],
+            safety_cap_usd=None,  # 2026-05-04: live_safety_cap_usd removed; no per-trade cap
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

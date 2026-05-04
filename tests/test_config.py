@@ -56,8 +56,12 @@ def test_settings_mode_key_is_legacy_optional(tmp_path):
 
 
 def test_settings_missing_key_raises():
+    # 2026-05-04: capital_base_usd was removed from required keys; pick any
+    # other required key to demonstrate that a config missing required keys
+    # still raises. Using "discovery" (still required) ensures the partial
+    # config below is genuinely missing other required sections.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump({"capital_base_usd": 100}, f)
+        json.dump({"discovery": {}}, f)
         f.flush()
         with pytest.raises(KeyError, match="Missing required config key"):
             Settings(path=Path(f.name))

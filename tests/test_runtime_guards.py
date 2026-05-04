@@ -6279,9 +6279,12 @@ def test_load_portfolio_prefers_position_current_when_projection_exists(tmp_path
     assert state.positions[0].state == "entered"
     assert state.positions[0].token_id == ""
     assert state.positions[0].no_token_id == ""
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
-    assert state.daily_baseline_total == pytest.approx(settings.capital_base_usd)
-    assert state.weekly_baseline_total == pytest.approx(settings.capital_base_usd)
+    # 2026-05-04 bankroll truth-chain cleanup: PortfolioState.bankroll defaults
+    # to 0.0 ("uninitialized — ask bankroll_provider"). load_portfolio() no
+    # longer seeds from settings.capital_base_usd ($150 fiction).
+    assert state.bankroll == pytest.approx(0.0)
+    assert state.daily_baseline_total == pytest.approx(0.0)
+    assert state.weekly_baseline_total == pytest.approx(0.0)
     assert state.recent_exits == []
 
 
@@ -6476,9 +6479,12 @@ def test_json_payload_loader_does_not_hydrate_ignored_tokens():
         current_mode="live",
     )
 
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
-    assert state.daily_baseline_total == pytest.approx(settings.capital_base_usd)
-    assert state.weekly_baseline_total == pytest.approx(settings.capital_base_usd)
+    # 2026-05-04 bankroll truth-chain cleanup: PortfolioState.bankroll defaults
+    # to 0.0 ("uninitialized — ask bankroll_provider"). load_portfolio() no
+    # longer seeds from settings.capital_base_usd ($150 fiction).
+    assert state.bankroll == pytest.approx(0.0)
+    assert state.daily_baseline_total == pytest.approx(0.0)
+    assert state.weekly_baseline_total == pytest.approx(0.0)
     assert state.recent_exits == []
     assert state.ignored_tokens == []
 
@@ -6516,7 +6522,7 @@ def test_load_portfolio_ignores_deprecated_json_when_projection_authoritative(tm
     state = load_portfolio(path)
 
     assert [pos.trade_id for pos in state.positions] == ["db-deprecated-json"]
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.bankroll == pytest.approx(0.0)  # 2026-05-04 bankroll truth-chain cleanup
 
 
 def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_path):
@@ -6548,7 +6554,7 @@ def test_load_portfolio_ignores_corrupt_json_when_projection_authoritative(tmp_p
     state = load_portfolio(path)
 
     assert [pos.trade_id for pos in state.positions] == ["db-corrupt-json"]
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.bankroll == pytest.approx(0.0)  # 2026-05-04 bankroll truth-chain cleanup
 
 
 def test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades(tmp_path, monkeypatch):
@@ -6564,7 +6570,7 @@ def test_load_portfolio_db_connection_failure_ignores_corrupt_json_and_degrades(
 
     assert state.positions == []
     assert state.portfolio_loader_degraded is True
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.bankroll == pytest.approx(0.0)  # 2026-05-04 bankroll truth-chain cleanup
 
 
 def test_load_portfolio_db_connection_failure_ignores_unreadable_json_bytes(tmp_path, monkeypatch):
@@ -6580,7 +6586,7 @@ def test_load_portfolio_db_connection_failure_ignores_unreadable_json_bytes(tmp_
 
     assert state.positions == []
     assert state.portfolio_loader_degraded is True
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.bankroll == pytest.approx(0.0)  # 2026-05-04 bankroll truth-chain cleanup
 
 
 def test_load_portfolio_db_connection_failure_rejects_deprecated_json(tmp_path, monkeypatch):
@@ -6713,7 +6719,7 @@ def test_load_portfolio_treats_empty_projection_as_canonical_empty(tmp_path, mon
     # Empty position_current is canonical healthy truth, not JSON fallback.
     assert state.positions == []
     assert state.portfolio_loader_degraded is False
-    assert state.bankroll == pytest.approx(settings.capital_base_usd)
+    assert state.bankroll == pytest.approx(0.0)  # 2026-05-04 bankroll truth-chain cleanup
 
 
 def test_load_portfolio_treats_empty_projection_as_canonical_despite_legacy_json(tmp_path, monkeypatch):

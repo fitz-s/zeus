@@ -137,7 +137,13 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             len(positions), len(metadata_positions)
         )
 
-    bankroll = float(getattr(metadata_state, "bankroll", settings.capital_base_usd) or settings.capital_base_usd)
+    # Bankroll truth comes from on-chain wallet via src.runtime.bankroll_provider.
+    # If metadata_state has no bankroll (or 0/falsy), do NOT fall back to a config
+    # literal — return 0.0 so downstream sizing fails-CLOSED and RiskGuard.tick()
+    # surfaces DATA_DEGRADED via the bankroll_provider.current() check upstream.
+    # Removed 2026-05-04: previously fell back to settings.capital_base_usd
+    # ($150 fiction); see docs/operations/task_2026-05-01_bankroll_truth_chain/.
+    bankroll = float(getattr(metadata_state, "bankroll", 0.0) or 0.0)
     portfolio = PortfolioState(
         positions=positions,
         bankroll=bankroll,
