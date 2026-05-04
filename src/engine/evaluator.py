@@ -1719,6 +1719,7 @@ def evaluate_candidate(
                 forecast_days=ens_forecast_days,
                 model=primary_model,
                 role="entry_primary",
+                temperature_metric=temperature_metric.temperature_metric,
             )
         except SourceNotEnabled as e:
             return [EdgeDecision(
@@ -2468,6 +2469,7 @@ def evaluate_candidate(
                 forecast_days=ens_forecast_days,
                 model=crosscheck_model,
                 role="diagnostic",
+                temperature_metric=temperature_metric.temperature_metric,
             )
         except Exception as e:
             return [EdgeDecision(

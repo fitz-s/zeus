@@ -160,6 +160,31 @@ def source_family_from_data_version(data_version: str) -> str | None:
     return None
 
 
+# Phase 2.6 hardening (2026-05-04, critic-opus BLOCKER 1): map runtime
+# source_id strings to source_family keys so live-fetch paths (where the
+# data_version isn't yet known at parse time) can populate a typed
+# data_version into ens_result. Without this, _parse_response returned
+# ens_result without data_version, causing evaluator's
+# UNKNOWN_FORECAST_SOURCE_FAMILY gate to silently skip every fetch.
+_SOURCE_ID_TO_SOURCE_FAMILY: dict[str, str] = {
+    "tigge": "tigge",
+    "tigge_mars": "tigge",
+    "ecmwf_open_data": "ecmwf_opendata",
+}
+
+
+def source_family_from_source_id(source_id: str) -> str | None:
+    """Map a runtime source_id (as written into ens_result['source_id']) to
+    the source_family key used by the data_version factories.
+
+    Returns None for unrecognized sources; callers treat None as
+    UNKNOWN_FORECAST_SOURCE_FAMILY rejection (see evaluator gate).
+    """
+    if not isinstance(source_id, str) or not source_id:
+        return None
+    return _SOURCE_ID_TO_SOURCE_FAMILY.get(source_id)
+
+
 # Canonical module-level constants. These are the two legal metric identities.
 # data_version strings match zeus_dual_track_architecture.md §2.2.
 HIGH_LOCALDAY_MAX = MetricIdentity(

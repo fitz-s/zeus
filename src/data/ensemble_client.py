@@ -32,7 +32,9 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
 CACHE_TTL_SECONDS = 15 * 60
 _CACHE_STORED_AT_KEY = "_cache_stored_at"
-_ENSEMBLE_CACHE: dict[tuple[str, float, float, str, str, int, ForecastSourceRole], dict] = {}
+_ENSEMBLE_CACHE: dict[
+    tuple[str, float, float, str, str, int, ForecastSourceRole, str | None], dict
+] = {}
 
 
 def _cache_key(
@@ -40,7 +42,8 @@ def _cache_key(
     model: str,
     past_days: int = 0,
     role: ForecastSourceRole = "entry_primary",
-) -> tuple[str, float, float, str, str, int, ForecastSourceRole]:
+    temperature_metric: str | None = None,
+) -> tuple[str, float, float, str, str, int, ForecastSourceRole, str | None]:
     return (
         city.name,
         float(city.lat),
@@ -49,6 +52,7 @@ def _cache_key(
         model,
         past_days,
         role,
+        temperature_metric,
     )
 
 
@@ -84,6 +88,8 @@ def fetch_ensemble(
     model: str = "ecmwf_ifs025",
     past_days: int = 0,
     role: ForecastSourceRole = "entry_primary",
+    *,
+    temperature_metric: str | None = None,
 ) -> Optional[dict]:  # Spec §2.1
     """Fetch ensemble forecast from Open-Meteo.
 
@@ -93,9 +99,19 @@ def fetch_ensemble(
         first_valid_time: datetime (UTC forecast-window start from payload)
         fetch_time: datetime (UTC)
         model: str
+        data_version: str | None — populated when temperature_metric is given
+            and the source resolves to a known source_family; sentinel
+            'unknown_forecast_source_family' when source is unrecognized.
+            None for diagnostic/crosscheck callers that pass no metric.
         n_members: int
 
     Returns None if all retries fail.
+
+    Phase 2.6 (2026-05-04, critic-opus BLOCKER 1): ``temperature_metric``
+    keyword-only param ('high'|'low') threads to ``_parse_response`` so
+    the returned ens_result carries a typed data_version. Without this,
+    the evaluator's UNKNOWN_FORECAST_SOURCE_FAMILY gate silently skipped
+    every live fetch (ens_result.get('data_version') was always None).
     """
     source_id = source_id_for_ensemble_model(model)
     source_spec = gate_source(source_id)
@@ -108,6 +124,7 @@ def fetch_ensemble(
             past_days=past_days,
             role=role,
             ingest_class=source_spec.ingest_class,
+            temperature_metric=temperature_metric,
         )
     temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
 
@@ -124,7 +141,7 @@ def fetch_ensemble(
 
     fetch_time = datetime.now(timezone.utc)
     last_error = None
-    cache_key = _cache_key(city, model, past_days, role)
+    cache_key = _cache_key(city, model, past_days, role, temperature_metric)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
         age_seconds = _cache_age_seconds(cached, fetch_time)
@@ -149,6 +166,7 @@ def fetch_ensemble(
                 authority_tier=source_spec.authority_tier,
                 degradation_level=source_spec.degradation_level,
                 forecast_source_role=role,
+                temperature_metric=temperature_metric,
             )
             parsed["forecast_days"] = int(forecast_days)
             parsed[_CACHE_STORED_AT_KEY] = fetch_time
@@ -180,6 +198,7 @@ def _fetch_registered_ingest_ensemble(
     past_days: int,
     role: ForecastSourceRole,
     ingest_class,
+    temperature_metric: str | None = None,
 ) -> Optional[dict]:
     """Fetch an operator-gated registered ingest source without Open-Meteo.
 
@@ -190,7 +209,7 @@ def _fetch_registered_ingest_ensemble(
     """
 
     fetch_time = datetime.now(timezone.utc)
-    cache_key = _cache_key(city, model, past_days, role)
+    cache_key = _cache_key(city, model, past_days, role, temperature_metric)
     cached = _ENSEMBLE_CACHE.get(cache_key)
     if cached is not None:
         age_seconds = _cache_age_seconds(cached, fetch_time)
@@ -204,7 +223,10 @@ def _fetch_registered_ingest_ensemble(
     except TypeError:
         ingest = ingest_class()
     bundle = ingest.fetch(fetch_time, lead_hours)
-    parsed = _parse_ingest_bundle(bundle, model=model, fetch_time=fetch_time, role=role)
+    parsed = _parse_ingest_bundle(
+        bundle, model=model, fetch_time=fetch_time, role=role,
+        temperature_metric=temperature_metric,
+    )
     parsed["forecast_days"] = int(forecast_days)
     parsed[_CACHE_STORED_AT_KEY] = fetch_time
     _ENSEMBLE_CACHE[cache_key] = parsed
@@ -217,6 +239,7 @@ def _parse_ingest_bundle(
     model: str,
     fetch_time: datetime,
     role: ForecastSourceRole,
+    temperature_metric: str | None = None,
 ) -> dict:
     raw = bundle.raw_payload
     if isinstance(raw, Mapping) and "hourly" in raw:
@@ -228,6 +251,7 @@ def _parse_ingest_bundle(
             authority_tier=bundle.authority_tier,
             degradation_level="OK",
             forecast_source_role=role,
+            temperature_metric=temperature_metric,
         )
         parsed["issue_time"] = bundle.run_init_utc
         parsed["raw_payload_hash"] = bundle.raw_payload_hash
@@ -260,6 +284,9 @@ def _parse_ingest_bundle(
         "captured_at": bundle.captured_at.isoformat(),
         "model": model,
         "source_id": bundle.source_id,
+        "data_version": _derive_data_version_from_source_and_metric(
+            bundle.source_id, temperature_metric
+        ),
         "raw_payload_hash": bundle.raw_payload_hash,
         "authority_tier": bundle.authority_tier,
         "degradation_level": "OK",
@@ -269,6 +296,28 @@ def _parse_ingest_bundle(
     if available_at is not None:
         result["available_at"] = available_at
     return result
+
+
+def _derive_data_version_from_source_and_metric(
+    source_id: str | None, temperature_metric: str | None
+) -> str | None:
+    """Same data_version derivation _parse_response uses, exposed for the
+    non-`hourly` registered-ingest branch.
+    """
+    if temperature_metric is None or not source_id:
+        return None
+    from src.types.metric_identity import (
+        MetricIdentity,
+        source_family_from_source_id,
+    )
+    family = source_family_from_source_id(source_id)
+    if family is None:
+        return "unknown_forecast_source_family"
+    try:
+        mi = MetricIdentity.for_metric_with_source_family(temperature_metric, family)
+        return mi.data_version
+    except ValueError:
+        return "unknown_forecast_source_family"
 
 
 def _extract_times(raw: object) -> Sequence[object]:
@@ -311,11 +360,22 @@ def _parse_response(
     authority_tier: str = "FORECAST",
     degradation_level: str = "OK",
     forecast_source_role: ForecastSourceRole = "entry_primary",
+    temperature_metric: str | None = None,
 ) -> dict:
     """Parse Open-Meteo ensemble response into structured dict.
 
     Open-Meteo returns ensemble members as separate keys:
     temperature_2m_member0, temperature_2m_member1, ..., temperature_2m_member50
+
+    Phase 2.6 hardening (2026-05-04, critic-opus BLOCKER 1): when
+    ``temperature_metric`` is provided AND the resolved source_id maps to a
+    known source_family, populate ``data_version`` so the evaluator's
+    UNKNOWN_FORECAST_SOURCE_FAMILY gate can route this snapshot to the
+    correct stratified Platt bucket. When source_family is unrecognized
+    we set a sentinel so the gate REJECTS (rather than silently
+    fallthrough through the legacy hardcoded TIGGE constant). When
+    temperature_metric is None (e.g., diagnostic/crosscheck callers),
+    data_version stays None and the gate falls through.
     """
     hourly = data["hourly"]
     times = hourly["time"]
@@ -344,6 +404,26 @@ def _parse_response(
 
     first_valid_time = _parse_timestamp_as_utc(times[0])
 
+    resolved_source_id = source_id or source_id_for_ensemble_model(model)
+
+    data_version: str | None = None
+    if temperature_metric is not None:
+        from src.types.metric_identity import (
+            MetricIdentity,
+            source_family_from_source_id,
+        )
+        family = source_family_from_source_id(resolved_source_id)
+        if family is None:
+            data_version = "unknown_forecast_source_family"
+        else:
+            try:
+                mi = MetricIdentity.for_metric_with_source_family(
+                    temperature_metric, family
+                )
+                data_version = mi.data_version
+            except ValueError:
+                data_version = "unknown_forecast_source_family"
+
     return {
         "members_hourly": members_hourly,
         "times": times,
@@ -352,7 +432,8 @@ def _parse_response(
         "fetch_time": fetch_time,
         "captured_at": fetch_time.isoformat(),
         "model": model,
-        "source_id": source_id or source_id_for_ensemble_model(model),
+        "source_id": resolved_source_id,
+        "data_version": data_version,
         "raw_payload_hash": stable_payload_hash(data),
         "authority_tier": authority_tier,
         "degradation_level": degradation_level,

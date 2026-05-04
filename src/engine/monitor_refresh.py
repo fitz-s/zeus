@@ -198,6 +198,7 @@ def _refresh_ens_member_counting(
         forecast_days=int(requested_lead_days) + 2,
         model=ensemble_primary_model(),
         role="monitor_fallback",
+        temperature_metric=temperature_metric.temperature_metric,
     )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
@@ -516,6 +517,7 @@ def _refresh_day0_observation(
         forecast_days=2,
         model=ensemble_primary_model(),
         role="monitor_fallback",
+        temperature_metric=temperature_metric.temperature_metric,
     )
     if ens_result is None or not validate_ensemble(ens_result):
         _set_monitor_probability_fresh(position, False)
