@@ -49,24 +49,27 @@ incoherence for divergent candidates (e.g.,
 ``discovery_mode=opening_hunt`` + ``market_phase=settlement_day`` —
 strategy_key dispatch routes to ``settlement_capture`` while EntryMethod
 stays on ENS_MEMBER_COUNTING). Closure: the EntryMethod selection logic
-is rewired through the StrategyProfile registry in PR #54 §3.A4 — see
-``docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md``.
+is rewired through the StrategyProfile registry in the oracle/Kelly
+rebuild — see ``docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md``
+§A4 (PR number assigned at open-time; task path is the stable anchor).
 This is a flag-OFF safe scaffold; flag MUST stay default OFF until the
-PR #54 cutover lands.
+rebuild §A4 cutover lands.
 
 KNOWN OBSERVABILITY-ONLY GAPS (critic R5 A5-M2 / A6-M3 / A7-M4):
 - ``_is_settlement_day_phase`` hardcodes ``uma_resolved=False`` — UMA
   on-chain resolved truth is not wired today. POST_TRADING and RESOLVED
-  collapse to the same dispatch behavior. PR #54 §3.A5 ships the UMA
-  ``SettlementResolved`` listener.
+  collapse to the same dispatch behavior. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
+  §A5 ships the UMA ``SettlementResolved`` listener.
 - F1 fallback (12:00 UTC of target_date) is the only endDate source
   for site 1 (monitor loop has no Gamma payload). With flag ON this
-  becomes silent live authority. PR #54 §3.A5 introduces
-  ``MarketPhaseEvidence.phase_source ∈ {verified_gamma, fallback_f1,
-  unknown, onchain_resolved}`` so callers can distinguish + degrade.
+  becomes silent live authority. ``task_2026-05-04_oracle_kelly_evidence_rebuild``
+  §A5 introduces ``MarketPhaseEvidence.phase_source ∈ {verified_gamma,
+  fallback_f1, unknown, onchain_resolved}`` so callers can distinguish
+  + degrade.
 - ``market_phase=None`` collapses MISSING + PARSE_FAILED + PRE_FLAG_FLIP
   into a single state. Finding A's "missing = OK" pattern for the
-  phase axis. PR #54 §3.A5 separates these.
+  phase axis. ``task_2026-05-04_oracle_kelly_evidence_rebuild`` §A5
+  separates these.
 
 Cycle-axis sites (cycle_runner.py:_classify_edge_source / freshness
 short-circuit) are NOT migrated by P3/P4 because they operate before
