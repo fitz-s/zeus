@@ -5,6 +5,31 @@
 #                    ROBUST_KELLY_NEEDED_NOW)
 """Robust lower-bound Kelly sizing (Phase 2.75).
 
+**STATUS (2026-05-04):** Phase 2.75-Phase-1 only.  Module exists, unit
+tests pass, but it is **NOT yet wired into the production sizing path**.
+The evaluator still calls legacy ``kelly_size`` at evaluator.py:493.
+Production wiring is deferred to Phase 2.75-Phase-2 because the real CI
+sources don't exist yet:
+
+  * ``platt_param_ci`` needs Platt parameter bootstrap (not implemented).
+  * ``decision_group_ci`` needs DG residual bootstrap (not implemented).
+  * ``transfer_ci`` needs validated_transfers OOS metrics rolling window
+    (the table exists but the bootstrap reduction does not).
+  * ``oracle_posterior_upper`` needs Beta-binomial posterior wired into
+    the Day-0 oracle (per may4math.md F3, not yet on the runtime path).
+
+Wiring with **placeholder zero-width or fabricated ±5% CIs** would
+produce a false sense of robustness without the math actually shrinking
+size — see option 3 (defer + document) chosen 2026-05-04.
+
+**Unlock-blocker:** the precedence=200 NULL-expiry control_overrides
+row that holds live trading off stays in place until Phase 2.75-Phase-2
+lands real CI sources and flips the evaluator call site.
+
+See ``docs/operations/task_2026-05-04_tigge_ingest_resilience/DEFERRAL_PHASE2_75_ROBUST_KELLY_WIRING.md``.
+
+---
+
 The legacy ``kelly_size`` in ``kelly.py`` applies the **point posterior**
 to size. When ``p_posterior`` is biased (residual cycle drift, transfer
 noise, oracle posterior wobble, slippage), Kelly **amplifies** the bias.
