@@ -738,11 +738,21 @@ ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG = "ZEUS_ENTRY_FORECAST_READINESS_WRITE
 
 
 def _entry_forecast_rollout_gate_flag_on() -> bool:
-    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG) == "1"
+    """Default ON since 2026-05-04 (operator authorization). Kill-switch
+    semantics: set the env var to ``"0"`` (or any non-empty string ≠ ``"1"``)
+    to disable the gate at the rollout-blocker site without redeploy.
+    Empty string and unset both keep the default-ON behavior.
+    """
+
+    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG, "1") != "0"
 
 
 def _entry_forecast_readiness_writer_flag_on() -> bool:
-    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG) == "1"
+    """Default ON since 2026-05-04 (operator authorization). Kill-switch
+    semantics match ``_entry_forecast_rollout_gate_flag_on``.
+    """
+
+    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "1") != "0"
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:

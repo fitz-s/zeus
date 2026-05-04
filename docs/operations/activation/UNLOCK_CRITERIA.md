@@ -5,8 +5,14 @@
 **Scope**: the three activation flags wired in PR #47 Phase C —
 `ZEUS_ENTRY_FORECAST_READINESS_WRITER`,
 `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`,
-`ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS`. All default OFF on
-`main` (HEAD `cd882ee9` at time of writing).
+`ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS`.
+
+**Default state (post-2026-05-04 operator authorization)**:
+- `_READINESS_WRITER` and `_ROLLOUT_GATE` default **ON** at the
+  predicate level. Operator emergency kill-switch: set the env var
+  to literal `"0"` to disable that flag without redeploy.
+- `_HEALTHCHECK_BLOCKERS` remains default **OFF** until 24h of
+  flags 1+2 stable observation per §Flag 3 below.
 
 **Created**: 2026-05-04. **Last reused/audited**: 2026-05-04.
 

@@ -18,6 +18,32 @@ failed.
 
 ---
 
+## CRITICAL: SQLite 单写者锁导致 live daemon 崩溃 (2026-05-04)
+
+**Status:** OPEN — 今天已发生：live daemon 3次崩溃，实际交易窗口丢失。
+**First observed:** 2026-05-04
+**Root cause:** SQLite 单写者模型。WAL 模式允许并发读，但同一时刻只有一个写者可以持有写锁。`rebuild_calibration_pairs_v2.py` 跑了 30+ 分钟写事务，任何需要写锁的操作（包括 `init_schema()`）都会等待或超时崩溃。
+
+**Severity by scenario:**
+
+| 场景 | 风险 |
+|------|------|
+| 重建脚本在 live trading 时段运行 | **CRITICAL** — live daemon 无法重启 |
+| 重建脚本在盘前运行但超时 | **HIGH** — 开盘时仍锁定 |
+| 正常数据采集（非重建） | LOW — 短事务，WAL 通常够用 |
+
+**Immediate mitigation:** 不要在 live 时段（或盘前 2h 内）运行 `rebuild_calibration_pairs_v2.py`。操作员手动调度。
+
+**Structural fixes (options):**
+1. **写锁 timeout + 快速失败**：rebuild 脚本持有锁超过 N 秒时主动放锁，live daemon 设置短 `timeout` 而不是无限等待——最小成本，治标。
+2. **DB 物理隔离**：calibration DB（重建写入）与 live trading DB（zeus.db）分开——从根本上消除锁竞争，是 `project_zeus_isolation_design.md` 已记录的结构决策方向。
+3. **事务分片**：rebuild 脚本改为分批 commit（每 N 城市一个事务），降低单次持锁时长——降低概率，但不消除竞争。
+
+**Proposed antibody:** DB 物理隔离（option 2）是唯一能使"rebuild 时 live daemon 崩溃"这一错误类别不可能发生的结构决策。Options 1/3 是降险措施。
+**Blocks:** live daemon 稳定性；任何需要在 live 时段运行 rebuild 的操作。
+
+---
+
 ## CRITICAL: Full-flow live audit (2026-04-28)
 
 **Status:** OPEN; read-only audit record.
@@ -743,45 +769,16 @@ freshness function.
 coverage-insufficient Day0 observations reject entry before p_raw/calibration;
 monitor artifacts explicitly show stale-observation read-only degradation.
 
-### [OPEN P1] Day0 capture mode has contradictory resolution-hour filters
+### [CLOSED — 2026-05-04] Day0 capture mode has contradictory resolution-hour filters
 
-**Location:** `src/engine/cycle_runner.py::MODE_PARAMS`,
-`src/engine/cycle_runtime.py::execute_discovery_phase`,
-`src/data/market_scanner.py::find_weather_markets` / `_parse_event`,
-`architecture/runtime_modes.yaml`.
-**Problem:** Project law defines `day0_capture` as markets less than 6 hours to
-settlement. Runtime implements that second-stage filter with
-`max_hours_to_resolution=6`, but the call into `find_weather_markets()` does not
-override the scanner default `min_hours_to_resolution=6`. `_parse_event()` first
-drops markets whose `hours_to_resolution < 6`; then runtime keeps only markets
-whose `hours_to_resolution < 6`. The practical intersection is empty.
-**Read-only reproduction:** A synthetic New York temperature event 5 hours from
-resolution returned `scanner_default_returns=False` while
-`scanner_no_min_returns=True`; a 7-hour event survived the scanner default but
-`runtime_day0_keeps_after_default=False`. `MODE_PARAMS[DAY0_CAPTURE]` contains
-only `{'max_hours_to_resolution': 6}`, so runtime relies on the scanner default
-for the missing min filter.
-**Impact:** The strategy family that is supposed to exploit same-day observation
-speed can discover zero entry candidates before the evaluator sees observation,
-calibration, or edge logic. This means fixing Day0 signal math, station routing,
-and observation freshness would still not prove live Day0 capture works unless
-the discovery-mode filter contract is repaired.
-**False-positive boundary:** This affects the `day0_capture` entry discovery
-lane. It does not block monitoring of already-held positions, and it does not
-block non-Day0 opening/update modes.
-**Proposed remediation:**
-1. Make mode params explicit: `day0_capture` should pass
-   `min_hours_to_resolution=0` or the scanner should accept separate min/max
-   bounds instead of a global lower-bound default.
-2. Move mode-specific time-window filtering into one owner so scanner and
-   runtime cannot enforce contradictory halves of the same contract.
-3. Add a regression with 5h, 6h boundary, and 7h synthetic events proving
-   `day0_capture` keeps the intended <6h set and other modes keep their intended
-   windows.
-4. Record the applied discovery window in opportunity/no-trade facts.
-**Acceptance evidence:** A `day0_capture` dry-run with a fresh <6h market reaches
-`MarketCandidate(... discovery_mode='day0_capture')`; a >6h market is rejected
-with a structured discovery-window reason, not silently removed by two filters.
+**Closed:** 2026-05-04. Gap was valid when filed (original audit showed `MODE_PARAMS[DAY0_CAPTURE]` had no `min_hours_to_resolution`). Subsequent session added compensating logic in `cycle_runtime.py::execute_discovery_phase` (lines 1997-2001):
+```python
+min_hours_to_resolution = params.get("min_hours_to_resolution")
+if min_hours_to_resolution is None:
+    min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+```
+DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is passed to scanner → <6h markets are not dropped at scanner boundary. The fix is present in current main. Moving to archive.
 
 ### [OPEN P1] Final SDK submission envelope is not persisted after CLOB submit
 

@@ -346,7 +346,7 @@ RESOLVED_TOKEN_SUPPRESSION_REASONS = (
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = db_path or ZEUS_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=120)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

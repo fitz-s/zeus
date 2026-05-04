@@ -149,23 +149,24 @@ def _read_back_row(conn: sqlite3.Connection):
 # -------------------------------------------------------------------- #
 
 
-def test_inv_a_flag3_alone_does_not_change_evaluator_behavior(monkeypatch, tmp_path):
-    """Flag 3 (HEALTHCHECK_BLOCKERS) is a dashboard-surfacing flag; it
-    must not affect ``_live_entry_forecast_rollout_blocker`` or the
-    writer-flag predicate when flags 1+2 are OFF. Out-of-order flip
-    3-only ⇒ identical legacy rollout-mode-only behavior at every
-    evaluator call site that the daemon hot-path runs.
+def test_inv_a_kill_switch_zero_disables_flags(monkeypatch, tmp_path):
+    """Post-2026-05-04 default-ON activation: the kill-switch is
+    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=0`` /
+    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=0``. Setting either to ``"0"``
+    must restore the legacy rollout-mode-only check for that flag's
+    call site, without touching the other flag.
 
-    Architectural pin: the writer-flag check is at the call site
-    (``evaluator.py:1639``), not inside ``_write_entry_readiness_for_candidate``
-    itself. Direct invocation of the helper ALWAYS writes — the gate is
-    the predicate. We assert the predicate; daemon code paths must
-    consult it before calling the helper.
+    This is the operator's emergency-disable contract — if the gate or
+    writer misbehaves in production, set the env to ``"0"`` and the
+    daemon falls back to the pre-Phase-C behavior on next cycle.
     """
 
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", raising=False)
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "0")
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS", "1")
+
+    assert evaluator_module._entry_forecast_rollout_gate_flag_on() is False
+    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is False
 
     blocked_cfg = replace(_live_cfg(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
     assert (
@@ -175,10 +176,32 @@ def test_inv_a_flag3_alone_does_not_change_evaluator_behavior(monkeypatch, tmp_p
     live_cfg = _live_cfg()
     assert evaluator_module._live_entry_forecast_rollout_blocker(live_cfg) is None
 
-    # Writer-flag predicate must return False; daemon call site at
-    # evaluator.py:1639 honors it before invoking the helper.
-    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is False
-    assert evaluator_module._entry_forecast_rollout_gate_flag_on() is False
+
+def test_inv_a_default_on_unset_env_treats_flags_as_active(monkeypatch, tmp_path):
+    """Post-2026-05-04: with both env vars unset (operator never set
+    them), the flag predicates default to ON. This pins the new
+    default-on contract.
+    """
+
+    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", raising=False)
+    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
+
+    assert evaluator_module._entry_forecast_rollout_gate_flag_on() is True
+    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is True
+
+
+def test_inv_a_empty_string_env_treats_flag_as_active(monkeypatch, tmp_path):
+    """Empty-string env var ⇒ default behavior (ON) because the
+    kill-switch only fires on the literal string ``"0"``. This guards
+    against the failure mode where some shell config sets the var to
+    ``""`` accidentally and silently disables the gate.
+    """
+
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "")
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "")
+
+    assert evaluator_module._entry_forecast_rollout_gate_flag_on() is True
+    assert evaluator_module._entry_forecast_readiness_writer_flag_on() is True
 
 
 def test_inv_a_flag2_alone_writes_blocked_when_evidence_missing(monkeypatch, tmp_path):
@@ -189,7 +212,7 @@ def test_inv_a_flag2_alone_writes_blocked_when_evidence_missing(monkeypatch, tmp
     typed blocker → fail-closed.
     """
 
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", raising=False)
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "1")
     monkeypatch.delenv("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS", raising=False)
 
@@ -202,13 +225,13 @@ def test_inv_a_flag2_alone_writes_blocked_when_evidence_missing(monkeypatch, tmp
 
 
 def test_inv_a_flag1_alone_blocks_when_evidence_missing(monkeypatch, tmp_path):
-    """Flag 1 (ROLLOUT_GATE) ON without flag 2 ⇒ rollout blocker
+    """Flag 1 (ROLLOUT_GATE) ON, flag 2 killed ⇒ rollout blocker
     surfaces EVIDENCE_MISSING. Even though no row is ever written,
     the upstream gate refuses live submission.
     """
 
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "1")
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "0")
     monkeypatch.setattr(
         evidence_io,
         "DEFAULT_PROMOTION_EVIDENCE_PATH",

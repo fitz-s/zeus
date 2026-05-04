@@ -101,13 +101,15 @@ def test_live_mode_blocked_entry_forecast_stops_before_legacy_entry_primary_fetc
     assert "legacy_entry_primary_fetch_blocked" in decision.applied_validations
 
 
-def test_phase_c1_flag_off_preserves_legacy_rollout_blocker(monkeypatch) -> None:
-    """Phase C-1: with ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` unset (default
-    OFF), ``_live_entry_forecast_rollout_blocker`` continues to use the
-    rollout-mode-only check so daemon behavior is byte-equal to pre-Phase-C.
+def test_phase_c1_kill_switch_zero_preserves_legacy_rollout_blocker(monkeypatch) -> None:
+    """Phase C-1 post-2026-05-04 default-ON activation: setting
+    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE=0`` is the operator's emergency
+    kill-switch — it restores the legacy rollout-mode-only check
+    (byte-equal to pre-Phase-C behavior). Used during incident
+    recovery only.
     """
 
-    monkeypatch.delenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", raising=False)
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
     blocked_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.BLOCKED)
     live_cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 
@@ -232,20 +234,22 @@ def test_phase_c1_flag_on_blocks_when_evidence_lacks_canary_success(monkeypatch,
     )
 
 
-def test_phase_c3_writer_flag_off_does_not_write_entry_readiness(monkeypatch, tmp_path) -> None:
-    """Phase C-3: with ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` unset
-    (default OFF), the per-candidate helper does not run and no
-    ``readiness_state`` row with ``strategy_key='entry_forecast'`` lands.
-    Daemon behavior at flag-default is byte-equal to pre-Phase-C-3.
+def test_phase_c3_kill_switch_zero_disables_writer(monkeypatch, tmp_path) -> None:
+    """Phase C-3 post-2026-05-04 default-ON activation: setting
+    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=0`` is the operator's
+    emergency kill-switch — predicate returns False so the call site
+    at ``evaluator.py:1639`` skips the writer invocation and no
+    ``readiness_state`` row with ``strategy_key='entry_forecast'``
+    lands. Used during incident recovery only.
     """
 
-    import sqlite3
-    from src.engine.evaluator import _write_entry_readiness_for_candidate, _entry_forecast_readiness_writer_flag_on
-    from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.engine.evaluator import _entry_forecast_readiness_writer_flag_on
+
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "0")
+    assert _entry_forecast_readiness_writer_flag_on() is False
 
     monkeypatch.delenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", raising=False)
-    assert _entry_forecast_readiness_writer_flag_on() is False
+    assert _entry_forecast_readiness_writer_flag_on() is True  # default-ON
 
 
 def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkeypatch, tmp_path) -> None:
@@ -382,7 +386,15 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
     PR47 entry_forecast_cfg was loaded (i.e., every live cycle). The
     fix relies on the cutover-guard expression
     ``entry_forecast_cfg is not None and not is_day0_mode``.
+
+    Post-2026-05-04 default-ON activation: the rollout gate fires
+    BEFORE the Day0 cutover guard at evaluator.py:1467, so reaching
+    the Day0 fall-through requires either populated promotion
+    evidence or the gate kill-switch. This test uses the kill-switch
+    to isolate the §Phase-C-6 behavior under test.
     """
+
+    monkeypatch.setenv("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE", "0")
 
     cfg_live = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
@@ -441,6 +453,16 @@ def test_phase_c6_day0_mode_falls_through_to_legacy_fetch(monkeypatch) -> None:
 
 
 def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monkeypatch) -> None:
+    """Post-2026-05-04 default-ON gate: rollout-blocker fires BEFORE
+    the executable-reader path. With no on-disk evidence, the gate
+    short-circuits with EVIDENCE_MISSING; legacy fetch is never
+    consulted (which is the property this test originally asserted).
+
+    Kill-switch=0 here would expose the legacy path's
+    ``ENTRY_FORECAST_READER_DB_UNAVAILABLE``; we keep the gate
+    default-ON to pin the new dominant path.
+    """
+
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "live")
     monkeypatch.setattr(evaluator_module, "entry_forecast_config", lambda: cfg)
@@ -462,8 +484,8 @@ def test_live_mode_live_rollout_uses_executable_reader_before_legacy_fetch(monke
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision.should_trade is False
-    assert decision.rejection_reasons == ["ENTRY_FORECAST_READER_DB_UNAVAILABLE"]
+    assert decision.rejection_reasons == ["ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"]
     assert decision.applied_validations == [
-        "entry_forecast_reader",
+        "entry_forecast_rollout",
         "legacy_entry_primary_fetch_blocked",
     ]

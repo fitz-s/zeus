@@ -659,3 +659,20 @@ formula units, and evaluator no longer rejects otherwise-valid candidates at
 
 
 
+
+---
+
+## [CLOSED — 2026-05-04] Day0 capture mode contradictory resolution-hour filters
+
+**Original finding:** `MODE_PARAMS[DAY0_CAPTURE] = {"max_hours_to_resolution": 6}` had no `min_hours_to_resolution`. Scanner default `min_hours_to_resolution=6.0` dropped all markets with `hours_to_resolution < 6`; runtime second-stage kept only `hours_to_resolution < 6`. Practical intersection: empty — DAY0_CAPTURE could never discover any candidates.
+
+**Antibody (landed in `cycle_runtime.py::execute_discovery_phase`):**
+```python
+min_hours_to_resolution = params.get("min_hours_to_resolution")
+if min_hours_to_resolution is None:
+    min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+```
+Presence of `max_hours_to_resolution` in params → scanner receives `min_hours_to_resolution=0` → <6h markets survive scanner filter.
+
+**Verified:** 2026-05-04 by reading `cycle_runtime.py:1997-2001` on main (`cd882ee9`+). Gap was stale; no code change needed.
