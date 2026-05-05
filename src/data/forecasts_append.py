@@ -262,7 +262,7 @@ def _rows_from_payload(
             captured_at=retrieved_at,
             authority_tier=source_spec.authority_tier,
             rebuild_run_id=rebuild_run_id,
-            data_source_version=data_source_version,
+            data_source_version=data_source_version or f"{source_spec.source_id}_v1",
             availability_provenance=provenance.value,
         ))
         covered_days[(source, target_date)] = covered_days.get((source, target_date), 0) + 1
