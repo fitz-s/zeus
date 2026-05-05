@@ -1,0 +1,95 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T1G",
+  "task_id": "zeus-may3-remediation",
+  "title": "Final SDK envelope persistence path audit (verification-first)",
+  "intent": "Audit every live venue submit path in src/execution/executor.py to confirm the SDK-returned final envelope/order payload is persisted via _persist_final_submission_envelope_payload (executor.py:432) at every contact site (entry submit, exit submit, rejected submit, FOK/FAK filled response, open-order ACK, SUBMIT_UNKNOWN_SIDE_EFFECT). Implement persistence ONLY at sites the audit proves are missing it; do not opportunistically refactor confirmed-OK sites.",
+
+  "files_touched": [
+    "architecture/test_topology.yaml",
+    "tests/test_final_sdk_envelope_persistence.py"
+  ],
+  "loc_delta_estimate": 250,
+  "introduces_abstraction": false,
+  "cross_module_edges": 0,
+  "domain": "execution/venue-provenance-audit",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_final_sdk_envelope_persistence.py",
+    "python -m pytest -q tests/test_executor_command_split.py",
+    "python -m pytest -q tests/test_v2_adapter.py"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T1G-AUDIT-ARTIFACT-WRITTEN",
+      "text": "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/audit/sdk_envelope_path_audit.md exists, enumerates every live SDK contact site in src/execution/executor.py (and src/venue/polymarket_v2_adapter.py), classifies each as VERIFIED_PERSISTS / NEEDS_FIX / NOT_LIVE_PATH, and cites file:line for each verdict. The audit covers at minimum: entry submit (executor.py:1609), exit submit (executor.py:2291), SUBMIT_REJECTED (executor.py:1495,1662,1694,2099,2138,2169,2342,2373), SUBMIT_UNKNOWN_SIDE_EFFECT (executor.py:1568,2251), and the venue-adapter post_order paths (polymarket_v2_adapter.py:345-369)."
+    },
+    {
+      "id": "T1G-RELATIONSHIP-TEST-EVERY-PATH",
+      "text": "tests/test_final_sdk_envelope_persistence.py contains test_every_live_submit_persists_final_sdk_envelope, test_rejected_submit_persists_reject_payload, and test_exit_submit_persists_final_envelope. Each test exercises the relevant code path with a fake SDK and asserts that venue_command_repo.insert_submission_envelope (or the equivalent post-T1G persistence helper) was called with the SDK-returned payload, NOT just the pre-submit envelope. The tests fail before T1G when run against any path the audit classifies as NEEDS_FIX."
+    },
+    {
+      "id": "T1G-ONLY-MISSING-PATHS-PATCHED",
+      "text": "If the audit finds the existing _persist_final_submission_envelope_payload helper at executor.py:432 is correctly called at all live contact sites, T1G's source-edit scope is empty and T1G closes with audit + tests only. If the audit finds gaps, the executor adds source-edit work to files_touched in a phase-amendment commit before patching; the phase MUST NOT silently widen scope."
+    },
+    {
+      "id": "T1G-NO-NEW-SDK-CALL-PATH",
+      "text": "T1G does NOT introduce new SDK call surfaces. It only audits and adds persistence at existing call sites. polymarket_v2_adapter.py:312 submit() is owned by T1F; T1G must not duplicate or regress T1F's live-bound assertion."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T1",
+    "NO-RISKGUARD-DURING-T1",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK",
+    "T1F-PLACEHOLDER-ENVELOPE-FAKE-SDK-COUNT-ZERO",
+    "T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES",
+    "T1C-LIVE-PRAW-NOT-TRAINING-DATA",
+    "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH"
+  ],
+
+  "expected_artifact": "audit/sdk_envelope_path_audit.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-04",
+    "round2_grep_verification": {
+      "persistence_helper_already_exists": "src/execution/executor.py:432 def _persist_final_submission_envelope_payload(...)",
+      "currently_called_at": [
+        "src/execution/executor.py:1609 (entry submit, in execute_entry_order region)",
+        "src/execution/executor.py:2291 (exit submit, in _live_order region)"
+      ],
+      "submit_rejected_event_appends_without_envelope_persistence": [
+        "src/execution/executor.py:1495 SUBMIT_REJECTED in execute_exit_order (post-client-init reject)",
+        "src/execution/executor.py:1662 SUBMIT_REJECTED in execute_exit_order (success_false branch)",
+        "src/execution/executor.py:1694 SUBMIT_REJECTED in execute_exit_order (missing_order_id branch)",
+        "src/execution/executor.py:2099 SUBMIT_REJECTED in _live_order (post-client-init reject)",
+        "src/execution/executor.py:2138 SUBMIT_REJECTED in _live_order (post-v2-preflight reject)",
+        "src/execution/executor.py:2169 SUBMIT_REJECTED in _live_order (generic reject)",
+        "src/execution/executor.py:2342 SUBMIT_REJECTED in _live_order (success_false)",
+        "src/execution/executor.py:2373 SUBMIT_REJECTED in _live_order (missing_order_id)"
+      ],
+      "submit_unknown_side_effect": [
+        "src/execution/executor.py:1568 in execute_exit_order",
+        "src/execution/executor.py:2251 in _live_order"
+      ],
+      "audit_target_per_master_plan": "MASTER_PLAN_v2 §10 row T1G enumerates: entry submit, exit submit, compatibility submit, rejected submit, FOK/FAK filled response, open-order ACK. Compatibility submit is owned by T1F; T1G inherits T1F's live-bound assertion as the gate that prevents it from reaching SDK. FOK/FAK is not a separate code path — it is selected via envelope.order_type ('FOK'/'FAK') consumed by polymarket_v2_adapter.py:347 client.create_and_post_order; T1G audits that FOK/FAK responses also flow through _persist_final_submission_envelope_payload, with explicit test fixture coverage."
+    },
+    "loc_estimate_basis": "T1G is verification-first. Audit document: ~80 lines. New test file: ~250 lines (one test per audited site + fakes for SDK responses). Source patches if needed: estimated 0-100 lines depending on audit verdicts. Total 250 LOC base + up to 100 LOC contingent on audit. The phase.files_touched lists ONLY the audit + test file; if audit finds NEEDS_FIX gaps, executor opens a phase amendment to add src/execution/executor.py and/or src/state/venue_command_repo.py.",
+    "expected_artifact_override": "Per ORCHESTRATOR_RUNBOOK §5 and ORCHESTRATOR_RUNBOOK §10, expected_artifact is 'execution/execution_result.md' by default. T1G overrides this to 'audit/sdk_envelope_path_audit.md' because the phase is verification-first (per MASTER_PLAN_v2 §10 row T1G 'Verification-first: trace entry submit, exit submit ...'). The execution_result.md is still produced if any source edits land, but the audit document is the primary phase deliverable.",
+    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/execution/executor.py + src/state/venue_command_repo.py for write-intent edit if the audit finds gaps. Resolution per LOCK_DECISION Amendment 4. Audit-only mode (read + new test + new audit doc) MAY be admissible under a different profile route; planner did not run that variant.",
+    "planning_lock_required": "true if source edits are needed; false if audit-only outcome",
+    "k0_k1_classification": "K0 LIVE BOUNDARY (executor venue submit). Critic + security-reviewer-opus required per ORCHESTRATOR_RUNBOOK §12 T1G row.",
+    "coordinator_blockers": [
+      "T0.2 RiskGuard still RUNNING (planner Round-1).",
+      "T0.3 venue quiescent attestation pending.",
+      "T1F closeout MUST land first — T1G inherits the live-bound assertion as the gate for compatibility-submit attempts."
+    ],
+    "predecessor_dependency": "T1F (live-bound assertion) MUST land first. T1F covers compat submit blocking; T1G covers final envelope persistence at all admitted live paths. Without T1F, the audit cannot rely on placeholder envelopes being blocked, contaminating the test fixtures."
+  }
+}

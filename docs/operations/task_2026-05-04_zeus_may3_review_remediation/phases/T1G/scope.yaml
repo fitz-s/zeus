@@ -1,0 +1,42 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - tests/test_final_sdk_envelope_persistence.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/**
+
+out_of_scope:
+  - src/execution/executor.py
+  - src/state/venue_command_repo.py
+  - src/venue/polymarket_v2_adapter.py
+  - src/contracts/venue_submission_envelope.py
+  - src/state/db.py
+  - src/data/polymarket_client.py
+  - src/strategy/**
+  - src/engine/**
+  - src/calibration/**
+  - src/state/**
+  - src/contracts/**
+  - src/riskguard/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - VERIFICATION-FIRST PHASE. Default mode produces an audit document and one new relationship test file; no source edits.
+  - If the audit at .../phases/T1G/audit/sdk_envelope_path_audit.md finds NEEDS_FIX gaps in src/execution/executor.py persistence calls, the executor MUST stop, open a scope amendment that explicitly adds src/execution/executor.py (and optionally src/state/venue_command_repo.py) to in_scope, get coordinator approval, then patch only the gaps named in the audit.
+  - src/venue/polymarket_v2_adapter.py is owned by T1F and remains out_of_scope for T1G.
+  - src/contracts/venue_submission_envelope.py is contract-level and out_of_scope for T1G.
+  - T1G's relationship tests use FAKE SDK clients; no live network or credential access is permitted.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md, T0_VENUE_QUIESCENT.md, T1A + T1F + T1BD + T1C + T1E closeout evidence (T1F is the most important predecessor; T1G inherits T1F's live-bound assertion as the gate for placeholder envelopes).

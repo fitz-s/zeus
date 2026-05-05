@@ -241,6 +241,7 @@ test_trust_policy:
     tests/test_position_projection_d6_counters.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
 
 categories:
   core_law_antibody:
@@ -1176,3 +1177,28 @@ test_metadata:
       .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
       never called. Asserts rebuild_v2 shards commits per (city, metric)
       bucket: conn.commit() call count >= city_count for a single metric spec.
+
+  tests/test_final_sdk_envelope_persistence.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_sdk_envelope_persistence_audit
+    blocks_commit: true
+    asserted_invariants:
+      - T1G-AUDIT-ARTIFACT-WRITTEN
+      - T1G-RELATIONSHIP-TEST-EVERY-PATH
+      - T1G-ONLY-MISSING-PATHS-PATCHED
+    source_under_test:
+      - src/execution/executor.py
+      - src/state/venue_command_repo.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json
+    notes: >
+      Relationship test. Asserts that every live SDK contact site in executor.py
+      persists the SDK-returned _venue_submission_envelope via
+      _persist_final_submission_envelope_payload before appending ACK/REJECTED
+      events. Three tests: entry submit (_live_order:2291), rejected submit
+      (success_false branch via _live_order:2342), exit submit
+      (execute_exit_order:1609). Each uses a fake SDK client returning a
+      distinguishable SDK-returned envelope (raw_response_json populated); asserts
+      a post-submit venue_submission_envelopes row exists and the terminal event
+      payload carries final_submission_envelope_id.
