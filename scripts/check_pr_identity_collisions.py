@@ -130,6 +130,7 @@ def _format_warning(
     collisions: list[tuple[dict, set[tuple[str, str]]]],
 ) -> str:
     lines = [
+        "<!-- identity-collision-warning -->",
         f"## Identity-collision risk on PR #{this_pr}",
         "",
         "This PR and one or more other open PRs add a class declaration "
