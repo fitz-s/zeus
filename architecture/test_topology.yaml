@@ -1202,3 +1202,30 @@ test_metadata:
       distinguishable SDK-returned envelope (raw_response_json populated); asserts
       a post-submit venue_submission_envelopes row exists and the terminal event
       payload carries final_submission_envelope_id.
+
+  tests/test_state_census.py:
+    modules: [state, execution]
+    category: core_law_antibody
+    profile: r3_state_census_read_only
+    blocks_commit: true
+    asserted_invariants:
+      - T1H-CENSUS-READ-ONLY
+      - T1H-DATA-UNAVAILABLE-DISTINCT-FROM-NO-REDEEM
+      - T1H-DETECTS-PLACEHOLDER-IDENTITY
+      - T1H-DETECTS-CORRECTED-WITHOUT-FILL-AUTHORITY
+      - T1H-PROVENANCE-HEADER-PRESENT
+    source_under_test:
+      - scripts/state_census.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json
+    notes: >
+      Relationship test for T1H minimal coded state census. Asserts read-only URI
+      mode (mode=ro) is enforced at the sqlite3 driver layer and that attempted
+      writes raise OperationalError. Asserts 0 rows in settlement_commands yields
+      redeem_truth=data_unavailable (not no_redeem_queued). Asserts envelope rows
+      with condition_id starting with legacy: or question_id==legacy-compat yield
+      identity_truth=placeholder and trade_id appears in anomalies. Asserts
+      corrected_executable_economics_eligible=True with non-locked fill_authority
+      yields position_truth=review_required and trade_id in anomalies.
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05

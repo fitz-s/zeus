@@ -1,0 +1,85 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T1H",
+  "task_id": "zeus-may3-remediation",
+  "title": "Minimal coded state census (read-only)",
+  "intent": "Add a NEW read-only census script (scripts/state_census.py) and its relationship test (tests/test_state_census.py) that classifies every open position across six axes (position truth / redeem truth / command truth / fill truth / quote-or-exit truth / identity truth) using ONLY existing canonical DB read surfaces. Empty settlement command queue is reported as data_unavailable, never as no_redeem_queued. The census never writes to any production DB.",
+
+  "files_touched": [
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "scripts/state_census.py",
+    "tests/test_state_census.py"
+  ],
+  "loc_delta_estimate": 700,
+  "introduces_abstraction": false,
+  "cross_module_edges": 4,
+  "domain": "state/read-only-census",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_state_census.py",
+    "python scripts/state_census.py --read-only --json-out /tmp/zeus_state_census.json"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T1H-CENSUS-READ-ONLY",
+      "text": "scripts/state_census.py opens DB connections in read-only URI mode (file:?mode=ro) and never executes INSERT, UPDATE, DELETE, CREATE, ALTER, or DROP on any production DB. test_census_read_only asserts this with a sqlite3 trace hook or by attempting and catching a write that the read-only connection refuses."
+    },
+    {
+      "id": "T1H-DATA-UNAVAILABLE-DISTINCT-FROM-NO-REDEEM",
+      "text": "When the settlement_commands table contains zero rows for a position's condition_id, the census classifies redeem_truth as 'data_unavailable' and explicitly NOT 'no_redeem_queued'. The two values are distinct in the census output schema and in test_census_data_unavailable_on_empty_settlement_queue."
+    },
+    {
+      "id": "T1H-DETECTS-PLACEHOLDER-IDENTITY",
+      "text": "When a venue_submission_envelope row has condition_id starting with 'legacy:' or question_id == 'legacy-compat', the census flags identity_truth as 'placeholder' and includes the trade_id in an anomalies list. test_census_detects_placeholder_identity asserts this with a fixture-backed envelope row."
+    },
+    {
+      "id": "T1H-DETECTS-CORRECTED-WITHOUT-FILL-AUTHORITY",
+      "text": "When a position has corrected_executable_economics_eligible=True AND fill_authority is NOT FILL_AUTHORITY_VENUE_CONFIRMED_FULL (or whatever T0/T1F-locked authority constants are), the census classifies position_truth as 'review_required' and includes the trade_id in an anomalies list. test_census_detects_corrected_row_without_fill_authority asserts this."
+    },
+    {
+      "id": "T1H-PROVENANCE-HEADER-PRESENT",
+      "text": "Both new files (scripts/state_census.py and tests/test_state_census.py) carry the file-header provenance block per ~/.claude/CLAUDE.md (Created / Last reused or audited / Authority basis fields). architecture/script_manifest.yaml gets a new row for state_census.py with class=diagnostic_read_only (or equivalent), apply_flag absent, target_db=zeus_trades.db (read-only), required_tests including tests/test_state_census.py. architecture/test_topology.yaml gets a new row for tests/test_state_census.py with created/last_used dates."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T1",
+    "NO-RISKGUARD-DURING-T1",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK",
+    "T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES",
+    "T1C-SETTLEMENT-NOT-REDEEM",
+    "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH",
+    "T1G-AUDIT-ARTIFACT-WRITTEN"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-04",
+    "round2_grep_verification": {
+      "scripts_state_census_does_not_exist_yet": "ls scripts/state_census.py → 'No such file or directory' at planner Round-2.",
+      "tests_state_census_does_not_exist_yet": "ls tests/test_state_census.py → 'No such file or directory' at planner Round-2.",
+      "settlement_commands_read_helpers_already_exist": "src/execution/settlement_commands.py:444 SELECT * FROM settlement_commands ... WHERE state = ? — provides the read shape; T1H imports the read API rather than crafting raw SQL.",
+      "portfolio_read_helpers_already_exist": "src/state/portfolio.py:1761 def get_open_positions(...) and src/state/portfolio.py:1715 corrected_executable_economics_eligible projection — the census reads these.",
+      "venue_command_repo_envelope_reads": "src/state/venue_command_repo.py:319 def insert_submission_envelope (write API; the census uses the corresponding read API at the same module — planner did not enumerate exhaustively)."
+    },
+    "loc_estimate_basis": "scripts/state_census.py (new): ~400 lines — 6 census axes × ~50 lines per classifier + ~50 lines for argv parsing + JSON output + ~50 lines for the read-only connection helper. tests/test_state_census.py (new): ~300 lines — 4 named invariant tests plus fixture setup. architecture/script_manifest.yaml: +12 lines. architecture/test_topology.yaml: +1 line. Total ~700 LOC; this is by far the largest T1 phase but is mostly NEW additive code, not edits to existing surfaces.",
+    "cross_module_edges_basis": "4 imports across module boundaries — src.state.portfolio (Position dataclass + reads), src.execution.settlement_commands (SettlementState enum + reads), src.state.venue_command_repo (envelope reads), src.config (state_path / DB locations). Each is read-only.",
+    "code_provenance_header": "Per ~/.claude/CLAUDE.md (Code Provenance section): every new script and test file carries Created/Last-reused-or-audited/Authority-basis header. T1H-PROVENANCE-HEADER-PRESENT invariant enforces this; the critic verifies header presence.",
+    "topology_admission": "BLOCKED at planner time — generic profile does not admit scripts/state_census.py for write-intent create. Resolution per LOCK_DECISION Amendment 4. NOTE: scripts/state_census.py creation may match the 'add or change script' digest profile better than the surgical executor work in T1A/T1F — coordinator may try that profile name before declaring STOP_REPLAN.",
+    "planning_lock_required": true,
+    "k0_k1_classification": "READ-ONLY surface; lowest-risk T1 phase. Critic-opus still required (the census produces evidence that gates Tier-2 admission; correctness of read interpretation matters even if the script writes nothing).",
+    "coordinator_blockers": [
+      "T0.2 RiskGuard still RUNNING (planner Round-1).",
+      "T0.3 venue quiescent attestation pending (planner Round-1)."
+    ],
+    "predecessor_dependency": "T1G MUST land first — the census's identity_truth axis classifies envelope persistence; if T1G found NEEDS_FIX persistence gaps the census results would be misleading. T1A/T1F/T1BD/T1C/T1E provide the invariants that the census's anomaly-detection logic encodes."
+  }
+}
