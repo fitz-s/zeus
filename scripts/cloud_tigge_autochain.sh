@@ -81,8 +81,12 @@ kick_extract() {
         if [[ -f "$ROOT/$script" ]]; then
             local sess
             sess="extract-$(basename "$script" .py)"
+            # Build a safely-quoted arg string so paths with spaces (e.g. the
+            # default ROOT containing "51 source data") survive tmux expansion.
+            local quoted_args
+            quoted_args=$(printf '%q ' "${extract_args[@]}")
             tmux new-session -d -s "$sess" \
-                "cd \"$ROOT\" && \"$PYTHON_BIN\" \"$script\" ${extract_args[*]} 2>&1 | tee -a \"$LOG\""
+                "cd $(printf '%q' "$ROOT") && $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$script") ${quoted_args}2>&1 | tee -a $(printf '%q' "$LOG")"
             log "extract: launched $sess"
         else
             log "extract: $script not found, skipping"
