@@ -1,0 +1,106 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T2G",
+  "task_id": "zeus-may3-remediation",
+  "title": "Fitz #4 wiring debts: connect_or_degrade in cycle_runner + enqueue_redeem_command in _settle_positions",
+  "intent": "Convert two T1-extracted-but-unused primitives from 'structural separation in code' to 'category-impossible by construction' (Fitz #4). Wire (1) src.state.db.connect_or_degrade as the live cycle write-path connection acquirer, replacing src/engine/cycle_runner.py:509's get_connection() call so a 'database is locked' error during the cycle gracefully degrades to a read-only cycle (None) instead of crashing the daemon — matching the T1E primitive-level intent of T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH at the live-cycle level. (2) src.execution.harvester.enqueue_redeem_command as the only redeem-state transition entry point, replacing the inline 'from src.execution.settlement_commands import request_redeem; command_id = request_redeem(...)' block at src/execution/harvester.py:2006-2025 inside _settle_positions so the T1C-SETTLEMENT-NOT-REDEEM separation becomes structurally enforced (request_redeem only callable through enqueue_redeem_command).",
+
+  "files_touched": [
+    "src/engine/cycle_runner.py",
+    "src/execution/harvester.py",
+    "tests/test_cycle_runner_db_lock_degrade.py",
+    "tests/test_settle_positions_uses_enqueue_redeem.py"
+  ],
+  "loc_delta_estimate": 250,
+  "introduces_abstraction": false,
+  "cross_module_edges": 2,
+  "domain": "live-cycle/lifecycle-settlement",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_cycle_runner_db_lock_degrade.py",
+    "python -m pytest -q tests/test_settle_positions_uses_enqueue_redeem.py",
+    "python -m pytest -q tests/test_sqlite_busy_timeout.py tests/test_harvester_settlement_separation.py tests/test_harvester_learning_authority.py",
+    "python -m pytest -q tests/test_cycle_runner_smoke.py"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T2G-CYCLE-RUNNER-DEGRADES-NOT-CRASHES",
+      "text": "src/engine/cycle_runner.py:509 (or its drifted equivalent) acquires the trade-DB connection via src.state.db.connect_or_degrade(...) (NOT via the bare _connect / get_trade_connection_with_world). When connect_or_degrade returns None, the cycle skips all write operations for this iteration and continues into the next cycle without raising sqlite3.OperationalError to the daemon top-level. tests/test_cycle_runner_db_lock_degrade.py asserts: (a) connect_or_degrade returning None causes cycle.run() to return a 'degraded' marker without raising, (b) the db_write_lock_timeout_total counter increments exactly once per degraded cycle (via the typed sink wired in T2F), (c) any non-lock OperationalError still propagates."
+    },
+    {
+      "id": "T2G-NO-INLINE-REQUEST-REDEEM",
+      "text": "git grep -n 'from src.execution.settlement_commands import request_redeem' src/execution/harvester.py returns exactly 1 line, and that line is inside the body of enqueue_redeem_command (existing line ~499). The inline import + request_redeem call block currently at src/execution/harvester.py:2006-2025 inside _settle_positions is REMOVED and replaced by a single enqueue_redeem_command(conn, condition_id=pos.condition_id, payout_asset='pUSD', market_id=..., pusd_amount_micro=..., token_amounts=..., trade_id=pos.trade_id) call. tests/test_settle_positions_uses_enqueue_redeem.py asserts via monkeypatch on src.execution.harvester.enqueue_redeem_command that _settle_positions calls it exactly once per redeemable position with the correct kwargs, and that src.execution.settlement_commands.request_redeem is NOT directly called from _settle_positions (assert request_redeem mock unused at the _settle_positions caller boundary)."
+    },
+    {
+      "id": "T2G-CONNECT-OR-DEGRADE-COUNTER-WIRED",
+      "text": "When connect_or_degrade returns None due to 'database is locked', the typed counter sink (T2F) records db_write_lock_timeout_total += 1. tests/test_cycle_runner_db_lock_degrade.py::test_db_lock_increments_typed_counter_via_sink asserts read-back from src.observability.counters.read('db_write_lock_timeout_total') increments by 1 per simulated lock event."
+    },
+    {
+      "id": "T2G-REDEEM-STATE-TRANSITION-AUDITABLE",
+      "text": "Every redeem-state transition (SettlementState.REDEEM_INTENT_CREATED) in production code paths originates from a single call site: enqueue_redeem_command. tests/test_settle_positions_uses_enqueue_redeem.py::test_redeem_state_only_via_enqueue asserts via grep + AST inspection that no other call site in src/ invokes request_redeem outside of enqueue_redeem_command's body. (Test files and scripts/ are exempt; the assertion is scoped to src/**.)"
+    },
+    {
+      "id": "T2G-LIVE-CYCLE-INVARIANT-PRESERVED",
+      "text": "tests/test_cycle_runner_smoke.py (existing) continues to pass post-edit. The cycle's happy-path behavior (DB available, no lock contention) is unchanged: connect_or_degrade returns a Connection identical in semantics to the pre-T2G _connect path. No new SDK call paths, no new venue side effects."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T2",
+    "NO-RISKGUARD-DURING-T2",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1C-SETTLEMENT-NOT-REDEEM",
+    "T1E-BUSY-TIMEOUT-CONFIGURABLE",
+    "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH",
+    "T2F-COUNTER-SINK-TYPED-API",
+    "T2F-EVERY-T1-COUNTER-EMITS-VIA-SINK"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-05",
+    "wiring_target_evidence": {
+      "connect_or_degrade_definition": "src/state/db.py:120-134 (drifted from cited 120-135; actual body 14 lines). Imports inside body: sqlite3 (already module-level). T1E commit 76ef3796 introduced this primitive but did not wire it.",
+      "cycle_runner_db_acquisition_site": "src/engine/cycle_runner.py:509 conn = get_connection() (where get_connection = get_trade_connection_with_world per cycle_runner.py:58 alias). T2G replaces this single call with connect_or_degrade(...) and adds the None-return early-exit + counter emit.",
+      "cycle_runner_dependency_injection_path": "src/engine/cycle_runner.py:53,58 import get_trade_connection_with_world; T2G adds 'from src.state.db import connect_or_degrade' and updates the get_connection alias OR introduces a separate variable; executor decides minimal-change path. Note tests use deps.get_connection patching pattern (per cycle_runner.py:56 comment); T2G must preserve this monkeypatch-ability.",
+      "enqueue_redeem_command_definition": "src/execution/harvester.py:479-520 (full body). The function exists and is correct; T1C extracted it but did not wire it in _settle_positions.",
+      "inline_request_redeem_site": "src/execution/harvester.py:2006-2025 inside _settle_positions; calls request_redeem with (condition_id, 'pUSD', market_id=..., pusd_amount_micro=..., token_amounts=..., conn=conn). Body block is ~20 lines (try/except + logger.info on success + logger.warning on failure). enqueue_redeem_command's body already encapsulates the same try/except + logger pattern."
+    },
+    "loc_estimate_basis": {
+      "src/engine/cycle_runner.py: replace conn = get_connection() with connect_or_degrade + None-handling + counter emit via T2F sink": "~40 LOC",
+      "src/execution/harvester.py: replace _settle_positions:2006-2025 inline block with single enqueue_redeem_command call + None-conn fallback handling": "~25 LOC (block shrinks from ~20 to ~5; net -15, but +10 for kwarg construction)",
+      "tests/test_cycle_runner_db_lock_degrade.py NEW": "~120 LOC (3 test cases: lock_returns_none, non_lock_propagates, counter_increments_via_sink + sqlite3 OperationalError fixture)",
+      "tests/test_settle_positions_uses_enqueue_redeem.py NEW": "~80 LOC (2 test cases: monkeypatch enqueue_redeem_command + verify call args, AST-grep assertion that request_redeem not called outside enqueue_redeem_command body in src/**)",
+      "total": "~250 LOC (matches telemetry guidance ~150-300 LOC)"
+    },
+    "k0_classification": "K0 LIVE BOUNDARY — cycle_runner.py is THE top-level live cycle orchestration hub (per src/engine/AGENTS.md:24 'CRITICAL — sequences the entire money path'). _settle_positions in harvester.py is the lifecycle settlement edge that records pUSD redeem intents into the durable settlement_commands ledger. Both surfaces touch live-money state-truth at the highest blast radius in the codebase.",
+    "reviewer_set_rationale": "Per T1 retrospective doctrine: K0 LIVE BOUNDARY phases (T1F + T1G) required security-reviewer; K0 STATE TRUTH (T1A + T1BD + T1E + T1H) did not. T2G is K0 LIVE BOUNDARY because cycle_runner orchestrates the venue-submit path AND the settlement-redeem path, both of which can cause live-money side effects if the wiring is wrong (e.g., wrong conn passed to request_redeem could write to the wrong DB; wrong None-handling in cycle_runner could either crash the daemon mid-cycle or worse, silently skip a critical write). Reviewer set: critic-opus + verifier-sonnet + security-reviewer-opus + git-master-sonnet (matches T1F + T1G).",
+    "predecessor_dependency": "T2F MUST land first. The connect_or_degrade counter emit in T2G uses the T2F typed sink (T2F-COUNTER-SINK-TYPED-API). Without T2F, T2G would either re-introduce the logger.warning telemetry_counter pattern (regressing the T2F goal) or skip the counter emit (regressing T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH observability). Serialized order: T2F → T2G.",
+    "deviation_anticipation": [
+      "Executor may discover that connect_or_degrade's signature (db_path: Path) doesn't match get_trade_connection_with_world's signature (zero-arg with internal path resolution). Likely resolution: extend connect_or_degrade to accept the same zero-arg or path-resolved invocation pattern, OR introduce a thin connect_or_degrade_for_trade_db wrapper. Surface as deviation if either path is taken.",
+      "Executor may discover that _settle_positions has multiple redeem branches (not just :2006-2025); planner verified only the buy_yes/buy_no branch. If additional branches exist, ALL must route through enqueue_redeem_command. Surface in BATCH_DONE.",
+      "Existing tests/test_harvester_settlement_separation.py may already lock in the inline request_redeem call shape; T2G must update or supersede those tests. If supersession is needed, note in BATCH_DONE.",
+      "cycle_runner.py:509 is inside an existing function whose monkeypatch-via-deps pattern (per :56 comment) tests rely on. Replacing get_connection() with connect_or_degrade may break test patches that monkey-patch deps.get_connection. Likely resolution: keep the get_connection alias as the indirection point but change its target to connect_or_degrade — preserves monkeypatch surface while changing semantics."
+    ],
+    "category_impossible_target": "Post-T2G, request_redeem is NOT importable from any caller outside enqueue_redeem_command's body in src/**, and connect_or_degrade is the ONLY connection-acquisition path for the live cycle write surface. This makes (a) 'redeem state mutation outside settlement-command audit trail' and (b) 'daemon crash on transient DB lock' both category-impossible by construction.",
+    "operator_awareness": "AMD-T2-2: operator-visible behavior change at the live cycle write boundary. Pre-T2G: a transient sqlite3.OperationalError('database is locked') at the cycle's trade-DB connection acquisition (src/engine/cycle_runner.py:509) propagates uncaught through cycle.run() and crashes the live daemon (or surfaces up to launchd's restart loop, producing a tight respawn window during contention with a concurrent rebuild_calibration_pairs_v2.py or other writer). Post-T2G: connect_or_degrade catches the lock-class OperationalError, returns None, the cycle gracefully degrades to read-only for that single iteration (no writes, no SDK contact, no settlement command emission), the next cycle proceeds normally, and src.observability.counters.increment('db_write_lock_timeout_total', ...) records each occurrence (read-back via T2F sink). Any non-lock OperationalError still propagates as before. This is the intentional realization of T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH at the live-cycle level (T1E shipped the primitive only). This field mirrors scope.yaml's operator-visible disclosure but is duplicated here because phase.json _planner_notes is the durable surface for operator-visible behavior changes — scope.yaml may be summarized away in downstream tooling.",
+    "out_of_scope_explicit": [
+      "Other connection-acquisition sites (CLI scripts, tests, riskguard) — T2G only wires the live cycle write path. Other sites use _connect or get_connection directly and are NOT changed.",
+      "Refactoring _settle_positions beyond the redeem-call swap. The function's outer loop, position iteration, exit price computation, and settlement record write are out of scope.",
+      "Persisting connect_or_degrade's counter to disk (T2F sink is in-process; persistence is out of T2 scope entirely).",
+      "Adding new redeem-state transitions or modifying SettlementState enum (frozen post-T1A)."
+    ]
+  },
+  "scope_yaml_ref": "phases/T2G/scope.yaml",
+  "reviewer_set": ["critic-opus", "verifier-sonnet", "security-reviewer-opus", "git-master-sonnet"],
+  "batch_plan": {
+    "batches": 1,
+    "B1": "Both wirings in single atomic commit. cycle_runner.py edit + harvester.py:2006-2025 swap + 2 new test files. If executor finds the cycle_runner monkeypatch surface change is non-trivial (per deviation_anticipation #4), split into B1a (harvester swap + new test, simpler surface) and B1b (cycle_runner wiring + new test, more delicate); coordinator authorizes split via SendMessage. Default expectation: single commit per T1 retrospective single-batch pattern."
+  }
+}

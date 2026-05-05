@@ -1,0 +1,142 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T2F",
+  "task_id": "zeus-may3-remediation",
+  "title": "Typed counter sink primitive + caplog test ledger + T1 doc/spirit LOWs cleanup",
+  "intent": "Replace the ad-hoc logger.warning(\"telemetry_counter event=...\") pattern emitted by T1F/T1BD/T1C/T1E with a single typed counter sink primitive (read-back queryable, monotonically incrementing, thread-safe, in-process). Add caplog tests that pin every distinct counter event name asserted in the T1 invariants ledger. Land the 6 doc/spirit LOWs accumulated across T1 closures so the T1 review record is debt-free before T2 admission. Operator-visible behavior change: counter values become inspectable beyond log-grep; emission semantics unchanged.",
+
+  "files_touched": [
+    "architecture/script_manifest.yaml",
+    "architecture/test_topology.yaml",
+    "src/observability/counters.py",
+    "src/state/chain_reconciliation.py",
+    "src/state/db.py",
+    "src/state/portfolio.py",
+    "src/venue/polymarket_v2_adapter.py",
+    "src/execution/harvester.py",
+    "tests/test_observability_counters.py",
+    "tests/test_counter_caplog_ledger.py",
+    "scripts/state_census.py",
+    "tests/test_state_census.py",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json",
+    "docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json"
+  ],
+  "loc_delta_estimate": 700,
+  "introduces_abstraction": true,
+  "cross_module_edges": 5,
+  "domain": "observability/typed-counters + meta-cleanup",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_observability_counters.py",
+    "python -m pytest -q tests/test_counter_caplog_ledger.py",
+    "python -m pytest -q tests/test_v2_adapter.py tests/test_polymarket_adapter_submit_safety.py tests/test_chain_reconciliation_corrected_guard.py tests/test_harvester_learning_authority.py tests/test_sqlite_busy_timeout.py tests/test_state_census.py"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T2F-COUNTER-SINK-TYPED-API",
+      "text": "src/observability/counters.py exposes a typed Counter API: increment(name: str, *, labels: dict[str, str] | None = None) -> None and read(name: str, *, labels: dict[str, str] | None = None) -> int. The module-level state is thread-safe (threading.Lock or equivalent). Reading an un-incremented (name, labels) pair returns 0. Negative deltas are rejected with ValueError. Unit test test_counter_increment_read_isolated_per_label_set asserts counters with different label dicts increment independently."
+    },
+    {
+      "id": "T2F-EVERY-T1-COUNTER-EMITS-VIA-SINK",
+      "text": "Every existing logger.warning(\"telemetry_counter event=...\") call site in src/venue/polymarket_v2_adapter.py:322,573 (placeholder_envelope_blocked_total, compat_submit_rejected_total), src/state/db.py:110 (db_write_lock_timeout_total), src/state/portfolio.py:1177,1707 (position_loader_field_defaulted_total, position_projection_field_dropped_total), src/state/chain_reconciliation.py:535-664 (cost_basis_chain_mutation_blocked_total × 4 field labels), src/execution/harvester.py:552,560,1733 (harvester_learning_write_blocked_total) calls src.observability.counters.increment(...) with the same event name as 'name' and the field/path qualifier as 'labels'. The original logger.warning line is preserved (or replaced by a single helper that emits both) so log-grep observability is not regressed."
+    },
+    {
+      "id": "T2F-CAPLOG-LEDGER-ASSERTS-EVERY-EVENT-NAME",
+      "text": "tests/test_counter_caplog_ledger.py exercises the 7 distinct counter event names emitted by T1 (placeholder_envelope_blocked_total, compat_submit_rejected_total, db_write_lock_timeout_total, position_loader_field_defaulted_total, position_projection_field_dropped_total, cost_basis_chain_mutation_blocked_total, harvester_learning_write_blocked_total) and asserts: (a) the typed sink reflects the increment, AND (b) the legacy log line still fires (caplog match on 'telemetry_counter event=<name>'). Each event name has at least one parametrized test case."
+    },
+    {
+      "id": "T2F-NEGATIVE-ENV-VALIDATION-LOUD-FAIL",
+      "text": "src/state/db.py::_db_busy_timeout_s rejects negative ZEUS_DB_BUSY_TIMEOUT_MS values with ValueError at parse time (not at connect time). tests/test_sqlite_busy_timeout.py::test_negative_env_rejected_at_parse_time asserts this. Closes T1E C-1 LOW."
+    },
+    {
+      "id": "T2F-CENSUS-FILL-AUTHORITY-FAIL-CLOSED",
+      "text": "scripts/state_census.py removes the ImportError fallback that hardcoded FILL_AUTHORITY_VENUE_CONFIRMED_FULL='venue_confirmed_full' (T1H C-1). On import failure of src.state.portfolio.FILL_AUTHORITY_VENUE_CONFIRMED_FULL, the census exits non-zero with a clear 'authority constant unavailable; refusing to classify' message rather than silently using a duplicate string. tests/test_state_census.py::test_census_fail_closed_on_missing_authority_constant asserts this."
+    },
+    {
+      "id": "T2F-DOC-DRIFT-CLEANED",
+      "text": "phase.json files_touched lists are reconciled with the actual git diff at close-time for: (a) T1F (line drift 1395-1397 → 1456-1458 in db.py merge surface; T1F C-2 LOW), (b) T1BD lifecycle_events.py listing (T1BD C-2 LOW; either remove from files_touched if the executor never wrote it, or add a 'read-only context' annotation), (c) T1C invariant text tightened to acknowledge the wrapper-only placement is intentional (T1C C-1 LOW; cite the legacy openmeteo training_allowed=0 audit-pair test). Cleanup commits update each phase.json's _planner_notes with a 'closeout_drift_resolution' field naming the LOW resolved."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T2",
+    "NO-RISKGUARD-DURING-T2",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1F-COUNTER-EMITTED",
+    "T1BD-PROJECTION-DROP-COUNTER",
+    "T1BD-LOADER-DEFAULT-COUNTER",
+    "T1C-LEARNING-AUTHORITY-GATE",
+    "T1E-BUSY-TIMEOUT-CONFIGURABLE",
+    "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH",
+    "T1H-DETECTS-CORRECTED-WITHOUT-FILL-AUTHORITY"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-05",
+    "counter_event_names_enumerated": {
+      "placeholder_envelope_blocked_total": "src/venue/polymarket_v2_adapter.py:322 (T1F)",
+      "compat_submit_rejected_total": "src/venue/polymarket_v2_adapter.py:573 (T1F)",
+      "db_write_lock_timeout_total": "src/state/db.py:110 (T1E _handle_db_write_lock)",
+      "position_loader_field_defaulted_total": "src/state/portfolio.py:1177 (T1BD, label=field)",
+      "position_projection_field_dropped_total": "src/state/portfolio.py:1707 (T1BD, label=field)",
+      "cost_basis_chain_mutation_blocked_total": "src/state/chain_reconciliation.py:535,541,542,547,636,642,643,649,664 (T1BD, label=field={entry_price,cost_basis_usd,size_usd,shares} × 9 sites = 4 distinct field labels)",
+      "harvester_learning_write_blocked_total": "src/execution/harvester.py:552,560,1733 (T1C, label=reason={missing_source_model_version_or_lineage,live_praw_no_training_lineage,missing_forecast_issue_time})"
+    },
+    "distinct_event_name_count": 7,
+    "distinct_label_combinations_estimated": "~14 (4 chain_reconciliation field labels + 3 harvester reason labels + 2 portfolio field labels + 5 single-label events)",
+    "caplog_ledger_test_count_estimate": "~14 parametrized cases, one per distinct (event_name, label_dict) tuple",
+    "loc_estimate_basis": {
+      "src/observability/counters.py NEW": "~120 LOC (Counter class + thread-safe increment/read + helper emit_typed_counter that emits both typed sink AND legacy log line so existing log-grep continues to work)",
+      "src/state/db.py + chain_reconciliation.py + portfolio.py + venue/polymarket_v2_adapter.py + execution/harvester.py call-site replacements": "~50 LOC (10 call sites × ~5 LOC delta each)",
+      "tests/test_observability_counters.py NEW": "~150 LOC (sink unit tests: thread-safety, label isolation, negative-delta rejection, read-back monotonicity)",
+      "tests/test_counter_caplog_ledger.py NEW": "~250 LOC (14 parametrized cases × ~15 LOC fixture-driven trigger)",
+      "negative-env-validation in db.py + test": "~30 LOC",
+      "census fail-closed in scripts/state_census.py + test_state_census.py": "~40 LOC",
+      "phase.json doc cleanup (5 files × ~12 line edits)": "~60 LOC",
+      "rebuild_all_v2 partial-commit operator note": "0 LOC (already in T1E commit message; T2F adds it to docs/to-do-list/known_gaps.md or equivalent operator-visible doc — coordinator decides exact target)",
+      "total": "~700 LOC (matches telemetry guidance ~600-800 LOC)"
+    },
+    "k0_k1_classification_per_surface": {
+      "src/observability/counters.py NEW + tests": "K1 STATE TRUTH (in-process counter ledger; not LIVE BOUNDARY because no SDK contact, but state-truth because read() values gate alerting)",
+      "call-site replacement in chain_reconciliation/portfolio/db/adapter/harvester": "K1 STATE TRUTH (the existing emission semantics is being doubled, not replaced; risk is regression of existing log-grep observability)",
+      "phase.json doc cleanup": "K2 hygiene-only (no source surface; meta-only)",
+      "negative-env validation in db.py": "K0 STATE TRUTH (db.py is the single connection authority; an over-tight ValueError at parse time could brick connect)",
+      "census fail-closed": "K1 read-only census; failure mode change is observable but no production-DB write surface"
+    },
+    "reviewer_set_rationale": "K0 STATE TRUTH surface (db.py negative-env validation) requires opus critic + verifier + git-master. No security-reviewer because no LIVE BOUNDARY (no SDK contact, no venue side effect; this matches the doctrine from T1A + T1BD + T1E retrospective: K0 STATE TRUTH does NOT trigger security probe — only K0 LIVE BOUNDARY does, which T2F is not).",
+    "predecessor_dependency": "All 7 T1 phases must be landed (they are, per s3 telemetry: T1A af671406, T1F 0468a9ad, T1BD fccbb93c, T1C 72e58e3a, T1E 76ef3796, T1G 3bcd8778, T1H 98483e79). T2F depends on the call sites that those phases introduced; modifying call sites that no longer match the source would error.",
+    "deviation_anticipation": [
+      "Executor may discover the 'emit both typed sink AND legacy log line' helper conflicts with existing logger.warning string-formatting (the chain_reconciliation field-label emissions use multi-line f-strings; a unifying helper must preserve the existing format string verbatim). Likely resolution: keep the existing logger.warning line untouched and add a side-effect-free counters.increment(...) call immediately after each. This is the conservative path; executor should not refactor the log strings.",
+      "Negative-env validation: the existing _db_busy_timeout_s catches malformed env via ValueError/TypeError and falls back to default 30000ms. T2F changes this to ValueError-at-parse-time for negative values specifically; positive-but-malformed strings should still fall back (preserving T1E behavior). Executor must not regress the malformed-string-falls-back-to-default path.",
+      "Doc cleanup may surface that phase.json files_touched drift is wider than 6 LOWs; if executor finds additional drift, surface it in BATCH_DONE rather than silently expand."
+    ],
+    "out_of_scope_explicit": [
+      "Persistence of counter values to disk (a future T2-counter-persistence phase if needed; T2F sink is in-process only).",
+      "Wiring counters into Discord alert thresholds (T2E owns alert delivery; T2F only provides the read API).",
+      "Removing the 'logger.warning telemetry_counter event=' lines (deferred to a future deprecation phase once typed sink is the universal source-of-truth and dashboards have migrated).",
+      "rebuild_all_v2 partial-commit semantic CHANGE (T1E C-3) — only the operator-note documentation lands in T2F; the semantic itself is intentional per T1E close.",
+      "FOK/FAK fixture (T1G C-1) — promotion to fixture is deferred to follow-up phase if production telemetry shows usage; out of T2F scope per planner Round-3.",
+      "T1F case-sensitivity LOW (security probe-4: `legacy:` startswith case-sensitive on src/venue/polymarket_v2_adapter.py:319 / scripts/state_census.py placeholder detection) — AMD-T2-1: explicitly DEFERRED. The carry-forward is hypothetical (no production trigger observed; T1F security-reviewer flagged it as theoretical risk only). Defer pending production telemetry showing a placeholder envelope with case-mismatched 'Legacy:' / 'LEGACY:' prefix. T2F does NOT add case-folding; if production evidence emerges, a follow-up phase introduces case-insensitive matching across both surfaces consistently. Closing the audit trail between the s3 retrospective LOWs ledger row 'security probe-4 (T1F) | optional case-folding' and T2F scope: this is the explicit decision-of-record."
+    ],
+    "scope_amendments_anticipated": [
+      "If executor finds the negative-env validation requires touching scripts/rebuild_calibration_pairs_v2.py (T1E surface) to apply consistently, that is a scope expansion — surface as deviation, do not silently expand."
+    ]
+  },
+  "scope_yaml_ref": "phases/T2F/scope.yaml",
+  "reviewer_set": ["critic-opus", "verifier-sonnet", "git-master-sonnet"],
+  "batch_plan": {
+    "batches": 1,
+    "B1": "Typed sink primitive + 7 call-site call-through + caplog ledger + negative-env validation + census fail-closed + 5 phase.json doc cleanups in single atomic commit. If executor finds B1 LOC trending past 800, split into B1a (sink + call-throughs + ledger; ~500 LOC) and B1b (negative-env + census + doc cleanups; ~200 LOC); coordinator authorizes split via SendMessage."
+  }
+}
