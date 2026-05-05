@@ -44,6 +44,7 @@ from src.state.lifecycle_manager import (
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.truth_files import annotate_truth_payload
 from src.types.truth_authority import TruthAuthority
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
@@ -1173,7 +1174,6 @@ def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
     """
     value = row.get(field_name)
     if value is None or value == "":
-        from src.observability.counters import increment as _cnt_inc
         _cnt_inc("position_loader_field_defaulted_total", labels={"field": field_name})
         logger.warning(
             "telemetry_counter event=position_loader_field_defaulted_total field=%s",
@@ -1705,7 +1705,6 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
     if not getattr(pos, "corrected_executable_economics_eligible", False):
         return chain_value
     if fill_authority_value is not None and fill_authority_value != chain_value:
-        from src.observability.counters import increment as _cnt_inc
         _cnt_inc("position_projection_field_dropped_total", labels={"field": field_name})
         logger.warning(
             "telemetry_counter event=position_projection_field_dropped_total field=%s",

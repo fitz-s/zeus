@@ -21,6 +21,7 @@ from src.state.ledger import (
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.snapshot_repo import init_snapshot_schema
+from src.observability.counters import increment as _cnt_inc
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
@@ -118,7 +119,6 @@ def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
     live cycle must continue in read-only monitor mode rather than crashing.
     Does NOT re-raise — caller decides whether to return None or raise.
     """
-    from src.observability.counters import increment as _cnt_inc
     _cnt_inc("db_write_lock_timeout_total")
     logger.warning(
         "telemetry_counter event=db_write_lock_timeout_total db_error=%r",

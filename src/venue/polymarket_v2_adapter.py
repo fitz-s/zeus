@@ -27,6 +27,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,6 @@ class PolymarketV2Adapter:
         try:
             envelope.assert_live_submit_bound()
         except ValueError as exc:
-            from src.observability.counters import increment as _cnt_inc
             _cnt_inc("placeholder_envelope_blocked_total")
             logger.warning(
                 "telemetry_counter event=placeholder_envelope_blocked_total path=submit"
@@ -571,7 +571,6 @@ class PolymarketV2Adapter:
             and Path(self.q1_egress_evidence_path).exists()
         )
         if _evidence_present and not _allow_compat_for_test:
-            from src.observability.counters import increment as _cnt_inc
             _cnt_inc("compat_submit_rejected_total")
             logger.warning(
                 "telemetry_counter event=compat_submit_rejected_total path=submit_limit_order"

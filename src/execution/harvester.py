@@ -57,6 +57,7 @@ from src.state.portfolio import (
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
 from src.riskguard.discord_alerts import alert_redeem
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
@@ -548,7 +549,6 @@ def maybe_write_learning_pair(
     # Pre-screen: missing authority — harvest_settlement will also check, but
     # we emit the counter here so the caller's log captures the rejection.
     if not str(source_model_version).strip() or not snapshot_training_allowed:
-        from src.observability.counters import increment as _cnt_inc
         _cnt_inc(
             "harvester_learning_write_blocked_total",
             labels={"reason": "missing_source_model_version_or_lineage"},
@@ -561,7 +561,6 @@ def maybe_write_learning_pair(
 
     # Pre-screen: live/non-training source.
     if not _is_training_forecast_source(source_model_version):
-        from src.observability.counters import increment as _cnt_inc
         _cnt_inc(
             "harvester_learning_write_blocked_total",
             labels={"reason": "live_praw_no_training_lineage"},
@@ -1739,7 +1738,6 @@ def harvest_settlement(
             city.name,
             target_date,
         )
-        from src.observability.counters import increment as _cnt_inc
         _cnt_inc(
             "harvester_learning_write_blocked_total",
             labels={"reason": "missing_forecast_issue_time"},

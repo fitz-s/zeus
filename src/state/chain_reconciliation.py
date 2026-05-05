@@ -21,6 +21,7 @@ from src.state.lifecycle_manager import (
     rescue_pending_runtime_state,
 )
 from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
@@ -532,7 +533,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 if not _rescue_eligible:
                     rescued.entry_price = chain.avg_price
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
             if chain.cost > 0:
@@ -540,17 +540,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     rescued.cost_basis_usd = chain.cost
                     rescued.size_usd = chain.cost
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
             if chain.size > 0:
                 if not _rescue_eligible:
                     rescued.shares = chain.size
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
             rescued.entry_fill_verified = True
@@ -641,7 +638,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 if not _size_mismatch_eligible:
                     corrected.entry_price = chain.avg_price
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
             if chain.cost > 0:
@@ -649,10 +645,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     corrected.cost_basis_usd = chain.cost
                     corrected.size_usd = chain.cost
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
             if abs(chain.size - local_shares) > 0.01:
@@ -660,7 +654,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 if not _size_mismatch_eligible:
                     corrected.shares = chain.size
                 else:
-                    from src.observability.counters import increment as _cnt_inc
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                 if not _append_canonical_size_correction_if_available(
@@ -677,7 +670,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     if not _size_mismatch_eligible:
                         corrected.shares = local_shares
                     else:
-                        from src.observability.counters import increment as _cnt_inc
                         _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                         logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
