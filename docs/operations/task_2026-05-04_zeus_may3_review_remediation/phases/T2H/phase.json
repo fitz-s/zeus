@@ -1,0 +1,108 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T2H",
+  "task_id": "zeus-may3-remediation",
+  "title": "T2G follow-up: cycle_runner cargo-cult import cleanup + operator runbook for db-lock degrade",
+  "intent": "Resolve the two carry-forward items from T2G's reviewer set that are doctrine-load-bearing but small-surface. (1) C-1 LOW: clean the two cargo-cult inline imports in src/engine/cycle_runner.py that the T2G executor introduced under an invalidated 'avoid circular import' rationale — `from src.state.db import get_trade_connection_with_world as _gtcww` at line 73 is dead code (the `_gtcww` symbol is never referenced inside get_connection's body; connect_or_degrade is called directly at line 74 using the already-module-level import at line 55), and the inline `from src.state.db import ZEUS_WORLD_DB_PATH as _world_path` at line 79 can safely hoist to the module-level import block at lines 53-58 because connect_or_degrade is already there with no observed circular-import effect. (2) SEC-MEDIUM-1 + SEC-MEDIUM-2: write a top-level operator runbook entry at docs/runbooks/T2G_database_locked_degrade_runbook.md that mirrors AMD-T2-2's operator_awareness disclosure (pre/post failure semantics) AND documents the oncall alert-rule migration from launchd-respawn-counts to db_write_lock_timeout_total counter + the ALERT log line. The packet docs and phase.json _planner_notes fields are durable-but-invisible to oncall; the runbook is the operationally-visible surface.",
+
+  "files_touched": [
+    "src/engine/cycle_runner.py",
+    "docs/runbooks/T2G_database_locked_degrade_runbook.md"
+  ],
+  "loc_delta_estimate": 200,
+  "introduces_abstraction": false,
+  "cross_module_edges": 0,
+  "domain": "hygiene/cleanup + operator-runbook",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_cycle_runner_db_lock_degrade.py",
+    "python -c \"import src.engine.cycle_runner as m; assert m.get_connection.__doc__\""
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T2H-CYCLE-RUNNER-NO-DEAD-IMPORT",
+      "text": "src/engine/cycle_runner.py:73 (or its drifted equivalent) no longer contains `from src.state.db import get_trade_connection_with_world as _gtcww`. The `_gtcww` symbol does not appear anywhere in src/engine/cycle_runner.py. Verification: `git grep -c '_gtcww' src/engine/cycle_runner.py` returns 0; `python -c 'import ast, pathlib; tree = ast.parse(pathlib.Path(\"src/engine/cycle_runner.py\").read_text()); names = [n for n in ast.walk(tree) if isinstance(n, ast.Name)]; assert all(n.id != \"_gtcww\" for n in names)'`."
+    },
+    {
+      "id": "T2H-CYCLE-RUNNER-WORLD-PATH-MODULE-LEVEL",
+      "text": "src/engine/cycle_runner.py imports ZEUS_WORLD_DB_PATH at module level inside the existing src.state.db import block (lines 53-62 region), NOT inline inside get_connection's ATTACH branch. The function-scope `from src.state.db import ZEUS_WORLD_DB_PATH as _world_path` line at line 79 is REMOVED; the ATTACH call at line 81-82 references the module-level name. AMD-T2H-4: Verification — `git grep -n 'ZEUS_WORLD_DB_PATH' src/engine/cycle_runner.py` returns exactly 1 import declaration line in the module-level import block (lines 53-62 region); usages of ZEUS_WORLD_DB_PATH at function-scope are permitted and expected (the constant is consumed where the ATTACH world schema is wired, e.g. line 81 `conn.execute('ATTACH DATABASE ? AS world', (str(ZEUS_WORLD_DB_PATH),))`). The invariant's spirit is 'exactly one module-level import declaration + zero function-scope re-imports'; the count of usage references at function-scope is unbounded and structurally healthy."
+    },
+    {
+      "id": "T2H-CYCLE-RUNNER-IMPORT-NO-REGRESSION",
+      "text": "`python -c 'import src.engine.cycle_runner'` succeeds without ImportError, ModuleNotFoundError, or circular-import error. tests/test_cycle_runner_db_lock_degrade.py continues to pass byte-identical pre-T2H semantics (the cleanup is structurally pure: dead-code removal + import hoist; no runtime behavior change). AMD-T2H-5: tests/test_cycle_runner_smoke.py was previously cited but does not exist on disk; the operative regression contract is tests/test_cycle_runner_db_lock_degrade.py alone. AMD-T2H-2: src.state.db module-level import block additions are limited to ZEUS_WORLD_DB_PATH; the existing imported names {_zeus_trade_db_path, connect_or_degrade, get_trade_connection_with_world, record_token_suppression} are preserved verbatim (no rename, no reorder, no removal). Verification: `git diff src/engine/cycle_runner.py` on the import block shows exactly one added line (the ZEUS_WORLD_DB_PATH addition); the four pre-existing names appear in the post-T2H block in the same relative positions they occupied pre-T2H."
+    },
+    {
+      "id": "T2H-OPERATOR-RUNBOOK-PRESENT",
+      "text": "docs/runbooks/T2G_database_locked_degrade_runbook.md exists, is non-empty, and contains all four required sections: (a) 'Pre-T2G vs Post-T2G failure semantics' mirroring AMD-T2-2's operator_awareness disclosure verbatim or near-verbatim, (b) 'Oncall alert-rule migration' describing the move from launchd-respawn-counts to src.observability.counters.read('db_write_lock_timeout_total') + the legacy ALERT log line as fallback, (c) 'Diagnostic checks' enumerating the steps oncall takes when db_write_lock_timeout_total is non-zero (check rebuild_calibration_pairs_v2 contention, check riskguard write activity, inspect cycle_runner.log for ALERT lines), (d) 'Escalation thresholds' — section (d) MUST use the literal placeholder format <PLACEHOLDER pending first-7-day production calibration> for each numeric bound (transient-window threshold, investigate threshold, page-operator threshold). Executor MUST NOT invent operator-policy numbers; the AMD-T2H-1 contract is that operator calibrates these values after the first 7-day production window using db_write_lock_timeout_total telemetry. Verification: `wc -l docs/runbooks/T2G_database_locked_degrade_runbook.md` ≥ 50; `grep -c -E 'Pre-T2G|Post-T2G|alert-rule|db_write_lock_timeout_total|launchd' docs/runbooks/T2G_database_locked_degrade_runbook.md` ≥ 5; `grep -c 'PLACEHOLDER pending first-7-day production calibration' docs/runbooks/T2G_database_locked_degrade_runbook.md` ≥ 3 (one per numeric bound in section (d))."
+    },
+    {
+      "id": "T2H-RUNBOOK-CITES-AUTHORITY",
+      "text": "The runbook explicitly cites: T2G commit ee94539f as the behavior-change commit, the AMD-T2-2 amendment ID, the T2G _planner_notes.operator_awareness field as the durable doctrine source, and the T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH invariant as the upstream contract. This makes the runbook trace-back-able to the packet authority surface. Verification: `grep -E 'ee94539f|AMD-T2-2|T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH|operator_awareness' docs/runbooks/T2G_database_locked_degrade_runbook.md` returns ≥ 4 distinct matches."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T2",
+    "NO-RISKGUARD-DURING-T2",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH",
+    "T2F-COUNTER-SINK-TYPED-API",
+    "T2G-CYCLE-RUNNER-DEGRADES-NOT-CRASHES",
+    "T2G-CONNECT-OR-DEGRADE-COUNTER-WIRED"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-05",
+    "cleanup_target_evidence": {
+      "dead_import_line": "src/engine/cycle_runner.py:73 `from src.state.db import get_trade_connection_with_world as _gtcww` — fresh grep confirms `_gtcww` symbol appears at line 73 ONLY (one match in entire file), inside get_connection function scope, never referenced after the import statement. Dead code.",
+      "cargo_cult_inline_import": "src/engine/cycle_runner.py:79 `from src.state.db import ZEUS_WORLD_DB_PATH as _world_path` — inside the try-block of the ATTACH path. Used immediately at line 82 in `conn.execute('ATTACH DATABASE ? AS world', (str(_world_path),))`. Hoist target: line 53-58 module-level import block (where connect_or_degrade is already imported with no circular-import effect).",
+      "module_level_import_block": "src/engine/cycle_runner.py:53-58 currently imports {_zeus_trade_db_path, connect_or_degrade, get_trade_connection_with_world, record_token_suppression} from src.state.db. T2H adds ZEUS_WORLD_DB_PATH to this set; alphabetical order suggests insertion between get_trade_connection_with_world and record_token_suppression OR at the top.",
+      "circular_import_claim_invalidated": "T2G executor's DEV-1 rationale was 'function-scope import to avoid circular import'. Critic adversarially probed: connect_or_degrade is already module-level imported at line 55 with no error; ZEUS_WORLD_DB_PATH is exported from the same src.state.db module. No circular import exists. The cargo-cult is the executor's pre-emptive defense against a hypothetical that does not materialize."
+    },
+    "runbook_target_evidence": {
+      "directory_exists": "ls docs/runbooks/ → AGENTS.md + 6 existing runbooks (live-operation.md, live-phase-1-first-boot.md, settlement_mismatch_triage.md, task_2026-04-15_data_math_operator_runbook.md, task_2026-04-19_ai_workflow_bridge.md, tigge_cloud_download.md). Convention is lowercase + snake_case OR PascalCase-with-task-prefix. Brief specifies T2G_database_locked_degrade_runbook.md verbatim — planner uses brief filename.",
+      "amd_t2_2_source": "T2G phase.json _planner_notes.operator_awareness — the verbatim disclosure to mirror.",
+      "sec_medium_1_specifics": "T2G security-reviewer flagged that operator alerting on db-lock currently relies on launchd respawn counts (because pre-T2G the daemon CRASHED on lock). Post-T2G, the daemon does NOT crash, so launchd respawn counts will drop to zero EVEN WHEN the cycle is repeatedly degrading — a silent observability regression unless oncall migrates the alert rule to query the typed counter sink (src.observability.counters.read('db_write_lock_timeout_total')) and/or grep the ALERT log line emitted alongside.",
+      "sec_medium_2_specifics": "T2G security-reviewer flagged that the operator_awareness disclosure lives only in scope.yaml line 46 + phase.json _planner_notes (durable but invisible to oncall). Top-level docs/runbooks/ entry is the operationally-visible surface."
+    },
+    "loc_estimate_basis": {
+      "src/engine/cycle_runner.py: -2 dead-import lines, +1 module-level import (ZEUS_WORLD_DB_PATH), +0-2 docstring touch-up referencing T2H cleanup": "~5 LOC net, ~10 LOC churn",
+      "docs/runbooks/T2G_database_locked_degrade_runbook.md NEW": "~150-180 LOC (4 sections × ~40 lines: pre/post semantics + alert-rule migration + diagnostic checks + escalation thresholds + ~15 lines of frontmatter/citations)",
+      "test_commands": "0 LOC (no new tests; existing tests/test_cycle_runner_db_lock_degrade.py already covers the runtime semantics; T2H cleanup is structural-purity not behavior-change)",
+      "total": "~190-200 LOC (matches brief guidance ~50 cleanup + ~150 runbook = ~200)"
+    },
+    "k_class_classification": "K2 hygiene-only. cycle_runner.py edit is dead-code removal + import hoist (zero runtime behavior change verifiable via existing test suite). Runbook is documentation. No source surface changes semantics; no new SDK/venue/state-mutation; no LIVE BOUNDARY edges. Reviewer set per T1 retrospective doctrine for K2: critic-opus + verifier-sonnet + git-master-sonnet. NO security-reviewer (no LIVE BOUNDARY surface; the security-flagged items SEC-MEDIUM-1+SEC-MEDIUM-2 are the runbook content itself, not a new code surface — security-reviewer already adversarially reviewed those at T2G close and APPROVED_WITH_MITIGATIONS pending T2H runbook).",
+    "reviewer_set_rationale": "K2 hygiene + docs. cycle_runner.py is modified but the modifications are net-zero behavior (dead import removal + module-level hoist of an already-callable name). Existing T2G tests are the regression contract. Runbook is documentation-only. No K0 LIVE BOUNDARY change → no security-reviewer per T1 retrospective doctrine. critic-opus + verifier-sonnet + git-master-sonnet matches the K2 baseline used for T1A simple-DDL and T1H read-only-census patterns.",
+    "predecessor_dependency": "T2F + T2G MUST be landed (they are: 7dac7096 + ee94539f per s4 telemetry). T2H consumes T2G-CYCLE-RUNNER-DEGRADES-NOT-CRASHES + T2G-CONNECT-OR-DEGRADE-COUNTER-WIRED for the runbook's correctness; modifying cycle_runner.py before T2G's wiring landed would not even have the dead-imports to clean.",
+    "deviation_anticipation": [
+      "Executor may discover that hoisting ZEUS_WORLD_DB_PATH to module-level surfaces a previously-masked circular import (the function-scope import was pre-emptive defense; if the defense was actually load-bearing for some indirect import-time dependency we don't currently see, hoisting would error). If `python -c 'import src.engine.cycle_runner'` errors after the hoist, executor reverts the hoist and surfaces in BATCH_DONE; the dead-_gtcww-removal is still performed (that's unambiguously safe).",
+      "Executor may discover the runbook's escalation thresholds need operator input (1-3/hour vs 3-10/hour vs 10+/hour). If the executor cannot derive these from existing telemetry/incidents, write them as PLACEHOLDER bracketed values with a note 'pending operator calibration after first 7-day production window' — do NOT invent operator-policy thresholds.",
+      "Existing runbooks may use a frontmatter convention or AGENTS.md cross-reference pattern; executor must match that convention (look at docs/runbooks/AGENTS.md + docs/runbooks/settlement_mismatch_triage.md for the canonical pattern before drafting the new runbook).",
+      "If executor finds that the get_connection function's docstring still claims 'function-scope import to avoid circular import' (legacy from T2G commit), the docstring should be tightened to remove the invalidated rationale — surface in BATCH_DONE if changed, since docstring-edits are a sister surface."
+    ],
+    "category_impossible_target": "Post-T2H, the 'cargo-cult inline import' pattern in cycle_runner.py is gone (no inline imports of names already module-level imported), and the operator's alert-rule migration path from launchd-respawn to typed-counter is documented in a top-level runbook readable by oncall without packet-doc archaeology. This closes the T2G doctrine surface debt; no further Fitz #4 wiring debts remain in the T1+T2 ledger.",
+    "out_of_scope_explicit": [
+      "T2G C-2 LOW (cycle_runner ATTACH-world bare `except Exception:` swallow at line 83): this is a pre-existing pattern from db.py:99-104; tightening it would expand to the upstream primitive too. Per brief: defer (not new debt). Documented here so the audit trail shows the explicit decision-of-record. If the operator later wants to tighten exception handling across both surfaces, that is a separate phase.",
+      "T2F + T2G C-3 LOW (closeout_drift_resolution boilerplate carry-forward): the T2F + T2G closeout_drift_resolution fields contain identical/boilerplate text rather than per-phase resolution language. Per brief: defer (not load-bearing). The T2F + T2G commit message bodies already address this in prose; phase.json field text being boilerplate is cosmetic.",
+      "Adding new source surfaces or runtime behavior changes. T2H is hygiene + docs only; any source-edit beyond dead-import removal + import hoist is a deviation requiring SendMessage scope amendment.",
+      "Adding new tests. The existing T2G test suite (tests/test_cycle_runner_db_lock_degrade.py) is the regression contract; T2H deliberately does not add new test files because it does not change behavior. If executor finds the existing suite does not actually exercise the post-cleanup import shape (e.g., never imports cycle_runner at module-level in a test file), surface as deviation — the import-shape assertion can be a one-liner inside an existing test file.",
+      "Modifying any other runbook in docs/runbooks/. The new file is the only runbook surface T2H touches; cross-references to existing runbooks are read-only context.",
+      "AMD-T2H-3: cycle_runner.py:847 cargo-cult inline import block (`from src.state.db import get_world_connection as _get_world_conn, get_connection as _get_db_conn, RISK_DB_PATH as _RISK_DB_PATH` plus 4 more inline imports from src.riskguard / src.control inside the same try-block) is the same pattern shape as the T2H-targeted lines 73 + 79, but at a different call site (the EntriesBlockRegistry initialization branch at lines 844-855). DEFERRED to a future hygiene cleanup phase. Reason: this LOW was surfaced by critic during T2H plan review, NOT in the T2G carry_forward_to_t2h list. Silently expanding T2H scope to clean it now would (a) violate the brief's explicit scope-tightness instruction, (b) double the cleanup surface area without adversarial review of the additional imports' circular-import-defense rationale (the line-847 block also imports from src.riskguard + src.control, which DO have known import-time complexity unlike src.state.db), and (c) muddy T2H's structural-purity guarantee (currently: net-zero behavior, only two trivially-safe edits inside one function). Future phase that takes this on must adversarially probe each of the 7 inline imports at 845-851 individually before hoisting; at least 4 of them (riskguard / heartbeat / ws_gap / rollout_gate) are NOT obviously safe-to-hoist."
+    ],
+    "scope_amendments_anticipated": [
+      "If the runbook needs to cite a specific oncall alert configuration file path (e.g., monitoring/alerts.yaml from T2E) and that file does not exist yet (per planner_output.md D-3 T2E re-scope), the runbook references the future location with a TODO note. Do NOT silently expand scope to create the alert config; that belongs to T2E."
+    ]
+  },
+  "scope_yaml_ref": "phases/T2H/scope.yaml",
+  "reviewer_set": ["critic-opus", "verifier-sonnet", "git-master-sonnet"],
+  "batch_plan": {
+    "batches": 1,
+    "B1": "Both deliverables in single atomic commit. Order recommended: cleanup first (dead-import removal + module-level hoist + verify `python -c 'import src.engine.cycle_runner'` + run T2G regression suite), then runbook draft. If the import-hoist deviation #1 fires (circular import surfaces), revert hoist and split into B1a (dead-_gtcww-removal + runbook; safe) and B1b (hoist investigation; deferred); coordinator authorizes split via SendMessage. Expected default: single commit, ~190-200 LOC."
+  }
+}

@@ -1,0 +1,71 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  # T2G C-1 LOW cleanup target
+  - src/engine/cycle_runner.py
+
+  # SEC-MEDIUM-1 + SEC-MEDIUM-2 runbook target (NEW file)
+  - docs/runbooks/T2G_database_locked_degrade_runbook.md
+
+allow_companions:
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2H/**
+
+out_of_scope:
+  # All other src — T2H is hygiene-only on cycle_runner imports
+  - src/state/**
+  - src/execution/**
+  - src/venue/**
+  - src/contracts/**
+  - src/strategy/**
+  - src/calibration/**
+  - src/data/**
+  - src/riskguard/**
+  - src/observability/**           # T2F owns; T2H references read API in runbook prose only
+  - src/engine/cycle_runtime.py    # cycle_runner.py only; cycle_runtime.py untouched
+  - src/engine/dispatch.py
+  - src/engine/**                  # except cycle_runner.py (in_scope above)
+
+  # No new tests — existing T2G test suite is the regression contract
+  - tests/**
+
+  # No script changes — T2H does not refactor scripts/
+  - scripts/**
+
+  # No other doc surfaces — runbook only
+  - docs/operations/**             # except packet phases/T2H/** (allow_companions above)
+  - docs/methodology/**
+  - docs/reference/**
+  - docs/reports/**
+  - docs/to-do-list/**
+  - docs/runbooks/AGENTS.md        # read-only context for convention; not edited
+  - docs/runbooks/live-operation.md
+  - docs/runbooks/live-phase-1-first-boot.md
+  - docs/runbooks/settlement_mismatch_triage.md
+  - docs/runbooks/task_2026-04-15_data_math_operator_runbook.md
+  - docs/runbooks/task_2026-04-19_ai_workflow_bridge.md
+  - docs/runbooks/tigge_cloud_download.md
+
+  # Architecture / manifest / config / state / data — none touched
+  - architecture/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - K2 hygiene-only surface. cycle_runner.py edit is dead-code removal (`_gtcww` line) + module-level import hoist (`ZEUS_WORLD_DB_PATH`) — net-zero runtime behavior change verifiable via existing T2G test suite (tests/test_cycle_runner_db_lock_degrade.py + tests/test_cycle_runner_smoke.py). No K0 LIVE BOUNDARY change → reviewer set is critic-opus + verifier-sonnet + git-master-sonnet (no security-reviewer; T2G security already adversarially APPROVED_WITH_MITIGATIONS pending the runbook content T2H is now landing).
+  - The cleanup target is INSIDE get_connection() at src/engine/cycle_runner.py:67-86 (T2G's own function). Lines drift across edits; T2H must re-locate by symbol (`_gtcww`, `ZEUS_WORLD_DB_PATH`) not by line number. Per Fitz memory item "feedback_zeus_plan_citations_rot_fast": grep-verify the actual line numbers within 10 minutes of executor dispatch.
+  - tests/test_cycle_runner_db_lock_degrade.py and tests/test_cycle_runner_smoke.py are read-only context. Both must continue to pass byte-identically post-T2H. If a test asserts on the function-scope import shape (unlikely; tests assert on runtime behavior, not import location), surface as deviation in BATCH_DONE.
+  - Tier 2 prerequisite: T2F + T2G landed (commits 7dac7096 + ee94539f per s4 telemetry). T2H consumes T2G-CYCLE-RUNNER-DEGRADES-NOT-CRASHES + T2G-CONNECT-OR-DEGRADE-COUNTER-WIRED + T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH; all three are ASSERTED in invariants.jsonl pre-T2H.
+  - Operator-runbook convention check: docs/runbooks/AGENTS.md is the authority for the runbook frontmatter / structure / cross-reference convention. Executor reads it (read-only context, NOT edited) before drafting docs/runbooks/T2G_database_locked_degrade_runbook.md and matches its conventions (e.g., heading shape, citation style, escalation-level table format). The brief specifies the exact filename T2G_database_locked_degrade_runbook.md verbatim.
+  - Runbook content contract (4 required sections per T2H-OPERATOR-RUNBOOK-PRESENT invariant): (1) pre-T2G vs post-T2G failure semantics mirroring AMD-T2-2, (2) oncall alert-rule migration from launchd-respawn-counts to db_write_lock_timeout_total counter + ALERT log line fallback, (3) diagnostic checks oncall takes when counter is non-zero, (4) escalation thresholds (planner expects executor to use PLACEHOLDER bracketed values pending first-7-day production calibration; do NOT invent operator-policy thresholds).
+  - Pre-existing pattern carry-forward (T2G C-2 LOW): cycle_runner.py:83 bare `except Exception: pass` swallow on the ATTACH branch is OUT OF SCOPE per brief — pre-existing pattern from db.py:99-104; tightening here would require expanding to the upstream primitive too. Documented in phase.json `_planner_notes.out_of_scope_explicit`. If T2H executor encounters this line during the import hoist edit and is tempted to tighten, STOP and surface as deviation; do not silently widen scope.
+  - Boilerplate carry-forward (T2F + T2G C-3 LOW): T2F + T2G closeout_drift_resolution fields contain identical/boilerplate text instead of per-phase resolution language. OUT OF SCOPE per brief — not load-bearing; commit message bodies already address it in prose. Documented in `_planner_notes.out_of_scope_explicit`.

@@ -1,0 +1,33 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - scripts/state_census.py
+  - tests/test_state_census.py
+
+allow_companions:
+  - architecture/script_manifest.yaml
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/**
+
+out_of_scope:
+  - src/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - All src/** is OUT OF SCOPE. T1H is read-only census; it imports from src/* but does not edit any source file. If executor finds a needed read-helper missing in src/, executor STOPS and re-plans — T1H does not add helpers.
+  - scripts/state_census.py is NEW; manifest registration is mandatory per ~/.claude/CLAUDE.md Code Provenance rules and per MASTER_PLAN_v2 §4 working-contract item 8 ("New scripts and tests must be registered in the appropriate manifests before they are used as closeout evidence").
+  - File-header provenance block (Created / Last reused or audited / Authority basis) is REQUIRED on both new files. Critic enforces.
+  - Census output schema lives in the script docstring + JSON output; no separate contract file is created in this phase.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md, T0_VENUE_QUIESCENT.md, T1A + T1F + T1BD + T1C + T1E + T1G closeout evidence.
+  - This is the LAST T1 phase. Closeout evidence feeds T2 admission via census output reviewed by operator.

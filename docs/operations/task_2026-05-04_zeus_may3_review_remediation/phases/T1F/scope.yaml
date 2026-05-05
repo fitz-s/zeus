@@ -1,0 +1,52 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - src/contracts/venue_submission_envelope.py
+  - src/venue/polymarket_v2_adapter.py
+  - tests/test_polymarket_adapter_submit_safety.py
+  - tests/test_venue_envelope_live_bound.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/**
+  # AMD-T1F-1 (coordinator-authorized 2026-05-05): kwarg edit (_allow_compat_for_test=True)
+  # in tests/test_v2_adapter.py LIMITED to these 3 tests:
+  #   - test_submit_limit_order_snapshot_failure_is_typed_pre_submit_rejection
+  #   - test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing
+  #   - test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_none
+  # AMD-T1F-2 (coordinator-authorized 2026-05-05): structural rewrite of
+  #   - test_legacy_sell_compatibility_hashes_final_side_and_size
+  # DROP fake_client.create_order call_count assertion (T1F renders it impossible
+  # by design); REPLACE submit(envelope) call with direct envelope construction;
+  # KEEP hash-correctness assertions and envelope placeholder check; ADD inline
+  # comment citing T1F. Rationale: Fitz #4 — T1F makes 'placeholder→SDK' category
+  # impossible; test must align with new invariant.
+  - tests/test_v2_adapter.py
+
+out_of_scope:
+  - src/execution/**
+  - src/strategy/**
+  - src/engine/**
+  - src/state/**
+  - src/data/**
+  - src/riskguard/**
+  - src/calibration/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - Touches K0 live-boundary surface. Requires opus critic + security-reviewer per ORCHESTRATOR_RUNBOOK §12.
+  - src/contracts/venue_submission_envelope.py is in_scope ONLY if assertion-method validation gaps are found during executor exploration. If envelope.assert_live_submit_bound() at line 107 is already complete, the contract file may remain untouched and only the adapter is edited.
+  - tests/test_v2_adapter.py is read-only context (must continue to pass), NOT in_scope.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md (riskguard unload + re-attest), T0_VENUE_QUIESCENT.md, and T1A closeout evidence.
+  - src/data/polymarket_client.py:407-424 already implements the same live-bound check pattern on the executor-bound envelope. The T1F executor MUST mirror that pattern; do not reinvent.

@@ -1,0 +1,48 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - src/execution/harvester.py
+  - tests/test_harvester_learning_authority.py
+  - tests/test_harvester_settlement_redeem.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/**
+
+out_of_scope:
+  - src/execution/executor.py
+  - src/execution/harvester_pnl_resolver.py
+  - src/ingest/harvester_truth_writer.py
+  - src/execution/settlement_commands.py
+  - src/state/lifecycle_manager.py
+  - src/state/chain_reconciliation.py
+  - src/state/portfolio.py
+  - src/state/decision_chain.py
+  - src/calibration/**
+  - src/venue/**
+  - src/strategy/**
+  - src/contracts/**
+  - src/data/**
+  - src/riskguard/**
+  - src/engine/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - Reads-only allowed but NOT in_scope (no edits) - src/execution/settlement_commands.py provides SettlementState enum; T1C imports from it but does not modify.
+  - src/state/decision_chain.py provides store_settlement_records() at line 217; T1C imports but does not modify.
+  - src/state/lifecycle_manager.py is K0/K1 surface (lifecycle grammar) — explicitly out_of_scope. If T1C scope analysis reveals a lifecycle change is required, executor STOPS and re-plans (forbidden expansion).
+  - src/calibration/manager.py provides maybe_refit_bucket() at line 556; T1C imports but does not modify.
+  - The other two harvester surfaces (harvester_pnl_resolver.py, harvester_truth_writer.py) ALREADY share the same ZEUS_HARVESTER_LIVE_ENABLED gate at the same default OFF; T1C does not need to touch them. If divergence is found at edit time, executor records and stops.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md (riskguard unload + re-attest), T0_VENUE_QUIESCENT.md, T0_HARVESTER_POLICY.md (REALITY_ANSWERED, default OFF), T1A + T1F + T1BD closeout evidence.
+  - T1BD must land first to establish the counter-sink module/pattern; T1C reuses it for harvester_learning_write_blocked_total.

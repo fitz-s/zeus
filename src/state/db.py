@@ -21,12 +21,43 @@ from src.state.ledger import (
 from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.snapshot_repo import init_snapshot_schema
+from src.observability.counters import increment as _cnt_inc
 
 
 ZEUS_DB_PATH = STATE_DIR / "zeus.db"  # LEGACY — remove after Phase 4
 ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlements, calibration, ENS)
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
+
+# T1E: configurable busy-timeout (ms → s). Default 30000ms = 30s per T0_SQLITE_POLICY.md.
+# ZEUS_DB_BUSY_TIMEOUT_MS env var is in milliseconds; sqlite3.connect(timeout=) takes seconds.
+# Malformed value falls back to default (catch-and-log) so daemon never crashes on bad config.
+def _db_busy_timeout_s() -> float:
+    """Return sqlite3 busy-timeout in seconds from ZEUS_DB_BUSY_TIMEOUT_MS env var.
+
+    Reads env var on each call so long-running daemons pick up runtime changes.
+    Default: 30000 ms (30 s) per T0_SQLITE_POLICY.md.
+    """
+    raw = os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000")
+    try:
+        ms = float(raw)
+    except (ValueError, TypeError):
+        _startup_logger = logging.getLogger(__name__)
+        _startup_logger.warning(
+            "ZEUS_DB_BUSY_TIMEOUT_MS=%r is not a valid number; "
+            "falling back to default 30000 ms (30 s)",
+            raw,
+        )
+        return 30.0
+    # T2F-NEGATIVE-ENV-VALIDATION-LOUD-FAIL: reject negative values at parse
+    # time so a misconfigured daemon fails loudly rather than silently using a
+    # negative sqlite3 timeout (which may behave as an indefinite lock).
+    if ms < 0:
+        raise ValueError(
+            f"ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0; got {raw!r} ({ms} ms). "
+            "Fix the environment variable before starting the daemon."
+        )
+    return ms / 1000.0
 
 
 def _zeus_trade_db_path() -> Path:
@@ -37,7 +68,9 @@ def _zeus_trade_db_path() -> Path:
 def _connect(db_path: Path) -> sqlite3.Connection:
     """Low-level connection with standard pragmas."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=120)
+    # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
+    timeout_s = _db_busy_timeout_s()
+    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -69,11 +102,51 @@ def get_trade_connection_with_world() -> sqlite3.Connection:
     # Guard: skip ATTACH if 'world' schema already present (connection reuse)
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" not in attached:
-        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        try:
+            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        except sqlite3.OperationalError as exc:
+            logger.warning("ATTACH world failed (non-fatal): %r", exc)
     return conn
 
 
 logger = logging.getLogger(__name__)
+
+
+def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
+    """T1E: log degrade counter + ALERT when 'database is locked' is raised.
+
+    Called by connection helpers when sqlite3 busy-timeout expires and the
+    live cycle must continue in read-only monitor mode rather than crashing.
+    Does NOT re-raise — caller decides whether to return None or raise.
+    """
+    _cnt_inc("db_write_lock_timeout_total")
+    logger.warning(
+        "telemetry_counter event=db_write_lock_timeout_total db_error=%r",
+        str(exc),
+    )
+    logger.error(
+        "ALERT db_write_lock_timeout: database is locked after busy-timeout; "
+        "cycle degrades to read-only monitor for this cycle. error=%r",
+        str(exc),
+    )
+
+
+def connect_or_degrade(db_path: Path) -> Optional[sqlite3.Connection]:
+    """T1E: Connect to DB; on 'database is locked' degrade to None (read-only cycle).
+
+    Used by the live cycle write path. Returns None when the DB is locked so
+    the caller can skip writes for this cycle without crashing the daemon.
+    Any other OperationalError is re-raised (not a lock timeout).
+    """
+    try:
+        return _connect(db_path)
+    except sqlite3.OperationalError as exc:
+        if str(exc).startswith("database is locked"):
+            _handle_db_write_lock(exc)
+            return None
+        raise
+
+
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -346,7 +419,9 @@ RESOLVED_TOKEN_SUPPRESSION_REASONS = (
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = db_path or ZEUS_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=120)
+    # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
+    timeout_s = _db_busy_timeout_s()
+    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -1392,49 +1467,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
           recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    # R3 R1 settlement/redeem command ledger.  Keep DDL in the schema owner so
-    # DB initialization does not import src.execution during startup.
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS settlement_commands (
-          command_id TEXT PRIMARY KEY,
-          state TEXT NOT NULL CHECK (state IN (
-            'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
-            'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
-          )),
-          condition_id TEXT NOT NULL,
-          market_id TEXT NOT NULL,
-          payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
-          pusd_amount_micro INTEGER,
-          token_amounts_json TEXT,
-          tx_hash TEXT,
-          block_number INTEGER,
-          confirmation_count INTEGER DEFAULT 0,
-          requested_at TEXT NOT NULL,
-          submitted_at TEXT,
-          terminal_at TEXT,
-          error_payload TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_settlement_commands_state
-          ON settlement_commands (state, requested_at);
-        CREATE INDEX IF NOT EXISTS idx_settlement_commands_condition
-          ON settlement_commands (condition_id, market_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_commands_active_condition_asset
-          ON settlement_commands (condition_id, market_id, payout_asset)
-          WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
-
-        CREATE TABLE IF NOT EXISTS settlement_command_events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          command_id TEXT NOT NULL REFERENCES settlement_commands(command_id),
-          event_type TEXT NOT NULL,
-          payload_hash TEXT NOT NULL,
-          payload_json TEXT,
-          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_settlement_command_events_command
-          ON settlement_command_events (command_id, recorded_at);
-    """)
+    # T1A: DDL single-source — delegate to schema owner to avoid duplication.
+    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA
+    conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
     
     # Safe Schema evolution for phase 3 attribution
     for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:

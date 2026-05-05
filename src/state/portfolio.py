@@ -44,6 +44,7 @@ from src.state.lifecycle_manager import (
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.truth_files import annotate_truth_payload
 from src.types.truth_authority import TruthAuthority
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
@@ -1161,6 +1162,27 @@ def _runtime_state_for_portfolio_phase(phase: str) -> str:
     raise ValueError(f"unsupported canonical phase for portfolio loader: {phase!r}")
 
 
+_D6_LOCKED_FIELDS = frozenset({"entry_price", "cost_basis_usd", "size_usd", "shares"})
+
+
+def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
+    """T1BD: Load a D6 locked field from a projection row.
+
+    Emits position_loader_field_defaulted_total{field} when the row does not
+    carry the field (None or missing). The row is not silently zero-defaulted
+    without telemetry.
+    """
+    value = row.get(field_name)
+    if value is None or value == "":
+        _cnt_inc("position_loader_field_defaulted_total", labels={"field": field_name})
+        logger.warning(
+            "telemetry_counter event=position_loader_field_defaulted_total field=%s",
+            field_name,
+        )
+        return default
+    return float(value)
+
+
 def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     state = str(row.get("state") or "")
     if not state:
@@ -1184,10 +1206,10 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         # present; fall back to the 'unknown_env' sentinel otherwise and
         # let downstream authority consumers mark the row UNVERIFIED.
         env=str(row.get("env") or "unknown_env"),
-        size_usd=float(row.get("size_usd") or 0.0),
-        shares=float(row.get("shares") or 0.0),
-        cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
-        entry_price=float(row.get("entry_price") or 0.0),
+        size_usd=_load_d6_field(row, "size_usd"),
+        shares=_load_d6_field(row, "shares"),
+        cost_basis_usd=_load_d6_field(row, "cost_basis_usd"),
+        entry_price=_load_d6_field(row, "entry_price"),
         p_posterior=float(row.get("p_posterior") or 0.0),
         entered_at=entered_at if state != "pending_tracked" else "",
         day0_entered_at=day0_entered_at,
@@ -1673,6 +1695,25 @@ def remove_position(
     return None
 
 
+def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill_authority_value: float) -> float:
+    """T1BD: For corrected-eligible positions, use FillAuthority value in projection row.
+
+    If the position is corrected_executable_economics_eligible and the chain-context
+    value differs from the FillAuthority-derived value, emit a telemetry counter and
+    return the FillAuthority value. Legacy positions pass through unchanged.
+    """
+    if not getattr(pos, "corrected_executable_economics_eligible", False):
+        return chain_value
+    if fill_authority_value is not None and fill_authority_value != chain_value:
+        _cnt_inc("position_projection_field_dropped_total", labels={"field": field_name})
+        logger.warning(
+            "telemetry_counter event=position_projection_field_dropped_total field=%s",
+            field_name,
+        )
+        return fill_authority_value
+    return chain_value
+
+
 def _track_exit(state: PortfolioState, pos: Position) -> None:
     """Track exit for reentry/cooldown checks AND replay auditability.
 
@@ -1696,8 +1737,10 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "token_id": pos.token_id,
         "no_token_id": pos.no_token_id,
         # Entry context (replay-critical)
-        "entry_price": pos.entry_price,
-        "size_usd": pos.size_usd,
+        # T1BD: for corrected-eligible positions, project FillAuthority-derived
+        # D6 values and emit telemetry counters.
+        "entry_price": _project_d6_field(pos, "entry_price", pos.entry_price, pos.entry_price_avg_fill),
+        "size_usd": _project_d6_field(pos, "size_usd", pos.size_usd, pos.filled_cost_basis_usd),
         "target_notional_usd": pos.target_notional_usd,
         "submitted_notional_usd": pos.submitted_notional_usd,
         "filled_cost_basis_usd": pos.filled_cost_basis_usd,

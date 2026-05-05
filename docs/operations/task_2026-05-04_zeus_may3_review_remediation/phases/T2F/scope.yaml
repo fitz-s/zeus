@@ -1,0 +1,65 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  # NEW typed counter sink primitive
+  - src/observability/counters.py
+  - tests/test_observability_counters.py
+  - tests/test_counter_caplog_ledger.py
+
+  # Call-site call-through edits (preserve existing logger.warning lines; add counters.increment)
+  - src/state/db.py
+  - src/state/chain_reconciliation.py
+  - src/state/portfolio.py
+  - src/venue/polymarket_v2_adapter.py
+  - src/execution/harvester.py
+
+  # T1E negative-env validation gap (C-1 LOW) — db.py edit shared with above
+  # T1H census fail-closed (C-1 LOW) — script + test edit
+  - scripts/state_census.py
+  - tests/test_state_census.py
+
+  # T1F/T1BD/T1C/T1E/T1H/T1G phase.json doc cleanups (meta-only)
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json
+
+allow_companions:
+  - architecture/script_manifest.yaml
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/**
+
+out_of_scope:
+  # Forbidden source surfaces — explicitly NOT in T2F
+  - src/engine/cycle_runner.py          # owned by T2G
+  - src/engine/cycle_runtime.py         # owned by T2G if needed
+  - src/strategy/**
+  - src/calibration/**
+  - src/data/**
+  - src/riskguard/**
+  - src/contracts/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+  # rebuild_calibration_pairs_v2.py is OUT OF SCOPE — operator-note only, no source edit
+  - scripts/rebuild_calibration_pairs_v2.py
+
+notes:
+  - K1 STATE TRUTH primary surface (typed counter sink). One K0 STATE TRUTH edge in db.py for negative-env validation; reviewer set is opus critic + verifier + git-master per T1 retrospective doctrine (no security-reviewer because no LIVE BOUNDARY surface in T2F).
+  - The ~10 call-site call-through edits across 5 source files MUST preserve the existing logger.warning("telemetry_counter event=...") line verbatim. T2F adds a sibling counters.increment(...) call; it does NOT refactor or remove the legacy log line. Rationale (T1F C-1 + T1BD C-3 + T1C C-3 + T1E C-4 caplog tests assert log-line presence; removing the log line would break caplog ledger).
+  - tests/test_v2_adapter.py, tests/test_polymarket_adapter_submit_safety.py, tests/test_chain_reconciliation_corrected_guard.py, tests/test_harvester_learning_authority.py, tests/test_sqlite_busy_timeout.py, tests/test_state_census.py are read-only context (must continue to pass), NOT in_scope. Any test edit beyond these files is a deviation that requires SendMessage scope amendment.
+  - Tier 2 prerequisite: T1 tier complete (commits af671406 + 0468a9ad + fccbb93c + 72e58e3a + 76ef3796 + 3bcd8778 + 98483e79 all landed per telemetry s3).
+  - Counter sink design choice (per planner Round-1 Amendment 7 in planner_output.md): T1F/T1BD/T1C/T1E shipped with the "logger.warning telemetry_counter event=" pattern as an interim. T2F now resolves the choice toward Option 1 from Amendment 7 (NEW module src/observability/counters.py, in-process thread-safe). Persistence to disk is explicitly OUT OF SCOPE (Option 2 from Amendment 7) — deferred to a possible future T3-counter-persistence phase.
+  - Phase.json doc cleanup: T2F is a meta-cleanup vehicle for the 6 documented LOWs (T1F C-2 files_touched drift, T1BD C-2 lifecycle_events drift, T1C C-1 invariant text vs spirit, T1E C-1 negative-env, T1E C-3 rebuild_all_v2 partial-commit operator note, T1H C-1 ImportError fallback). The T1G C-1 FOK/FAK fixture LOW is OUT OF SCOPE per planner_notes.out_of_scope_explicit (deferred to follow-up phase).
+  - Operator-note for T1E C-3 (rebuild_all_v2 partial-commit) lands in docs/to-do-list/known_gaps.md or equivalent operator-visible doc; coordinator decides exact target via SendMessage at executor brief.

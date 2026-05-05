@@ -1,0 +1,40 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - src/execution/settlement_commands.py
+  - src/state/db.py
+  - tests/test_settlement_commands_schema.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/**
+
+out_of_scope:
+  - src/execution/harvester.py
+  - src/execution/executor.py
+  - src/venue/**
+  - src/strategy/**
+  - src/contracts/**
+  - src/engine/**
+  - src/riskguard/**
+  - src/calibration/**
+  - src/data/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - This phase scope widens the packet-root scope.yaml strictly to the three source/test files T1A needs to edit, plus the test-topology manifest as a companion.
+  - The packet-root scope.yaml at docs/operations/task_2026-05-04_zeus_may3_review_remediation/scope.yaml lists src/** as out_of_scope. This phase scope.yaml supersedes for files admitted in_scope above; the packet-root remains authoritative for everything not listed here.
+  - tests/test_settlement_commands.py (existing) is read-only context, NOT in_scope, because the existing file already passes; add a NEW test file tests/test_settlement_commands_schema.py for the single-source-of-truth relationship test.
+  - architecture/test_topology.yaml MUST receive a row for the new test file (planner verified architecture/test_topology.yaml:211 already has tests/test_settlement_commands.py).
+  - Tier 1 prerequisite: T-1 + T0 + LOCK_DECISION must be complete. RiskGuard daemon must actually be unloaded (T0_DAEMON_UNLOADED.md is currently a BLOCKER).

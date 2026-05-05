@@ -234,6 +234,14 @@ test_trust_policy:
     tests/test_pscb_hook.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
+    tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_venue_envelope_live_bound.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_polymarket_adapter_submit_safety.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_chain_reconciliation_corrected_guard.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_position_projection_d6_counters.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_final_sdk_envelope_persistence.py: {created: "2026-05-05", last_used: "2026-05-05"}
 
 categories:
   core_law_antibody:
@@ -276,6 +284,8 @@ categories:
     - tests/test_cutover_guard.py
     - tests/test_heartbeat_supervisor.py
     - tests/test_v2_adapter.py
+    - tests/test_venue_envelope_live_bound.py
+    - tests/test_polymarket_adapter_submit_safety.py
     - tests/test_collateral_ledger.py
     - tests/test_executable_market_snapshot_v2.py
     - tests/test_provenance_5_projections.py
@@ -1025,3 +1035,242 @@ test_metadata:
       Verifies P2 4.4.B-lite backfill scripts emit completeness manifests and
       return non-zero when failed or missing units exceed the configured
       threshold.
+  tests/test_venue_envelope_live_bound.py:
+    modules: [contracts]
+    category: core_law_antibody
+    profile: r3_venue_submit_live_bound
+    blocks_commit: true
+    asserted_invariants:
+      - T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK
+    source_under_test:
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+    notes: >
+      Contract-level relationship test. Parametrizes over placeholder vs
+      live-bound (condition_id, question_id) pairs. Asserts assert_live_submit_bound()
+      raises for placeholder envelopes and passes for live-bound ones. No SDK, no network.
+  tests/test_polymarket_adapter_submit_safety.py:
+    modules: [venue, contracts]
+    category: core_law_antibody
+    profile: r3_venue_submit_live_bound
+    blocks_commit: true
+    asserted_invariants:
+      - T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK
+      - T1F-COMPAT-SUBMIT-LIMIT-ORDER-REJECTS-OR-FAKE
+      - T1F-PLACEHOLDER-ENVELOPE-FAKE-SDK-COUNT-ZERO
+      - T1F-COUNTER-EMITTED
+    source_under_test:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+    notes: >
+      Fake-SDK safety test. Verifies SDK create_and_post_order/post_order/create_order
+      call_count == 0 when a placeholder envelope is submitted directly or via
+      submit_limit_order without _allow_compat_for_test=True.
+  tests/test_chain_reconciliation_corrected_guard.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_corrected_economics_chain_freeze
+    blocks_commit: true
+    asserted_invariants:
+      - T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES
+      - T1BD-LEGACY-CHAIN-MUTATION-UNCHANGED
+    source_under_test:
+      - src/state/chain_reconciliation.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+    notes: >
+      Relationship test. Parametrizes over (branch, eligible_flag). Eligible=True asserts
+      no D6-field mutation and cost_basis_chain_mutation_blocked_total{field} emitted.
+      Eligible=False asserts mutation proceeds unchanged (legacy invariant preserved).
+      Covers RESCUE, SIZE-MISMATCH, and QUARANTINE branches across all 4 locked D6 fields.
+  tests/test_position_projection_d6_counters.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_corrected_economics_chain_freeze
+    blocks_commit: true
+    asserted_invariants:
+      - T1BD-PROJECTION-DROP-COUNTER
+      - T1BD-LOADER-DEFAULT-COUNTER
+    source_under_test:
+      - src/state/portfolio.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+    notes: >
+      Tests _project_d6_field (projection write) and _load_d6_field (loader read).
+      Projection: eligible position with chain-context value differing from FillAuthority
+      emits position_projection_field_dropped_total{field} and uses FillAuthority value.
+      Loader: missing D6 field emits position_loader_field_defaulted_total{field} and uses default.
+  tests/test_harvester_settlement_redeem.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_harvester_settlement_redeem_learning_split
+    blocks_commit: true
+    asserted_invariants:
+      - T1C-SETTLEMENT-NOT-REDEEM
+    source_under_test:
+      - src/execution/harvester.py
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+    notes: >
+      Relationship test. Asserts record_settlement_result() writes decision_log records
+      without emitting any redeem-state transition, and enqueue_redeem_command() writes
+      a settlement_commands row without touching decision_log. The two effects are
+      structurally independent.
+  tests/test_harvester_learning_authority.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_harvester_settlement_redeem_learning_split
+    blocks_commit: true
+    asserted_invariants:
+      - T1C-LEARNING-AUTHORITY-GATE
+      - T1C-LIVE-PRAW-NOT-TRAINING-DATA
+    source_under_test:
+      - src/execution/harvester.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+    notes: >
+      Relationship test. Parametrizes over (source_model_version, snapshot_training_allowed).
+      Asserts maybe_write_learning_pair() returns 0 and emits
+      harvester_learning_write_blocked_total{reason} for: missing smv, training=False,
+      live-praw (openmeteo) source. Only tigge/ecmwf_ens with training=True writes pairs.
+      Also asserts existing missing-forecast-issue-time guard now emits the counter.
+
+  tests/test_sqlite_busy_timeout.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_sqlite_tactical_mitigation
+    blocks_commit: true
+    asserted_invariants:
+      - T1E-BUSY-TIMEOUT-CONFIGURABLE
+      - T1E-ENV-OVERRIDE-WIRED
+      - T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH
+    source_under_test:
+      - src/state/db.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+    notes: >
+      Unit and relationship tests for T1E SQLite busy-timeout configurability.
+      Asserts _db_busy_timeout_s() yields 30.0s when env unset and 5.0s when
+      ZEUS_DB_BUSY_TIMEOUT_MS=5000. Verifies both _connect (site 1) and
+      get_connection (site 2) apply the env var. Asserts malformed env falls
+      back to 30s (catch-and-log). Asserts connect_or_degrade() returns None
+      and emits db_write_lock_timeout_total on database-is-locked error.
+  tests/test_rebuild_live_sentinel.py:
+    modules: [scripts, state]
+    category: core_law_antibody
+    profile: r3_sqlite_tactical_mitigation
+    blocks_commit: true
+    asserted_invariants:
+      - T1E-REBUILD-SENTINEL-REFUSES
+      - T1E-REBUILD-TRANSACTION-SHARDED
+    source_under_test:
+      - scripts/rebuild_calibration_pairs_v2.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+    notes: >
+      Tests T1E rebuild sentinel and transaction-sharding invariants.
+      Asserts rebuild_calibration_pairs_v2.py exits non-zero when
+      .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
+      never called. Asserts rebuild_v2 shards commits per (city, metric)
+      bucket: conn.commit() call count >= city_count for a single metric spec.
+
+  tests/test_final_sdk_envelope_persistence.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_sdk_envelope_persistence_audit
+    blocks_commit: true
+    asserted_invariants:
+      - T1G-AUDIT-ARTIFACT-WRITTEN
+      - T1G-RELATIONSHIP-TEST-EVERY-PATH
+      - T1G-ONLY-MISSING-PATHS-PATCHED
+    source_under_test:
+      - src/execution/executor.py
+      - src/state/venue_command_repo.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json
+    notes: >
+      Relationship test. Asserts that every live SDK contact site in executor.py
+      persists the SDK-returned _venue_submission_envelope via
+      _persist_final_submission_envelope_payload before appending ACK/REJECTED
+      events. Three tests: entry submit (_live_order:2291), rejected submit
+      (success_false branch via _live_order:2342), exit submit
+      (execute_exit_order:1609). Each uses a fake SDK client returning a
+      distinguishable SDK-returned envelope (raw_response_json populated); asserts
+      a post-submit venue_submission_envelopes row exists and the terminal event
+      payload carries final_submission_envelope_id.
+
+  tests/test_state_census.py:
+    modules: [state, execution]
+    category: core_law_antibody
+    profile: r3_state_census_read_only
+    blocks_commit: true
+    asserted_invariants:
+      - T1H-CENSUS-READ-ONLY
+      - T1H-DATA-UNAVAILABLE-DISTINCT-FROM-NO-REDEEM
+      - T1H-DETECTS-PLACEHOLDER-IDENTITY
+      - T1H-DETECTS-CORRECTED-WITHOUT-FILL-AUTHORITY
+      - T1H-PROVENANCE-HEADER-PRESENT
+    source_under_test:
+      - scripts/state_census.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json
+    notes: >
+      Relationship test for T1H minimal coded state census. Asserts read-only URI
+      mode (mode=ro) is enforced at the sqlite3 driver layer and that attempted
+      writes raise OperationalError. Asserts 0 rows in settlement_commands yields
+      redeem_truth=data_unavailable (not no_redeem_queued). Asserts envelope rows
+      with condition_id starting with legacy: or question_id==legacy-compat yield
+      identity_truth=placeholder and trade_id appears in anomalies. Asserts
+      corrected_executable_economics_eligible=True with non-locked fill_authority
+      yields position_truth=review_required and trade_id in anomalies.
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05
+
+  tests/test_observability_counters.py:
+    modules: [observability]
+    category: core_law_antibody
+    profile: r3_typed_counter_sink
+    blocks_commit: true
+    asserted_invariants:
+      - T2F-COUNTER-SINK-TYPED-API
+    source_under_test:
+      - src/observability/counters.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json
+    notes: >
+      Unit tests for typed counter sink (src/observability/counters.py).
+      Asserts increment/read API, thread safety, label isolation via frozenset key,
+      negative delta rejection (ValueError), reset_all isolation, and emit_typed_counter
+      convenience helper. Named test test_counter_increment_read_isolated_per_label_set
+      satisfies the T2F-COUNTER-SINK-TYPED-API invariant text exactly.
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05
+
+  tests/test_counter_caplog_ledger.py:
+    modules: [observability, state, execution, venue]
+    category: core_law_antibody
+    profile: r3_typed_counter_sink
+    blocks_commit: true
+    asserted_invariants:
+      - T2F-EVERY-T1-COUNTER-EMITS-VIA-SINK
+      - T2F-CAPLOG-LEDGER-ASSERTS-EVERY-EVENT-NAME
+    source_under_test:
+      - src/observability/counters.py
+      - src/venue/polymarket_v2_adapter.py
+      - src/state/db.py
+      - src/state/portfolio.py
+      - src/state/chain_reconciliation.py
+      - src/execution/harvester.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json
+    notes: >
+      Caplog ledger asserting all 7 event names fire both typed sink AND legacy
+      logger.warning. 36 tests total (typed + legacy per event, parametrized over
+      field/reason labels). Actual emit-line count: 17 (planner estimated 10 - deviation
+      logged in BATCH_DONE_T2F).
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05

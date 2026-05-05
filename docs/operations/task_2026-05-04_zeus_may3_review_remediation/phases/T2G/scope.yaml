@@ -1,0 +1,46 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - src/engine/cycle_runner.py
+  - src/execution/harvester.py
+  - tests/test_cycle_runner_db_lock_degrade.py
+  - tests/test_settle_positions_uses_enqueue_redeem.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/**
+
+out_of_scope:
+  - src/state/db.py                       # connect_or_degrade itself unchanged; wiring is in cycle_runner
+  - src/execution/settlement_commands.py  # request_redeem itself unchanged; T1A locked DDL surface
+  - src/state/portfolio.py
+  - src/state/chain_reconciliation.py
+  - src/venue/**
+  - src/contracts/**
+  - src/strategy/**
+  - src/calibration/**
+  - src/data/**
+  - src/riskguard/**
+  - src/observability/**                  # T2F owns; T2G consumes T2F sink read API only
+  - scripts/**                            # CLI scripts use bare _connect; T2G does not refactor them
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - K0 LIVE BOUNDARY surface (cycle_runner.py is the top-level live cycle orchestration hub per src/engine/AGENTS.md:24; harvester._settle_positions is the lifecycle settlement edge writing redeem intents to durable settlement_commands ledger). Reviewer set is critic-opus + verifier-sonnet + security-reviewer-opus + git-master-sonnet per T1 retrospective doctrine (K0 LIVE BOUNDARY = security-reviewer required, matches T1F + T1G).
+  - cycle_runner.py:509 is the SINGLE wiring target for connect_or_degrade. Other _connect / get_connection call sites (CLI scripts, riskguard, tests) are NOT changed. If executor finds additional cycle-write call sites in cycle_runner.py beyond :509, ALL must route through connect_or_degrade — this is enforced by T2G-CYCLE-RUNNER-DEGRADES-NOT-CRASHES.
+  - harvester.py:2006-2025 is the SINGLE wiring target for enqueue_redeem_command in _settle_positions. T2G's category-impossible target requires that no other call site in src/** invokes request_redeem outside enqueue_redeem_command's body — this is enforced by T2G-NO-INLINE-REQUEST-REDEEM via grep + AST inspection in tests/test_settle_positions_uses_enqueue_redeem.py.
+  - tests/test_harvester_settlement_separation.py and tests/test_harvester_learning_authority.py are read-only context (must continue to pass). If executor finds existing test assertions that lock in the inline-request_redeem shape and require surgical update, surface as deviation in BATCH_DONE — do not silently rewrite without coordinator amendment.
+  - Tier 2 prerequisite: T2F landed (T2G consumes T2F-COUNTER-SINK-TYPED-API for the db_write_lock_timeout_total counter emit at the cycle-runner degrade site). Without T2F, T2G's T2G-CONNECT-OR-DEGRADE-COUNTER-WIRED invariant cannot be asserted via typed-sink read-back.
+  - Monkeypatch surface preservation: src/engine/cycle_runner.py:56 comment notes 'fill_tracker.py and tests patch deps.get_connection' — T2G must keep the get_connection alias at line 58 as the indirection point. Recommended approach: keep alias name 'get_connection' but change its target to a wrapper that calls connect_or_degrade and handles None-return. Preserves test monkeypatch surface; changes only the connection-acquisition semantics.
+  - Operator-visible behavior change: prior to T2G, a 'database is locked' OperationalError during the live cycle would crash the daemon (or surface up to launchd's restart loop). Post-T2G, it gracefully degrades the cycle to read-only and increments db_write_lock_timeout_total. This is the intentional realization of T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH at the live-cycle level. Operator should be informed via packet docs.

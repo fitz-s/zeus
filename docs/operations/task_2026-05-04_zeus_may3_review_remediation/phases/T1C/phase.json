@@ -1,0 +1,88 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T1C",
+  "task_id": "zeus-may3-remediation",
+  "title": "Harvester settlement / redeem / learning-write separation",
+  "intent": "Harvester run_harvester() splits its three side-effect responsibilities into three callable functions with three independent authority gates: (1) record_settlement_result(...) writes the settlement fact only, (2) enqueue_redeem_command(...) is a separate lifecycle transition that uses the existing SettlementState.REDEEM_INTENT_CREATED state machine in src/execution/settlement_commands.py, and (3) maybe_write_learning_pair(...) refuses to call harvest_settlement(...) without explicit source/lineage authority \u2014 settlement-recorded is no longer a synonym for redeem-confirmed nor for training-data-eligible.",
+  "files_touched": [
+    "architecture/test_topology.yaml",
+    "src/execution/harvester.py",
+    "tests/test_harvester_learning_authority.py",
+    "tests/test_harvester_settlement_redeem.py"
+  ],
+  "loc_delta_estimate": 600,
+  "introduces_abstraction": false,
+  "cross_module_edges": 0,
+  "domain": "execution/settlement-redeem-learning",
+  "purely_mechanical": false,
+  "test_commands": [
+    "python -m pytest -q tests/test_harvester_settlement_redeem.py",
+    "python -m pytest -q tests/test_harvester_learning_authority.py",
+    "python -m pytest -q tests/test_harvester_split_independence.py",
+    "python -m pytest -q tests/test_harvester_metric_identity.py",
+    "python -m pytest -q tests/test_harvester_dr33_live_enablement.py",
+    "python -m pytest -q tests/test_harvester_high_calibration_v2_route.py"
+  ],
+  "asserted_invariants": [
+    {
+      "id": "T1C-SETTLEMENT-NOT-REDEEM",
+      "text": "After T1C, run_harvester()'s settlement-recorded branch (src/execution/harvester.py:638 _settle_positions and :655-657 store_settlement_records) does not invoke any redeem-state transition. Redeem transitions only occur through the SettlementState.REDEEM_INTENT_CREATED \u2192 REDEEM_SUBMITTED \u2192 REDEEM_CONFIRMED chain in src/execution/settlement_commands.py:71-77, called from a separate enqueue_redeem_command(...) function with its own preconditions."
+    },
+    {
+      "id": "T1C-LEARNING-AUTHORITY-GATE",
+      "text": "harvest_settlement(...) (src/execution/harvester.py:1569) is unreachable from run_harvester() unless the calling context provides a non-empty source_model_version AND snapshot_training_allowed=True (or its equivalent post-T1C lineage object). The existing reject-on-missing-issue-time guard at lines 1597-1603 is preserved; T1C ADDS a hard rejection on missing source/lineage authority and emits harvester_learning_write_blocked_total{reason} on each block."
+    },
+    {
+      "id": "T1C-LIVE-PRAW-NOT-TRAINING-DATA",
+      "text": "When a snapshot's authority is anything other than the explicit training-source allowlist (per _is_training_forecast_source at src/execution/harvester.py:181), harvest_settlement(...) returns 0 pairs and increments harvester_learning_write_blocked_total{reason='live_praw_no_training_lineage'}. Test test_harvester_does_not_rebrand_live_praw_as_training_without_lineage asserts this on a synthetic Open-Meteo / live snapshot input."
+    },
+    {
+      "id": "T1C-DR33-DEFAULT-OFF-PRESERVED",
+      "text": "ZEUS_HARVESTER_LIVE_ENABLED default OFF gate at src/execution/harvester.py:461, src/execution/harvester_pnl_resolver.py:44, and src/ingest/harvester_truth_writer.py:443 remains unchanged. T1C DOES NOT add any new env var that enables harvester live."
+    },
+    {
+      "id": "T1C-NO-LIFECYCLE-MANAGER-WIDEN",
+      "text": "T1C does NOT modify src/state/lifecycle_manager.py. If T1C scope analysis reveals a lifecycle-manager change is required, executor stops and re-plans (this is K0/K1 surface and is forbidden by phase-local scope.yaml)."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T1",
+    "NO-RISKGUARD-DURING-T1",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T0-HARVESTER-POLICY-DEFAULT-OFF",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK",
+    "T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES",
+    "T1BD-PAIRED-COMMIT"
+  ],
+  "expected_artifact": "execution/execution_result.md",
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-04",
+    "round2_grep_verification": {
+      "settlement_state_machine_already_exists": "src/execution/settlement_commands.py:71-77 SettlementState.REDEEM_INTENT_CREATED/REDEEM_SUBMITTED/REDEEM_TX_HASHED/REDEEM_CONFIRMED/REDEEM_FAILED/REDEEM_RETRYING/REDEEM_REVIEW_REQUIRED \u2014 T1C uses this; does not invent new states.",
+      "settlement_record_path": "src/execution/harvester.py:638 _settle_positions(...) is the position-settlement function; src/execution/harvester.py:655-657 store_settlement_records (imported from src/state/decision_chain.py:217) is the settlement-record writer. Today these are inline in run_harvester(); T1C extracts them into named functions.",
+      "learning_pair_path": "src/execution/harvester.py:611-633 is the inline 'event_pairs += harvest_settlement(...)' loop. harvest_settlement is defined at src/execution/harvester.py:1569 and already has TWO authority guards: (a) line 1610-1612 raises ValueError if p_raw_vector is set without source_model_version, (b) line 1597-1603 returns 0 if forecast_issue_time is missing. T1C ADDS a third hard guard: lineage authority check on the snapshot/source pair, with the new counter.",
+      "no_existing_counter_sink": "Planner grep (src/state/, src/observability/, src/riskguard/metrics.py) found no general counter sink. The three *_observation modules in src/state/ are read-only projections, not increment surfaces. T1BD is the first phase to introduce the counter sink decision; T1C reuses whatever T1BD chose."
+    },
+    "t1c_known_gaps_coverage_per_T-1_KNOWN_GAPS_COVERAGE.md": {
+      "G-HARV1": "Harvester live settlement write is HIGH-only for LOW markets \u2014 T1C covers via the metric_identity logic at harvester.py:1614-1618; the fix landed in tests/test_harvester_metric_identity.py (already green per repo state).",
+      "G-HARV2": "Settlement observation lookup ignores authority/station/metric \u2014 T1C covers via _lookup_settlement_obs at harvester.py:391 and _station_matches_city at :381 (both already exist; T1C only adds tests if coverage is missing).",
+      "G-SETTLE": "Settled pending-exit exposure can be skipped indefinitely \u2014 T1C covers via _settle_positions extraction; ensures settled rows write even when the caller is in pending_exit phase.",
+      "G-HARV3": "Harvester can rebrand live decision p_raw as TIGGE training data \u2014 this is the PRIMARY G-HARV3 antibody; covered by T1C-LIVE-PRAW-NOT-TRAINING-DATA invariant + new test."
+    },
+    "loc_estimate_basis": "harvester.py is 1968 lines today. T1C extracts ~150 lines of inline logic from run_harvester() (lines 504-689 region) into 3 named functions, adds ~200 lines of authority-check + counter wiring, and adds ~250 lines of new test code across two test files. Total ~600 LOC delta is conservative.",
+    "topology_admission": "BLOCKED at planner time \u2014 generic profile does not admit src/execution/harvester.py for write-intent edit. Resolution per LOCK_DECISION Amendment 4.",
+    "planning_lock_required": true,
+    "k0_k1_classification": "K2 execution surface (harvester is execution/runtime not state-truth). NOT K0 \u2014 but adjacent because settlement_commands.py is K2 settlement_redeem_command_model. Critic should be opus per ORCHESTRATOR_RUNBOOK \u00a712 T1C row.",
+    "coordinator_blockers": [
+      "T0.2 RiskGuard still RUNNING (PID 14177); operator must unload before dispatch (planner-Round-1 amendment 1 carried forward; coordinator confirmed escalation pending).",
+      "T0.3 venue quiescent attestation pending (planner-Round-1 carried forward).",
+      "Counter-sink module not yet decided; T1BD (predecessor) makes that decision and T1C consumes it."
+    ],
+    "predecessor_dependency": "T1BD MUST land first because T1C reuses the counter-sink and increments harvester_learning_write_blocked_total \u2014 same sink as cost_basis_chain_mutation_blocked_total that T1BD introduces.",
+    "closeout_drift_resolution": "Wrapper-only placement of authority/lineage guards in maybe_write_learning_pair() matches the phase.json invariant text 'wrapper refuses to call harvest_settlement without explicit source/lineage authority' verbatim; the spirit-vs-text concern was about whether the guards belonged INSIDE harvest_settlement's body. Critic verified that wrapper placement preserves the G-HARV3 antibody (tests/test_openmeteo_p_raw_lineage.py::test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair) which would have been broken by inside-body placement (openmeteo legitimately writes training_allowed=0 audit pairs). Decision-of-record: wrapper-only is the structurally correct placement per Fitz #1 (structural decision, not patch)."
+  }
+}

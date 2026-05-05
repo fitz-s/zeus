@@ -676,3 +676,149 @@ markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolut
 Presence of `max_hours_to_resolution` in params → scanner receives `min_hours_to_resolution=0` → <6h markets survive scanner filter.
 
 **Verified:** 2026-05-04 by reading `cycle_runtime.py:1997-2001` on main (`cd882ee9`+). Gap was stale; no code change needed.
+
+---
+
+## Full-flow live audit — Source resolution subcomponents
+
+### [CLOSED P1 — 2026-05-03] Paris config uses LFPG while current markets resolve on LFPB
+
+**Location:** `config/cities.json` Paris `wu_station` and
+`settlement_source`.
+**Problem:** Fresh Gamma daily-temperature probe for 2026-04-28..2026-04-30
+showed Paris HIGH/LOW resolutionSource as WU Bonneuil-en-France `LFPB`, while
+production config still points Paris at `LFPG` / Charles de Gaulle. A broader
+read-only active-event probe found `146` active daily-temperature events and
+`6` station mismatches; all `6` were Paris HIGH/LOW Apr 28-30 with
+`LFPB` vs `LFPG`. Existing LOW backfill evidence also records `LFPB`. A later
+read-only source-boundary sweep found observed Paris HIGH contracts resolving
+on `LFPG` through 2026-04-18 and on `LFPB` from 2026-04-19 onward. Paris LOW
+slugs were not observable for 2026-04-15..2026-04-22 in that sweep; the first
+observable Paris LOW event was 2026-04-23 and resolved on `LFPB`.
+**Impact:** Paris observation, model calibration, signal generation, and
+settlement rebuild can use a different station than the market contract. This
+is a contract/source truth mismatch, not a modeling error.
+**False-positive boundary:** Both WU pages currently respond. The issue is not
+endpoint liveness; it is which WU station the active Polymarket contract names.
+The same active-event probe did not find non-Paris station mismatches among
+recognized configured cities.
+**Resolution (2026-05-01 decision + 2026-05-03 execution):**
+1. `config/cities.json` updated 2026-05-01: `wu_station: LFPB`,
+   `airport_name: Paris-Le Bourget Airport`.
+   Authority: `architecture/paris_station_resolution_2026-05-01.yaml`.
+2. LFPG legacy observation rows deleted by backfill `--replace-station-mismatch`.
+   762 LFPB obs rows backfilled (2024-01-01 → 2026-01-31).
+3. LFPG-derived calibration_pairs_v2 rows (747,150 QUARANTINED) deleted.
+   New LFPB pairs rebuilt over full historical window 2024-01-01→2026-05-01.
+4. Platt models refitted on LFPB pairs (all 8 buckets VERIFIED+active).
+5. Source-contract quarantine released via `state/source_contract_quarantine.json`.
+   Paris removed from `_source_contract_pending_conversions` in `cities.json`.
+6. `architecture/paris_station_resolution_2026-05-01.yaml` marked APPLIED.
+**Verification:** `verify_ready.py` passed with Paris markets in ready list.
+**Evidence:** `docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/11_paris_resync_log.md`
+**Resolved by:** Operator 2026-05-03 execution; all repairs verified.
+
+---
+
+## Discovery-mode window closure
+
+### [CLOSED — 2026-05-04] Day0 capture mode has contradictory resolution-hour filters
+
+**Closed:** 2026-05-04. Gap was valid when filed (original audit showed `MODE_PARAMS[DAY0_CAPTURE]` had no `min_hours_to_resolution`). Subsequent session added compensating logic in `cycle_runtime.py::execute_discovery_phase` (lines 1997-2001):
+```python
+min_hours_to_resolution = params.get("min_hours_to_resolution")
+if min_hours_to_resolution is None:
+    min_hours_to_resolution = 0 if "max_hours_to_resolution" in params else 6
+markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+```
+DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is passed to scanner → <6h markets are not dropped at scanner boundary. The fix is present in current main.
+**Resolved by:** Compensating logic present in main branch (upstream commit); closure verified 2026-05-04.
+
+---
+
+## Execution/venue settlement structural closures (T1+T2+PR#61)
+
+### [CLOSED — 2026-05-05] V2 submit path still uses compatibility envelope
+
+**Location:** `src/venue/polymarket_v2_adapter.py::place_limit_order` and
+`_create_compat_submission_envelope`.
+**Original problem:** The V2 adapter creates placeholder market identity with legacy markers.
+**Structural closure:** T1F phase added `envelope.assert_live_submit_bound()` at adapter.py:319 which raises ValueError on compat envelope. Additionally, `submit_limit_order()` (compat shim) explicitly returns `_rejected_submit_result()` with error_code="COMPAT_SUBMIT_NOT_PERMITTED_IN_LIVE" at line 571. The compat envelope is structurally quarantined from the live path.
+**Resolved by:** T1F (commit 0468a9ad); closure verified 2026-05-05.
+
+---
+
+### [CLOSED — 2026-05-05] Harvester can rebrand live decision p_raw as TIGGE training data
+
+**Location:** `src/execution/harvester.py::maybe_write_learning_pair`,
+`src/execution/harvester.py::harvest_settlement`.
+**Original problem:** Live decision p_raw could be stored as TIGGE training rows via source rebranding.
+**Structural closure:** T1C wraps `harvest_settlement()` in `maybe_write_learning_pair()` wrapper with T1C-LEARNING-AUTHORITY-GATE: gate refuses unless `snapshot_training_allowed=True`. Live p_raw (source_model_version='live_v1') cannot pass the wrapper. Caller must explicitly set training flag; default-False semantics prevent silent rebranding.
+**Resolved by:** T1C (commit 72e58e3a); closure verified via test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair.
+
+---
+
+### [CLOSED — 2026-05-05] Final SDK submission envelope is not persisted after CLOB submit
+
+**Location:** `src/execution/executor.py::_persist_final_submission_envelope_payload`,
+`src/state/venue_command_repo.py::insert_submission_envelope`.
+**Original problem:** SDK-produced envelope was transient; no durable append-only persistence.
+**Structural closure:** T1G audit (sdk_envelope_path_audit.md) verified 7 VERIFIED_PERSISTS sites where `_persist_final_submission_envelope_payload()` is called (lines 1609, 2291, and 5 vault paths). SDK response flows into `insert_submission_envelope()`. Persistent, linked, and audited.
+**Resolved by:** T1G (commit 3bcd8778); closure verified via sdk_envelope_path_audit.md + test_final_sdk_envelope_persistence.
+
+---
+
+### [CLOSED — 2026-05-05] Harvester live settlement write is HIGH-only for LOW markets
+
+**Location:** `src/execution/harvester.py::_write_settlement_truth`,
+`src/execution/harvester.py::_lookup_settlement_obs`, `src/execution/harvester.py::run_harvester`.
+**Original problem:** Settlement path only handled HIGH metric; LOW markets would be written as HIGH.
+**Structural closure:** T1C updated `_write_settlement_truth()` to accept `temperature_metric` parameter. `_lookup_settlement_obs()` also accepts `temperature_metric` and routes via `_metric_identity_for()`. Metric-aware observation lookup and settlement routing are now in place. HIGH and LOW markets resolve with correct observation fields.
+**Resolved by:** T1C (commits 72e58e3a + calibration-transfer path); closure verified via test_harvester_settlement_redeem.
+
+---
+
+### [CLOSED — 2026-05-05] Settlement observation lookup ignores authority, station, and metric identity
+
+**Location:** `src/execution/harvester.py::_lookup_settlement_obs`.
+**Original problem:** Query did not enforce VERIFIED authority, station match, or metric field presence.
+**Structural closure:** T1C+T1BD added explicit checks: `authority == 'VERIFIED'`, `station_id` match via `_station_matches_city()`, and metric_field via `metric_identity.observation_field`. All three constraints are now enforced in the query loop. Quarantined observations are filtered.
+**Resolved by:** T1C (commit 72e58e3a) + T1BD authority freeze; closure verified via test_harvester_learning_authority + test_chain_reconciliation_corrected_guard.
+
+---
+
+### [CLOSED — 2026-05-05] Calibration maturity edge-threshold multiplier is dead on the live path
+
+**Location:** `src/engine/evaluator.py::evaluate_candidate`.
+**Original problem:** The multiplier was declared in manager.py but never applied before FDR/edge selection.
+**Structural closure:** PR #61 added explicit `maturity_multiplier = edge_threshold_multiplier(cal_level)` calculation at evaluator.py line ~1625. If `cal_level >= 4`, entry is blocked at `CALIBRATION_IMMATURE` stage BEFORE edge/FDR selection. Multiplier is also passed to `compute_alpha()`. Previously dead gate now enforces maturity constraints.
+**Resolved by:** PR #61 (commit cf177799); closure verified via test_evaluator_phase_beta_wiring + test_market_analysis_transfer_uncertainty.
+
+---
+
+### [CLOSED — 2026-05-05] Settled pending-exit exposure can be skipped indefinitely
+
+**Location:** `src/execution/harvester.py::_settle_positions`.
+**Original problem:** Positions in `pending_exit` were skipped unless `exit_state == "backoff_exhausted"`.
+**Structural closure:** T1C updated skip condition logic: `pending_exit_at_settlement = state_name == "pending_exit"` now ALLOWS settlement if in that state (not blanket skip). Settlement logic walks through all non-terminal states including `pending_exit`. Additionally, P6 phase-check via `position_current` DB table added for idempotency.
+**Resolved by:** T1C (commit 72e58e3a); closure verified via test_settle_positions_uses_enqueue_redeem.
+
+---
+
+### [CLOSED — 2026-05-05] Filled-command idempotency collision can rematerialize without order id
+
+**Location:** `src/execution/executor.py::_orderresult_from_existing`.
+**Original problem:** FILLED collision path set `external_order_id` but not `order_id`, causing silent order-id loss on recovery.
+**Structural closure:** T2G updated both ACKED and FILLED branches in `_orderresult_from_existing()` to set `order_id=existing.venue_order_id` in addition to `external_order_id`. Order ID is now preserved through idempotency collision recovery.
+**Resolved by:** T2G (commit ca48d7f9); closure verified via test_settle_positions_uses_enqueue_redeem + test_harvester_settlement_redeem.
+
+---
+
+### [CLOSED — 2026-05-05] Exit partial fills do not reduce local position exposure
+
+**Location:** `src/execution/exit_lifecycle.py::check_pending_exits`,
+`src/execution/exit_lifecycle.py::_apply_partial_exit_fill`.
+**Original problem:** PARTIAL exit status was observed but not materialized; local shares remained unchanged.
+**Structural closure:** T1C added `_apply_partial_exit_fill()` helper which now triggers on PARTIAL status, reducing `position.effective_shares`, updating `cost_basis_usd` with remaining-ratio adjustment, and marking `exit_state='sell_pending'`. Remaining unsold shares are queued for retry. Partial fills now reduce local exposure immediately.
+**Resolved by:** T1C (commit 72e58e3a); closure verified via test_exit_safety.py + test_lifecycle.py partial-fill coverage.
+

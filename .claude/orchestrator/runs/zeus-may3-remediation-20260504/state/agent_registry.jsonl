@@ -1,0 +1,36 @@
+{"phase":"T1A","role":"critic","batch":"B2","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE","registered_at":"2026-05-05T04:55:00Z"}
+{"phase":"T1A","role":"verifier","batch":"B2","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","registered_at":"2026-05-05T04:55:00Z"}
+{"phase":"T1F","role":"executor","batches":["B1","B2","B3"],"agentId":"a18a286184cefb3e3","model":"sonnet","registered_at":"2026-05-05T00:30:00Z"}
+{"phase":"T1F","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1A B2 critic","registered_at":"2026-05-05T00:35:00Z"}
+{"phase":"T1F","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1A B2 verifier","registered_at":"2026-05-05T00:35:00Z"}
+{"phase":"T1F","role":"security-reviewer","agentId":"a5102a8d447756d23","model":"opus","verdict":"APPROVE_WITH_MITIGATIONS","registered_at":"2026-05-05T00:35:00Z"}
+{"phase":"T1BD","role":"executor","batches":["B1"],"agentId":"a718f2faf84d36c7c","model":"sonnet","registered_at":"2026-05-05T01:00:00Z"}
+{"phase":"T1BD","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1F critic","registered_at":"2026-05-05T01:05:00Z"}
+{"phase":"T1BD","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1F verifier","registered_at":"2026-05-05T01:05:00Z"}
+{"phase":"T1C","role":"executor","batches":["B1"],"agentId":"ac3118009377fef7a","model":"sonnet","registered_at":"2026-05-05T01:30:00Z"}
+{"phase":"T1C","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1BD critic","registered_at":"2026-05-05T01:35:00Z"}
+{"phase":"T1C","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1BD verifier","registered_at":"2026-05-05T01:35:00Z"}
+{"phase":"T1E","role":"executor","batches":["B1"],"agentId":"abb85a2001a1c5a97","model":"sonnet","registered_at":"2026-05-05T01:50:00Z"}
+{"phase":"T1E","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1C critic","registered_at":"2026-05-05T01:55:00Z"}
+{"phase":"T1E","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1C verifier","registered_at":"2026-05-05T01:55:00Z"}
+{"phase":"T1G","role":"executor","batches":["B1"],"agentId":"a6b34b7d52a61caee","model":"sonnet","registered_at":"2026-05-05T02:10:00Z"}
+{"phase":"T1G","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1E critic","registered_at":"2026-05-05T02:15:00Z"}
+{"phase":"T1G","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1E verifier","registered_at":"2026-05-05T02:15:00Z"}
+{"phase":"T1G","role":"security-reviewer","agentId":"a5102a8d447756d23","model":"opus","verdict":"APPROVE","reuse_of":"T1F security","registered_at":"2026-05-05T02:15:00Z"}
+{"phase":"T1H","role":"executor","batches":["B1"],"agentId":"a3bb08471629c9efb","model":"sonnet","registered_at":"2026-05-05T02:30:00Z"}
+{"phase":"T1H","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1G critic","registered_at":"2026-05-05T02:35:00Z"}
+{"phase":"T1H","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1G verifier","registered_at":"2026-05-05T02:35:00Z"}
+{"phase":"T2-plan","role":"planner","agentId":"a87f4bd50441a3d45","model":"opus","verdict":"PLAN_DONE_T2","registered_at":"2026-05-05T07:45:00Z","note":"T2F (K1, 6 inv, ~700 LOC) + T2G (K0, 5 inv, ~250 LOC); deviation: 7 distinct counter event names (not ~12)"}
+{"phase":"T2F","role":"executor","batches":["B1"],"agentId":"aeff8fe3d71243948","model":"sonnet","registered_at":"2026-05-05T08:15:00Z","note":"DEV-1 17 actual emits + DEV-2 caplog fixture token_id; 86 new tests"}
+{"phase":"T2F","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1H critic","registered_at":"2026-05-05T08:25:00Z"}
+{"phase":"T2F","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1H verifier","registered_at":"2026-05-05T08:25:00Z"}
+{"phase":"T2G","role":"executor","batches":["B1"],"agentId":"ad9b7c7a2efb28c00","model":"sonnet","registered_at":"2026-05-05T08:50:00Z","note":"DEV-1 get_connection function not alias; rationale (circular import) invalidated by critic — cargo-cult"}
+{"phase":"T2G","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T2F critic","registered_at":"2026-05-05T09:25:00Z"}
+{"phase":"T2G","role":"security-reviewer","agentId":"a5102a8d447756d23","model":"opus","verdict":"APPROVE_WITH_MITIGATIONS","reuse_of":"T1G security","registered_at":"2026-05-05T09:25:00Z","note":"0/0/2 MEDIUM; no fix; runbook follow-up"}
+{"phase":"T2G","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2F verifier","registered_at":"2026-05-05T09:25:00Z"}
+{"phase":"T2H","role":"executor","batches":["B1"],"agentId":"a4a980c69da800e80","model":"sonnet","registered_at":"2026-05-05T10:35:00Z","note":"DEV-1 grep_count=2 INVARIANT_AMEND via AMD-T2H-4; DEV-2 non-existent test cite APPROVE via AMD-T2H-5"}
+{"phase":"T2H","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T2G critic","registered_at":"2026-05-05T10:55:00Z","note":"resumed once mid-investigation via SendMessage nudge"}
+{"phase":"T2H","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2G verifier","registered_at":"2026-05-05T10:55:00Z"}
+{"phase":"T2I","role":"executor","batches":["B1"],"agentId":"addbcb8a66060b244","model":"sonnet","registered_at":"2026-05-05T13:50:00Z","note":"3 commits A/B/C; DEV-1 chain_reconciliation indentation fixed inline; 0 hoist reverts (counters.py stdlib-only)"}
+{"phase":"T2I","role":"critic","agentId":"aefdc210c5c6eea0b","model":"opus","verdict":"APPROVE","registered_at":"2026-05-05T14:25:00Z","note":"FRESH critic dispatched per coordinator self-audit decision (persistent critic at ~448K context cliff); APPROVE = first clean APPROVE of the run, 0 caveats"}
+{"phase":"T2I","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2H verifier","registered_at":"2026-05-05T14:25:00Z"}

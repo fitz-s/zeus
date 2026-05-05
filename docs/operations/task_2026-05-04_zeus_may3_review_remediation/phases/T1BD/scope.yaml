@@ -1,0 +1,41 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - src/engine/lifecycle_events.py
+  - src/state/chain_reconciliation.py
+  - src/state/portfolio.py
+  - tests/test_chain_reconciliation_corrected_guard.py
+  - tests/test_position_projection_d6_counters.py
+
+allow_companions:
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/**
+
+out_of_scope:
+  - src/execution/**
+  - src/venue/**
+  - src/strategy/**
+  - src/contracts/**
+  - src/data/**
+  - src/riskguard/**
+  - src/calibration/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - K0/K1 surface (state truth, lifecycle, chain reconciliation). Opus critic + extended verification required per ORCHESTRATOR_RUNBOOK §12.
+  - T1B (chain-reconciliation freeze) and T1D (projection/loader counters) MUST land in ONE commit (paired). Splitting violates F2 / MASTER_PLAN_v2 §2.
+  - Counter sink: planner has not enumerated; executor must use the existing telemetry/counter module identified by topology. If no module is admitted, executor stops and asks coordinator (do not invent a new counter module in T1BD).
+  - tests/ directory only admits the two NEW relationship tests; existing test files remain read-only context.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md (riskguard unload + re-attest), T0_VENUE_QUIESCENT.md, T0_D6_FIELD_LOCK.md (planner-prepared, REALITY_ANSWERED), and T1F closeout evidence.
+  - The 5 chain-mutation branches and 20 mutation sites enumerated in phase.json _planner_notes must each be guarded; partial coverage fails T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES.

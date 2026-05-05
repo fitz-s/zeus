@@ -57,6 +57,7 @@ from src.state.portfolio import (
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
 from src.riskguard.discord_alerts import alert_redeem
+from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,150 @@ def _lookup_settlement_obs(
     return None
 
 
+# ---------------------------------------------------------------------------
+# T1C extracted functions — settlement / redeem / learning-write separation
+# ---------------------------------------------------------------------------
+
+def record_settlement_result(
+    trade_conn,
+    settlement_records: "list[SettlementRecord]",
+    stage2_preflight: dict,
+) -> int:
+    """Write settlement records to the decision_log table and return count written.
+
+    T1C-SETTLEMENT-NOT-REDEEM: this function ONLY writes settlement facts.
+    It does NOT invoke any redeem-state transition. Redeem transitions are
+    the sole responsibility of enqueue_redeem_command().
+    """
+    if not settlement_records:
+        return 0
+    if "decision_log" in stage2_preflight.get("stage2_missing_trade_tables", []):
+        legacy_skipped = len(settlement_records)
+        logger.warning(
+            "Legacy settlement record storage skipped: decision_log missing; records=%d",
+            legacy_skipped,
+        )
+        return 0
+    store_settlement_records(trade_conn, settlement_records, source="harvester")
+    return len(settlement_records)
+
+
+def enqueue_redeem_command(
+    conn,
+    *,
+    condition_id: str,
+    payout_asset: str,
+    market_id: Optional[str] = None,
+    pusd_amount_micro: Optional[int] = None,
+    token_amounts: Optional[dict] = None,
+    trade_id: str = "",
+) -> dict:
+    """Enqueue a durable redeem-intent command in the settlement_commands ledger.
+
+    T1C-SETTLEMENT-NOT-REDEEM: this function is the ONLY entry point for
+    redeem-state transitions. It uses SettlementState.REDEEM_INTENT_CREATED
+    from src/execution/settlement_commands.py (read-only import; that module
+    is NOT modified by T1C).
+
+    Returns dict with keys: status ("queued" | "already_exists" | "error"),
+    command_id (str | None), reason (str | None).
+    """
+    from src.execution.settlement_commands import request_redeem, SettlementState  # noqa: F401 — verify import only
+    try:
+        command_id = request_redeem(
+            condition_id,
+            payout_asset,
+            market_id=market_id or condition_id,
+            pusd_amount_micro=pusd_amount_micro,
+            token_amounts=token_amounts or {},
+            conn=conn,
+        )
+        logger.info(
+            "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",
+            trade_id,
+            condition_id,
+            command_id,
+        )
+        return {"status": "queued", "command_id": command_id, "reason": None}
+    except Exception as exc:
+        logger.warning("Redeem deferred for %s: %s (pUSD still claimable later)", trade_id, exc)
+        return {"status": "error", "command_id": None, "reason": str(exc)}
+
+
+def maybe_write_learning_pair(
+    conn,
+    city: "City",
+    target_date: str,
+    winning_label: str,
+    all_labels: list,
+    context: dict,
+    temperature_metric: str,
+) -> int:
+    """Authority-gated wrapper for harvest_settlement().
+
+    T1C-LEARNING-AUTHORITY-GATE: refuses to write calibration pairs unless:
+      - context provides a non-empty source_model_version, AND
+      - context provides snapshot_training_allowed=True (or snapshot_learning_ready=True)
+
+    T1C-LIVE-PRAW-NOT-TRAINING-DATA: also refuses if the snapshot's source is
+    not in the explicit training-source allowlist (_is_training_forecast_source).
+
+    Emits harvester_learning_write_blocked_total{reason} on each block.
+    Returns the number of pairs written (0 on any block).
+    """
+    source_model_version = context.get("source_model_version") or ""
+    snapshot_training_allowed = bool(
+        context.get("snapshot_training_allowed")
+        or context.get("snapshot_learning_ready", False)
+    )
+
+    # Pre-screen: missing authority — harvest_settlement will also check, but
+    # we emit the counter here so the caller's log captures the rejection.
+    if not str(source_model_version).strip() or not snapshot_training_allowed:
+        _cnt_inc(
+            "harvester_learning_write_blocked_total",
+            labels={"reason": "missing_source_model_version_or_lineage"},
+        )
+        logger.warning(
+            "telemetry_counter event=harvester_learning_write_blocked_total "
+            "reason=missing_source_model_version_or_lineage"
+        )
+        return 0
+
+    # Pre-screen: live/non-training source.
+    if not _is_training_forecast_source(source_model_version):
+        _cnt_inc(
+            "harvester_learning_write_blocked_total",
+            labels={"reason": "live_praw_no_training_lineage"},
+        )
+        logger.warning(
+            "telemetry_counter event=harvester_learning_write_blocked_total "
+            "reason=live_praw_no_training_lineage"
+        )
+        return 0
+
+    # Delegate to harvest_settlement which performs the same guards again
+    # (defence-in-depth) and the actual DB write.
+    return harvest_settlement(
+        conn,
+        city,
+        target_date,
+        winning_label,
+        all_labels,
+        context["p_raw_vector"],
+        lead_days=context["lead_days"],
+        forecast_issue_time=context["issue_time"],
+        forecast_available_at=context["available_at"],
+        source_model_version=source_model_version,
+        temperature_metric=temperature_metric,
+        snapshot_id=context.get("decision_snapshot_id"),
+        snapshot_training_allowed=snapshot_training_allowed,
+        forecast_source=context.get("forecast_source", ""),
+        pair_data_version=context.get("source_model_version"),
+        causality_status=context.get("snapshot_causality_status") or "OK",
+    )
+
+
 def run_harvester() -> dict:
     """Run one harvester cycle. Polls for settled markets.
 
@@ -612,23 +757,16 @@ def run_harvester() -> dict:
             for context in learning_contexts:
                 if context.get("temperature_metric") != temperature_metric:
                     continue
-                event_pairs += harvest_settlement(
+                # T1C: route through maybe_write_learning_pair() which enforces
+                # source/lineage authority before calling harvest_settlement().
+                event_pairs += maybe_write_learning_pair(
                     shared_conn,
                     city,
                     target_date,
                     winning_label,
                     all_labels,
-                    context["p_raw_vector"],
-                    lead_days=context["lead_days"],
-                    forecast_issue_time=context["issue_time"],
-                    forecast_available_at=context["available_at"],
-                    source_model_version=context["source_model_version"],
-                    temperature_metric=temperature_metric,
-                    snapshot_id=context.get("decision_snapshot_id"),
-                    snapshot_training_allowed=bool(context.get("snapshot_learning_ready", False)),
-                    forecast_source=context.get("forecast_source", ""),
-                    pair_data_version=context.get("source_model_version"),
-                    causality_status=context.get("snapshot_causality_status") or "OK",
+                    context,
+                    temperature_metric,
                 )
             total_pairs += event_pairs
             if event_pairs > 0:
@@ -652,15 +790,13 @@ def run_harvester() -> dict:
             logger.error("Harvester error for event %s: %s",
                          event.get("slug", "?"), e)
 
-    legacy_settlement_records_skipped = 0
-    if settlement_records and "decision_log" not in stage2_preflight.get("stage2_missing_trade_tables", []):
-        store_settlement_records(trade_conn, settlement_records, source="harvester")
-    elif settlement_records:
-        legacy_settlement_records_skipped = len(settlement_records)
-        logger.warning(
-            "Legacy settlement record storage skipped: decision_log missing; records=%d",
-            legacy_settlement_records_skipped,
-        )
+    # T1C: settlement record write is now isolated in record_settlement_result().
+    # No redeem transitions here; those occur inside _settle_positions() via
+    # enqueue_redeem_command() which wraps the settlement_commands.request_redeem call.
+    n_written = record_settlement_result(trade_conn, settlement_records, stage2_preflight)
+    legacy_settlement_records_skipped = (
+        len(settlement_records) - n_written if settlement_records and n_written == 0 else 0
+    )
 
     # DT#1 / INV-17: DB commits FIRST, then JSON exports.
     # harvester has no artifact row, so db_op returns None.
@@ -1594,11 +1730,21 @@ def harvest_settlement(
     season = season_from_date(target_date, lat=city.lat)
     now = forecast_available_at or datetime.now(timezone.utc).isoformat()
     issue_time = str(forecast_issue_time or "").strip()
+    # Guard: missing forecast_issue_time when p_raw is present — preserve existing
+    # behaviour and emit counter (T1C adds the counter; the return-0 already existed).
     if p_raw_vector and not issue_time:
         logger.warning(
             "Skipping calibration harvest for %s %s: forecast_issue_time is missing",
             city.name,
             target_date,
+        )
+        _cnt_inc(
+            "harvester_learning_write_blocked_total",
+            labels={"reason": "missing_forecast_issue_time"},
+        )
+        logger.warning(
+            "telemetry_counter event=harvester_learning_write_blocked_total "
+            "reason=missing_forecast_issue_time"
         )
         return 0
     if bias_corrected is None:
@@ -1865,31 +2011,23 @@ def _settle_positions(
             if strategy_tracker is not None:
                 strategy_tracker.record_settlement(closed)
 
-        # T2-G / R3 Z4: Redemption is gated by Q-FX-1 and durable R1
-        # settlement commands. Z4 may wire the fail-closed edge but must not
-        # perform direct live redemption side effects.
+        # T2G-NO-INLINE-REQUEST-REDEEM: all redeem-state transitions route through
+        # enqueue_redeem_command (the single auditable entry point per T1C +
+        # T2G-REDEEM-STATE-TRANSITION-AUDITABLE). The prior inline
+        # 'from src.execution.settlement_commands import request_redeem' block
+        # is removed here; request_redeem is only called inside
+        # enqueue_redeem_command's body (src/execution/harvester.py:~499).
         if exit_price > 0 and pos.condition_id:
-            try:
-                from src.execution.settlement_commands import request_redeem
-
-                redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-                command_id = request_redeem(
-                    pos.condition_id,
-                    "pUSD",
-                    market_id=getattr(pos, "market_id", "") or pos.condition_id,
-                    pusd_amount_micro=int(round(shares * 1_000_000)),
-                    token_amounts={redeem_token_id: shares} if redeem_token_id else {},
-                    conn=conn,
-                )
-                logger.info(
-                    "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",
-                    pos.trade_id,
-                    pos.condition_id,
-                    command_id,
-                )
-            except Exception as exc:
-                logger.warning("Redeem deferred for %s: %s (pUSD still claimable later)",
-                               pos.trade_id, exc)
+            redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+            enqueue_redeem_command(
+                conn,
+                condition_id=pos.condition_id,
+                payout_asset="pUSD",
+                market_id=getattr(pos, "market_id", "") or pos.condition_id,
+                pusd_amount_micro=int(round(shares * 1_000_000)),
+                token_amounts={redeem_token_id: shares} if redeem_token_id else {},
+                trade_id=pos.trade_id,
+            )
 
         # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)
         token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id

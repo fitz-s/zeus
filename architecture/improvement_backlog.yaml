@@ -74,3 +74,159 @@ entries:
       capsule has a non-chat persistence target.  V2 (topology_doctor
       admission) deferred — separate entry will be raised when the
       operator picks an intent vocabulary for improvement_backlog_write.
+
+  - id: P4-2026-05-05
+    title: "Planner test-file pre-lock validation (ls-verify cited test_commands)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@T2H-executor + capsule@verifier-persistent"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2H phase.json cited tests/test_cycle_runner_smoke.py in test_commands;
+      file never existed. Surfaced as DEV-2; resolved by AMD-T2H-5 removing
+      4 live citations. Planner should run `ls tests/test_*.py | grep <cited>`
+      as a pre-lock step and only cite existing files in test_commands.
+
+  - id: P5-2026-05-05
+    title: "Known-gaps mandatory label-verification step (read code, not header age)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@explore-known-gaps-archive"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      Conservative archive pass moved 2 entries; sharpened pass moved 9 more
+      by reading actual code instead of trusting [OPEN P1] headers (filed
+      before T1+T2 work). Live-file labels lag code reality by >=1 tier;
+      no auto-update mechanism. Future gap audits should grep for the
+      described problem in current code, not the header age. Especially
+      relevant for parameter-threading patterns (4 of 9 sharpened closures
+      involved temperature_metric threading).
+
+  - id: P6-2026-05-05
+    title: "Operator-runbook gate for fail-loud -> fail-open K0 LIVE BOUNDARY transitions"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@security-reviewer"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2G converted database-locked OperationalError from daemon-crash
+      (fail-loud) to graceful read-only degrade (fail-open). Security
+      surfaced SEC-MEDIUM-2: phase.json _planner_notes.operator_awareness
+      doesn't reach oncall — needs top-level docs/runbooks/ entry. T2H
+      added the runbook (commit f5654ef0). Codify as checklist gate: any
+      K0 LIVE BOUNDARY phase that flips fail-loud -> fail-open MUST
+      include a top-level runbook deliverable in the same phase.
+
+  - id: P7-2026-05-05
+    title: "Bare-except connection-plumbing audit script"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@security-reviewer"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2I-A narrowed cycle_runner.py:81-82 from `except Exception: pass`
+      to `except sqlite3.OperationalError`. Pattern likely exists at other
+      connection-plumbing sites. Build scripts/audit_silent_degrade.py
+      that greps `except Exception:.*pass` near get_connection / ATTACH /
+      sqlite3 calls and returns {file, line, suggested_narrow_class}.
+
+      VISIONIST_REFINE 2026-05-05 (opus a128a7c65b394ebdb): scope as a
+      ONE-TIME audit task (single script run + cleanup), not as ongoing
+      doctrine. The audit either closes the gap or surfaces remaining
+      sites for narrow-typing; do not codify "always grep for bare-except
+      near IO" as a permanent rule.
+
+  - id: P8-2026-05-05
+    title: "AST counter-census helper (walk Call nodes to _cnt_inc)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@verifier-persistent + capsule@executor-t2f"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2F multiline `_cnt_inc` calls (event name on next line) caused
+      planner undercount (10 estimated vs 17 actual); single-line grep
+      cannot capture the pattern.
+
+      VISIONIST_REFINE 2026-05-05 (opus a128a7c65b394ebdb): replace "build
+      a bespoke scripts/counter_census.py helper" with "use ast-grep
+      (mcp__plugin_oh-my-claudecode_t__ast_grep_search) or an LSP-aware
+      query for symbol counts; never single-line grep". Bespoke helper is
+      premature when existing AST-aware tools suffice. Reframe deliverable:
+      planner+verifier doctrine update saying "for any 'how many call
+      sites of X' question, use ast-grep, not single-line grep".
+
+  - id: P9-2026-05-05
+    title: "DATA_DEGRADED early-return canonical template (None-guard before IO)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@executor-t2g"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2G's cycle_runner.py:537-548 implements the correct Zeus idiom:
+      conn = get_connection(); if conn is None: return summary BEFORE
+      any DB write. Codify in docs/reference/zeus_execution_lifecycle_reference.md
+      as the canonical write-path degrade template; add an AST check that
+      flags write-path functions which call connect_or_degrade without an
+      immediate None-guard early-return.
+
+  - id: P10-2026-05-05
+    title: "AST FunctionDef-walk import-location enforcement (vs grep)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@executor-t2g"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2G-NO-INLINE-REQUEST-REDEEM via grep returns count=4 including 1
+      comment line; AST test in tests/test_settle_positions_uses_enqueue_redeem.py
+      walks FunctionDef nodes correctly. Promote AST FunctionDef-walk as
+      the canonical import-location enforcement layer for any "no inline
+      X" invariant. Build tests/_helpers/import_location_ast.py reusable
+      across future Fitz #4 wiring invariants.
+
+  - id: P11-2026-05-05
+    title: "Sink-supplements-log-not-replaces design pattern (additive observability)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@executor-t2f"
+    status: rejected
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    rationale: >
+      Visionist-opus (a128a7c65b394ebdb) judged 2026-05-05 as REJECT:
+      "specific architectural fact about T2F observability; not a
+      generalizable lesson". The additive-not-replacement choice was a
+      one-time T2F design call; promoting it to project doctrine over-fits
+      one phase's design choice. The underlying principle (don't break
+      legacy log-line greps) is already covered by the broader stability-
+      of-existing-interfaces convention.
+    notes: >
+      Original capsule observation retained for reference: T2F typed
+      counter sink supplements (not replaces) existing logger.warning
+      lines at all 17 sites; zero-risk for existing log parsers and
+      alerting rules.
+
+  - id: P12-2026-05-05
+    title: "caplog RESCUE-branch fixture token_id wiring pattern"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@executor-t2f"
+    status: rejected
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    rationale: >
+      Visionist-opus (a128a7c65b394ebdb) judged 2026-05-05 as REJECT:
+      "specific test-fixture detail for one branch. Not a lesson — it's a
+      debugging note." A single test-fixture wiring choice does not
+      generalize to backlog-worthy doctrine; if it recurs, an inline
+      fixture-builder helper in tests/_helpers/ can address it without a
+      project-level entry.
+
+  - id: P13-2026-05-05
+    title: "test_topology.yaml hook-friendly edit helper (avoid ARCH_PLAN_EVIDENCE workaround)"
+    raised_at: "2026-05-05"
+    raised_by: "capsule@executor-t2f + coordinator-direct-experience"
+    status: proposed
+    detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    notes: >
+      T2F executor bypassed pre-edit hook on architecture/test_topology.yaml
+      via subprocess python3. Coordinator hit the same hook on
+      architecture/improvement_backlog.yaml at run-end (this very entry).
+      Build scripts/register_test_topology.py that supplies the
+      ARCH_PLAN_EVIDENCE contract correctly. Operator decision needed:
+      tighten the hook (fewer bypasses) or relax for routine entries.
