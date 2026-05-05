@@ -235,6 +235,8 @@ test_trust_policy:
     tests/test_no_synthetic_provenance_marker.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlements_physical_quantity_invariant.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_venue_envelope_live_bound.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_polymarket_adapter_submit_safety.py: {created: "2026-05-04", last_used: "2026-05-04"}
 
 categories:
   core_law_antibody:
@@ -277,6 +279,8 @@ categories:
     - tests/test_cutover_guard.py
     - tests/test_heartbeat_supervisor.py
     - tests/test_v2_adapter.py
+    - tests/test_venue_envelope_live_bound.py
+    - tests/test_polymarket_adapter_submit_safety.py
     - tests/test_collateral_ledger.py
     - tests/test_executable_market_snapshot_v2.py
     - tests/test_provenance_5_projections.py
@@ -1026,3 +1030,37 @@ test_metadata:
       Verifies P2 4.4.B-lite backfill scripts emit completeness manifests and
       return non-zero when failed or missing units exceed the configured
       threshold.
+  tests/test_venue_envelope_live_bound.py:
+    modules: [contracts]
+    category: core_law_antibody
+    profile: r3_venue_submit_live_bound
+    blocks_commit: true
+    asserted_invariants:
+      - T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK
+    source_under_test:
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+    notes: >
+      Contract-level relationship test. Parametrizes over placeholder vs
+      live-bound (condition_id, question_id) pairs. Asserts assert_live_submit_bound()
+      raises for placeholder envelopes and passes for live-bound ones. No SDK, no network.
+  tests/test_polymarket_adapter_submit_safety.py:
+    modules: [venue, contracts]
+    category: core_law_antibody
+    profile: r3_venue_submit_live_bound
+    blocks_commit: true
+    asserted_invariants:
+      - T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK
+      - T1F-COMPAT-SUBMIT-LIMIT-ORDER-REJECTS-OR-FAKE
+      - T1F-PLACEHOLDER-ENVELOPE-FAKE-SDK-COUNT-ZERO
+      - T1F-COUNTER-EMITTED
+    source_under_test:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+    notes: >
+      Fake-SDK safety test. Verifies SDK create_and_post_order/post_order/create_order
+      call_count == 0 when a placeholder envelope is submitted directly or via
+      submit_limit_order without _allow_compat_for_test=True.

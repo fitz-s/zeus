@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -26,6 +27,8 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 DEFAULT_Q1_EGRESS_EVIDENCE = Path(
@@ -310,6 +313,19 @@ class PolymarketV2Adapter:
         )
 
     def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult:
+        # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
+        # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
+        try:
+            envelope.assert_live_submit_bound()
+        except ValueError as exc:
+            logger.warning(
+                "telemetry_counter event=placeholder_envelope_blocked_total path=submit"
+            )
+            return _rejected_submit_result(
+                envelope,
+                error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                error_message=str(exc),
+            )
         try:
             preflight = self.preflight()
         except Exception as exc:
@@ -533,6 +549,7 @@ class PolymarketV2Adapter:
         size: float,
         side: str,
         order_type: str = "GTC",
+        _allow_compat_for_test: bool = False,
     ) -> SubmitResult:
         """Compatibility helper for legacy PolymarketClient.place_limit_order.
 
@@ -542,6 +559,32 @@ class PolymarketV2Adapter:
         U1-certified snapshot facts. The canonical request hash is computed from
         the final side/size values; the envelope is never mutated post-hash.
         """
+
+        # T1F-COMPAT-SUBMIT-LIMIT-ORDER-REJECTS-OR-FAKE: block this path in live
+        # mode (Q1 egress evidence present) unless the caller has explicitly opted
+        # in via _allow_compat_for_test.  When evidence is absent, preflight will
+        # reject with Q1_EGRESS_EVIDENCE_ABSENT as before — no double-gate needed.
+        _evidence_present = (
+            self.q1_egress_evidence_path is not None
+            and Path(self.q1_egress_evidence_path).exists()
+        )
+        if _evidence_present and not _allow_compat_for_test:
+            logger.warning(
+                "telemetry_counter event=compat_submit_rejected_total path=submit_limit_order"
+            )
+            return self._compat_rejected_submit_result(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=side,
+                order_type=order_type,
+                error_code="COMPAT_SUBMIT_NOT_PERMITTED_IN_LIVE",
+                error_message=(
+                    "submit_limit_order is a compatibility shim; it must not be "
+                    "called in live mode.  Wire U1 executable market snapshots into "
+                    "the executor and call submit() with a live-bound envelope."
+                ),
+            )
 
         try:
             preflight = self.preflight()

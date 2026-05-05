@@ -238,7 +238,7 @@ def test_submit_limit_order_fails_closed_when_q1_egress_evidence_absent(tmp_path
 def test_submit_limit_order_snapshot_failure_is_typed_pre_submit_rejection(tmp_path):
     adapter, fake = _adapter(tmp_path, FakePreflightOnlyClient())
 
-    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY")
+    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY", _allow_compat_for_test=True)
 
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
@@ -273,7 +273,7 @@ def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_p
     fake = MissingFeeClient()
     adapter, _ = _adapter(tmp_path, fake)
 
-    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY")
+    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY", _allow_compat_for_test=True)
 
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
@@ -290,7 +290,7 @@ def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_none(tmp_path
     fake = NoneFeeClient()
     adapter, _ = _adapter(tmp_path, fake)
 
-    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY")
+    result = adapter.submit_limit_order(token_id="yes-token", price=0.5, size=10.0, side="BUY", _allow_compat_for_test=True)
 
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
@@ -480,14 +480,10 @@ def test_neg_risk_passthrough_v2_preserves_snapshot_value(tmp_path):
 
 
 def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):
-    fake = FakeTwoStepClient()
-    adapter, _ = _adapter(tmp_path, fake)
-    adapter.submit_limit_order(token_id="yes-token", price=0.5, size=3.25, side="SELL")
-
-    create_call = next(call for call in fake.calls if call[0] == "create_order")
-    order_args = create_call[1]
-    assert getattr(order_args, "side") == "SELL"
-    assert getattr(order_args, "size") == 3.25
+    # AMD-T1F-2: T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK makes placeholder→SDK
+    # contact impossible by design. This test now inspects the envelope's hash
+    # fields directly rather than asserting SDK call_count.
+    adapter, _ = _adapter(tmp_path, FakeTwoStepClient())
 
     envelope = adapter._create_compat_submission_envelope(
         token_id="yes-token",
