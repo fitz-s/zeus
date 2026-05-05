@@ -188,11 +188,13 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     collisions: list[tuple[dict, set[tuple[str, str]]]] = []
     for pr in others:
-        if pr.get("baseRefOid") == this_base:
-            # Stacked: same base commit means one PR is intentionally
-            # building on the other.  Real collisions still possible but
-            # the resolution is "rebase the dependent branch", which the
-            # author already knows.  Skip to keep noise low.
+        if pr.get("headRefOid") == this_base:
+            # Stacked: the other PR's HEAD is exactly our base commit,
+            # meaning THIS PR intentionally builds on top of that PR.
+            # A same-name class is expected (inherited), not a collision.
+            # Parallel PRs that merely share the same base commit are NOT
+            # skipped — that is the primary collision scenario this tool
+            # exists to catch.
             continue
         try:
             other_diff = _pr_diff(pr["number"], args.repo)

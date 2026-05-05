@@ -49,15 +49,15 @@ jobs:
           python scripts/check_pr_identity_collisions.py \
               --this-pr ${{ github.event.pull_request.number }} \
               --repo ${{ github.repository }} \
-              --output-file /tmp/identity_collision_warning.md
+              --output-file "${{ github.workspace }}/identity_collision_warning.md"
 
       - name: Post warning comment if collision detected
-        if: ${{ hashFiles('/tmp/identity_collision_warning.md') != '' }}
+        if: ${{ hashFiles('identity_collision_warning.md') != '' }}
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('/tmp/identity_collision_warning.md', 'utf8');
+            const body = fs.readFileSync(`${process.env.GITHUB_WORKSPACE}/identity_collision_warning.md`, 'utf8');
             // Look for an existing collision-warning comment from this bot;
             // update in place rather than spamming.
             const { data: comments } = await github.rest.issues.listComments({

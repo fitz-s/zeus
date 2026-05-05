@@ -37,11 +37,16 @@ print(r.get('exit_code', 0))
 
 [ "$EXIT_CODE" != "0" ] && exit 0
 
-# Active worktrees (excluding main and temp pytest worktrees)
-WORKTREES=$(git worktree list 2>/dev/null \
-  | grep -v "^$(git rev-parse --show-toplevel)" \
+# Active worktrees (excluding main and temp pytest worktrees).
+# Use --porcelain so paths containing spaces survive intact, and -Fx exact-match
+# exclusion of the toplevel so sibling worktrees sharing a path prefix aren't
+# falsely swallowed.
+TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
+WORKTREES=$(git worktree list --porcelain 2>/dev/null \
+  | awk '/^worktree / { sub(/^worktree /, ""); print }' \
+  | grep -vFx -- "${TOPLEVEL:-/dev/null/never-matches}" \
   | grep -v "/tmp/\|/T/" \
-  | awk '{print $1}' || true)
+  || true)
 
 echo ""
 echo "── Post-merge cleanup (soft) ──────────────────────────────────"
