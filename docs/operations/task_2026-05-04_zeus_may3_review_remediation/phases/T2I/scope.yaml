@@ -1,0 +1,115 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: zeus-may3-r5-remediation-2026-05-05
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  # Deliverable A: ATTACH narrow-except in two sites + new relationship test
+  # AMD-T2I-4: cycle_runner.py edits confined to lines 53-90 region (module-level
+  # imports block at 53-62 + get_connection() function body at 67-90). Any line >90
+  # modification surfaces as scope deviation in BATCH_DONE; lines 91-841 are
+  # implicitly out-of-scope (no active deliverable touches them) and lines 842-883
+  # are explicitly out-of-scope per the cycle_runner.py:847 antibody fence below.
+  - src/engine/cycle_runner.py
+  - src/state/db.py
+  - tests/test_attach_narrow_except.py
+
+  # Deliverable B: hoist function-scope `_cnt_inc` imports to module-level (5 files)
+  # Note: src/state/db.py also touched in Deliverable A; same file, both edits land in same B1+B2 sequence
+  - src/state/chain_reconciliation.py
+  - src/state/portfolio.py
+  - src/venue/polymarket_v2_adapter.py
+  - src/execution/harvester.py
+
+  # Deliverable C: 6 T1 phase.json closeout_drift_resolution rewrites (meta-only)
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1F/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1G/phase.json
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1H/phase.json
+
+allow_companions:
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/**
+
+out_of_scope:
+  # cycle_runner.py is in_scope but only for the get_connection() ATTACH branch (lines 67-90)
+  # and the module-level import block. Lines 842-883 (EntriesBlockRegistry antibody) are FORBIDDEN.
+  # The narrow-except edit at line 81-82 must NOT cascade into any other line range of cycle_runner.py.
+
+  # Strict source-surface fence: T2I does NOT touch any other src module
+  - src/observability/**             # `_cnt_inc` is the import surface; the typed sink itself is unchanged
+  - src/contracts/**
+  - src/strategy/**
+  - src/calibration/**
+  - src/data/**
+  - src/riskguard/**
+  - src/control/**                   # explicitly out: any control-module interaction would touch the cycle_runner.py:847 antibody
+  - src/engine/cycle_runtime.py
+  - src/engine/dispatch.py
+  - src/state/lifecycle_manager.py
+  - src/state/canonical_write.py
+  - src/state/decision_chain.py
+  - src/state/lifecycle_events.py
+  - src/state/venue_command_repo.py
+  - src/execution/settlement_commands.py
+  - src/execution/command_recovery.py
+  - src/execution/executor.py
+  - src/execution/harvester_pnl_resolver.py
+  - src/ingest/**
+
+  # No script changes
+  - scripts/**
+
+  # No test changes beyond Deliverable A's new file
+  - tests/test_observability_counters.py
+  - tests/test_counter_caplog_ledger.py
+  - tests/test_cycle_runner_db_lock_degrade.py
+  - tests/test_settle_positions_uses_enqueue_redeem.py
+  - tests/test_sqlite_busy_timeout.py
+  - tests/test_state_census.py
+  - tests/test_chain_reconciliation_corrected_guard.py
+  - tests/test_harvester_learning_authority.py
+  - tests/test_polymarket_adapter_submit_safety.py
+  - tests/test_v2_adapter.py
+  - tests/test_venue_envelope_live_bound.py
+  - tests/test_final_sdk_envelope_persistence.py
+  - tests/test_settlement_commands_schema.py
+
+  # No architecture/manifest/config/state/data
+  - architecture/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+  # No other doc surfaces
+  - docs/runbooks/**
+  - docs/methodology/**
+  - docs/reference/**
+  - docs/reports/**
+  - docs/to-do-list/**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1A/**     # T1A had no closeout_drift_resolution carry-forward
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2H/**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T0_**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T-1_**
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/LOCK_DECISION.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/planner_output.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/critic_round5_response.md
+
+notes:
+  - MIXED K-class surface (K1 STATE TRUTH for Deliverable A; K2 hygiene for Deliverable B; K2 docs for Deliverable C). Reviewer set is critic-opus + verifier-sonnet + git-master-sonnet — no security-reviewer because no LIVE BOUNDARY edge in T2I (no SDK contact, no venue side effect, no live-money state-truth mutation). Per T1 retrospective doctrine: K0 LIVE BOUNDARY → security; K0/K1 STATE TRUTH → no security; K2 → no security.
+  - **CRITICAL fence on cycle_runner.py**: in_scope ONLY for (a) the get_connection() function body at lines 67-90 (Deliverable A narrow-except edit) and (b) the module-level `from src.observability.counters import increment as _cnt_inc` hoist (Deliverable B; if applicable — db.py is the single _cnt_inc site touched by db.py edits, not cycle_runner.py — verify via grep). Lines 842-883 of cycle_runner.py (the EntriesBlockRegistry try/except Exception antibody) are EXPLICITLY OUT OF SCOPE per `_planner_notes.out_of_scope_explicit` (RECLASSIFIED NOT_A_DEFECT in the 2026-05-05T12:30Z reclassification ledger entry). The narrow-except edit must NOT cascade into that block.
+  - **Deliverable B fence**: 5 files actually have function-scope `_cnt_inc` imports (NOT 6 — fresh grep at 2026-05-05T13:30Z shows scripts/state_census.py has zero matches; brief was over-inclusive). The 5 files are src/state/db.py (1 occurrence), src/state/chain_reconciliation.py (9 occurrences), src/state/portfolio.py (2 occurrences), src/venue/polymarket_v2_adapter.py (2 occurrences), src/execution/harvester.py (3 occurrences). Total 17 function-scope imports → 5 module-level + 0 function-scope (ideal post-T2I). Per-file safety probe: `python -c 'import src.<module>'` after each hoist; on ImportError, REVERT that file's hoist and document in BATCH_DONE.
+  - **Deliverable A asymmetry-correction**: brief described db.py:99-104 as 'pre-existing bare-except', but fresh grep at 2026-05-05T13:30Z shows db.py:99-105 (def get_trade_connection_with_world) has NO try/except wrapper at all — the function currently raises EVERYTHING uncaught. The bare-except swallow is ONLY in cycle_runner.py:81-82. T2I tightens BOTH sites symmetrically: cycle_runner converts bare-except → narrow-except + log; db.py wraps from scratch with the same narrow-except + log. Behavior change for db.py: previously OperationalError raised uncaught, now logs + continues with un-attached connection. Test contract in tests/test_attach_narrow_except.py asserts both narrowing directions.
+  - **Deliverable C boilerplate**: confirmed via fresh grep that all 6 T1 phase.json files contain the identical text 'T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding.' at T1F:72, T1BD:97, T1C:86, T1E:83, T1G:89, T1H:79. Each must be replaced with phase-specific prose per `_planner_notes.deliverable_c_evidence.per_phase_resolution_targets`. Verifier asserts via `python -c \"import json; texts = [...]; assert len(set(texts)) == 6\"` that all 6 fields are distinct.
+  - **Out-of-scope batch contract**: 3 atomic commits, one per deliverable (B1=A, B2=B, B3=C). Each commit goes through critic + verifier separately so the reviewer chain can verify atomically. If B1 fails review, B2 and B3 may still proceed independently — they are surface-disjoint (Deliverable B touches the import block of the same files Deliverable A's narrow-except touches in db.py only; the touch points are different lines, no diff conflict expected).
+  - Tier 2 prerequisite: T2F + T2G + T2H landed (commits per s4 + s5 telemetry; mainline closed at f5654ef0; PR #61 merged into branch at 1ea0fc2e per brief). T2I consumes T2F-COUNTER-SINK-TYPED-API + T2F-EVERY-T1-COUNTER-EMITS-VIA-SINK + T2H-CYCLE-RUNNER-WORLD-PATH-MODULE-LEVEL.
+  - **AMD-T2H-3 reclassification authority**: the cycle_runner.py:847 exclusion is FINAL per the 2026-05-05T12:30Z reclassification ledger entry. Future phases must obtain explicit operator override to revisit that surface. T2I scope must not weaken or reverse this exclusion under any deviation pressure.
