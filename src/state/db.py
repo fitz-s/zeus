@@ -1392,49 +1392,9 @@ def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
           recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    # R3 R1 settlement/redeem command ledger.  Keep DDL in the schema owner so
-    # DB initialization does not import src.execution during startup.
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS settlement_commands (
-          command_id TEXT PRIMARY KEY,
-          state TEXT NOT NULL CHECK (state IN (
-            'REDEEM_INTENT_CREATED','REDEEM_SUBMITTED','REDEEM_TX_HASHED',
-            'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED'
-          )),
-          condition_id TEXT NOT NULL,
-          market_id TEXT NOT NULL,
-          payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
-          pusd_amount_micro INTEGER,
-          token_amounts_json TEXT,
-          tx_hash TEXT,
-          block_number INTEGER,
-          confirmation_count INTEGER DEFAULT 0,
-          requested_at TEXT NOT NULL,
-          submitted_at TEXT,
-          terminal_at TEXT,
-          error_payload TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_settlement_commands_state
-          ON settlement_commands (state, requested_at);
-        CREATE INDEX IF NOT EXISTS idx_settlement_commands_condition
-          ON settlement_commands (condition_id, market_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_commands_active_condition_asset
-          ON settlement_commands (condition_id, market_id, payout_asset)
-          WHERE state NOT IN ('REDEEM_CONFIRMED','REDEEM_FAILED');
-
-        CREATE TABLE IF NOT EXISTS settlement_command_events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          command_id TEXT NOT NULL REFERENCES settlement_commands(command_id),
-          event_type TEXT NOT NULL,
-          payload_hash TEXT NOT NULL,
-          payload_json TEXT,
-          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_settlement_command_events_command
-          ON settlement_command_events (command_id, recorded_at);
-    """)
+    # T1A: DDL single-source — delegate to schema owner to avoid duplication.
+    from src.execution.settlement_commands import SETTLEMENT_COMMAND_SCHEMA
+    conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
     
     # Safe Schema evolution for phase 3 attribution
     for col in ["entry_alpha_usd", "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd", "settlement_edge_usd"]:

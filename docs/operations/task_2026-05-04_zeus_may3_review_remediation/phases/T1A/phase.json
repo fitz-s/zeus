@@ -1,0 +1,69 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T1A",
+  "task_id": "zeus-may3-remediation",
+  "title": "Single source settlement_commands DDL",
+  "intent": "Schema initialization uses one canonical settlement_commands DDL source so that future schema evolution has a single edit-point and inline duplicates cannot drift.",
+
+  "files_touched": [
+    "architecture/test_topology.yaml",
+    "src/execution/settlement_commands.py",
+    "src/state/db.py",
+    "tests/test_settlement_commands_schema.py"
+  ],
+  "loc_delta_estimate": 200,
+  "introduces_abstraction": false,
+  "cross_module_edges": 1,
+  "domain": "state/execution-schema",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_settlement_commands_schema.py",
+    "python -m pytest -q tests/test_settlement_commands.py"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T1A-DDL-SINGLE-SOURCE",
+      "text": "Repo grep for 'CREATE TABLE IF NOT EXISTS settlement_commands' returns exactly one definition site (src/execution/settlement_commands.py)."
+    },
+    {
+      "id": "T1A-DB-IMPORTS-SCHEMA",
+      "text": "src/state/db.py imports SETTLEMENT_COMMAND_SCHEMA (or an init helper) from src/execution/settlement_commands and does not redefine the DDL inline."
+    },
+    {
+      "id": "T1A-NO-BEHAVIOR-CHANGE",
+      "text": "Existing tests (tests/test_settlement_commands.py) pass unchanged; init_schema() still creates settlement_commands and settlement_command_events with identical column shapes."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T1",
+    "NO-RISKGUARD-DURING-T1",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-LAUNCHCTL"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-04",
+    "duplicate_DDL_sites": [
+      "src/execution/settlement_commands.py:27 SETTLEMENT_COMMAND_SCHEMA",
+      "src/execution/settlement_commands.py:28 CREATE TABLE IF NOT EXISTS settlement_commands",
+      "src/state/db.py:1398 CREATE TABLE IF NOT EXISTS settlement_commands"
+    ],
+    "circular_import_risk": "init_schema() in db.py is module-level; importing from src.execution.settlement_commands at module-load time may pull in execution-side dependencies. Mitigation: function-scope import inside init_schema() (per MASTER_PLAN_v2 §10 T1A 'function-scope import if needed').",
+    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/state/db.py. T1A executor MUST run the topology gate at GO_BATCH_1 time and stop if rejected. Operator may need to add an 'r3 settlement command schema unification' digest profile before dispatch.",
+    "planning_lock_required": true,
+    "planning_lock_evidence": "docs/operations/task_2026-05-04_zeus_may3_review_remediation/PLAN.md (admitted by --planning-lock check at planner time, 2026-05-04)",
+    "manifest_companions_required": [
+      "architecture/test_topology.yaml — register tests/test_settlement_commands_schema.py if new"
+    ],
+    "operator_only_blockers_at_planner_time": [
+      "T0.2 RiskGuard still RUNNING (PID 14177); operator must unload before dispatch.",
+      "T0.3 venue quiescence not yet attested."
+    ]
+  }
+}

@@ -13,9 +13,11 @@ in_scope:
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/LOCK_DECISION.md
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/PLAN_LOCKED.md
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/critic_round5_response.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/planner_output.md
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T-1_*.md
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/T0_*.md
   - docs/operations/task_2026-05-04_zeus_may3_review_remediation/INVARIANTS_LEDGER.md
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/**
 
 allow_companions:
   - docs/operations/AGENTS.md
