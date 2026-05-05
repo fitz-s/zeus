@@ -527,13 +527,24 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             rescued.chain_shares = chain.size
             rescued.chain_verified_at = now
             rescued.condition_id = rescued.condition_id or chain.condition_id
+            _rescue_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
             if chain.avg_price > 0:
-                rescued.entry_price = chain.avg_price
+                if not _rescue_eligible:
+                    rescued.entry_price = chain.avg_price
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
             if chain.cost > 0:
-                rescued.cost_basis_usd = chain.cost
-                rescued.size_usd = chain.cost
+                if not _rescue_eligible:
+                    rescued.cost_basis_usd = chain.cost
+                    rescued.size_usd = chain.cost
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
             if chain.size > 0:
-                rescued.shares = chain.size
+                if not _rescue_eligible:
+                    rescued.shares = chain.size
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
             rescued.entry_fill_verified = True
             rescued.order_status = "filled"
             rescued.state = rescue_pending_runtime_state(
@@ -617,14 +628,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             corrected.chain_shares = chain.size
             corrected.chain_verified_at = now
             corrected.condition_id = corrected.condition_id or chain.condition_id
+            _size_mismatch_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
             if chain.avg_price > 0:
-                corrected.entry_price = chain.avg_price
+                if not _size_mismatch_eligible:
+                    corrected.entry_price = chain.avg_price
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
             if chain.cost > 0:
-                corrected.cost_basis_usd = chain.cost
-                corrected.size_usd = chain.cost
+                if not _size_mismatch_eligible:
+                    corrected.cost_basis_usd = chain.cost
+                    corrected.size_usd = chain.cost
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
             if abs(chain.size - local_shares) > 0.01:
                 logger.warning("SIZE MISMATCH: %s local %.4f vs chain %.4f", pos.trade_id, local_shares, chain.size)
-                corrected.shares = chain.size
+                if not _size_mismatch_eligible:
+                    corrected.shares = chain.size
+                else:
+                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                 if not _append_canonical_size_correction_if_available(
                     corrected,
                     local_shares_before=local_shares,
@@ -636,7 +658,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     )
                     corrected.state = "quarantine_size_mismatch"
                     corrected.chain_state = "size_mismatch_unresolved"
-                    corrected.shares = local_shares
+                    if not _size_mismatch_eligible:
+                        corrected.shares = local_shares
+                    else:
+                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )

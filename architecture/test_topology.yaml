@@ -237,6 +237,8 @@ test_trust_policy:
     tests/test_settlement_commands_schema.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_venue_envelope_live_bound.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_polymarket_adapter_submit_safety.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_chain_reconciliation_corrected_guard.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_position_projection_d6_counters.py: {created: "2026-05-05", last_used: "2026-05-05"}
 
 categories:
   core_law_antibody:
@@ -1064,3 +1066,37 @@ test_metadata:
       Fake-SDK safety test. Verifies SDK create_and_post_order/post_order/create_order
       call_count == 0 when a placeholder envelope is submitted directly or via
       submit_limit_order without _allow_compat_for_test=True.
+  tests/test_chain_reconciliation_corrected_guard.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_corrected_economics_chain_freeze
+    blocks_commit: true
+    asserted_invariants:
+      - T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES
+      - T1BD-LEGACY-CHAIN-MUTATION-UNCHANGED
+    source_under_test:
+      - src/state/chain_reconciliation.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+    notes: >
+      Relationship test. Parametrizes over (branch, eligible_flag). Eligible=True asserts
+      no D6-field mutation and cost_basis_chain_mutation_blocked_total{field} emitted.
+      Eligible=False asserts mutation proceeds unchanged (legacy invariant preserved).
+      Covers RESCUE, SIZE-MISMATCH, and QUARANTINE branches across all 4 locked D6 fields.
+  tests/test_position_projection_d6_counters.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_corrected_economics_chain_freeze
+    blocks_commit: true
+    asserted_invariants:
+      - T1BD-PROJECTION-DROP-COUNTER
+      - T1BD-LOADER-DEFAULT-COUNTER
+    source_under_test:
+      - src/state/portfolio.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1BD/phase.json
+    notes: >
+      Tests _project_d6_field (projection write) and _load_d6_field (loader read).
+      Projection: eligible position with chain-context value differing from FillAuthority
+      emits position_projection_field_dropped_total{field} and uses FillAuthority value.
+      Loader: missing D6 field emits position_loader_field_defaulted_total{field} and uses default.

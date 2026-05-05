@@ -1,0 +1,98 @@
+{
+  "schema_version": "orch.phase.v1",
+  "phase_id": "T1BD",
+  "task_id": "zeus-may3-remediation",
+  "title": "Chain-reconciliation four-field freeze + D6 projection/loader counters",
+  "intent": "For positions where corrected_executable_economics_eligible is True, chain reconciliation never overwrites entry_price, cost_basis_usd, size_usd, or shares; counters cost_basis_chain_mutation_blocked_total{field}, position_projection_field_dropped_total, and position_loader_field_defaulted_total are emitted in the same commit.",
+
+  "files_touched": [
+    "architecture/test_topology.yaml",
+    "src/engine/lifecycle_events.py",
+    "src/state/chain_reconciliation.py",
+    "src/state/portfolio.py",
+    "tests/test_chain_reconciliation_corrected_guard.py",
+    "tests/test_position_projection_d6_counters.py"
+  ],
+  "loc_delta_estimate": 480,
+  "introduces_abstraction": false,
+  "cross_module_edges": 1,
+  "domain": "state/lifecycle/chain-truth",
+  "purely_mechanical": false,
+
+  "test_commands": [
+    "python -m pytest -q tests/test_chain_reconciliation_corrected_guard.py",
+    "python -m pytest -q tests/test_position_projection_d6_counters.py",
+    "python -m pytest -q -k 'chain_reconciliation or lifecycle_events or portfolio'"
+  ],
+
+  "asserted_invariants": [
+    {
+      "id": "T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES",
+      "text": "If position.corrected_executable_economics_eligible is True, chain_reconciliation.py's RESCUE branch (lines 531-577 region), SIZE-MISMATCH branch (lines 614-652 region), and QUARANTINE branch (lines 683-695 region) cannot mutate entry_price, cost_basis_usd, size_usd, or shares. Each blocked attempt increments cost_basis_chain_mutation_blocked_total{field=<one of the four>}."
+    },
+    {
+      "id": "T1BD-LEGACY-CHAIN-MUTATION-UNCHANGED",
+      "text": "If position.corrected_executable_economics_eligible is False (legacy default), every existing chain-fact mutation site behaves as it does today. No regression for legacy positions."
+    },
+    {
+      "id": "T1BD-PROJECTION-DROP-COUNTER",
+      "text": "When src/state/portfolio.py serializes a Position with corrected_executable_economics_eligible=True and any of the four locked D6 fields is non-default-zero from chain context, position_projection_field_dropped_total{field=<one of the four>} increments and the projected row carries the FillAuthority value, not the chain-context value."
+    },
+    {
+      "id": "T1BD-LOADER-DEFAULT-COUNTER",
+      "text": "When _position_from_projection_row(...) reads a row whose locked D6 field is missing, position_loader_field_defaulted_total{field} increments and the in-memory Position uses the default; the row is not silently zero-defaulted."
+    },
+    {
+      "id": "T1BD-PAIRED-COMMIT",
+      "text": "T1B (chain-reconciliation freeze) and T1D (projection/loader counters) land in the same commit; the executor MUST NOT split this into separate B/D commits."
+    }
+  ],
+  "consumed_invariants": [
+    "NO-LIVE-DAEMON-DURING-T1",
+    "NO-RISKGUARD-DURING-T1",
+    "NO-VENUE-SIDE-EFFECTS",
+    "NO-PRODUCTION-DB-MUTATION",
+    "NO-BROAD-STAGING",
+    "NO-LAUNCHCTL",
+    "T1A-DDL-SINGLE-SOURCE",
+    "T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK",
+    "T0-D6-FIELD-LOCK"
+  ],
+
+  "expected_artifact": "execution/execution_result.md",
+
+  "_planner_notes": {
+    "evidence_grep_ts": "2026-05-04",
+    "locked_d6_fields": ["entry_price", "cost_basis_usd", "size_usd", "shares"],
+    "f5_evidence_chain_mutation_sites": [
+      "src/state/chain_reconciliation.py:531 rescued.entry_price = chain.avg_price (RESCUE)",
+      "src/state/chain_reconciliation.py:533 rescued.cost_basis_usd = chain.cost (RESCUE)",
+      "src/state/chain_reconciliation.py:534 rescued.size_usd = chain.cost (RESCUE)",
+      "src/state/chain_reconciliation.py:536 rescued.shares = chain.size (RESCUE)",
+      "src/state/chain_reconciliation.py:574 pos.entry_price = rescued.entry_price (RESCUE commit-back)",
+      "src/state/chain_reconciliation.py:575 pos.cost_basis_usd = rescued.cost_basis_usd (RESCUE commit-back)",
+      "src/state/chain_reconciliation.py:576 pos.size_usd = rescued.size_usd (RESCUE commit-back)",
+      "src/state/chain_reconciliation.py:577 pos.shares = rescued.shares (RESCUE commit-back)",
+      "src/state/chain_reconciliation.py:621 corrected.entry_price = chain.avg_price (SIZE-MISMATCH)",
+      "src/state/chain_reconciliation.py:623 corrected.cost_basis_usd = chain.cost (SIZE-MISMATCH)",
+      "src/state/chain_reconciliation.py:624 corrected.size_usd = chain.cost (SIZE-MISMATCH)",
+      "src/state/chain_reconciliation.py:627 corrected.shares = chain.size (SIZE-MISMATCH)",
+      "src/state/chain_reconciliation.py:639 corrected.shares = local_shares (SIZE-MISMATCH preserved-local)",
+      "src/state/chain_reconciliation.py:649-652 pos.entry_price/cost_basis_usd/size_usd/shares = corrected.* (SIZE-MISMATCH commit-back)",
+      "src/state/chain_reconciliation.py:683 size_usd=0.0 (QUARANTINE)",
+      "src/state/chain_reconciliation.py:684 entry_price=0.0 (QUARANTINE)",
+      "src/state/chain_reconciliation.py:692 cost_basis_usd=chain.cost or (chain.size * chain.avg_price) (QUARANTINE)",
+      "src/state/chain_reconciliation.py:693 shares=chain.size (QUARANTINE)"
+    ],
+    "f5_count": "20 distinct mutation lines across 5 branches; T1BD MUST guard every one or its invariant is partial.",
+    "subtle_finding": "Position has multiple share-flavored fields (shares, shares_filled, shares_remaining, shares_submitted, chain_shares). T1BD locks `shares` and `chain_shares` chain-mutation; shares_filled / shares_remaining are FillAuthority-derived and out of scope.",
+    "projection_loader_seam": "src/state/portfolio.py:1699-1716 (projection write) and src/state/portfolio.py:1164 _position_from_projection_row (loader)",
+    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/state/chain_reconciliation.py. Operator may need to add an 'r3 corrected economics chain freeze' digest profile before dispatch.",
+    "planning_lock_required": true,
+    "operator_only_blockers_at_planner_time": [
+      "T0.2 RiskGuard still RUNNING (PID 14177); operator must unload before dispatch.",
+      "T0.3 venue quiescence not yet attested."
+    ],
+    "k0_k1_classification": "K0/K1 STATE TRUTH — lifecycle/chain reconciliation. Requires opus critic per ORCHESTRATOR_RUNBOOK §12 T1BD row. Paired counters land together (no split commits)."
+  }
+}
