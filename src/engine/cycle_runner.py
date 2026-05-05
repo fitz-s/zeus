@@ -50,12 +50,39 @@ from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
-from src.state.db import get_trade_connection_with_world, record_token_suppression
+from src.state.db import (
+    _zeus_trade_db_path,
+    connect_or_degrade,
+    get_trade_connection_with_world,
+    record_token_suppression,
+)
 from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
-get_connection = get_trade_connection_with_world
+# T2G: wraps connect_or_degrade so a transient 'database is locked' OperationalError
+# returns None instead of crashing the daemon. Tests monkeypatch this alias to
+# simulate both the happy path (returns Connection) and the lock-degrade path
+# (returns None).  Any other OperationalError still propagates.
+def get_connection():
+    """T2G: Acquire trade+world DB connection via connect_or_degrade.
+
+    Returns a live Connection on success, or None if the DB is transiently
+    locked (busy-timeout expired). Any other OperationalError propagates.
+    """
+    from src.state.db import get_trade_connection_with_world as _gtcww
+    conn = connect_or_degrade(_zeus_trade_db_path())
+    if conn is None:
+        return None
+    # ATTACH world schema (mirrors get_trade_connection_with_world logic).
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH as _world_path
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" not in attached:
+            conn.execute("ATTACH DATABASE ? AS world", (str(_world_path),))
+    except Exception:
+        pass
+    return conn
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (
     Position,
@@ -507,6 +534,20 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     summary["risk_level"] = risk_level.value
 
     conn = get_connection()
+    # T2G: connect_or_degrade returns None on transient 'database is locked'.
+    # Graceful-degrade: skip all write operations for this cycle; next cycle
+    # proceeds normally. Counter already incremented inside connect_or_degrade
+    # via _handle_db_write_lock → src.observability.counters.increment().
+    if conn is None:
+        summary["db_write_lock_degraded"] = True
+        summary["skipped"] = True
+        summary["skip_reason"] = "db_write_lock_degraded"
+        logger.warning(
+            "cycle_runner: DB write-lock degrade — skipping cycle writes "
+            "(db_write_lock_timeout_total incremented)"
+        )
+        return summary
+
     portfolio = load_portfolio()
     if getattr(portfolio, 'portfolio_loader_degraded', False):
         # DT#6 graceful degradation (Phase 8 R-BQ): do NOT raise RuntimeError.

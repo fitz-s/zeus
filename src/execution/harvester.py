@@ -2013,31 +2013,23 @@ def _settle_positions(
             if strategy_tracker is not None:
                 strategy_tracker.record_settlement(closed)
 
-        # T2-G / R3 Z4: Redemption is gated by Q-FX-1 and durable R1
-        # settlement commands. Z4 may wire the fail-closed edge but must not
-        # perform direct live redemption side effects.
+        # T2G-NO-INLINE-REQUEST-REDEEM: all redeem-state transitions route through
+        # enqueue_redeem_command (the single auditable entry point per T1C +
+        # T2G-REDEEM-STATE-TRANSITION-AUDITABLE). The prior inline
+        # 'from src.execution.settlement_commands import request_redeem' block
+        # is removed here; request_redeem is only called inside
+        # enqueue_redeem_command's body (src/execution/harvester.py:~499).
         if exit_price > 0 and pos.condition_id:
-            try:
-                from src.execution.settlement_commands import request_redeem
-
-                redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-                command_id = request_redeem(
-                    pos.condition_id,
-                    "pUSD",
-                    market_id=getattr(pos, "market_id", "") or pos.condition_id,
-                    pusd_amount_micro=int(round(shares * 1_000_000)),
-                    token_amounts={redeem_token_id: shares} if redeem_token_id else {},
-                    conn=conn,
-                )
-                logger.info(
-                    "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",
-                    pos.trade_id,
-                    pos.condition_id,
-                    command_id,
-                )
-            except Exception as exc:
-                logger.warning("Redeem deferred for %s: %s (pUSD still claimable later)",
-                               pos.trade_id, exc)
+            redeem_token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
+            enqueue_redeem_command(
+                conn,
+                condition_id=pos.condition_id,
+                payout_asset="pUSD",
+                market_id=getattr(pos, "market_id", "") or pos.condition_id,
+                pusd_amount_micro=int(round(shares * 1_000_000)),
+                token_amounts={redeem_token_id: shares} if redeem_token_id else {},
+                trade_id=pos.trade_id,
+            )
 
         # T2-C: Add settled token to ignored set (don't resurrect in reconciliation)
         token_id = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
