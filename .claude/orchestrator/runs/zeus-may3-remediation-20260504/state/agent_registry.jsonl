@@ -31,3 +31,6 @@
 {"phase":"T2H","role":"executor","batches":["B1"],"agentId":"a4a980c69da800e80","model":"sonnet","registered_at":"2026-05-05T10:35:00Z","note":"DEV-1 grep_count=2 INVARIANT_AMEND via AMD-T2H-4; DEV-2 non-existent test cite APPROVE via AMD-T2H-5"}
 {"phase":"T2H","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T2G critic","registered_at":"2026-05-05T10:55:00Z","note":"resumed once mid-investigation via SendMessage nudge"}
 {"phase":"T2H","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2G verifier","registered_at":"2026-05-05T10:55:00Z"}
+{"phase":"T2I","role":"executor","batches":["B1"],"agentId":"addbcb8a66060b244","model":"sonnet","registered_at":"2026-05-05T13:50:00Z","note":"3 commits A/B/C; DEV-1 chain_reconciliation indentation fixed inline; 0 hoist reverts (counters.py stdlib-only)"}
+{"phase":"T2I","role":"critic","agentId":"aefdc210c5c6eea0b","model":"opus","verdict":"APPROVE","registered_at":"2026-05-05T14:25:00Z","note":"FRESH critic dispatched per coordinator self-audit decision (persistent critic at ~448K context cliff); APPROVE = first clean APPROVE of the run, 0 caveats"}
+{"phase":"T2I","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2H verifier","registered_at":"2026-05-05T14:25:00Z"}
