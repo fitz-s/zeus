@@ -1137,3 +1137,42 @@ test_metadata:
       harvester_learning_write_blocked_total{reason} for: missing smv, training=False,
       live-praw (openmeteo) source. Only tigge/ecmwf_ens with training=True writes pairs.
       Also asserts existing missing-forecast-issue-time guard now emits the counter.
+
+  tests/test_sqlite_busy_timeout.py:
+    modules: [state]
+    category: core_law_antibody
+    profile: r3_sqlite_tactical_mitigation
+    blocks_commit: true
+    asserted_invariants:
+      - T1E-BUSY-TIMEOUT-CONFIGURABLE
+      - T1E-ENV-OVERRIDE-WIRED
+      - T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH
+    source_under_test:
+      - src/state/db.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+    notes: >
+      Unit and relationship tests for T1E SQLite busy-timeout configurability.
+      Asserts _db_busy_timeout_s() yields 30.0s when env unset and 5.0s when
+      ZEUS_DB_BUSY_TIMEOUT_MS=5000. Verifies both _connect (site 1) and
+      get_connection (site 2) apply the env var. Asserts malformed env falls
+      back to 30s (catch-and-log). Asserts connect_or_degrade() returns None
+      and emits db_write_lock_timeout_total on database-is-locked error.
+  tests/test_rebuild_live_sentinel.py:
+    modules: [scripts, state]
+    category: core_law_antibody
+    profile: r3_sqlite_tactical_mitigation
+    blocks_commit: true
+    asserted_invariants:
+      - T1E-REBUILD-SENTINEL-REFUSES
+      - T1E-REBUILD-TRANSACTION-SHARDED
+    source_under_test:
+      - scripts/rebuild_calibration_pairs_v2.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
+    notes: >
+      Tests T1E rebuild sentinel and transaction-sharding invariants.
+      Asserts rebuild_calibration_pairs_v2.py exits non-zero when
+      .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
+      never called. Asserts rebuild_v2 shards commits per (city, metric)
+      bucket: conn.commit() call count >= city_count for a single metric spec.

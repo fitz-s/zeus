@@ -53,6 +53,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# T1E sentinel check: must happen before any DB connection is opened.
+# Path is resolved relative to the script's own location so cwd doesn't matter.
+_SENTINEL_PATH = Path(__file__).parent.parent / ".zeus" / "rebuild_lock.do_not_run_during_live"
+
+
+def _check_live_sentinel() -> None:
+    """Raise SystemExit(1) if the live-rebuild sentinel file exists.
+
+    Called at module load (below). Isolated as a function so tests can patch
+    it out while still importing the module's rebuild_v2 / rebuild_all_v2.
+    The check fires before any sqlite3.connect call.
+    """
+    if _SENTINEL_PATH.exists():
+        print(
+            f"ERROR: Live-rebuild sentinel exists at {_SENTINEL_PATH}. "
+            "Remove the sentinel before running rebuild during a non-live window.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+_check_live_sentinel()
+
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -426,12 +449,12 @@ def rebuild_v2(
     end_date: Optional[str] = None,
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
-    _skip_commit: bool = False,
 ) -> RebuildStatsV2:
-    """Run the v2 rebuild end-to-end. Returns accounting stats.
+    """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
-    _skip_commit: internal flag used by rebuild_all_v2 to suppress the inner
-    conn.commit() — the outer SAVEPOINT + commit is managed by the caller.
+    T1E: Each city is processed in its own SAVEPOINT + commit, bounding the
+    writer-lock-hold duration to one city's write volume rather than the full
+    rebuild. Replaces the previous monolithic outer SAVEPOINT design.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -500,78 +523,98 @@ def rebuild_v2(
             "Check that 4B ingest has populated ensemble_snapshots_v2."
         )
 
-    conn.execute("SAVEPOINT v2_rebuild")
-    try:
-        _delete_canonical_v2_slice(
-            conn,
-            spec=spec,
-            city_filter=city_filter,
-            start_date=start_date,
-            end_date=end_date,
+    # T1E: Group snapshots by city and process each city in its own bounded
+    # SAVEPOINT + commit. This limits writer-lock-hold duration to one city's
+    # write volume. Unknown-city snapshots are counted but do not abort the
+    # entire rebuild (they are skipped per the existing soft-skip policy).
+    from collections import defaultdict as _defaultdict
+    city_buckets: dict[str, list] = _defaultdict(list)
+    missing_city_count = 0
+    for snap in eligible:
+        city_name = snap["city"]
+        if cities_by_name.get(city_name) is None:
+            missing_city_count += 1
+            continue
+        city_buckets[city_name].append(snap)
+
+    if missing_city_count:
+        print(f"  WARN: {missing_city_count} snapshots had unknown city, will be skipped")
+
+    # Hard-failure policy: unknown-city snapshots still abort (structural integrity).
+    if missing_city_count:
+        stats.refused = True
+        raise RuntimeError(
+            f"Refusing v2 rebuild: {missing_city_count} snapshots had unknown city; rolling back."
         )
-        start = time.monotonic()
-        missing_city_count = 0
-        for snap in eligible:
-            city = cities_by_name.get(snap["city"])
-            if city is None:
-                missing_city_count += 1
-                continue
-            _process_snapshot_v2(
-                conn, snap, city,
+
+    start = time.monotonic()
+    for city_name, city_snaps in sorted(city_buckets.items()):
+        city = cities_by_name[city_name]
+        city_unit_rejected = 0
+
+        # Per-(city, metric) SAVEPOINT — bounded transaction duration.
+        conn.execute("SAVEPOINT v2_rebuild_bucket")
+        try:
+            # Delete the slice for this city+metric only.
+            _delete_canonical_v2_slice(
+                conn,
                 spec=spec,
-                n_mc=n_mc,
-                rng=rng,
-                stats=stats,
+                city_filter=city_name,
+                start_date=start_date,
+                end_date=end_date,
             )
-            if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
-                elapsed = time.monotonic() - start
-                rate = stats.snapshots_processed / max(elapsed, 1e-6)
-                print(
-                    f"  progress: {stats.snapshots_processed}/{len(eligible)} "
-                    f"({rate:.1f} snap/s)"
+            for snap in city_snaps:
+                _process_snapshot_v2(
+                    conn, snap, city,
+                    spec=spec,
+                    n_mc=n_mc,
+                    rng=rng,
+                    stats=stats,
                 )
+                if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
+                    elapsed = time.monotonic() - start
+                    rate = stats.snapshots_processed / max(elapsed, 1e-6)
+                    print(
+                        f"  progress: {stats.snapshots_processed}/{len(eligible)} "
+                        f"({rate:.1f} snap/s)"
+                    )
 
-        if missing_city_count:
-            print(f"  WARN: {missing_city_count} snapshots had unknown city, skipped")
+            city_unit_rejected = stats.snapshots_unit_rejected
+            conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild_bucket")
+            conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")
+            raise
 
-        # Hard-failure policy (stricter than legacy rebuild_calibration_pairs_canonical.py):
-        # ANY missing-city or unit-rejection rolls back the entire SAVEPOINT.
-        # The legacy script skips individual bad rows; v2 treats them as bugs
-        # (cities.json drift or contaminated members_json) that must be fixed
-        # before the rebuild proceeds. Soft-skip is only allowed for missing
-        # observations (expected data holes), not for structural integrity failures.
-        hard_failures = missing_city_count + stats.snapshots_unit_rejected
-        if hard_failures:
-            stats.refused = True
-            raise RuntimeError(
-                f"Refusing v2 rebuild: {hard_failures} hard failures "
-                f"(missing_city={missing_city_count}, "
-                f"unit_rejected={stats.snapshots_unit_rejected}); rolling back."
-            )
+        # Commit after each (city, metric) bucket — bounded writer-lock hold.
+        conn.commit()
 
-        no_obs_ratio = stats.snapshots_no_observation / max(len(eligible), 1)
-        if no_obs_ratio > 0.30:
-            stats.refused = True
-            raise RuntimeError(
-                f"Refusing v2 rebuild: "
-                f"{stats.snapshots_no_observation}/{len(eligible)} "
-                f"({no_obs_ratio:.1%}) had no matching observation. "
-                f"Expected <30%. Check WU/HKO backfill coverage."
-            )
+    # Post-all-cities validation.
+    hard_failures = missing_city_count + stats.snapshots_unit_rejected
+    if hard_failures:
+        stats.refused = True
+        raise RuntimeError(
+            f"Refusing v2 rebuild: {hard_failures} hard failures "
+            f"(missing_city={missing_city_count}, "
+            f"unit_rejected={stats.snapshots_unit_rejected}); "
+            "some buckets may have already committed — inspect calibration_pairs_v2."
+        )
 
-        if stats.pairs_written == 0:
-            stats.refused = True
-            raise RuntimeError(
-                "Refusing v2 rebuild: zero pairs written; rolling back."
-            )
+    no_obs_ratio = stats.snapshots_no_observation / max(len(eligible), 1)
+    if no_obs_ratio > 0.30:
+        stats.refused = True
+        raise RuntimeError(
+            f"Refusing v2 rebuild: "
+            f"{stats.snapshots_no_observation}/{len(eligible)} "
+            f"({no_obs_ratio:.1%}) had no matching observation. "
+            f"Expected <30%. Check WU/HKO backfill coverage."
+        )
 
-        conn.execute("RELEASE SAVEPOINT v2_rebuild")
-        if not _skip_commit:
-            conn.commit()
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild")
-        conn.execute("RELEASE SAVEPOINT v2_rebuild")
-        raise
+    if stats.pairs_written == 0:
+        stats.refused = True
+        raise RuntimeError(
+            "Refusing v2 rebuild: zero pairs written; rolling back."
+        )
 
     print()
     print("=" * 70)
@@ -583,8 +626,8 @@ def rebuild_v2(
     print(f"Pairs written:           {stats.pairs_written}")
     if stats.per_city:
         print("Per-city pair counts:")
-        for city_name, n in sorted(stats.per_city.items()):
-            print(f"  {city_name:20s}  {n}")
+        for cname, n in sorted(stats.per_city.items()):
+            print(f"  {cname:20s}  {n}")
 
     return stats
 
@@ -601,41 +644,33 @@ def rebuild_all_v2(
     n_mc: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> dict[str, RebuildStatsV2]:
-    """Rebuild calibration_pairs_v2 for ALL METRIC_SPECS under one outer SAVEPOINT.
+    """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
-    LOW-side failure rolls back HIGH writes — no orphan rows on partial failure.
+    T1E: Each metric spec is processed via rebuild_v2, which commits per
+    (city, metric) bucket. No outer SAVEPOINT — each bucket is independently
+    atomic. A metric-level failure does not roll back previously committed
+    city buckets from prior metrics; operators should inspect the DB on failure.
     Returns per-metric stats dict keyed by temperature_metric string.
     """
     per_metric: dict[str, RebuildStatsV2] = {}
 
-    conn.execute("SAVEPOINT v2_rebuild_all")
-    try:
-        specs = [
-            spec for spec in METRIC_SPECS
-            if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
-        ]
-        for spec in specs:
-            stats = rebuild_v2(
-                conn,
-                dry_run=dry_run,
-                force=force,
-                spec=spec,
-                city_filter=city_filter,
-                start_date=start_date,
-                end_date=end_date,
-                n_mc=n_mc,
-                rng=rng,
-                _skip_commit=True,
-            )
-            per_metric[spec.identity.temperature_metric] = stats
-
-        conn.execute("RELEASE SAVEPOINT v2_rebuild_all")
-        if not dry_run:
-            conn.commit()
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT v2_rebuild_all")
-        conn.execute("RELEASE SAVEPOINT v2_rebuild_all")
-        raise
+    specs = [
+        spec for spec in METRIC_SPECS
+        if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
+    ]
+    for spec in specs:
+        stats = rebuild_v2(
+            conn,
+            dry_run=dry_run,
+            force=force,
+            spec=spec,
+            city_filter=city_filter,
+            start_date=start_date,
+            end_date=end_date,
+            n_mc=n_mc,
+            rng=rng,
+        )
+        per_metric[spec.identity.temperature_metric] = stats
 
     return per_metric
 

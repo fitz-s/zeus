@@ -1,0 +1,66 @@
+$schema: ../../../../architecture/scope_schema.json
+schema_version: 1
+packet: task_2026-05-04_zeus_may3_review_remediation
+status: planned
+branch: main
+worktree: /Users/leofitz/.openclaw/worktrees/zeus-may3-remediation-main
+
+in_scope:
+  - scripts/rebuild_calibration_pairs_v2.py
+  - src/state/db.py
+  - tests/test_rebuild_live_sentinel.py
+  - tests/test_sqlite_busy_timeout.py
+
+allow_companions:
+  - architecture/script_manifest.yaml
+  - architecture/test_topology.yaml
+  - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/**
+
+out_of_scope:
+  - src/observability/status_summary.py
+  - src/data/market_scanner.py
+  - src/riskguard/discord_alerts.py
+  - scripts/migrate_observations_k1.py
+  - scripts/migrate_add_authority_column.py
+  - scripts/verify_truth_surfaces.py
+  - scripts/attribution_drift_weekly.py
+  - scripts/repro_antibodies.py
+  - scripts/replay_parity.py
+  - scripts/bridge_oracle_to_calibration.py
+  - scripts/ws_poll_reaction_weekly.py
+  - scripts/migrate_forecasts_availability_provenance.py
+  - scripts/fill_obs_v2_meteostat.py
+  - scripts/etl_forecasts_v2_from_legacy.py
+  - scripts/edge_observation_weekly.py
+  - scripts/diagnose_truth_surfaces.py
+  - scripts/fill_obs_v2_dst_gaps.py
+  - scripts/build_correlation_matrix.py
+  - scripts/venus_sensing_report.py
+  - scripts/ingest_grib_to_snapshots.py
+  - src/calibration/retrain_trigger.py
+  - src/state/learning_loop_observation.py
+  - src/state/edge_observation.py
+  - src/state/ws_poll_reaction.py
+  - src/state/calibration_observation.py
+  - src/execution/**
+  - src/venue/**
+  - src/strategy/**
+  - src/contracts/**
+  - src/engine/**
+  - src/riskguard/**
+  - src/data/**
+  - src/ingest/**
+  - .github/**
+  - config/**
+  - state/**
+  - logs/**
+  - data/**
+  - '*.db'
+  - '*.sqlite'
+
+notes:
+  - Other sqlite3.connect call sites use varied timeouts (0s/5s/30s/120s); T1E intentionally does NOT unify them in this phase. Those are explicitly out_of_scope to keep the diff bounded. T1E only changes the two trade/world DB connection helpers in db.py because they are on the live-daemon write path. A follow-up packet may unify the remaining sites if telemetry shows further contention.
+  - architecture/script_manifest.yaml:478 already registers rebuild_calibration_pairs_v2.py; T1E updates the row to add required_tests entries for the two new test files. NO new manifest entry is created (the row already exists).
+  - .zeus/rebuild_lock.do_not_run_during_live was created by coordinator (LOCK_DECISION Amendment 2). T1E only adds the script-side reader; sentinel content/format is owned by the coordinator and remains unchanged.
+  - Tier 1 prerequisite: T0_DAEMON_UNLOADED.md, T0_VENUE_QUIESCENT.md, T0_SQLITE_POLICY.md (planner-prefilled defaults; operator may override), T1A + T1F + T1BD + T1C closeout evidence.
+  - T1A must land first to avoid db.py merge conflicts with the DDL refactor.

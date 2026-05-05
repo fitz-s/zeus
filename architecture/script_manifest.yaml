@@ -475,7 +475,7 @@ scripts:
     apply_flag: "--no-dry-run"
     target_db: "--db"
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
-  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement."}
+  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; safety gates enforced via --dry-run default + --no-dry-run + --force requirement.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
   rebuild_settlements.py:
     class: repair
     module_owner: scripts

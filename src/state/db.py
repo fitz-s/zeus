@@ -28,6 +28,27 @@ ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlemen
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
+# T1E: configurable busy-timeout (ms → s). Default 30000ms = 30s per T0_SQLITE_POLICY.md.
+# ZEUS_DB_BUSY_TIMEOUT_MS env var is in milliseconds; sqlite3.connect(timeout=) takes seconds.
+# Malformed value falls back to default (catch-and-log) so daemon never crashes on bad config.
+def _db_busy_timeout_s() -> float:
+    """Return sqlite3 busy-timeout in seconds from ZEUS_DB_BUSY_TIMEOUT_MS env var.
+
+    Reads env var on each call so long-running daemons pick up runtime changes.
+    Default: 30000 ms (30 s) per T0_SQLITE_POLICY.md.
+    """
+    raw = os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000")
+    try:
+        return float(raw) / 1000.0
+    except (ValueError, TypeError):
+        _startup_logger = logging.getLogger(__name__)
+        _startup_logger.warning(
+            "ZEUS_DB_BUSY_TIMEOUT_MS=%r is not a valid number; "
+            "falling back to default 30000 ms (30 s)",
+            raw,
+        )
+        return 30.0
+
 
 def _zeus_trade_db_path() -> Path:
     """Physical path for the trade database."""
@@ -37,7 +58,9 @@ def _zeus_trade_db_path() -> Path:
 def _connect(db_path: Path) -> sqlite3.Connection:
     """Low-level connection with standard pragmas."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=120)
+    # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
+    timeout_s = _db_busy_timeout_s()
+    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -74,6 +97,42 @@ def get_trade_connection_with_world() -> sqlite3.Connection:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
+    """T1E: log degrade counter + ALERT when 'database is locked' is raised.
+
+    Called by connection helpers when sqlite3 busy-timeout expires and the
+    live cycle must continue in read-only monitor mode rather than crashing.
+    Does NOT re-raise — caller decides whether to return None or raise.
+    """
+    logger.warning(
+        "telemetry_counter event=db_write_lock_timeout_total db_error=%r",
+        str(exc),
+    )
+    logger.error(
+        "ALERT db_write_lock_timeout: database is locked after busy-timeout; "
+        "cycle degrades to read-only monitor for this cycle. error=%r",
+        str(exc),
+    )
+
+
+def connect_or_degrade(db_path: Path) -> Optional[sqlite3.Connection]:
+    """T1E: Connect to DB; on 'database is locked' degrade to None (read-only cycle).
+
+    Used by the live cycle write path. Returns None when the DB is locked so
+    the caller can skip writes for this cycle without crashing the daemon.
+    Any other OperationalError is re-raised (not a lock timeout).
+    """
+    try:
+        return _connect(db_path)
+    except sqlite3.OperationalError as exc:
+        if str(exc).startswith("database is locked"):
+            _handle_db_write_lock(exc)
+            return None
+        raise
+
+
 CANONICAL_POSITION_SETTLED_CONTRACT_VERSION = "position_settled.v1"
 CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "contract_version",
@@ -346,7 +405,9 @@ RESOLVED_TOKEN_SUPPRESSION_REASONS = (
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = db_path or ZEUS_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=120)
+    # T1E: timeout read from ZEUS_DB_BUSY_TIMEOUT_MS env var (ms→s); default 30s.
+    timeout_s = _db_busy_timeout_s()
+    conn = sqlite3.connect(str(db_path), timeout=timeout_s)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
