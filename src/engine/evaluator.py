@@ -2754,7 +2754,7 @@ def evaluate_candidate(
     _transfer_logit_sigma: float = 0.0
     try:
         from src.strategy.market_analysis import compute_transfer_logit_sigma as _compute_sigma
-        _sigma_scale: float = float(settings().get("transfer_logit_sigma_scale", 4.0))
+        _sigma_scale: float = float(settings["calibration"]["transfer_logit_sigma_scale"])
         _sigma_row = conn.execute(
             """
             SELECT status, brier_diff

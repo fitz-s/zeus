@@ -258,3 +258,51 @@ def test_legacy_path_no_warning_when_flag_off(
     assert len(deprecation_warnings) == 0, (
         "No DeprecationWarning expected when flag is off"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #61 review-remediation antibody tests
+# ---------------------------------------------------------------------------
+
+def test_settings_singleton_is_not_callable() -> None:
+    """settings is a singleton Settings() instance, not a factory function.
+
+    Regression guard for PR #61 review comment (Copilot #3): evaluator.py
+    line 2757 called settings() as a function. Settings uses dict-key access
+    (settings["key"]), not .get(). The call settings() raises TypeError which
+    was swallowed by the broad except clause — silently keeping sigma=0.0.
+    Fix: settings["transfer_logit_sigma_scale"] not settings()["..."].
+    """
+    from src.config import settings
+    # settings["calibration"]["transfer_logit_sigma_scale"] must return a number
+    # (nested under "calibration" in settings.json, not at the top level)
+    result = settings["calibration"]["transfer_logit_sigma_scale"]
+    assert isinstance(result, (int, float)), (
+        f"settings['calibration']['transfer_logit_sigma_scale'] must return a number, got {result!r}"
+    )
+    # settings must NOT be callable as a function (that was the bug)
+    with pytest.raises(TypeError):
+        settings()  # type: ignore[operator]
+
+
+def test_sigma_lookup_does_not_raise_with_correct_settings_access() -> None:
+    """The sigma lookup block in evaluator.py must not raise TypeError.
+
+    Regression guard: before fix, settings() (as function call) raised
+    TypeError immediately, swallowed by except, leaving sigma=0.0 always.
+    The production path now uses settings["transfer_logit_sigma_scale"] correctly.
+    """
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_transfer_row(conn, status="LIVE_ELIGIBLE", brier_diff=0.004,
+                         evaluated_at=now - timedelta(days=3))
+
+    # platt_model_key must match what _insert_transfer_row uses ('test_platt_key')
+    sigma = _query_sigma_from_conn(conn, platt_model_key="test_platt_key",
+                                   target_source_id="ecmwf_open_data",
+                                   target_cycle="00",
+                                   horizon_profile="full")
+    assert sigma > 0.0, (
+        "sigma must be > 0.0 for a LIVE_ELIGIBLE row; "
+        "if 0.0, the settings() TypeError bug is still present"
+    )
