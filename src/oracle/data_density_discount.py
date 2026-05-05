@@ -165,6 +165,9 @@ def evaluate_ddd(
     city_floors_config: dict,
     n_star_config: dict,
     sigma_diagnostic: float | None = None,
+    cycle: str | None = None,
+    source_id: str | None = None,
+    horizon_profile: str | None = None,
 ) -> DDDResult:
     """Evaluate the v2 Two-Rail Data Density Discount.
 
@@ -183,6 +186,12 @@ def evaluate_ddd(
     city_floors_config: Loaded floors JSON dict (from load_city_floors)
     n_star_config:      Loaded N_star JSON dict (from load_nstar_config)
     sigma_diagnostic:   σ of historical coverage (for monitoring only, NOT trigger)
+    cycle:              Forecast cycle hour string, e.g. '00' or '12'. Stored in
+                        diagnostic for monitoring; not a trigger input.
+    source_id:          Forecast source identifier, e.g. 'tigge_mars' or
+                        'ecmwf_open_data'. Stored in diagnostic only.
+    horizon_profile:    Horizon profile, e.g. 'full' or 'short'. Stored in
+                        diagnostic only.
 
     Returns
     -------
@@ -208,6 +217,12 @@ def evaluate_ddd(
         # σ is tracked for monitoring/dashboards but never enters the trigger
         "sigma_diagnostic": sigma_diagnostic,
         "small_sample_amp_applied": False,
+        # Source-cycle provenance — monitoring/audit only, NOT trigger inputs.
+        # Surfaces INV-17 risk: DDD trained on 00z TIGGE history must not be
+        # silently applied to a 12z OpenData live forecast without visibility.
+        "cycle": cycle,
+        "source_id": source_id,
+        "horizon_profile": horizon_profile,
     }
 
     # ── RAIL 1: Absolute hard kill ─────────────────────────────────────────
@@ -291,6 +306,10 @@ def _emit_diagnostic_log(result: DDDResult) -> None:
         "action": result.action,
         "rail": result.rail,
         "discount": result.discount,
+        # Source-cycle provenance fields (INV-17 audit surface)
+        "cycle": d.get("cycle"),
+        "source_id": d.get("source_id"),
+        "horizon_profile": d.get("horizon_profile"),
     }
     logger.info("ddd_evaluated", extra={"ddd_diag": payload})
 
@@ -307,6 +326,9 @@ def evaluate_ddd_from_files(
     floors_path: Path | None = None,
     nstar_path: Path | None = None,
     sigma_diagnostic: float | None = None,
+    cycle: str | None = None,
+    source_id: str | None = None,
+    horizon_profile: str | None = None,
 ) -> DDDResult:
     """Load config from files and evaluate DDD.
 
@@ -325,4 +347,7 @@ def evaluate_ddd_from_files(
         city_floors_config=city_floors_config,
         n_star_config=n_star_config,
         sigma_diagnostic=sigma_diagnostic,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
     )

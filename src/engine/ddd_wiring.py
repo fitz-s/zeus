@@ -252,6 +252,9 @@ def evaluate_ddd_for_decision(
     mismatch_rate: float,
     data_version: Optional[str] = None,
     decision_time: Optional[datetime] = None,
+    cycle: Optional[str] = None,
+    source_id: Optional[str] = None,
+    horizon_profile: Optional[str] = None,
 ) -> DDDResult:
     """Compute live DDD for one (city, target_date, metric) decision.
 
@@ -337,4 +340,7 @@ def evaluate_ddd_for_decision(
         city_floors_config=floors_cfg,
         n_star_config=nstar_cfg,
         sigma_diagnostic=None,
+        cycle=cycle,
+        source_id=source_id,
+        horizon_profile=horizon_profile,
     )
