@@ -53,7 +53,6 @@ from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile
 from src.state.db import (
     _zeus_trade_db_path,
     connect_or_degrade,
-    get_trade_connection_with_world,
     record_token_suppression,
     ZEUS_WORLD_DB_PATH,
 )

@@ -964,7 +964,16 @@ def test_run_cycle_monitoring_uses_attached_shared_connection(monkeypatch, tmp_p
 
     monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", shared_db)
     monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda mode=None: trade_db)
-    assert cycle_runner.get_connection is db_module.get_trade_connection_with_world
+    # T2G: get_connection is a wrapper in cycle_runner that reads its own module-level
+    # bindings for _zeus_trade_db_path and ZEUS_WORLD_DB_PATH (imported at load time).
+    # Patch cycle_runner's bindings so get_connection() uses the test DBs.
+    monkeypatch.setattr(cycle_runner, "ZEUS_WORLD_DB_PATH", shared_db)
+    monkeypatch.setattr(cycle_runner, "_zeus_trade_db_path", lambda: trade_db)
+    # T2G: get_connection is now a wrapper (not a direct alias) that calls
+    # connect_or_degrade and attaches world schema. Verify it is callable and
+    # defined in cycle_runner (the monkeypatch seam is the alias, not the identity).
+    assert callable(cycle_runner.get_connection)
+    assert cycle_runner.get_connection.__module__ == cycle_runner.__name__
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState())
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
