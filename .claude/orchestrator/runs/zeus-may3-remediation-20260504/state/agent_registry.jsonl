@@ -28,3 +28,6 @@
 {"phase":"T2G","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T2F critic","registered_at":"2026-05-05T09:25:00Z"}
 {"phase":"T2G","role":"security-reviewer","agentId":"a5102a8d447756d23","model":"opus","verdict":"APPROVE_WITH_MITIGATIONS","reuse_of":"T1G security","registered_at":"2026-05-05T09:25:00Z","note":"0/0/2 MEDIUM; no fix; runbook follow-up"}
 {"phase":"T2G","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2F verifier","registered_at":"2026-05-05T09:25:00Z"}
+{"phase":"T2H","role":"executor","batches":["B1"],"agentId":"a4a980c69da800e80","model":"sonnet","registered_at":"2026-05-05T10:35:00Z","note":"DEV-1 grep_count=2 INVARIANT_AMEND via AMD-T2H-4; DEV-2 non-existent test cite APPROVE via AMD-T2H-5"}
+{"phase":"T2H","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T2G critic","registered_at":"2026-05-05T10:55:00Z","note":"resumed once mid-investigation via SendMessage nudge"}
+{"phase":"T2H","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T2G verifier","registered_at":"2026-05-05T10:55:00Z"}

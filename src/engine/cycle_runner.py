@@ -55,6 +55,7 @@ from src.state.db import (
     connect_or_degrade,
     get_trade_connection_with_world,
     record_token_suppression,
+    ZEUS_WORLD_DB_PATH,
 )
 from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 
@@ -70,16 +71,14 @@ def get_connection():
     Returns a live Connection on success, or None if the DB is transiently
     locked (busy-timeout expired). Any other OperationalError propagates.
     """
-    from src.state.db import get_trade_connection_with_world as _gtcww
     conn = connect_or_degrade(_zeus_trade_db_path())
     if conn is None:
         return None
     # ATTACH world schema (mirrors get_trade_connection_with_world logic).
     try:
-        from src.state.db import ZEUS_WORLD_DB_PATH as _world_path
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
-            conn.execute("ATTACH DATABASE ? AS world", (str(_world_path),))
+            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     except Exception:
         pass
     return conn
