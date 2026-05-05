@@ -39,12 +39,19 @@ print(r.get('exit_code', 0))
 
 # Active worktrees (excluding main and temp pytest worktrees).
 # Use --porcelain so paths containing spaces survive intact, and -Fx exact-match
-# exclusion of the toplevel so sibling worktrees sharing a path prefix aren't
-# falsely swallowed.
-TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
+# exclusion of the MAIN worktree (the bare/primary one listed first by git).
+# We must exclude the main worktree, not the current worktree (`--show-toplevel`
+# returns the one the merge ran from, which IS the linked worktree the cleanup
+# reminder should be listing).
+# `git worktree list --porcelain` always lists the main worktree first; we
+# extract it with sed+head so paths with spaces survive intact.
+MAIN_WORKTREE=$(git worktree list --porcelain 2>/dev/null \
+  | sed -n 's/^worktree //p' \
+  | head -n1 \
+  || true)
 WORKTREES=$(git worktree list --porcelain 2>/dev/null \
-  | awk '/^worktree / { sub(/^worktree /, ""); print }' \
-  | grep -vFx -- "${TOPLEVEL:-/dev/null/never-matches}" \
+  | sed -n 's/^worktree //p' \
+  | grep -vFx -- "${MAIN_WORKTREE:-/dev/null/never-matches}" \
   | grep -v "/tmp/\|/T/" \
   || true)
 
