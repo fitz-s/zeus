@@ -138,6 +138,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
     conn: sqlite3.Connection,
     now: datetime,
     staleness_days: int = 90,
+    live_promotion_approved: bool = False,
 ) -> CalibrationTransferDecision:
     """DB-row-as-authority replacement for legacy string-mapping policy.
 
@@ -147,7 +148,8 @@ def evaluate_calibration_transfer_policy_with_evidence(
     Same-domain fast-path: source_id==target_source_id AND cycles match → LIVE_ELIGIBLE.
     Otherwise queries validated_calibration_transfers for matching row.
     Stale or missing → SHADOW_ONLY. status='TRANSFER_UNSAFE' → BLOCKED.
-    `live_promotion_approved` flag is REMOVED — DB row is authority.
+    `live_promotion_approved` is threaded to the legacy fallback (flag OFF).
+    When flag is ON, DB row is the authority and this parameter is unused.
 
     Phase X.1 scaffold: OOS evaluator (X.2) writes rows; flag flip (X.3) is
     operator-gated. Until then this is a zero-risk pass-through.
@@ -167,6 +169,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
             config=config,
             source_id=source_id,
             forecast_data_version=_fallback_dv,
+            live_promotion_approved=live_promotion_approved,
         )
 
     policy_id = config.calibration_policy_id.value

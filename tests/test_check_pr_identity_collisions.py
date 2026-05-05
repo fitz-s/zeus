@@ -17,10 +17,13 @@ from pathlib import Path
 # Add scripts/ to sys.path so the script-as-module import works.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+from unittest.mock import patch
+
 from check_pr_identity_collisions import (  # noqa: E402
     IDENTITY_FILE_PATTERNS,
     _file_matches_identity_scope,
     added_classes_in_diff,
+    main,
 )
 
 
@@ -200,3 +203,115 @@ def test_identity_patterns_compile():
     import re
     for pat in IDENTITY_FILE_PATTERNS:
         re.compile(pat)
+
+
+# ---- stacked-PR skip semantics --------------------------------------------
+#
+# Tests for the predicate at scripts/check_pr_identity_collisions.py:191
+# that decides which other PRs are stacked (skip) vs. sibling (check).
+# Stubs _pr_base, _list_other_open_prs, and _pr_diff so no gh CLI needed.
+
+
+_IDENTITY_DIFF = """\
+diff --git a/src/types/thing.py b/src/types/thing.py
+new file mode 100644
+--- /dev/null
++++ b/src/types/thing.py
+@@ -0,0 +1,2 @@
++class ThingIdentity:
++    pass
+"""
+
+
+class TestStackedPrSkipSemantics:
+    """Unit tests for the stacked-PR skip predicate.
+
+    The predicate in main():
+        if pr.get("headRefOid") == this_base:
+            continue   # stacked: skip
+    Stacked  = other PR's headRefOid IS our baseRefOid  → SKIP (expected inheritance)
+    Sibling  = other PR's headRefOid is different, but same base as ours → NOT skipped
+    Unrelated = different head AND different base → NOT skipped (evaluated normally)
+    """
+
+    BASE_OID = "aaa000"
+    OTHER_HEAD_STACKED = BASE_OID          # stacked: other.head == this.base
+    OTHER_HEAD_SIBLING = "bbb111"          # sibling: different head
+    OTHER_HEAD_UNRELATED = "ccc222"        # unrelated
+
+    def _run_main(self, this_pr_oid: str, others: list[dict], this_diff: str, other_diff: str) -> list[tuple]:
+        """Run main() with all external calls stubbed; return collisions list."""
+        collisions_captured: list = []
+
+        def fake_format_warning(this_pr, collisions):
+            collisions_captured.extend(collisions)
+            return "WARNING\n"
+
+        import check_pr_identity_collisions as mod
+        with (
+            patch.object(mod, "_pr_base", return_value=self.BASE_OID),
+            patch.object(mod, "_list_other_open_prs", return_value=others),
+            patch.object(mod, "_pr_diff", return_value=other_diff),
+            patch.object(mod, "_format_warning", side_effect=fake_format_warning),
+        ):
+            # Patch _pr_diff for THIS pr to return our identity diff
+            original_pr_diff = mod._pr_diff
+
+            def selective_pr_diff(pr_number, repo):
+                if pr_number == 99:
+                    return this_diff
+                return other_diff
+
+            with patch.object(mod, "_pr_diff", side_effect=selective_pr_diff):
+                main(["--this-pr", "99", "--repo", "owner/repo"])
+
+        return collisions_captured
+
+    def test_stacked_pr_is_skipped(self):
+        """Stacked: other PR's headRefOid == this PR's baseRefOid → skip."""
+        others = [{"number": 10, "headRefOid": self.OTHER_HEAD_STACKED,
+                   "headRefName": "stacked-branch", "baseRefOid": "prev000"}]
+        collisions = self._run_main(
+            this_pr_oid=self.BASE_OID,
+            others=others,
+            this_diff=_IDENTITY_DIFF,
+            other_diff=_IDENTITY_DIFF,
+        )
+        assert collisions == [], (
+            "Stacked PR (other.headRefOid == this.baseRefOid) must be skipped; "
+            f"got collisions: {collisions}"
+        )
+
+    def test_sibling_pr_is_not_skipped(self):
+        """Sibling: same base commit, different head → primary collision scenario."""
+        others = [{"number": 11, "headRefOid": self.OTHER_HEAD_SIBLING,
+                   "headRefName": "sibling-branch", "baseRefOid": self.BASE_OID}]
+        collisions = self._run_main(
+            this_pr_oid=self.BASE_OID,
+            others=others,
+            this_diff=_IDENTITY_DIFF,
+            other_diff=_IDENTITY_DIFF,
+        )
+        assert len(collisions) == 1, (
+            "Sibling PR (same baseRefOid, different head) must NOT be skipped; "
+            f"got: {collisions}"
+        )
+        pr_dict, overlap = collisions[0]
+        assert pr_dict["number"] == 11
+        assert ("src/types/thing.py", "ThingIdentity") in overlap
+
+    def test_unrelated_pr_is_evaluated(self):
+        """Unrelated: different head AND different base → evaluated normally."""
+        others = [{"number": 12, "headRefOid": self.OTHER_HEAD_UNRELATED,
+                   "headRefName": "unrelated-branch", "baseRefOid": "other-base"}]
+        collisions = self._run_main(
+            this_pr_oid=self.BASE_OID,
+            others=others,
+            this_diff=_IDENTITY_DIFF,
+            other_diff=_IDENTITY_DIFF,
+        )
+        # Unrelated PR adds the same class → collision detected
+        assert len(collisions) == 1, (
+            "Unrelated PR must be evaluated; expected collision; "
+            f"got: {collisions}"
+        )

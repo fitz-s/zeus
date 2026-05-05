@@ -917,6 +917,10 @@ def _write_entry_readiness_for_candidate(
         platt_model_key=None,
         conn=conn,
         now=decision_time,
+        # Rollout-gate was retired 2026-05-04 (gate-purge); live_promotion_approved
+        # is unconditionally True here. The legacy fallback honours the flag, and
+        # the evidence-gated path (flag ON) ignores it in favour of the DB row.
+        live_promotion_approved=True,
     )
 
     placeholder_scope = ForecastTargetScope(
