@@ -1229,3 +1229,48 @@ test_metadata:
       yields position_truth=review_required and trade_id in anomalies.
     created: 2026-05-05
     last_reused_or_audited: 2026-05-05
+
+  tests/test_observability_counters.py:
+    modules: [observability]
+    category: core_law_antibody
+    profile: r3_typed_counter_sink
+    blocks_commit: true
+    asserted_invariants:
+      - T2F-COUNTER-SINK-TYPED-API
+    source_under_test:
+      - src/observability/counters.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json
+    notes: >
+      Unit tests for typed counter sink (src/observability/counters.py).
+      Asserts increment/read API, thread safety, label isolation via frozenset key,
+      negative delta rejection (ValueError), reset_all isolation, and emit_typed_counter
+      convenience helper. Named test test_counter_increment_read_isolated_per_label_set
+      satisfies the T2F-COUNTER-SINK-TYPED-API invariant text exactly.
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05
+
+  tests/test_counter_caplog_ledger.py:
+    modules: [observability, state, execution, venue]
+    category: core_law_antibody
+    profile: r3_typed_counter_sink
+    blocks_commit: true
+    asserted_invariants:
+      - T2F-EVERY-T1-COUNTER-EMITS-VIA-SINK
+      - T2F-CAPLOG-LEDGER-ASSERTS-EVERY-EVENT-NAME
+    source_under_test:
+      - src/observability/counters.py
+      - src/venue/polymarket_v2_adapter.py
+      - src/state/db.py
+      - src/state/portfolio.py
+      - src/state/chain_reconciliation.py
+      - src/execution/harvester.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2F/phase.json
+    notes: >
+      Caplog ledger asserting all 7 event names fire both typed sink AND legacy
+      logger.warning. 36 tests total (typed + legacy per event, parametrized over
+      field/reason labels). Actual emit-line count: 17 (planner estimated 10 - deviation
+      logged in BATCH_DONE_T2F).
+    created: 2026-05-05
+    last_reused_or_audited: 2026-05-05

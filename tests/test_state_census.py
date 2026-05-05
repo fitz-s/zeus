@@ -457,6 +457,59 @@ class TestCensusDetectsCorrectedRowWithoutFillAuthority:
         ]
         assert not pos_anomalies, "No anomaly expected for locked fill authority."
 
+
+# ---------------------------------------------------------------------------
+# T2F-CENSUS-FILL-AUTHORITY-FAIL-CLOSED
+# ---------------------------------------------------------------------------
+
+
+class TestCensusFailClosedOnMissingAuthorityConstant:
+    """T2F-CENSUS-FILL-AUTHORITY-FAIL-CLOSED: ImportError exits non-zero rather than silently duplicating the string."""
+
+    def test_census_fail_closed_on_missing_authority_constant(self) -> None:
+        """When FILL_AUTHORITY_VENUE_CONFIRMED_FULL cannot be imported, state_census exits non-zero.
+
+        Strategy: patch sys.modules to make 'src.state.portfolio' raise ImportError,
+        then re-import scripts.state_census in a subprocess context.
+        We verify the fail-closed path by running the census module's import block
+        in isolation using importlib with a broken sys.modules entry.
+
+        The invariant: FATAL message on stderr and SystemExit(1) when import fails.
+        """
+        import importlib
+        import io
+        import subprocess
+        import sys
+        import textwrap
+
+        # Run in a subprocess with src.state.portfolio made unavailable.
+        # The census module's top-level import block calls sys.exit(1) on ImportError.
+        code = textwrap.dedent("""
+            import sys
+            # Block src.state.portfolio from being importable
+            sys.modules['src.state.portfolio'] = None  # type: ignore
+            import scripts.state_census  # should call sys.exit(1)
+        """)
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+
+        assert result.returncode != 0, (
+            "state_census should exit non-zero when FILL_AUTHORITY_VENUE_CONFIRMED_FULL "
+            "cannot be imported. returncode=0 means the ImportError fallback is still "
+            "silently duplicating the string (T1H C-1 LOW not resolved)."
+        )
+        assert "authority constant unavailable" in result.stderr, (
+            f"Expected 'authority constant unavailable' in stderr. Got: {result.stderr!r}"
+        )
+        assert "refusing to classify" in result.stderr, (
+            f"Expected 'refusing to classify' in stderr. Got: {result.stderr!r}"
+        )
+
     def test_census_not_corrected_any_fill_authority_is_open(
         self, tmp_path: Path
     ) -> None:

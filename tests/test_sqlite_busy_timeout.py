@@ -232,3 +232,57 @@ def test_connect_or_degrade_returns_connection_on_success(tmp_path):
     conn = connect_or_degrade(db_path)
     assert conn is not None
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# T2F-NEGATIVE-ENV-VALIDATION-LOUD-FAIL: negative ZEUS_DB_BUSY_TIMEOUT_MS
+# ---------------------------------------------------------------------------
+
+def test_negative_env_rejected_at_parse_time(monkeypatch):
+    """ZEUS_DB_BUSY_TIMEOUT_MS=-1 raises ValueError at parse time (not at connect time).
+
+    T2F-NEGATIVE-ENV-VALIDATION-LOUD-FAIL: a misconfigured negative timeout must
+    fail loudly before any sqlite3.connect() call, rather than passing a negative
+    timeout to SQLite (which could behave as an indefinite lock).
+    """
+    _set_env(monkeypatch, "-1")
+    from src.state import db as _db
+    import importlib
+    importlib.reload(_db)
+
+    with pytest.raises(ValueError, match="ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0"):
+        _db._db_busy_timeout_s()
+
+
+def test_negative_env_large_negative_rejected(monkeypatch):
+    """Large negative value is also rejected at parse time."""
+    _set_env(monkeypatch, "-99999")
+    from src.state import db as _db
+    import importlib
+    importlib.reload(_db)
+
+    with pytest.raises(ValueError, match="ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0"):
+        _db._db_busy_timeout_s()
+
+
+def test_zero_env_is_accepted(monkeypatch):
+    """ZEUS_DB_BUSY_TIMEOUT_MS=0 is >= 0 and should not raise (yields 0.0s timeout)."""
+    _set_env(monkeypatch, "0")
+    from src.state import db as _db
+    import importlib
+    importlib.reload(_db)
+
+    result = _db._db_busy_timeout_s()
+    assert result == pytest.approx(0.0)
+
+
+def test_malformed_env_still_falls_back_after_negative_validation(monkeypatch):
+    """Malformed (non-numeric) env still falls back to 30.0s; negative path is separate."""
+    _set_env(monkeypatch, "not_a_number")
+    from src.state import db as _db
+    import importlib
+    importlib.reload(_db)
+
+    # Malformed string -> float() raises ValueError/TypeError -> catch-and-log -> 30.0
+    result = _db._db_busy_timeout_s()
+    assert result == pytest.approx(30.0)

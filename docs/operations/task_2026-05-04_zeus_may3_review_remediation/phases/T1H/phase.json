@@ -4,7 +4,6 @@
   "task_id": "zeus-may3-remediation",
   "title": "Minimal coded state census (read-only)",
   "intent": "Add a NEW read-only census script (scripts/state_census.py) and its relationship test (tests/test_state_census.py) that classifies every open position across six axes (position truth / redeem truth / command truth / fill truth / quote-or-exit truth / identity truth) using ONLY existing canonical DB read surfaces. Empty settlement command queue is reported as data_unavailable, never as no_redeem_queued. The census never writes to any production DB.",
-
   "files_touched": [
     "architecture/script_manifest.yaml",
     "architecture/test_topology.yaml",
@@ -16,12 +15,10 @@
   "cross_module_edges": 4,
   "domain": "state/read-only-census",
   "purely_mechanical": false,
-
   "test_commands": [
     "python -m pytest -q tests/test_state_census.py",
     "python scripts/state_census.py --read-only --json-out /tmp/zeus_state_census.json"
   ],
-
   "asserted_invariants": [
     {
       "id": "T1H-CENSUS-READ-ONLY",
@@ -58,28 +55,27 @@
     "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH",
     "T1G-AUDIT-ARTIFACT-WRITTEN"
   ],
-
   "expected_artifact": "execution/execution_result.md",
-
   "_planner_notes": {
     "evidence_grep_ts": "2026-05-04",
     "round2_grep_verification": {
-      "scripts_state_census_does_not_exist_yet": "ls scripts/state_census.py → 'No such file or directory' at planner Round-2.",
-      "tests_state_census_does_not_exist_yet": "ls tests/test_state_census.py → 'No such file or directory' at planner Round-2.",
-      "settlement_commands_read_helpers_already_exist": "src/execution/settlement_commands.py:444 SELECT * FROM settlement_commands ... WHERE state = ? — provides the read shape; T1H imports the read API rather than crafting raw SQL.",
-      "portfolio_read_helpers_already_exist": "src/state/portfolio.py:1761 def get_open_positions(...) and src/state/portfolio.py:1715 corrected_executable_economics_eligible projection — the census reads these.",
-      "venue_command_repo_envelope_reads": "src/state/venue_command_repo.py:319 def insert_submission_envelope (write API; the census uses the corresponding read API at the same module — planner did not enumerate exhaustively)."
+      "scripts_state_census_does_not_exist_yet": "ls scripts/state_census.py \u2192 'No such file or directory' at planner Round-2.",
+      "tests_state_census_does_not_exist_yet": "ls tests/test_state_census.py \u2192 'No such file or directory' at planner Round-2.",
+      "settlement_commands_read_helpers_already_exist": "src/execution/settlement_commands.py:444 SELECT * FROM settlement_commands ... WHERE state = ? \u2014 provides the read shape; T1H imports the read API rather than crafting raw SQL.",
+      "portfolio_read_helpers_already_exist": "src/state/portfolio.py:1761 def get_open_positions(...) and src/state/portfolio.py:1715 corrected_executable_economics_eligible projection \u2014 the census reads these.",
+      "venue_command_repo_envelope_reads": "src/state/venue_command_repo.py:319 def insert_submission_envelope (write API; the census uses the corresponding read API at the same module \u2014 planner did not enumerate exhaustively)."
     },
-    "loc_estimate_basis": "scripts/state_census.py (new): ~400 lines — 6 census axes × ~50 lines per classifier + ~50 lines for argv parsing + JSON output + ~50 lines for the read-only connection helper. tests/test_state_census.py (new): ~300 lines — 4 named invariant tests plus fixture setup. architecture/script_manifest.yaml: +12 lines. architecture/test_topology.yaml: +1 line. Total ~700 LOC; this is by far the largest T1 phase but is mostly NEW additive code, not edits to existing surfaces.",
-    "cross_module_edges_basis": "4 imports across module boundaries — src.state.portfolio (Position dataclass + reads), src.execution.settlement_commands (SettlementState enum + reads), src.state.venue_command_repo (envelope reads), src.config (state_path / DB locations). Each is read-only.",
+    "loc_estimate_basis": "scripts/state_census.py (new): ~400 lines \u2014 6 census axes \u00d7 ~50 lines per classifier + ~50 lines for argv parsing + JSON output + ~50 lines for the read-only connection helper. tests/test_state_census.py (new): ~300 lines \u2014 4 named invariant tests plus fixture setup. architecture/script_manifest.yaml: +12 lines. architecture/test_topology.yaml: +1 line. Total ~700 LOC; this is by far the largest T1 phase but is mostly NEW additive code, not edits to existing surfaces.",
+    "cross_module_edges_basis": "4 imports across module boundaries \u2014 src.state.portfolio (Position dataclass + reads), src.execution.settlement_commands (SettlementState enum + reads), src.state.venue_command_repo (envelope reads), src.config (state_path / DB locations). Each is read-only.",
     "code_provenance_header": "Per ~/.claude/CLAUDE.md (Code Provenance section): every new script and test file carries Created/Last-reused-or-audited/Authority-basis header. T1H-PROVENANCE-HEADER-PRESENT invariant enforces this; the critic verifies header presence.",
-    "topology_admission": "BLOCKED at planner time — generic profile does not admit scripts/state_census.py for write-intent create. Resolution per LOCK_DECISION Amendment 4. NOTE: scripts/state_census.py creation may match the 'add or change script' digest profile better than the surgical executor work in T1A/T1F — coordinator may try that profile name before declaring STOP_REPLAN.",
+    "topology_admission": "BLOCKED at planner time \u2014 generic profile does not admit scripts/state_census.py for write-intent create. Resolution per LOCK_DECISION Amendment 4. NOTE: scripts/state_census.py creation may match the 'add or change script' digest profile better than the surgical executor work in T1A/T1F \u2014 coordinator may try that profile name before declaring STOP_REPLAN.",
     "planning_lock_required": true,
     "k0_k1_classification": "READ-ONLY surface; lowest-risk T1 phase. Critic-opus still required (the census produces evidence that gates Tier-2 admission; correctness of read interpretation matters even if the script writes nothing).",
     "coordinator_blockers": [
       "T0.2 RiskGuard still RUNNING (planner Round-1).",
       "T0.3 venue quiescent attestation pending (planner Round-1)."
     ],
-    "predecessor_dependency": "T1G MUST land first — the census's identity_truth axis classifies envelope persistence; if T1G found NEEDS_FIX persistence gaps the census results would be misleading. T1A/T1F/T1BD/T1C/T1E provide the invariants that the census's anomaly-detection logic encodes."
+    "predecessor_dependency": "T1G MUST land first \u2014 the census's identity_truth axis classifies envelope persistence; if T1G found NEEDS_FIX persistence gaps the census results would be misleading. T1A/T1F/T1BD/T1C/T1E provide the invariants that the census's anomaly-detection logic encodes.",
+    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
   }
 }

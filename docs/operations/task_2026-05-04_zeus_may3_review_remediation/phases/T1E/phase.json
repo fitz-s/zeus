@@ -4,7 +4,6 @@
   "task_id": "zeus-may3-remediation",
   "title": "SQLite single-writer tactical mitigation (busy-timeout + read-only degrade + rebuild sentinel + rebuild sharding)",
   "intent": "Replace the hard-coded sqlite3.connect(timeout=120) calls in src/state/db.py with a configurable ZEUS_DB_BUSY_TIMEOUT_MS (default 30000ms per T0_SQLITE_POLICY); on sqlite3.OperationalError 'database is locked' the live cycle degrades to read-only-monitor for that cycle and increments db_write_lock_timeout_total; scripts/rebuild_calibration_pairs_v2.py refuses to start if .zeus/rebuild_lock.do_not_run_during_live exists; the rebuild splits its monolithic write transaction into bounded per-(city,metric) transactions so the writer-lock-hold duration is bounded.",
-
   "files_touched": [
     "architecture/script_manifest.yaml",
     "architecture/test_topology.yaml",
@@ -18,12 +17,10 @@
   "cross_module_edges": 0,
   "domain": "state/db-resilience",
   "purely_mechanical": false,
-
   "test_commands": [
     "python -m pytest -q tests/test_sqlite_busy_timeout.py",
     "python -m pytest -q tests/test_rebuild_live_sentinel.py"
   ],
-
   "asserted_invariants": [
     {
       "id": "T1E-BUSY-TIMEOUT-CONFIGURABLE",
@@ -61,29 +58,28 @@
     "T1BD-CORRECTED-NO-CHAIN-MUTATION-ALL-SITES",
     "T1C-SETTLEMENT-NOT-REDEEM"
   ],
-
   "expected_artifact": "execution/execution_result.md",
-
   "_planner_notes": {
     "evidence_grep_ts": "2026-05-04",
     "round2_grep_verification": {
-      "two_connect_sites": "src/state/db.py:40 (in _connect) and src/state/db.py:349 (in get_connection) — confirmed at planner Round-1; still unchanged at Round-2 grep.",
-      "no_existing_zeus_db_busy_timeout_ms": "grep -rn ZEUS_DB_BUSY_TIMEOUT src/ scripts/ config/ → 0 matches at Round-2; T1E is the introduction.",
-      "operational_error_uses_in_db_py": "src/state/db.py:329, 1443, 1451, 1455, 1467, 1485, 1497, 1511, 1522, 1533, 1542, 1548, 1557, 1562 — these are existing OperationalError handlers, but ALL are for ALTER-TABLE / CREATE-TABLE-IF-NOT-EXISTS migrations, NOT for 'database is locked' busy timeouts. The new T1E catch is in the live cycle write path, which is at a different layer.",
+      "two_connect_sites": "src/state/db.py:40 (in _connect) and src/state/db.py:349 (in get_connection) \u2014 confirmed at planner Round-1; still unchanged at Round-2 grep.",
+      "no_existing_zeus_db_busy_timeout_ms": "grep -rn ZEUS_DB_BUSY_TIMEOUT src/ scripts/ config/ \u2192 0 matches at Round-2; T1E is the introduction.",
+      "operational_error_uses_in_db_py": "src/state/db.py:329, 1443, 1451, 1455, 1467, 1485, 1497, 1511, 1522, 1533, 1542, 1548, 1557, 1562 \u2014 these are existing OperationalError handlers, but ALL are for ALTER-TABLE / CREATE-TABLE-IF-NOT-EXISTS migrations, NOT for 'database is locked' busy timeouts. The new T1E catch is in the live cycle write path, which is at a different layer.",
       "rebuild_script_already_in_manifest": "architecture/script_manifest.yaml:478 already registers rebuild_calibration_pairs_v2.py with class=repair, dangerous_if_run=true, target_db=state/zeus-world.db. T1E updates this row to add required_helpers (sentinel check) and required_tests (the new test files).",
       "sentinel_dir_present": "Coordinator already created .zeus/rebuild_lock.do_not_run_during_live per LOCK_DECISION Amendment 2. T1E wires the script-side check that consumes the sentinel."
     },
     "loc_estimate_basis": "src/state/db.py is 6118 lines. The T1E patch is small in db.py: ~30 lines (env read + apply to two connect sites + new exception-translate helper for the live-cycle catch). scripts/rebuild_calibration_pairs_v2.py: ~80 lines (sentinel check at top, then refactor the bulk write into a per-bucket loop with intermediate commits). Two new test files: ~150 lines each. Total ~410 LOC; the 380 estimate is conservative (some test code can reuse existing fixtures).",
-    "cross_module_edges": "0 — T1E does not introduce a new module or import. It uses existing os.environ, sqlite3.OperationalError, and the existing sentinel file path constant.",
-    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/state/db.py for write-intent edit. Resolution per LOCK_DECISION Amendment 4.",
+    "cross_module_edges": "0 \u2014 T1E does not introduce a new module or import. It uses existing os.environ, sqlite3.OperationalError, and the existing sentinel file path constant.",
+    "topology_admission": "BLOCKED at planner time \u2014 generic profile does not admit src/state/db.py for write-intent edit. Resolution per LOCK_DECISION Amendment 4.",
     "planning_lock_required": true,
-    "k0_k1_classification": "K0 STATE TRUTH — db.py is db_connection_schema_runtime per source_rationale.yaml. Critic should be opus. Verifier MUST reproduce the 'database is locked' synthetic-writer test.",
+    "k0_k1_classification": "K0 STATE TRUTH \u2014 db.py is db_connection_schema_runtime per source_rationale.yaml. Critic should be opus. Verifier MUST reproduce the 'database is locked' synthetic-writer test.",
     "coordinator_blockers": [
       "T0.2 RiskGuard still RUNNING (planner Round-1 amendment 1; coordinator confirmed escalation pending).",
       "T0.3 venue quiescent attestation pending.",
       "T0.5 SQLite policy: planner pre-filled 30000ms / pull-forward T2G in T0_SQLITE_POLICY.md; operator may override before T1E dispatch."
     ],
-    "predecessor_dependency": "T1A (DDL single-source) MUST land first — T1E touches db.py and any DDL refactor T1A makes will conflict at the same file. T1F and T1BD do not directly conflict but they may have introduced the counter-sink module that T1E imports for db_write_lock_timeout_total.",
-    "successor_constraint": "T2G (DB physical isolation) is gated by T1E telemetry stability. db_write_lock_timeout_total nonzero in shadow runs blocks T3 corrected-live until T2G lands per T0_SQLITE_POLICY operator decision."
+    "predecessor_dependency": "T1A (DDL single-source) MUST land first \u2014 T1E touches db.py and any DDL refactor T1A makes will conflict at the same file. T1F and T1BD do not directly conflict but they may have introduced the counter-sink module that T1E imports for db_write_lock_timeout_total.",
+    "successor_constraint": "T2G (DB physical isolation) is gated by T1E telemetry stability. db_write_lock_timeout_total nonzero in shadow runs blocks T3 corrected-live until T2G lands per T0_SQLITE_POLICY operator decision.",
+    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
   }
 }

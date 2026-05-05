@@ -1173,6 +1173,8 @@ def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
     """
     value = row.get(field_name)
     if value is None:
+        from src.observability.counters import increment as _cnt_inc
+        _cnt_inc("position_loader_field_defaulted_total", labels={"field": field_name})
         logger.warning(
             "telemetry_counter event=position_loader_field_defaulted_total field=%s",
             field_name,
@@ -1703,6 +1705,8 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
     if not getattr(pos, "corrected_executable_economics_eligible", False):
         return chain_value
     if fill_authority_value and fill_authority_value != chain_value:
+        from src.observability.counters import increment as _cnt_inc
+        _cnt_inc("position_projection_field_dropped_total", labels={"field": field_name})
         logger.warning(
             "telemetry_counter event=position_projection_field_dropped_total field=%s",
             field_name,

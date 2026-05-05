@@ -69,13 +69,19 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Import fill-authority constant from canonical source (do NOT redefine).
 # T1H-DETECTS-CORRECTED-WITHOUT-FILL-AUTHORITY uses this exact constant.
+# T2F-CENSUS-FILL-AUTHORITY-FAIL-CLOSED: ImportError exits non-zero rather
+# than silently duplicating the string, removing the drift risk (T1H C-1 LOW).
 # ---------------------------------------------------------------------------
 try:
     from src.state.portfolio import FILL_AUTHORITY_VENUE_CONFIRMED_FULL
-except ImportError:
-    # Fallback for running outside the venv / sys.path not set.
-    # The string value is locked in src/state/portfolio.py:223.
-    FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
+except ImportError as _fill_auth_import_err:
+    print(
+        "FATAL: authority constant unavailable; refusing to classify. "
+        "Cannot import FILL_AUTHORITY_VENUE_CONFIRMED_FULL from src.state.portfolio. "
+        f"Ensure the repo venv is active and src/ is on sys.path. ({_fill_auth_import_err})",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # DB path resolution

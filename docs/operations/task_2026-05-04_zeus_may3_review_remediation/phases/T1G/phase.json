@@ -4,7 +4,6 @@
   "task_id": "zeus-may3-remediation",
   "title": "Final SDK envelope persistence path audit (verification-first)",
   "intent": "Audit every live venue submit path in src/execution/executor.py to confirm the SDK-returned final envelope/order payload is persisted via _persist_final_submission_envelope_payload (executor.py:432) at every contact site (entry submit, exit submit, rejected submit, FOK/FAK filled response, open-order ACK, SUBMIT_UNKNOWN_SIDE_EFFECT). Implement persistence ONLY at sites the audit proves are missing it; do not opportunistically refactor confirmed-OK sites.",
-
   "files_touched": [
     "architecture/test_topology.yaml",
     "tests/test_final_sdk_envelope_persistence.py"
@@ -14,13 +13,11 @@
   "cross_module_edges": 0,
   "domain": "execution/venue-provenance-audit",
   "purely_mechanical": false,
-
   "test_commands": [
     "python -m pytest -q tests/test_final_sdk_envelope_persistence.py",
     "python -m pytest -q tests/test_executor_command_split.py",
     "python -m pytest -q tests/test_v2_adapter.py"
   ],
-
   "asserted_invariants": [
     {
       "id": "T1G-AUDIT-ARTIFACT-WRITTEN",
@@ -53,9 +50,7 @@
     "T1C-LIVE-PRAW-NOT-TRAINING-DATA",
     "T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH"
   ],
-
   "expected_artifact": "audit/sdk_envelope_path_audit.md",
-
   "_planner_notes": {
     "evidence_grep_ts": "2026-05-04",
     "round2_grep_verification": {
@@ -78,18 +73,19 @@
         "src/execution/executor.py:1568 in execute_exit_order",
         "src/execution/executor.py:2251 in _live_order"
       ],
-      "audit_target_per_master_plan": "MASTER_PLAN_v2 §10 row T1G enumerates: entry submit, exit submit, compatibility submit, rejected submit, FOK/FAK filled response, open-order ACK. Compatibility submit is owned by T1F; T1G inherits T1F's live-bound assertion as the gate that prevents it from reaching SDK. FOK/FAK is not a separate code path — it is selected via envelope.order_type ('FOK'/'FAK') consumed by polymarket_v2_adapter.py:347 client.create_and_post_order; T1G audits that FOK/FAK responses also flow through _persist_final_submission_envelope_payload, with explicit test fixture coverage."
+      "audit_target_per_master_plan": "MASTER_PLAN_v2 \u00a710 row T1G enumerates: entry submit, exit submit, compatibility submit, rejected submit, FOK/FAK filled response, open-order ACK. Compatibility submit is owned by T1F; T1G inherits T1F's live-bound assertion as the gate that prevents it from reaching SDK. FOK/FAK is not a separate code path \u2014 it is selected via envelope.order_type ('FOK'/'FAK') consumed by polymarket_v2_adapter.py:347 client.create_and_post_order; T1G audits that FOK/FAK responses also flow through _persist_final_submission_envelope_payload, with explicit test fixture coverage."
     },
     "loc_estimate_basis": "T1G is verification-first. Audit document: ~80 lines. New test file: ~250 lines (one test per audited site + fakes for SDK responses). Source patches if needed: estimated 0-100 lines depending on audit verdicts. Total 250 LOC base + up to 100 LOC contingent on audit. The phase.files_touched lists ONLY the audit + test file; if audit finds NEEDS_FIX gaps, executor opens a phase amendment to add src/execution/executor.py and/or src/state/venue_command_repo.py.",
-    "expected_artifact_override": "Per ORCHESTRATOR_RUNBOOK §5 and ORCHESTRATOR_RUNBOOK §10, expected_artifact is 'execution/execution_result.md' by default. T1G overrides this to 'audit/sdk_envelope_path_audit.md' because the phase is verification-first (per MASTER_PLAN_v2 §10 row T1G 'Verification-first: trace entry submit, exit submit ...'). The execution_result.md is still produced if any source edits land, but the audit document is the primary phase deliverable.",
-    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/execution/executor.py + src/state/venue_command_repo.py for write-intent edit if the audit finds gaps. Resolution per LOCK_DECISION Amendment 4. Audit-only mode (read + new test + new audit doc) MAY be admissible under a different profile route; planner did not run that variant.",
+    "expected_artifact_override": "Per ORCHESTRATOR_RUNBOOK \u00a75 and ORCHESTRATOR_RUNBOOK \u00a710, expected_artifact is 'execution/execution_result.md' by default. T1G overrides this to 'audit/sdk_envelope_path_audit.md' because the phase is verification-first (per MASTER_PLAN_v2 \u00a710 row T1G 'Verification-first: trace entry submit, exit submit ...'). The execution_result.md is still produced if any source edits land, but the audit document is the primary phase deliverable.",
+    "topology_admission": "BLOCKED at planner time \u2014 generic profile does not admit src/execution/executor.py + src/state/venue_command_repo.py for write-intent edit if the audit finds gaps. Resolution per LOCK_DECISION Amendment 4. Audit-only mode (read + new test + new audit doc) MAY be admissible under a different profile route; planner did not run that variant.",
     "planning_lock_required": "true if source edits are needed; false if audit-only outcome",
-    "k0_k1_classification": "K0 LIVE BOUNDARY (executor venue submit). Critic + security-reviewer-opus required per ORCHESTRATOR_RUNBOOK §12 T1G row.",
+    "k0_k1_classification": "K0 LIVE BOUNDARY (executor venue submit). Critic + security-reviewer-opus required per ORCHESTRATOR_RUNBOOK \u00a712 T1G row.",
     "coordinator_blockers": [
       "T0.2 RiskGuard still RUNNING (planner Round-1).",
       "T0.3 venue quiescent attestation pending.",
-      "T1F closeout MUST land first — T1G inherits the live-bound assertion as the gate for compatibility-submit attempts."
+      "T1F closeout MUST land first \u2014 T1G inherits the live-bound assertion as the gate for compatibility-submit attempts."
     ],
-    "predecessor_dependency": "T1F (live-bound assertion) MUST land first. T1F covers compat submit blocking; T1G covers final envelope persistence at all admitted live paths. Without T1F, the audit cannot rely on placeholder envelopes being blocked, contaminating the test fixtures."
+    "predecessor_dependency": "T1F (live-bound assertion) MUST land first. T1F covers compat submit blocking; T1G covers final envelope persistence at all admitted live paths. Without T1F, the audit cannot rely on placeholder envelopes being blocked, contaminating the test fixtures.",
+    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
   }
 }

@@ -1286,3 +1286,26 @@ trail divergence).
 remove the semantic-linter rule that guards the dead table. Defer until next
 schema-cleanup pass; audit any open evidence/audit packets that still cite
 `v_evidence_hourly_observations` first.
+
+---
+
+## T1E C-3 — rebuild_calibration_pairs_v2 partial-commit semantic (LOW)
+
+**Added:** 2026-05-05
+**Authority:** docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json C-3 LOW
+**Status:** OPEN, operator-noted, no live risk.
+
+**Finding:** `scripts/rebuild_calibration_pairs_v2.py` shards commits per
+`(city, metric)` bucket (T1E-REBUILD-TRANSACTION-SHARDED invariant). If the
+process is interrupted mid-run, already-committed buckets are durably written
+while remaining buckets are not. The rebuilt DB may therefore hold a partial
+result set across buckets. This is not a crash risk and does not affect live
+trading (rebuild runs offline, result is swapped in atomically via sentinel
+gate). However, an interrupted rebuild would require a manual re-run to
+produce a complete calibration DB.
+
+**Proposed antibody:** Add an explicit `rebuild_complete` sentinel row written
+in the final commit after all buckets succeed. Any consumer that opens the
+rebuilt DB should check for this sentinel before use; absence indicates an
+incomplete rebuild and the consumer should refuse to swap. Defer until next
+rebuild pipeline hardening pass.

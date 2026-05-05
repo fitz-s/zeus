@@ -39,7 +39,7 @@ def _db_busy_timeout_s() -> float:
     """
     raw = os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000")
     try:
-        return float(raw) / 1000.0
+        ms = float(raw)
     except (ValueError, TypeError):
         _startup_logger = logging.getLogger(__name__)
         _startup_logger.warning(
@@ -48,6 +48,15 @@ def _db_busy_timeout_s() -> float:
             raw,
         )
         return 30.0
+    # T2F-NEGATIVE-ENV-VALIDATION-LOUD-FAIL: reject negative values at parse
+    # time so a misconfigured daemon fails loudly rather than silently using a
+    # negative sqlite3 timeout (which may behave as an indefinite lock).
+    if ms < 0:
+        raise ValueError(
+            f"ZEUS_DB_BUSY_TIMEOUT_MS must be >= 0; got {raw!r} ({ms} ms). "
+            "Fix the environment variable before starting the daemon."
+        )
+    return ms / 1000.0
 
 
 def _zeus_trade_db_path() -> Path:
@@ -106,6 +115,8 @@ def _handle_db_write_lock(exc: sqlite3.OperationalError) -> None:
     live cycle must continue in read-only monitor mode rather than crashing.
     Does NOT re-raise — caller decides whether to return None or raise.
     """
+    from src.observability.counters import increment as _cnt_inc
+    _cnt_inc("db_write_lock_timeout_total")
     logger.warning(
         "telemetry_counter event=db_write_lock_timeout_total db_error=%r",
         str(exc),

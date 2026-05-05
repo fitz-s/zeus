@@ -4,7 +4,6 @@
   "task_id": "zeus-may3-remediation",
   "title": "Adapter live-bound assertion + compatibility helper quarantine",
   "intent": "PolymarketV2Adapter.submit() asserts envelope.assert_live_submit_bound() before any SDK create_and_post_order/post_order call, so placeholder 'legacy:' compatibility envelopes cannot reach the live SDK contact path.",
-
   "files_touched": [
     "architecture/test_topology.yaml",
     "src/contracts/venue_submission_envelope.py",
@@ -17,13 +16,11 @@
   "cross_module_edges": 1,
   "domain": "venue/live-boundary",
   "purely_mechanical": false,
-
   "test_commands": [
     "python -m pytest -q tests/test_venue_envelope_live_bound.py",
     "python -m pytest -q tests/test_polymarket_adapter_submit_safety.py",
     "python -m pytest -q tests/test_v2_adapter.py"
   ],
-
   "asserted_invariants": [
     {
       "id": "T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK",
@@ -51,28 +48,27 @@
     "NO-LAUNCHCTL",
     "T1A-DDL-SINGLE-SOURCE"
   ],
-
   "expected_artifact": "execution/execution_result.md",
-
   "_planner_notes": {
     "evidence_grep_ts": "2026-05-04",
     "f1_evidence_sites": [
-      "src/venue/polymarket_v2_adapter.py:312 def submit(...) — does NOT call assert_live_submit_bound() before SDK contact",
-      "src/venue/polymarket_v2_adapter.py:345 client.create_and_post_order(...) — first SDK contact path",
-      "src/venue/polymarket_v2_adapter.py:355,364 client.create_order/post_order — second SDK contact path",
-      "src/venue/polymarket_v2_adapter.py:528 def submit_limit_order — compatibility helper",
-      "src/venue/polymarket_v2_adapter.py:643 condition_id = f'legacy:{token_id}' — placeholder identity",
-      "src/venue/polymarket_v2_adapter.py:661 question_id='legacy-compat' — placeholder identity",
-      "src/venue/polymarket_v2_adapter.py:589 return self.submit(envelope) — connects compat helper to live SDK path",
-      "src/data/polymarket_client.py:407-424 already-present live-bound check on _pending_submission_envelope — pattern to follow"
+      "src/venue/polymarket_v2_adapter.py:312 def submit(...) \u2014 does NOT call assert_live_submit_bound() before SDK contact",
+      "src/venue/polymarket_v2_adapter.py:345 client.create_and_post_order(...) \u2014 first SDK contact path",
+      "src/venue/polymarket_v2_adapter.py:355,364 client.create_order/post_order \u2014 second SDK contact path",
+      "src/venue/polymarket_v2_adapter.py:528 def submit_limit_order \u2014 compatibility helper",
+      "src/venue/polymarket_v2_adapter.py:643 condition_id = f'legacy:{token_id}' \u2014 placeholder identity",
+      "src/venue/polymarket_v2_adapter.py:661 question_id='legacy-compat' \u2014 placeholder identity",
+      "src/venue/polymarket_v2_adapter.py:589 return self.submit(envelope) \u2014 connects compat helper to live SDK path",
+      "src/data/polymarket_client.py:407-424 already-present live-bound check on _pending_submission_envelope \u2014 pattern to follow"
     ],
-    "live_bound_check_already_exists_in": "src/contracts/venue_submission_envelope.py:107 def assert_live_submit_bound(self) — used by src/data/polymarket_client.py:691 _submission_envelope_live_bound_error",
-    "topology_admission": "BLOCKED at planner time — generic profile does not admit src/venue/polymarket_v2_adapter.py. Operator may need to add an 'r3 venue submit live-bound' digest profile before dispatch.",
+    "live_bound_check_already_exists_in": "src/contracts/venue_submission_envelope.py:107 def assert_live_submit_bound(self) \u2014 used by src/data/polymarket_client.py:691 _submission_envelope_live_bound_error",
+    "topology_admission": "BLOCKED at planner time \u2014 generic profile does not admit src/venue/polymarket_v2_adapter.py. Operator may need to add an 'r3 venue submit live-bound' digest profile before dispatch.",
     "planning_lock_required": true,
     "operator_only_blockers_at_planner_time": [
       "T0.2 RiskGuard still RUNNING (PID 14177); operator must unload before dispatch.",
       "T0.3 venue quiescence not yet attested."
     ],
-    "k0_k1_classification": "K0 LIVE BOUNDARY — venue submit path. Requires opus critic + security-reviewer per ORCHESTRATOR_RUNBOOK §12 T1F row."
+    "k0_k1_classification": "K0 LIVE BOUNDARY \u2014 venue submit path. Requires opus critic + security-reviewer per ORCHESTRATOR_RUNBOOK \u00a712 T1F row.",
+    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
   }
 }

@@ -21,3 +21,6 @@
 {"phase":"T1H","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1G critic","registered_at":"2026-05-05T02:35:00Z"}
 {"phase":"T1H","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1G verifier","registered_at":"2026-05-05T02:35:00Z"}
 {"phase":"T2-plan","role":"planner","agentId":"a87f4bd50441a3d45","model":"opus","verdict":"PLAN_DONE_T2","registered_at":"2026-05-05T07:45:00Z","note":"T2F (K1, 6 inv, ~700 LOC) + T2G (K0, 5 inv, ~250 LOC); deviation: 7 distinct counter event names (not ~12)"}
+{"phase":"T2F","role":"executor","batches":["B1"],"agentId":"aeff8fe3d71243948","model":"sonnet","registered_at":"2026-05-05T08:15:00Z","note":"DEV-1 17 actual emits + DEV-2 caplog fixture token_id; 86 new tests"}
+{"phase":"T2F","role":"critic","agentId":"a03538fb0b5f999ed","model":"opus","verdict":"APPROVE_WITH_CAVEATS","reuse_of":"T1H critic","registered_at":"2026-05-05T08:25:00Z"}
+{"phase":"T2F","role":"verifier","agentId":"a62719f768a7c2478","model":"sonnet","verdict":"PASS","reuse_of":"T1H verifier","registered_at":"2026-05-05T08:25:00Z"}
