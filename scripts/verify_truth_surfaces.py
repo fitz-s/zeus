@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import date
@@ -2261,6 +2262,41 @@ def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
     conn = sqlite3.connect(uri, uri=True)
     cur = conn.cursor()
     try:
+        # Phase 2 schema gate (2026-05-05): both calibration tables MUST have
+        # stratification columns post-migration. If absent, refit will crash on
+        # OperationalError: no such column. Stage6 fails closed here with a
+        # specific verdict so watcher's stage7 never fires against a regressed schema.
+        required_strat_cols = ("cycle", "source_id", "horizon_profile")
+        for table in ("calibration_pairs_v2", "platt_models_v2"):
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            missing = [c for c in required_strat_cols if c not in cols]
+            if missing:
+                return {
+                    "ready": False,
+                    "verdict": "aborted_phase2_migration_unapplied",
+                    "reason": f"{table} missing Phase 2 columns: {missing}",
+                    "table": table,
+                    "missing_columns": missing,
+                }
+
+        # Verify platt_models_v2 UNIQUE includes stratification keys (post-migration shape).
+        # Check the UNIQUE clause text specifically — the column names also appear as
+        # column definitions so a full-sql substring search is insufficient.
+        platt_create_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='platt_models_v2'"
+        ).fetchone()
+        if platt_create_sql:
+            sql_lower = (platt_create_sql[0] or "").lower()
+            unique_match = re.search(r"unique\s*\(([^)]+)\)", sql_lower)
+            unique_cols_text = unique_match.group(1) if unique_match else ""
+            # Extended UNIQUE must include cycle + source_id + horizon_profile
+            if not all(k in unique_cols_text for k in ("cycle", "source_id", "horizon_profile")):
+                return {
+                    "ready": False,
+                    "verdict": "aborted_platt_unique_not_extended",
+                    "reason": "platt_models_v2 UNIQUE missing stratification keys; legacy 6-tuple still in place",
+                }
+
         _add_platt_pair_preflight_checks(report, cur)
     finally:
         conn.close()

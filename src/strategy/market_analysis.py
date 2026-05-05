@@ -1,10 +1,11 @@
 """MarketAnalysis: full-distribution edge scan with double bootstrap CI.
 
 Spec §4.1: For each bin, compute edge = p_posterior - p_market.
-Double bootstrap captures three σ sources:
+Double bootstrap captures four σ sources:
   σ_ensemble (ENS member resampling)
   σ_instrument (ASOS sensor noise ±0.5°F)
   σ_parameter (Platt bootstrap params)
+  σ_transfer (cross-domain Platt transfer uncertainty, additive in logit-space)
 """
 
 import logging
@@ -39,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 # Compatibility alias for tests and assumption audits.
 DEFAULT_EDGE_BOOTSTRAP = edge_n_bootstrap()
+
+
+def compute_transfer_logit_sigma(brier_diff: float, scale: float = 4.0) -> float:
+    """Map OOS Brier-diff to logit-space σ for cross-domain Platt transfer.
+
+    brier_diff: float — excess Brier MSE attributable to source→target domain shift.
+                negative or NaN values clamped to 0 (no inflation).
+    scale: float — operator-tunable; default 4.0 ≈ chain-rule logit slope at p=0.5.
+                   Configurable via config/settings.json::transfer_logit_sigma_scale.
+
+    Returns: σ in logit-space, additive in bootstrap_bin's z computation.
+    """
+    if brier_diff is None or not (brier_diff == brier_diff):  # NaN check
+        return 0.0
+    return (max(0.0, float(brier_diff))) ** 0.5 * float(scale)
 
 
 def _finite_probability_distribution(
@@ -150,6 +166,8 @@ class MarketAnalysis:
         posterior_mode: PosteriorMode = MODEL_ONLY_POSTERIOR_MODE,
         market_prior: MarketPriorDistribution | None = None,
         allow_legacy_quote_prior: bool = False,
+        *,
+        transfer_logit_sigma: float = 0.0,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -222,6 +240,7 @@ class MarketAnalysis:
         )  # centralized forecast-uncertainty seam
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
         self._rng = np.random.default_rng(rng_seed)
+        self._transfer_logit_sigma = float(transfer_logit_sigma)
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
@@ -442,6 +461,8 @@ class MarketAnalysis:
                             bin_width=bb.width,
                         )
                     z = A * logit_safe(p_input) + B * self._lead_days + C
+                    if self._transfer_logit_sigma > 0.0:
+                        z += rng.normal(0.0, self._transfer_logit_sigma)
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
                 p_cal_boot_all = p_raw_all
@@ -504,6 +525,8 @@ class MarketAnalysis:
                             bin_width=bb.width,
                         )
                     z = A * logit_safe(p_input) + B * self._lead_days + C
+                    if self._transfer_logit_sigma > 0.0:
+                        z += rng.normal(0.0, self._transfer_logit_sigma)
                     p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
             else:
                 p_cal_boot_all = p_raw_all

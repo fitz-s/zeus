@@ -276,7 +276,7 @@ def _rows_from_payload(
                 captured_at=retrieved_at,
                 authority_tier=source_spec.authority_tier,
                 rebuild_run_id=None,
-                data_source_version=None,
+                data_source_version=f"{source_spec.source_id}_v1",
                 availability_provenance=provenance.value,
             )
         )

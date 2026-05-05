@@ -452,3 +452,113 @@ def test_lagos_zero_cov_halts(conn, floors_and_nstar):
         decision_time=decision,
     )
     assert result.action == "HALT"
+
+
+# ── source-cycle provenance regression (INV-17) ──────────────────────────────
+
+
+def test_cycle_source_id_stored_in_diagnostic(conn, floors_and_nstar):
+    """cycle and source_id passed to evaluate_ddd_for_decision must appear in
+    the DDDResult diagnostic dict.  This is the INV-17 audit surface: the
+    diagnostic must make the provenance visible so any monitoring tool can
+    detect a mismatch between the floor calibration cycle (00z TIGGE) and the
+    live forecast cycle (12z OpenData) rather than silently applying the wrong
+    density discount.
+    """
+    # Seed enough coverage to avoid Rail 1 — we want to reach a result at all.
+    for h in range(12, 19):
+        conn.execute(
+            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
+        )
+    conn.execute(
+        """INSERT INTO platt_models_v2
+           (model_key, temperature_metric, cluster, season, data_version,
+            n_samples, fitted_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+         500, "2026-04-01"),
+    )
+    decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+    result = evaluate_ddd_for_decision(
+        conn=conn,
+        city="NYC",
+        target_date="2026-05-02",
+        metric="high",
+        peak_hour=15.0,
+        season="MAM",
+        mismatch_rate=0.0,
+        decision_time=decision,
+        cycle="12",
+        source_id="ecmwf_open_data",
+        horizon_profile="full",
+    )
+    assert result.diagnostic["cycle"] == "12"
+    assert result.diagnostic["source_id"] == "ecmwf_open_data"
+    assert result.diagnostic["horizon_profile"] == "full"
+
+
+def test_cycle_mismatch_not_silently_swallowed(conn, floors_and_nstar):
+    """A DDD result derived under cycle='00'/source_id='tigge_mars' must NOT
+    be served to a forecast with cycle='12'/source_id='ecmwf_open_data'.
+
+    Fail-closed semantics: the diagnostic must carry the LIVE cycle/source_id
+    so that any downstream consumer can detect the provenance mismatch.
+    Concretely: if a caller evaluates DDD for cycle='00' and then tries to use
+    the result for cycle='12', the cycle fields in the two results must differ
+    — asserting equality must fail.  This test documents the contract and
+    guards against any regression that loses cycle from the diagnostic.
+    """
+    # Seed full coverage so Rail 1 does not fire on either call.
+    for h in range(12, 19):
+        conn.execute(
+            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
+        )
+    conn.execute(
+        """INSERT INTO platt_models_v2
+           (model_key, temperature_metric, cluster, season, data_version,
+            n_samples, fitted_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+         500, "2026-04-01"),
+    )
+    decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
+
+    result_00z = evaluate_ddd_for_decision(
+        conn=conn,
+        city="NYC",
+        target_date="2026-05-02",
+        metric="high",
+        peak_hour=15.0,
+        season="MAM",
+        mismatch_rate=0.0,
+        decision_time=decision,
+        cycle="00",
+        source_id="tigge_mars",
+        horizon_profile="full",
+    )
+    result_12z = evaluate_ddd_for_decision(
+        conn=conn,
+        city="NYC",
+        target_date="2026-05-02",
+        metric="high",
+        peak_hour=15.0,
+        season="MAM",
+        mismatch_rate=0.0,
+        decision_time=decision,
+        cycle="12",
+        source_id="ecmwf_open_data",
+        horizon_profile="full",
+    )
+
+    # The cycle/source_id in each result must reflect the CALLER's provenance,
+    # not a stale cached value — so they must differ.
+    assert result_00z.diagnostic["cycle"] != result_12z.diagnostic["cycle"], (
+        "DDD silently returned 00z cycle value for a 12z forecast — "
+        "INV-17 source-cycle dimension missing from diagnostic"
+    )
+    assert result_00z.diagnostic["source_id"] != result_12z.diagnostic["source_id"], (
+        "DDD silently returned tigge_mars source_id for an ecmwf_open_data forecast — "
+        "INV-17 source-cycle dimension missing from diagnostic"
+    )
