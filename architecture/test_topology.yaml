@@ -239,6 +239,8 @@ test_trust_policy:
     tests/test_polymarket_adapter_submit_safety.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_chain_reconciliation_corrected_guard.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_position_projection_d6_counters.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_settlement_redeem.py: {created: "2026-05-05", last_used: "2026-05-05"}
+    tests/test_harvester_learning_authority.py: {created: "2026-05-05", last_used: "2026-05-05"}
 
 categories:
   core_law_antibody:
@@ -1100,3 +1102,38 @@ test_metadata:
       Projection: eligible position with chain-context value differing from FillAuthority
       emits position_projection_field_dropped_total{field} and uses FillAuthority value.
       Loader: missing D6 field emits position_loader_field_defaulted_total{field} and uses default.
+  tests/test_harvester_settlement_redeem.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_harvester_settlement_redeem_learning_split
+    blocks_commit: true
+    asserted_invariants:
+      - T1C-SETTLEMENT-NOT-REDEEM
+    source_under_test:
+      - src/execution/harvester.py
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+    notes: >
+      Relationship test. Asserts record_settlement_result() writes decision_log records
+      without emitting any redeem-state transition, and enqueue_redeem_command() writes
+      a settlement_commands row without touching decision_log. The two effects are
+      structurally independent.
+  tests/test_harvester_learning_authority.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: r3_harvester_settlement_redeem_learning_split
+    blocks_commit: true
+    asserted_invariants:
+      - T1C-LEARNING-AUTHORITY-GATE
+      - T1C-LIVE-PRAW-NOT-TRAINING-DATA
+    source_under_test:
+      - src/execution/harvester.py
+    law_dependencies:
+      - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
+    notes: >
+      Relationship test. Parametrizes over (source_model_version, snapshot_training_allowed).
+      Asserts maybe_write_learning_pair() returns 0 and emits
+      harvester_learning_write_blocked_total{reason} for: missing smv, training=False,
+      live-praw (openmeteo) source. Only tigge/ecmwf_ens with training=True writes pairs.
+      Also asserts existing missing-forecast-issue-time guard now emits the counter.
