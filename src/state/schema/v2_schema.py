@@ -350,7 +350,12 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
                 source_id TEXT NOT NULL DEFAULT 'tigge_mars',
                 horizon_profile TEXT NOT NULL DEFAULT 'full',
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active)
+                -- 2026-05-05 critic-opus Blocker 1: UNIQUE extended with
+                -- stratification keys so cross-cycle Platt rows do not collide
+                -- on insert. Legacy DBs must be rebuilt via
+                -- scripts/migrate_phase2_cycle_stratification.py to converge.
+                UNIQUE(temperature_metric, cluster, season, data_version,
+                       input_space, is_active, cycle, source_id, horizon_profile)
             )
         """)
         # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
@@ -369,6 +374,46 @@ def apply_v2_schema(conn: sqlite3.Connection) -> None:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_platt_models_v2_lookup
                 ON platt_models_v2(temperature_metric, cluster, season, data_version, input_space, is_active)
+        """)
+
+        # ----------------------------------------------------------------
+        # validated_calibration_transfers
+        # Phase X.1 (2026-05-05): OOS evidence scaffold for calibration-
+        # transfer gate. Rows written by Phase X.2 OOS evaluator; used by
+        # evaluate_calibration_transfer_policy_with_evidence when feature flag
+        # ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true (default: false).
+        # ----------------------------------------------------------------
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS validated_calibration_transfers (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_id             TEXT NOT NULL,
+                source_id             TEXT NOT NULL,
+                target_source_id      TEXT NOT NULL,
+                source_cycle          TEXT NOT NULL,
+                target_cycle          TEXT NOT NULL,
+                horizon_profile       TEXT NOT NULL,
+                season                TEXT NOT NULL,
+                cluster               TEXT NOT NULL,
+                metric                TEXT NOT NULL CHECK (metric IN ('high', 'low')),
+                n_pairs               INTEGER NOT NULL,
+                brier_source          REAL NOT NULL,
+                brier_target          REAL NOT NULL,
+                brier_diff            REAL NOT NULL,
+                brier_diff_threshold  REAL NOT NULL,
+                status                TEXT NOT NULL
+                    CHECK (status IN ('LIVE_ELIGIBLE', 'TRANSFER_UNSAFE',
+                                      'INSUFFICIENT_SAMPLE', 'same_domain_no_transfer')),
+                evidence_window_start TEXT NOT NULL,
+                evidence_window_end   TEXT NOT NULL,
+                platt_model_key       TEXT NOT NULL,
+                evaluated_at          TEXT NOT NULL,
+                UNIQUE (policy_id, target_source_id, target_cycle, season, cluster, metric,
+                        horizon_profile, platt_model_key)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_validated_transfers_route
+                ON validated_calibration_transfers(target_source_id, target_cycle, season, cluster, metric)
         """)
 
         # ----------------------------------------------------------------

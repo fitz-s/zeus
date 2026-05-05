@@ -62,7 +62,9 @@
       "level1": 150,
       "level2": 50,
       "level3": 15
-    }
+    },
+    "transfer_logit_sigma_scale": 4.0,
+    "_transfer_logit_sigma_scale_note": "Chain-rule logit slope at p=0.5 used to map OOS Brier-diff to logit-space σ for cross-domain Platt transfer uncertainty (Phase α, Issue 2.4). Default 4.0. Operator-tunable once OOS Brier-diff corpus is available."
   },
   "day0": {
     "n_mc": 10000,

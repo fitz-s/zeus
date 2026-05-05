@@ -81,6 +81,18 @@ def compute_required_max_step(
 
     Uses fixed offset (not ZoneInfo) because tests pass a numeric offset.
     Actual extraction uses ZoneInfo for precision. Result is 6h-aligned.
+
+    # 2026-05-05 architect Fitz #1 K=1 structural cleanup target:
+    # compute_required_max_step should be `max(required_period_end_steps(...))`.
+    # Phase α adds the invariant test below; unification is a follow-up PR
+    # touching extractor callsites + tz semantics audit.
+    # NOTE: This function uses a fixed UTC offset (not ZoneInfo) which means it
+    # will NOT produce the DST-aware result for cities with summer/winter offset
+    # changes. The extractor snapshots the UTC offset at issue_utc before calling
+    # here (extract_tigge_mx2t6_localday_max.py:241 pattern), which is correct but
+    # differs from required_period_end_steps() which uses ZoneInfo throughout.
+    # The invariant test in tests/test_extractor_period_step_contract.py
+    # documents where the two implementations agree and where they diverge.
     """
     fixed_tz = timezone(timedelta(hours=city_utc_offset_hours))
     # local midnight at start of day after target_date = end of target_date local day
@@ -89,6 +101,45 @@ def compute_required_max_step(
     local_day_end_utc = local_day_end_local.astimezone(timezone.utc)
     delta_hours = (local_day_end_utc - issue_utc).total_seconds() / 3600.0
     return _ceil_to_next_6h(delta_hours)
+
+
+def predicted_step_set_for_target(
+    issue_utc: datetime,
+    target_date: date,
+    city_tz: "ZoneInfo | str",
+    period_hours: int = 6,
+) -> set[int]:
+    """Pure-Python prediction of which forecast steps the extractor would
+    emit for a given (issue cycle, target local-day, city tz) tuple.
+
+    Mirrors the extractor's overlap logic but takes no GRIB I/O. Used by
+    the period-step contract test to verify subset relation against
+    ``forecast_target_contract.required_period_end_steps``.
+
+    The extractor selects a GRIB message (step range ``start_step-end_step``)
+    when ``_overlap_seconds(window_start, window_end, day_start_utc, day_end_utc) > 0``.
+    For a 6h aggregation window, each message covers ``[issue + start_step,
+    issue + end_step]`` = ``[issue + (N-6)h, issue + Nh]`` for step N.
+    This function emits step N for every 6h period whose UTC window overlaps
+    the target local day.
+
+    Scans far enough to include all steps that could overlap the target day
+    (up to 360h = 15 days forward, well beyond any forecast horizon in use).
+    """
+    tz = ZoneInfo(str(city_tz)) if not isinstance(city_tz, ZoneInfo) else city_tz
+    day_start_utc, day_end_utc = _local_day_bounds_utc(target_date, str(tz))
+
+    result: set[int] = set()
+    # Scan 15 days = 360 6h steps; stops as soon as window_start >= day_end_utc
+    for n in range(1, 361):
+        step = n * period_hours
+        window_end = issue_utc + timedelta(hours=step)
+        window_start = window_end - timedelta(hours=period_hours)
+        if window_start >= day_end_utc:
+            break
+        if _overlap_seconds(window_start, window_end, day_start_utc, day_end_utc) > 0:
+            result.add(step)
+    return result
 
 
 def compute_manifest_hash(fields: dict) -> str:

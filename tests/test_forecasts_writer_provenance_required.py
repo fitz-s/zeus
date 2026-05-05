@@ -146,6 +146,17 @@ def test_rows_from_payload_stamps_provenance_for_canonical_sources():
     assert len(rows) > 0
     assert all(r.forecast_issue_time is not None for r in rows)
     assert all(r.availability_provenance is not None for r in rows)
+    # data_source_version must be non-NULL for every row produced by the writer
+    # (Phase 2 stratification depends on this for source_id mapping).
+    assert all(r.data_source_version is not None for r in rows), (
+        f"data_source_version is NULL on rows: "
+        f"{[r.source for r in rows if r.data_source_version is None]}"
+    )
+    # Version strings must follow the {source_id}_v1 convention.
+    for r in rows:
+        assert r.data_source_version == f"{r.source}_v1", (
+            f"unexpected data_source_version={r.data_source_version!r} for source={r.source!r}"
+        )
     # Both ECMWF and GFS sources carry DERIVED tier (verified primary sources):
     sources = {r.source for r in rows}
     assert sources == {"ecmwf_previous_runs", "gfs_previous_runs"}

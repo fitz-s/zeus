@@ -50,7 +50,10 @@ from src.control.entry_forecast_promotion_evidence_io import (
     read_promotion_evidence,
 )
 from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
-from src.data.calibration_transfer_policy import evaluate_calibration_transfer_policy
+from src.data.calibration_transfer_policy import (
+    evaluate_calibration_transfer_policy,
+    evaluate_calibration_transfer_policy_with_evidence,
+)
 from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_target_contract import ForecastTargetScope
@@ -897,13 +900,23 @@ def _write_entry_readiness_for_candidate(
     rollout_decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
     track = track_for_metric(cfg, temperature_metric.temperature_metric)
     data_version = data_version_for_track(track)
-    calibration_decision = evaluate_calibration_transfer_policy(
+    # Phase β: delegate to evidence-gated function.  When the feature flag is
+    # off (the default), this transparently falls back to the legacy string-
+    # mapping policy — behaviour is byte-identical.  When the flag flips on,
+    # the DB row becomes authority and live_promotion_approved is ignored.
+    calibration_decision = evaluate_calibration_transfer_policy_with_evidence(
         config=cfg,
         source_id=cfg.source_id,
-        forecast_data_version=data_version,
-        live_promotion_approved=bool(
-            evidence is not None and evidence.calibration_promotion_approved
-        ),
+        target_source_id=cfg.source_id,
+        source_cycle=None,
+        target_cycle=None,
+        horizon_profile=None,
+        season=None,
+        cluster=None,
+        metric=temperature_metric.temperature_metric,
+        platt_model_key=None,
+        conn=conn,
+        now=decision_time,
     )
 
     placeholder_scope = ForecastTargetScope(
@@ -2733,6 +2746,46 @@ def evaluate_candidate(
     if mapped_executable_outcomes < executable_count:
         market_is_complete = False
 
+    # Phase β bootstrap σ wiring (Issue 2.4): query validated_calibration_transfers
+    # for the active row matching this bucket. LIVE_ELIGIBLE row → compute σ from
+    # brier_diff. All other outcomes → σ=0.0 (byte-identical to pre-Phase-β).
+    # Default σ=0.0 preserves behaviour when the table doesn't exist (legacy DB)
+    # or no row is present (same-domain or no OOS evidence yet).
+    _transfer_logit_sigma: float = 0.0
+    try:
+        from src.strategy.market_analysis import compute_transfer_logit_sigma as _compute_sigma
+        _sigma_scale: float = float(settings["calibration"]["transfer_logit_sigma_scale"])
+        _sigma_row = conn.execute(
+            """
+            SELECT status, brier_diff
+              FROM validated_calibration_transfers
+             WHERE target_source_id = ?
+               AND target_cycle     = ?
+               AND season           = ?
+               AND cluster          = ?
+               AND metric           = ?
+               AND horizon_profile  = ?
+               AND platt_model_key  = ?
+             LIMIT 1
+            """,
+            (
+                _phase2_source_id or "",
+                _phase2_cycle or "",
+                season,
+                city.cluster,
+                temperature_metric.temperature_metric,
+                _phase2_horizon_profile or "",
+                "",  # platt_model_key not available on calibrator object; no row → σ=0.0
+            ),
+        ).fetchone()
+        if _sigma_row is not None and _sigma_row[0] == "LIVE_ELIGIBLE":
+            _transfer_logit_sigma = _compute_sigma(float(_sigma_row[1]), _sigma_scale)
+        # TRANSFER_UNSAFE / INSUFFICIENT_SAMPLE → σ=0.0 (already SHADOW_ONLY upstream)
+    except Exception as _sigma_exc:
+        logger.debug(
+            "transfer_logit_sigma lookup failed (legacy DB or missing table): %s", _sigma_exc
+        )
+
     analysis = MarketAnalysis(
         p_raw=p_raw,
         p_cal=p_cal,
@@ -2754,6 +2807,7 @@ def evaluate_candidate(
         market_complete=market_is_complete,
         bias_reference=bias_reference,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        transfer_logit_sigma=_transfer_logit_sigma,
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()
@@ -3093,6 +3147,9 @@ def evaluate_candidate(
                     season=season,
                     mismatch_rate=oracle.posterior_upper_95,
                     decision_time=decision_time,
+                    cycle=_phase2_cycle,
+                    source_id=_phase2_source_id,
+                    horizon_profile=_phase2_horizon_profile,
                 )
             except DDDFailClosed as exc:
                 decisions.append(EdgeDecision(
