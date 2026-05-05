@@ -101,7 +101,10 @@ def get_trade_connection_with_world() -> sqlite3.Connection:
     # Guard: skip ATTACH if 'world' schema already present (connection reuse)
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" not in attached:
-        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        try:
+            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+        except sqlite3.OperationalError as exc:
+            logger.warning("ATTACH world failed (non-fatal): %r", exc)
     return conn
 
 
