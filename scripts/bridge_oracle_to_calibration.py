@@ -73,6 +73,13 @@ DB_PATH = ROOT / "state" / "zeus-world.db"
 
 def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
     """Load all VERIFIED settlements keyed by (city, target_date)."""
+    # 2026-05-05 (architect): LOW track is intentionally NOT bridged here.
+    # Load-bearing fail-closed gate is src/strategy/oracle_penalty.py:472 — LOW
+    # metric routes to OracleStatus.METRIC_UNSUPPORTED → multiplier 0.0 → no LOW
+    # Kelly bets execute. LOW bridge would require upstream `_snapshot_daily_low`
+    # listener (HKO CLMMINT, WU daily_low_f) that does not exist yet. HKO LOW
+    # rounding/timing semantics differ from CLMMAXT — mirror-HIGH symmetry is
+    # unsafe without dedicated listener audit. Revisit when LOW listener PR ships.
     rows = conn.execute("""
         SELECT city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
                settlement_source_type, unit
