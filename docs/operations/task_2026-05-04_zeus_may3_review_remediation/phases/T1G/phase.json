@@ -86,6 +86,6 @@
       "T1F closeout MUST land first \u2014 T1G inherits the live-bound assertion as the gate for compatibility-submit attempts."
     ],
     "predecessor_dependency": "T1F (live-bound assertion) MUST land first. T1F covers compat submit blocking; T1G covers final envelope persistence at all admitted live paths. Without T1F, the audit cannot rely on placeholder envelopes being blocked, contaminating the test fixtures.",
-    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
+    "closeout_drift_resolution": "FOK/FAK structural-argument-not-parametrized-fixture LOW (C-1) was DEFERRED in T2F per planner_notes.out_of_scope_explicit ('FOK/FAK fixture (T1G C-1) — promotion to fixture is deferred to follow-up phase if production telemetry shows usage; out of T2F scope per planner Round-3'). Decision-of-record: deferral is intentional pending production telemetry showing FOK/FAK usage frequency that warrants fixture promotion. Not a defect; not resolved in T2I either."
   }
 }

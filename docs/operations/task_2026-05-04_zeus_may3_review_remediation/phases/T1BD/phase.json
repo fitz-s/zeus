@@ -94,6 +94,6 @@
       "T0.3 venue quiescence not yet attested."
     ],
     "k0_k1_classification": "K0/K1 STATE TRUTH \u2014 lifecycle/chain reconciliation. Requires opus critic per ORCHESTRATOR_RUNBOOK \u00a712 T1BD row. Paired counters land together (no split commits).",
-    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
+    "closeout_drift_resolution": "lifecycle_events.py was listed in files_touched but the executor never wrote to it — the file was inspection-only context for the chain-reconciliation 4-field freeze. Critic at T1BD review verified zero git-diff against lifecycle_events.py; the listing is an over-permissive scope artifact. Documented as read-only context, never mutated, rather than removing from files_touched to preserve the audit trail of which files the executor consulted."
   }
 }

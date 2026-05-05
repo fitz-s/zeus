@@ -69,6 +69,6 @@
       "T0.3 venue quiescence not yet attested."
     ],
     "k0_k1_classification": "K0 LIVE BOUNDARY \u2014 venue submit path. Requires opus critic + security-reviewer per ORCHESTRATOR_RUNBOOK \u00a712 T1F row.",
-    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
+    "closeout_drift_resolution": "T1A merge surface line drift 1395-1397 → 1456-1458 in db.py: invariants T1A-DDL-SINGLE-SOURCE + T1A-DB-IMPORTS-SCHEMA are byte-identical at new line numbers per critic verification (commit 76ef3796 invariants.jsonl close entry). No invariant text rewrite required; line numbers are not load-bearing across phase closures."
   }
 }

@@ -76,6 +76,6 @@
       "T0.3 venue quiescent attestation pending (planner Round-1)."
     ],
     "predecessor_dependency": "T1G MUST land first \u2014 the census's identity_truth axis classifies envelope persistence; if T1G found NEEDS_FIX persistence gaps the census results would be misleading. T1A/T1F/T1BD/T1C/T1E provide the invariants that the census's anomaly-detection logic encodes.",
-    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
+    "closeout_drift_resolution": "ImportError fallback drift (C-1 LOW: scripts/state_census.py hardcoded duplicate of FILL_AUTHORITY_VENUE_CONFIRMED_FULL='venue_confirmed_full' on src.state.portfolio import failure) was RESOLVED by T2F-CENSUS-FILL-AUTHORITY-FAIL-CLOSED invariant. Post-T2F the census exits non-zero with 'authority constant unavailable; refusing to classify' rather than silently using the duplicate string; tests/test_state_census.py::test_census_fail_closed_on_missing_authority_constant asserts."
   }
 }

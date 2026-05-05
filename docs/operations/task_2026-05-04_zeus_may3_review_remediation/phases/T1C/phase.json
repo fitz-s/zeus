@@ -83,6 +83,6 @@
       "Counter-sink module not yet decided; T1BD (predecessor) makes that decision and T1C consumes it."
     ],
     "predecessor_dependency": "T1BD MUST land first because T1C reuses the counter-sink and increments harvester_learning_write_blocked_total \u2014 same sink as cost_basis_chain_mutation_blocked_total that T1BD introduces.",
-    "closeout_drift_resolution": "T2F-DOC-DRIFT-CLEANED: typed counter sink landed in T2F B1 (2026-05-05). All T1 phases share src/observability/counters.py. No per-phase DDL or schema drift outstanding."
+    "closeout_drift_resolution": "Wrapper-only placement of authority/lineage guards in maybe_write_learning_pair() matches the phase.json invariant text 'wrapper refuses to call harvest_settlement without explicit source/lineage authority' verbatim; the spirit-vs-text concern was about whether the guards belonged INSIDE harvest_settlement's body. Critic verified that wrapper placement preserves the G-HARV3 antibody (tests/test_openmeteo_p_raw_lineage.py::test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair) which would have been broken by inside-body placement (openmeteo legitimately writes training_allowed=0 audit pairs). Decision-of-record: wrapper-only is the structurally correct placement per Fitz #1 (structural decision, not patch)."
   }
 }
