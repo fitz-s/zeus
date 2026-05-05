@@ -56,7 +56,11 @@ try:
 except Exception as exc:
     print('error', file=sys.stderr)
 " "$f" 2>/dev/null || echo "unknown")
-        if [[ "$status" != "completed" ]]; then
+        # 2026-05-05 fix: lane writers emit status="complete" (no -d).
+        # Accept both forms; treat anything else as incomplete. Pre-fix, this
+        # check rejected "complete" → autochain stalled 28h despite all 10
+        # lanes done. See post-mortem in PR #61.
+        if [[ "$status" != "complete" && "$status" != "completed" ]]; then
             incomplete=$((incomplete + 1))
         fi
     done
