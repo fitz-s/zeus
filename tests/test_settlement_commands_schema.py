@@ -21,12 +21,13 @@ CANONICAL_PATH = "src/execution/settlement_commands.py"
 
 
 def test_settlement_commands_single_source_of_truth():
-    result = subprocess.check_output(
+    result = subprocess.run(
         ["git", "grep", "-n", DDL_PATTERN, "--", "src/"],
         cwd=REPO_ROOT,
+        capture_output=True,
         text=True,
     )
-    matches = [line for line in result.splitlines() if line.strip()]
+    matches = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(matches) == 1, (
         f"Expected exactly 1 DDL definition site for settlement_commands, "
         f"got {len(matches)}: {matches}"
