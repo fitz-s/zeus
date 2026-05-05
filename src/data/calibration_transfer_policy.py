@@ -127,14 +127,14 @@ def evaluate_calibration_transfer_policy_with_evidence(
     *,
     config: EntryForecastConfig,
     source_id: str,
-    target_source_id: str,
-    source_cycle: str,
-    target_cycle: str,
-    horizon_profile: str,
-    season: str,
-    cluster: str,
+    target_source_id: Optional[str],
+    source_cycle: Optional[str],
+    target_cycle: Optional[str],
+    horizon_profile: Optional[str],
+    season: Optional[str],
+    cluster: Optional[str],
     metric: str,
-    platt_model_key: str,
+    platt_model_key: Optional[str],
     conn: sqlite3.Connection,
     now: datetime,
     staleness_days: int = 90,
@@ -173,6 +173,21 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
     # Same-domain fast-path: no transfer occurs when source and target are
     # identical on both source identity and cycle.
+    # Guard: if route keys are None (pre-forecast readiness write), the
+    # None==None comparison would spuriously fire the same-domain path for
+    # cross-domain routes. Reject None route keys as INSUFFICIENT_INFO →
+    # SHADOW_ONLY so the readiness writer never marks an unresolved route
+    # as LIVE_ELIGIBLE. (Known follow-up from arch doc 2026-05-05 §Known #1.)
+    if source_cycle is None or target_source_id is None or target_cycle is None:
+        return CalibrationTransferDecision(
+            status="SHADOW_ONLY",
+            reason_codes=("CALIBRATION_TRANSFER_INSUFFICIENT_ROUTE_INFO",),
+            policy_id=policy_id,
+            forecast_data_version="",
+            calibration_data_version=None,
+            live_promotion_approved=False,
+            note="none_route_keys_insufficient_info",
+        )
     if source_id == target_source_id and source_cycle == target_cycle:
         return CalibrationTransferDecision(
             status="LIVE_ELIGIBLE",
@@ -180,7 +195,11 @@ def evaluate_calibration_transfer_policy_with_evidence(
             policy_id=policy_id,
             forecast_data_version="",
             calibration_data_version=None,
-            live_promotion_approved=False,
+            # DB row is the authority when flag is on; live_promotion_approved
+            # is set True on LIVE_ELIGIBLE so the readiness writer's gate
+            # (which checks this flag) passes correctly. (arch doc 2026-05-05
+            # §"live_promotion_approved flag is REMOVED — DB row is authority")
+            live_promotion_approved=True,
             note="same_domain_no_transfer",
         )
 
@@ -239,7 +258,10 @@ def evaluate_calibration_transfer_policy_with_evidence(
             policy_id=policy_id,
             forecast_data_version="",
             calibration_data_version=None,
-            live_promotion_approved=False,
+            # DB row is the authority; live_promotion_approved=True so the
+            # readiness writer's gate passes. (arch doc 2026-05-05
+            # §"live_promotion_approved flag is REMOVED — DB row is authority")
+            live_promotion_approved=True,
             note="db_row_live_eligible",
         )
 

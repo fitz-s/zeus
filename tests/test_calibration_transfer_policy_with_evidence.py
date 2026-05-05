@@ -196,3 +196,103 @@ def test_transfer_unsafe_row_returns_blocked(monkeypatch: pytest.MonkeyPatch) ->
 
     assert decision.status == "BLOCKED"
     assert decision.note == "db_row_transfer_unsafe"
+
+
+# ---------------------------------------------------------------------------
+# PR #61 review-remediation antibody tests
+# ---------------------------------------------------------------------------
+
+def test_none_route_keys_return_shadow_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """None source_cycle/target_cycle must NOT trigger the same-domain fast-path.
+
+    Regression guard for PR #61 review comment (Codex/Copilot): the readiness
+    write callsite passes None for route keys before the forecast is resolved.
+    None==None was silently firing the same-domain LIVE_ELIGIBLE path, which
+    would mark unresolved routes live-eligible without DB evidence.
+    Fix: guard at top of function returns SHADOW_ONLY/INSUFFICIENT_INFO.
+    """
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        conn=conn,
+        source_id="ecmwf_open_data",
+        target_source_id=None,      # None — pre-forecast readiness callsite
+        source_cycle=None,
+        target_cycle=None,
+        horizon_profile=None,
+        season=None,
+        cluster=None,
+        metric="high",
+        platt_model_key=None,
+        now=datetime(2026, 5, 5, 12, 0, 0),
+    )
+
+    assert decision.status == "SHADOW_ONLY", (
+        f"Expected SHADOW_ONLY for None route keys, got {decision.status!r}"
+    )
+    assert "insufficient" in decision.note.lower() or "none" in decision.note.lower(), (
+        f"Expected 'insufficient' or 'none' in note, got {decision.note!r}"
+    )
+
+
+def test_live_eligible_db_row_sets_live_promotion_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LIVE_ELIGIBLE DB row must set live_promotion_approved=True.
+
+    Regression guard for PR #61 review comments (Copilot #5/#10): when the
+    readiness writer checks calibration_decision.live_promotion_approved, a
+    False value causes a BLOCKED write even though the DB row approved the
+    transfer. Architecture doc 2026-05-05: 'DB row is authority; flag REMOVED.'
+    """
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+    now = datetime(2026, 5, 5, 12, 0, 0)
+    _insert_row(conn, status="LIVE_ELIGIBLE", evaluated_at=now - timedelta(days=5))
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg, conn=conn, **{**_BASE_KWARGS, "now": now}
+    )
+
+    assert decision.status == "LIVE_ELIGIBLE"
+    assert decision.live_promotion_approved is True, (
+        "LIVE_ELIGIBLE DB row must set live_promotion_approved=True so the "
+        "readiness writer can pass the cross-gate invariant check"
+    )
+
+
+def test_same_domain_fast_path_sets_live_promotion_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-domain LIVE_ELIGIBLE fast-path must set live_promotion_approved=True.
+
+    Regression guard for PR #61 review comments (Copilot #5/#10): same-domain
+    path also needs live_promotion_approved=True so the readiness writer passes.
+    """
+    monkeypatch.setenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", "true")
+    cfg = entry_forecast_config()
+    conn = _make_conn()
+
+    decision = evaluate_calibration_transfer_policy_with_evidence(
+        config=cfg,
+        source_id="ecmwf_open_data",
+        target_source_id="ecmwf_open_data",
+        source_cycle="00",
+        target_cycle="00",
+        horizon_profile="full",
+        season="summer",
+        cluster="cluster_a",
+        metric="high",
+        platt_model_key="key1",
+        conn=conn,
+        now=datetime(2026, 5, 5, 12, 0, 0),
+    )
+
+    assert decision.status == "LIVE_ELIGIBLE"
+    assert decision.live_promotion_approved is True, (
+        "Same-domain LIVE_ELIGIBLE must set live_promotion_approved=True"
+    )
