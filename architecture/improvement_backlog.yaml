@@ -130,6 +130,12 @@ entries:
       that greps `except Exception:.*pass` near get_connection / ATTACH /
       sqlite3 calls and returns {file, line, suggested_narrow_class}.
 
+      VISIONIST_REFINE 2026-05-05 (opus a128a7c65b394ebdb): scope as a
+      ONE-TIME audit task (single script run + cleanup), not as ongoing
+      doctrine. The audit either closes the gap or surfaces remaining
+      sites for narrow-typing; do not codify "always grep for bare-except
+      near IO" as a permanent rule.
+
   - id: P8-2026-05-05
     title: "AST counter-census helper (walk Call nodes to _cnt_inc)"
     raised_at: "2026-05-05"
@@ -139,11 +145,15 @@ entries:
     notes: >
       T2F multiline `_cnt_inc` calls (event name on next line) caused
       planner undercount (10 estimated vs 17 actual); single-line grep
-      cannot capture the pattern. Build scripts/counter_census.py that
-      walks Call nodes to `_cnt_inc` and `counters.increment`, yielding
-      (file, line, event_name, label_dict). Mechanical census becomes
-      one-shot for both planner (emit-count estimates) and verifier
-      (caplog assertion enumeration).
+      cannot capture the pattern.
+
+      VISIONIST_REFINE 2026-05-05 (opus a128a7c65b394ebdb): replace "build
+      a bespoke scripts/counter_census.py helper" with "use ast-grep
+      (mcp__plugin_oh-my-claudecode_t__ast_grep_search) or an LSP-aware
+      query for symbol counts; never single-line grep". Bespoke helper is
+      premature when existing AST-aware tools suffice. Reframe deliverable:
+      planner+verifier doctrine update saying "for any 'how many call
+      sites of X' question, use ast-grep, not single-line grep".
 
   - id: P9-2026-05-05
     title: "DATA_DEGRADED early-return canonical template (None-guard before IO)"
@@ -177,31 +187,35 @@ entries:
     title: "Sink-supplements-log-not-replaces design pattern (additive observability)"
     raised_at: "2026-05-05"
     raised_by: "capsule@executor-t2f"
-    status: proposed
+    status: rejected
     detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
+    rationale: >
+      Visionist-opus (a128a7c65b394ebdb) judged 2026-05-05 as REJECT:
+      "specific architectural fact about T2F observability; not a
+      generalizable lesson". The additive-not-replacement choice was a
+      one-time T2F design call; promoting it to project doctrine over-fits
+      one phase's design choice. The underlying principle (don't break
+      legacy log-line greps) is already covered by the broader stability-
+      of-existing-interfaces convention.
     notes: >
-      T2F typed counter sink supplements (not replaces) existing
-      logger.warning lines at all 17 sites; zero-risk for existing log
-      parsers and alerting rules. Codify in
-      docs/reference/zeus_observability_reference.md as canonical pattern
-      for structured-data layers added atop existing log-line surfaces.
-      Anti-pattern: replacing log lines with sink calls (breaks legacy
-      oncall greps that preceded the sink).
+      Original capsule observation retained for reference: T2F typed
+      counter sink supplements (not replaces) existing logger.warning
+      lines at all 17 sites; zero-risk for existing log parsers and
+      alerting rules.
 
   - id: P12-2026-05-05
     title: "caplog RESCUE-branch fixture token_id wiring pattern"
     raised_at: "2026-05-05"
     raised_by: "capsule@executor-t2f"
-    status: proposed
+    status: rejected
     detail_doc: ".claude/skills/orchestrator-telemetry/entries/2026-05-05_zeus_may3_R5_s5_t2h_t2i.md"
-    notes: >
-      T2F cost_basis_chain_mutation_blocked_total caplog test required
-      token_id="tok-1" on the eligible Position fixture; chain reconciliation
-      matches by token_id, so a blank token_id silently routes QUARANTINE
-      instead of RESCUE without assertion error until the counter check
-      fails. Document the fixture pattern in tests/_helpers/ (or docstring
-      on _make_eligible_position) so future caplog tests for chain-reconcile
-      branches don't repeat DEV-2.
+    rationale: >
+      Visionist-opus (a128a7c65b394ebdb) judged 2026-05-05 as REJECT:
+      "specific test-fixture detail for one branch. Not a lesson — it's a
+      debugging note." A single test-fixture wiring choice does not
+      generalize to backlog-worthy doctrine; if it recurs, an inline
+      fixture-builder helper in tests/_helpers/ can address it without a
+      project-level entry.
 
   - id: P13-2026-05-05
     title: "test_topology.yaml hook-friendly edit helper (avoid ARCH_PLAN_EVIDENCE workaround)"
