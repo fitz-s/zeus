@@ -51,6 +51,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.architecture.decorators import capability, protects
 from src.calibration.manager import maturity_level, regularization_for_level
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.store import (
@@ -389,6 +390,8 @@ def _fit_bucket(
     stats.per_bucket[bucket_key] = f"OK {summary}"
 
 
+@capability("script_repair_write", lease=False)
+@protects("INV-04")
 def refit_v2(
     conn: sqlite3.Connection,
     *,

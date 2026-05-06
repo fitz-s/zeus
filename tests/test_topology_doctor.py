@@ -4300,57 +4300,24 @@ def test_navigation_includes_context_assumption():
     assert payload["context_assumption"] == payload["digest"]["context_assumption"]
 
 
+@pytest.mark.skip(reason="DEV-1 (Phase 4.A): build_invariants_slice removed with topology_doctor_packet_prefill.py; migrate to capability-schema surface in Phase 4 Gate 1")
 def test_invariants_slice_filters_by_zone():
-    payload = topology_doctor.build_invariants_slice("K3_extension")
-    ids = {invariant["id"] for invariant in payload["invariants"]}
-
-    assert payload["zone"] == "K3_extension"
-    assert "INV-04" in ids
-    assert "INV-06" in ids
-    assert "INV-07" not in ids
+    pass  # formerly tested topology_doctor.build_invariants_slice("K3_extension")
 
 
+@pytest.mark.skip(reason="DEV-1 (Phase 4.A): build_packet_prefill removed — topology_doctor_packet_prefill.py deleted; packet prefill behavior migrated to capability-schema surface in Phase 4 Gate 1")
 def test_refactor_packet_prefill_for_engine_scope():
-    packet = topology_doctor.build_packet_prefill(
-        packet_type="refactor",
-        task="split cycle runner orchestration helpers",
-        scope="src/engine/",
-    )
-
-    assert packet["packet_type"] == "refactor_packet"
-    assert packet["scope"] == "src/engine"
-    assert packet["zones_touched"] == ["K2_runtime"]
-    assert "INV-06" in packet["invariants_touched"]
-    assert "src/engine/**" in packet["files_may_change"]
-    assert "src/contracts" in packet["files_may_not_change"]
-    assert "src/engine/AGENTS.md" in packet["required_reads"]
-    assert "architecture/source_rationale.yaml" in packet["required_reads"]
-    assert any("semantic_linter.py --check src/engine" in gate for gate in packet["ci_gates_required"])
-    assert packet["context_assumption"]["sufficiency"] == "provisional_starting_packet"
+    pass  # formerly tested topology_doctor.build_packet_prefill(packet_type="refactor", scope="src/engine/")
 
 
+@pytest.mark.skip(reason="DEV-1 (Phase 4.A): build_packet_prefill removed — see test_refactor_packet_prefill_for_engine_scope skip rationale")
 def test_refactor_packet_prefill_detects_cross_zone_files():
-    packet = topology_doctor.build_packet_prefill(
-        packet_type="refactor",
-        task="extract evaluator strategy helper",
-        files=["src/engine/cycle_runner.py", "src/strategy/market_analysis.py"],
-    )
-
-    assert "K2_runtime" in packet["zones_touched"]
-    assert "K3_extension" in packet["zones_touched"]
-    assert packet["replay_required"] is True
-    assert any("tests/test_market_analysis.py" in test for test in packet["tests_required"])
+    pass  # formerly tested cross-zone file detection via build_packet_prefill
 
 
+@pytest.mark.skip(reason="DEV-1 (Phase 4.A): build_packet_prefill removed — see test_refactor_packet_prefill_for_engine_scope skip rationale")
 def test_refactor_packet_prefill_keeps_file_scope_literal():
-    packet = topology_doctor.build_packet_prefill(
-        packet_type="refactor",
-        task="refactor platt calibration",
-        scope="src/calibration/platt.py",
-    )
-
-    assert packet["files_may_change"] == ["src/calibration/platt.py"]
-    assert "src/calibration/platt.py/**" not in packet["files_may_change"]
+    pass  # formerly tested file-scope literal preservation in build_packet_prefill
 
 
 def test_impact_reports_write_routes_and_tests_for_store():
