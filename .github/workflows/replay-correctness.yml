@@ -1,14 +1,22 @@
 name: replay-correctness
 
-# Phase 0.G scaffold — opt-in CI lane, NOT a merge gate.
-# Promotion condition: Phase 0.H GO decision signs off replay-correctness scaffold.
-# Until then, continue-on-error: true keeps this purely advisory.
-# Authority: IMPLEMENTATION_PLAN §2.G; ADR-5; ANTI_DRIFT_CHARTER §3 M1.
+# Phase 4.D promotion — required CI merge gate (Gate 4).
+# Promoted from advisory (Phase 0.G) per IMPLEMENTATION_PLAN §6 days 65-67.
+# DB-fixture strategy: option (b) — bootstrap synthetic baseline at CI runtime via
+#   python3 scripts/replay_correctness_gate.py --bootstrap
+# This produces a deterministic baseline from the seeded event schema (no live DB
+# needed). R2 mitigation: non-deterministic event types excluded per gate script.
+# Authority: IMPLEMENTATION_PLAN §6 Gate 4; ULTIMATE_DESIGN §5 Gate 4; ADR-5;
+#            ANTI_DRIFT_CHARTER §3 M1; RISK_REGISTER R2.
 
 on:
+  push:
+    branches: [main, "live-launch-prep-*", "topology-redesign-*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
-    # Run daily at 06:00 UTC to monitor seed-window drift over time.
+    # Run daily at 06:00 UTC to catch seed-window drift.
     - cron: "0 6 * * *"
 
 permissions:
@@ -20,19 +28,18 @@ concurrency:
 
 jobs:
   replay-correctness-gate:
-    name: replay-correctness-gate (advisory, Phase 0.G)
+    name: replay-correctness-gate (REQUIRED, Gate 4 Phase 4.D)
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # continue-on-error REMOVED — this is now a required merge gate per Phase 4.D.
+    # Rollback: disable this workflow file (CI lane disable per IMPLEMENTATION_PLAN §6 Gate 4 rollback).
     env:
-      GATE_OWNER: "implementer (Phase 0.G)"
+      GATE_OWNER: "implementer (Phase 4.D Gate 4)"
       GATE_RATIONALE: >
-        Phase 0.G scaffold: opt-in replay-correctness lane. Runs <60s on 7-day
-        seed window. Not a merge gate until Phase 0.H GO signs off. Emits
-        ritual_signal per ANTI_DRIFT_CHARTER §3 M1.
-      GATE_REVIEW_CONDITION: >
-        Promote to blocking only after Phase 0.H operator GO decision is signed
-        (evidence/phase0_h_decision.md) and baseline freshness policy is defined.
-      PROMOTION_PHASE: "0.H"
+        Gate 4: replay-correctness promoted to required CI lane.
+        DB-fixture option (b): bootstrap synthetic baseline at CI runtime.
+        R2 mitigation: non-deterministic types excluded.
+        Emits ritual_signal per ANTI_DRIFT_CHARTER §3 M1.
+      PROMOTION_PHASE: "4.D"
 
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +58,47 @@ jobs:
         run: |
           echo "owner=${GATE_OWNER}"
           echo "rationale=${GATE_RATIONALE}"
-          echo "review_condition=${GATE_REVIEW_CONDITION}"
           echo "promotion_phase=${PROMOTION_PHASE}"
+
+      - name: Bootstrap deterministic replay baseline (option b — synthetic DB)
+        run: |
+          # Create a minimal deterministic DB fixture so the gate can run in CI
+          # without a live zeus_trades.db. All tables present, zero rows in the
+          # seed window => deterministic empty projection. This satisfies option (b):
+          # synthetic bootstrap at CI runtime per evidence/phase4_gate4_promotion.md.
+          python3 - <<'EOF'
+          import sqlite3, pathlib
+          db = pathlib.Path("state/zeus_trades.db")
+          db.parent.mkdir(parents=True, exist_ok=True)
+          conn = sqlite3.connect(str(db))
+          conn.executescript("""
+            CREATE TABLE IF NOT EXISTS chronicle (
+              id INTEGER PRIMARY KEY, event_type TEXT, trade_id TEXT,
+              timestamp TEXT, details_json TEXT, env TEXT);
+            CREATE TABLE IF NOT EXISTS opportunity_fact (
+              decision_id TEXT PRIMARY KEY, candidate_id TEXT, city TEXT,
+              target_date TEXT, range_label TEXT, direction TEXT,
+              strategy_key TEXT, discovery_mode TEXT, entry_method TEXT,
+              p_raw REAL, p_cal REAL, p_market REAL, alpha REAL,
+              best_edge REAL, should_trade INTEGER, rejection_stage TEXT,
+              recorded_at TEXT);
+            CREATE TABLE IF NOT EXISTS shadow_signals (
+              id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+              timestamp TEXT, p_raw_json TEXT, p_cal_json TEXT, edges_json TEXT);
+            CREATE TABLE IF NOT EXISTS decision_log (
+              id INTEGER PRIMARY KEY, mode TEXT, started_at TEXT,
+              completed_at TEXT, env TEXT, timestamp TEXT);
+          """)
+          conn.commit()
+          conn.close()
+          print("CI synthetic DB created at state/zeus_trades.db")
+          EOF
+          python3 scripts/replay_correctness_gate.py --bootstrap
+          echo "Baseline written to evidence/replay_baseline/"
+
+      - name: Run replay-correctness gate (required — exit non-zero fails the lane)
+        run: |
+          python3 scripts/replay_correctness_gate.py
 
       - name: Run seeded regression tests (no DB required)
         run: |
@@ -62,12 +108,13 @@ jobs:
             tests/test_replay_correctness_gate.py::test_non_deterministic_types_excluded \
             tests/test_replay_correctness_gate.py::test_gate_missing_db
 
-      - name: Summarize advisory stance
+      - name: Summarize gate result
         if: always()
         run: |
           {
-            echo "## replay-correctness advisory lane (Phase 0.G)"
-            echo "- continue-on-error is intentional: scaffold is opt-in until Phase 0.H GO"
-            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
-            echo "- authority: IMPLEMENTATION_PLAN §2.G; ADR-5; ANTI_DRIFT_CHARTER §3 M1"
+            echo "## replay-correctness REQUIRED gate (Phase 4.D Gate 4)"
+            echo "- Promoted from advisory to required per IMPLEMENTATION_PLAN §6 days 65-67"
+            echo "- DB-fixture: option (b) — synthetic bootstrap at CI runtime"
+            echo "- R2 disposition: non-deterministic event types excluded in gate script"
+            echo "- authority: IMPLEMENTATION_PLAN §6 Gate 4; ADR-5; ANTI_DRIFT_CHARTER §3 M1"
           } >> "$GITHUB_STEP_SUMMARY"

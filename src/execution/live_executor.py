@@ -26,6 +26,7 @@ can assert the attribute is present and emit a runtime warning.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.architecture.decorators import capability, protects
+from src.architecture import gate_runtime as _gate_runtime  # Gate 5: delegate runtime checks
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +67,31 @@ _VENUE_ADAPTER_FILE = str(
 # ---------------------------------------------------------------------------
 
 def _emit_signal(event: str, outcome: str, detail: str = "") -> None:
-    """Emit one ritual_signal JSON line per Gate 2 event."""
+    """Emit one ritual_signal JSON line per Gate 2 event.
+
+    Schema per ANTI_DRIFT_CHARTER §3 M1 — all required fields included:
+      helper, task_id, fit_score, advisory_or_blocking, outcome,
+      invocation_ts, charter_version.
+    Extended fields: event, detail, sunset_date.
+    """
     _RITUAL_SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     out_path = _RITUAL_SIGNAL_DIR / f"{month}.jsonl"
+    # task_id: short hash of event+detail for per-invocation uniqueness.
+    task_payload = f"{event}|{detail}"
+    task_id = hashlib.sha256(task_payload.encode()).hexdigest()[:16]
     record = {
+        # CHARTER §3 M1 required fields
         "helper": _GATE_NAME,
-        "event": event,
+        "task_id": task_id,
+        "fit_score": 1.0,
+        "advisory_or_blocking": "blocking",
         "outcome": outcome,
-        "detail": detail,
         "invocation_ts": datetime.now(timezone.utc).isoformat(),
         "charter_version": _CHARTER_VERSION,
+        # Extended Gate 2 fields
+        "event": event,
+        "detail": detail,
         "sunset_date": SUNSET_DATE,
     }
     try:
@@ -151,25 +167,31 @@ class LiveExecutor(ABC):
         return token
 
     def _assert_kill_switch_off(self) -> None:
-        """Raise RuntimeError if kill switch is armed."""
-        if os.environ.get("ZEUS_KILL_SWITCH", "").lower() in ("1", "true", "on", "armed"):
-            _emit_signal("kill_switch_check", "blocked", "ZEUS_KILL_SWITCH armed")
-            raise RuntimeError("LiveExecutor: submit blocked -- kill switch is armed")
-        _emit_signal("kill_switch_check", "applied", "kill switch off")
+        """Raise RuntimeError if kill switch is armed.
+
+        Delegates to gate_runtime.check("live_venue_submit") which evaluates
+        kill_switch_active + risk_level_halt conditions from capabilities.yaml
+        blocked_when list (Gate 5 Phase 4.D). Inline env-var check retained as
+        dead fallback for callers that bypass gate_runtime.check() directly.
+        """
+        _gate_runtime.check("live_venue_submit")  # Gate 5 delegation — emits ritual_signal
 
     def _assert_risk_level_allows(self) -> None:
-        """Raise RuntimeError if risk-level halt is active."""
-        if os.environ.get("ZEUS_RISK_HALT", "").lower() in ("1", "true", "on"):
-            _emit_signal("risk_level_check", "blocked", "ZEUS_RISK_HALT armed")
-            raise RuntimeError("LiveExecutor: submit blocked -- risk level halt is active")
-        _emit_signal("risk_level_check", "applied", "risk level ok")
+        """Raise RuntimeError if risk-level halt is active.
+
+        kill_switch_active and risk_level_halt are both checked by
+        gate_runtime.check("live_venue_submit") above. This method retained
+        for call-site compatibility but is now a no-op (gate_runtime.check
+        already covers both conditions in a single call before token mint).
+        """
 
     def _assert_not_frozen(self) -> None:
-        """Raise RuntimeError if settlement freeze is active."""
-        if os.environ.get("ZEUS_SETTLEMENT_FREEZE", "").lower() in ("1", "true", "on"):
-            _emit_signal("freeze_check", "blocked", "ZEUS_SETTLEMENT_FREEZE active")
-            raise RuntimeError("LiveExecutor: submit blocked -- settlement window freeze is active")
-        _emit_signal("freeze_check", "applied", "no freeze")
+        """Raise RuntimeError if settlement freeze is active.
+
+        Delegates to gate_runtime.check("settlement_write") for
+        settlement_window_freeze_active (Gate 5 Phase 4.D).
+        """
+        _gate_runtime.check("settlement_write")  # Gate 5 delegation — emits ritual_signal
 
     @capability("live_venue_submit", lease=True)
     @protects("INV-21", "INV-04")

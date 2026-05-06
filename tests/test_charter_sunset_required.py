@@ -99,3 +99,62 @@ def test_entry_has_sunset_date(yaml_file: str, entry_id: str, entry: dict) -> No
         f"{yaml_file} entry {entry_id!r}: sunset_date {parsed} is in the past "
         f"(today={today}). Re-affirm or archive this entry per charter §M3."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.D extension: verify _SUNSET_DATE constant on all 5 gate modules
+# (ANTI_DRIFT_CHARTER §5 M3 — operational gates expire after 90 days)
+# ---------------------------------------------------------------------------
+
+import importlib
+import re as _re
+from datetime import date as _date
+
+# Map of (module_import_path, constant_name) for each gate.
+# Gate 2 uses public SUNSET_DATE (no underscore); all others use _SUNSET_DATE.
+_GATE_MODULES: list[tuple[str, str]] = [
+    ("src.architecture.gate_edit_time", "_SUNSET_DATE"),       # Gate 1
+    ("src.execution.live_executor", "SUNSET_DATE"),             # Gate 2
+    ("src.architecture.gate_commit_time", "_SUNSET_DATE"),     # Gate 3
+    # Gate 4 is a CI workflow (no Python module constant; sunset managed via workflow file).
+    ("src.architecture.gate_runtime", "_SUNSET_DATE"),          # Gate 5
+]
+
+_EXPECTED_SUNSET = "2026-08-04"
+
+
+@pytest.mark.parametrize("module_path,const_name", _GATE_MODULES,
+                         ids=[m.split(".")[-1] for m, _ in _GATE_MODULES])
+def test_gate_module_has_sunset_date_constant(module_path: str, const_name: str) -> None:
+    """Every gate module must export a SUNSET_DATE constant = 2026-08-04.
+
+    Per ANTI_DRIFT_CHARTER §5 M3: operational gates (Phase 4) have a 90-day
+    sunset from authoring. The constant must be present and be a valid future
+    ISO date string. Tests fail if the gate module drops the constant or the
+    date is in the past.
+    """
+    mod = importlib.import_module(module_path)
+    assert hasattr(mod, const_name), (
+        f"{module_path} missing {const_name!r} constant. "
+        "Per ANTI_DRIFT_CHARTER §5 M3 all operational gate modules must carry "
+        "a machine-readable sunset date."
+    )
+    raw = getattr(mod, const_name)
+    assert isinstance(raw, str), (
+        f"{module_path}.{const_name} must be a string, got {type(raw)}"
+    )
+    try:
+        parsed = _date.fromisoformat(raw)
+    except ValueError as exc:
+        pytest.fail(
+            f"{module_path}.{const_name} = {raw!r} does not parse as ISO date: {exc}"
+        )
+    today = _date.today()
+    assert parsed >= today, (
+        f"{module_path}.{const_name} = {parsed} is in the past (today={today}). "
+        "Re-affirm or archive this gate per ANTI_DRIFT_CHARTER §5 M3."
+    )
+    assert raw == _EXPECTED_SUNSET, (
+        f"{module_path}.{const_name} = {raw!r} but expected {_EXPECTED_SUNSET!r}. "
+        "All Phase 4 gates share a 90-day sunset from 2026-05-06 authoring."
+    )
