@@ -37,11 +37,23 @@ print(r.get('exit_code', 0))
 
 [ "$EXIT_CODE" != "0" ] && exit 0
 
-# Active worktrees (excluding main and temp pytest worktrees)
-WORKTREES=$(git worktree list 2>/dev/null \
-  | grep -v "^$(git rev-parse --show-toplevel)" \
+# Active worktrees (excluding main and temp pytest worktrees).
+# Use --porcelain so paths containing spaces survive intact, and -Fx exact-match
+# exclusion of the MAIN worktree (the bare/primary one listed first by git).
+# We must exclude the main worktree, not the current worktree (`--show-toplevel`
+# returns the one the merge ran from, which IS the linked worktree the cleanup
+# reminder should be listing).
+# `git worktree list --porcelain` always lists the main worktree first; we
+# extract it with sed+head so paths with spaces survive intact.
+MAIN_WORKTREE=$(git worktree list --porcelain 2>/dev/null \
+  | sed -n 's/^worktree //p' \
+  | head -n1 \
+  || true)
+WORKTREES=$(git worktree list --porcelain 2>/dev/null \
+  | sed -n 's/^worktree //p' \
+  | grep -vFx -- "${MAIN_WORKTREE:-/dev/null/never-matches}" \
   | grep -v "/tmp/\|/T/" \
-  | awk '{print $1}' || true)
+  || true)
 
 echo ""
 echo "── Post-merge cleanup (soft) ──────────────────────────────────"

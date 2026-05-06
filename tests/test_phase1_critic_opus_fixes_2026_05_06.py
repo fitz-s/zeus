@@ -95,14 +95,17 @@ class TestFixG:
     """evaluate_calibration_transfer_policy_with_evidence flag-off delegation."""
 
     def test_with_evidence_flag_off_passes_live_promotion_true(self):
-        """Fix G: flag-off path must return LIVE_ELIGIBLE for valid ECMWF candidate.
+        """Fix G: flag-off path must return LIVE_ELIGIBLE for valid ECMWF candidate
+        when caller passes live_promotion_approved=True.
 
-        Before Fix G, the delegation at calibration_transfer_policy.py:166 omitted
-        live_promotion_approved=True, so the legacy function defaulted to False and
-        returned SHADOW_ONLY at line 107-115 → silent live-entry kill at launch.
+        Before Fix G, the delegation at calibration_transfer_policy.py:166 dropped
+        live_promotion_approved entirely, so the legacy function defaulted to False
+        and returned SHADOW_ONLY at line 107-115 → silent live-entry kill at launch.
 
-        After Fix G, flag-off delegation passes live_promotion_approved=True, so a
-        valid ECMWF OpenData candidate gets LIVE_ELIGIBLE via the TIGGE Platt route.
+        After Fix G + commit 4584c150 (PR #64), _with_evidence accepts
+        live_promotion_approved as a kwarg and forwards it to legacy. Caller
+        (evaluator.py rollout-gate-retired path) passes True; legacy then returns
+        LIVE_ELIGIBLE via the TIGGE Platt route. This test exercises that path.
         """
         cfg = entry_forecast_config()
 
@@ -120,17 +123,18 @@ class TestFixG:
                 platt_model_key=None,
                 conn=None,
                 now=datetime.now(timezone.utc),
+                live_promotion_approved=True,
             )
 
         assert decision.status == "LIVE_ELIGIBLE", (
-            f"Expected LIVE_ELIGIBLE when flag is OFF (Fix G), got {decision.status}. "
-            f"reason_codes={decision.reason_codes}. "
-            "If SHADOW_ONLY: live_promotion_approved=True was not threaded through."
+            f"Expected LIVE_ELIGIBLE when flag is OFF + caller-True (Fix G), "
+            f"got {decision.status}. reason_codes={decision.reason_codes}. "
+            "If SHADOW_ONLY: live_promotion_approved kwarg was not threaded through."
         )
         assert decision.live_eligible is True
 
     def test_with_evidence_flag_off_low_metric_returns_live_eligible(self):
-        """Fix G: LOW metric path also returns LIVE_ELIGIBLE under flag-off."""
+        """Fix G: LOW metric path also returns LIVE_ELIGIBLE under flag-off + caller-True."""
         cfg = entry_forecast_config()
 
         with patch.dict("os.environ", {"ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED": "false"}):
@@ -147,10 +151,38 @@ class TestFixG:
                 platt_model_key=None,
                 conn=None,
                 now=datetime.now(timezone.utc),
+                live_promotion_approved=True,
             )
 
         assert decision.status == "LIVE_ELIGIBLE", (
             f"LOW metric flag-off path got {decision.status}: {decision.reason_codes}"
+        )
+
+    def test_with_evidence_flag_off_caller_false_returns_shadow_only(self):
+        """Post-PR #64 reconciliation: when caller explicitly passes
+        live_promotion_approved=False, the legacy fallback must respect that
+        and return SHADOW_ONLY (operator has not approved live promotion)."""
+        cfg = entry_forecast_config()
+
+        with patch.dict("os.environ", {"ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED": "false"}):
+            decision = evaluate_calibration_transfer_policy_with_evidence(
+                config=cfg,
+                source_id="ecmwf_open_data",
+                target_source_id="ecmwf_open_data",
+                source_cycle="00",
+                target_cycle="00",
+                horizon_profile="full",
+                season="MAM",
+                cluster="US-Northeast",
+                metric="high",
+                platt_model_key=None,
+                conn=None,
+                now=datetime.now(timezone.utc),
+                live_promotion_approved=False,
+            )
+
+        assert decision.status == "SHADOW_ONLY", (
+            f"caller-False must yield SHADOW_ONLY, got {decision.status}"
         )
 
 

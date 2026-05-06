@@ -48,7 +48,7 @@ Setting this env-var activates the evidence-gated path (`evaluate_calibration_tr
 2. Missing row → `SHADOW_ONLY` status.
 3. Every ECMWF entry candidate blocked → **silent live-entry kill**.
 
-The correct launch path is the **legacy static mapping** in `evaluate_calibration_transfer_policy` (`src/data/calibration_transfer_policy.py:59`), accessed via the flag-off delegation at lines 161-170.  This routes ECMWF Opendata forecasts to their TIGGE Platt models via `_TRANSFER_SOURCE_BY_OPENDATA_VERSION` (lines 38-41), which is correct because ECMWF Opendata and TIGGE archive are the same physical IFS ensemble (TIGGE = +48h archive mirror).
+The correct launch path is the **legacy static mapping** in `evaluate_calibration_transfer_policy` (`src/data/calibration_transfer_policy.py:59`), accessed via the flag-off delegation at lines 161-170. This routes ECMWF Opendata forecasts to their TIGGE Platt models via `_TRANSFER_SOURCE_BY_OPENDATA_VERSION` (lines 38-41), which is correct because ECMWF Opendata and TIGGE archive are the same physical IFS ensemble (TIGGE = +48h archive mirror). Caller-side `live_promotion_approved` is now threaded through (commit 4584c150 + Fix G), so flag-off + caller-True → LIVE_ELIGIBLE for valid candidates.
 
 Phase B (≥2-4 weeks post-launch, once ECMWF pairs have accumulated) is when `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true` becomes safe.  See `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §4 and §5 for trigger conditions and upgrade steps.
 

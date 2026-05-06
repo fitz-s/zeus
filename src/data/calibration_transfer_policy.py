@@ -138,6 +138,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
     conn: sqlite3.Connection,
     now: datetime,
     staleness_days: int = 90,
+    live_promotion_approved: bool = False,
 ) -> CalibrationTransferDecision:
     """DB-row-as-authority replacement for legacy string-mapping policy.
 
@@ -147,7 +148,8 @@ def evaluate_calibration_transfer_policy_with_evidence(
     Same-domain fast-path: source_id==target_source_id AND cycles match → LIVE_ELIGIBLE.
     Otherwise queries validated_calibration_transfers for matching row.
     Stale or missing → SHADOW_ONLY. status='TRANSFER_UNSAFE' → BLOCKED.
-    `live_promotion_approved` flag is REMOVED — DB row is authority.
+    `live_promotion_approved` is threaded to the legacy fallback (flag OFF).
+    When flag is ON, DB row is the authority and this parameter is unused.
 
     Phase X.1 scaffold: OOS evaluator (X.2) writes rows; flag flip (X.3) is
     operator-gated. Until then this is a zero-risk pass-through.
@@ -159,13 +161,15 @@ def evaluate_calibration_transfer_policy_with_evidence(
         # from metric so the legacy version-map resolves. Phase X.3 caller
         # update will replace this inference with an explicit argument.
         #
-        # Fix G (golden-knitting-wand.md Phase 1): pass live_promotion_approved=True
-        # so the legacy path returns LIVE_ELIGIBLE for valid candidates.
-        # Architecture intent: flag-off posture = "operator's blanket approval via
-        # legacy static-mapping" — the TIGGE Platt IS the correct calibrator for
-        # ECMWF Opendata (same physical IFS ensemble; TIGGE = +48h archive mirror).
-        # Without this flag the legacy function defaults to live_promotion_approved=False
-        # (line 64) and returns SHADOW_ONLY at lines 107-115 → silent launch kill.
+        # Fix G (golden-knitting-wand.md Phase 1) + PR #64 Copilot follow-up
+        # (commit 4584c150): thread live_promotion_approved through to the
+        # legacy fallback so caller-side operator approval is preserved.
+        # Architecture intent: flag-off posture = "operator's blanket approval
+        # via legacy static-mapping" — the TIGGE Platt IS the correct calibrator
+        # for ECMWF Opendata (same physical IFS ensemble; TIGGE = +48h archive
+        # mirror). Callers (entry_forecast_shadow.py, evaluator.py) pass True
+        # when the operator has approved live calibration promotion; the legacy
+        # function then returns LIVE_ELIGIBLE rather than SHADOW_ONLY.
         # See architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §4.
         _fallback_dv = (
             ECMWF_OPENDATA_HIGH_DATA_VERSION
@@ -176,7 +180,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
             config=config,
             source_id=source_id,
             forecast_data_version=_fallback_dv,
-            live_promotion_approved=True,  # flag-off = operator approved via legacy posture
+            live_promotion_approved=live_promotion_approved,
         )
 
     policy_id = config.calibration_policy_id.value
