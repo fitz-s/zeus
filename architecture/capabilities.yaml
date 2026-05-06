@@ -80,6 +80,12 @@ capabilities:
       Rollback requires Chronicler replay; severity TRUTH_REWRITE.
     relationships:
       protects_invariants: [INV-02, INV-14]
+      # OD-R-3 (operator decision 2026-05-06): kill_switch_active intentionally
+      # NOT in blocked_when. Settlement is post-trade truth-recording; kill
+      # switch is for outgoing venue commands (covered by live_venue_submit).
+      # Replay rebuild covers any divergence. See evidence/phase5_h_decision.md
+      # attack-pattern 10 for the spec-ambiguity rationale (§2.2 example vs
+      # §8 row 7) and the operator's choice (option B keep current spec).
       blocked_when:
         - settlement_window_freeze_active
     hard_kernel_paths:

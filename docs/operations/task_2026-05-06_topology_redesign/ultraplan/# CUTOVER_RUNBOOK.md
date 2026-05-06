@@ -24,7 +24,7 @@ briefing §9 acceptance criterion or a CHARTER §10 sunset clause.
 | 8 | INV-HELP-NOT-GATE test | green | `tests/test_help_not_gate.py` | "INV-HELP-NOT-GATE relationship test" |
 | 9 | LiveAuthToken phantom | type-check fails on submit without token | mypy / pyright | "LiveAuthToken enforced at submit boundary" |
 | 10 | Edit-time gate | synthetic edit attempt on a hard-kernel path with wrong capability fails | manual fixture | "Hard-kernel paths blocked at Write tool" |
-| 11 | Topology infrastructure LOC | ≤1,500 | `wc -l` of new + retained vs deleted | "Topology infrastructure total" |
+| 11 | Topology infrastructure (reframed per OD-LOC-BUDGET 2026-05-06: friction-delta is the success metric; LOC reported as evidence) | friction-delta ≥-50% **AND** net-LOC-deleted ≥ net-LOC-added | Phase 5.C replay re-run + `git diff --shortstat`; LOC reported in two scopes (stable-layer-only, all-NEW-topology) | "Friction-delta -91% [actual]; net-delete 15.3:1 [actual]; stable-layer 538 LOC; all-NEW-topology 1,898 LOC" |
 | 12 | Bootstrap token cost | ≤30,000 | measurement script vs Phase 0.A baseline | "Total bootstrap token reduction ≥7×" |
 | 13 | 20-hour replay friction | ≤2h | Phase 5 replay re-run | "20-hour replay friction" |
 | 14 | 30d shadow [skip-invariant] rate | <2/week (R10 floor) | `git log --grep="skip-invariant"` | "[skip-invariant] rate over 30d" |
