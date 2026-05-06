@@ -1,5 +1,5 @@
 ---
-applyTo: "AGENTS.md,**/AGENTS.md,.claude/**,.github/copilot-instructions.md,.github/instructions/**,.github/pull_request_template.md,architecture/**,docs/authority/**,docs/operations/current_*.md,docs/reference/**,docs/review/**,REVIEW.md,workspace_map.md,docs/archive_registry.md"
+applyTo: "AGENTS.md,**/AGENTS.md,.agents/**,.claude/**,.github/copilot-instructions.md,.github/instructions/**,.github/pull_request_template.md,architecture/**,docs/authority/**,docs/operations/current_*.md,docs/reference/**,docs/review/**,REVIEW.md,workspace_map.md,docs/archive_registry.md"
 ---
 
 # Docs / agent / instruction review
@@ -17,7 +17,7 @@ as **authority review**, not prose review.
 2. **Reader contract.** Each doc has a named reader (Codex, Copilot,
    Claude session, human). Does the change preserve or break that
    contract? Bloating `.github/copilot-instructions.md` past 4000
-   characters breaks the Copilot contract — check `wc -c`.
+   bytes breaks the Copilot contract — check `wc -c` (bytes).
 3. **Scope creep.** Does the doc grow beyond its job? A "review" doc
    absorbing routing rules, a "skill" doc becoming a universal ritual,
    a manifest absorbing prose are all scope creep. Important.
@@ -44,24 +44,26 @@ noise.
 
 ## On instruction-file size budgets
 
-- `.github/copilot-instructions.md` ≤ 4000 chars (verify by `wc -c`).
+- `.github/copilot-instructions.md` ≤ 4000 bytes (verify by `wc -c`).
 - `REVIEW.md` self-contained: a reviewer should be able to start
   reviewing after reading only this file.
-- `.github/instructions/*.instructions.md` each ≤ 2500 chars.
+- `.github/instructions/*.instructions.md` each ≤ 4000 bytes (match
+  the primary Copilot-instructions cap).
 - Severity model and Tier definitions must be identical across
   REVIEW.md, `docs/review/code_review.md`,
   `.github/copilot-instructions.md`, and the instruction files.
-  Drift is itself a Tier 3 finding.
+  Drift is itself an Important finding (Tier 3 surface).
 
-## On `.claude/` changes
+## On agent-config changes
 
-`.claude/skills/**`, `.claude/agents/**`, `.claude/hooks/**`,
-`.claude/settings.json` affect agent behavior. Check for:
-- inline anti-pattern warnings that the skill is supposed to follow
-  (the zeus-ai-handoff drift is precedent — drift happens despite
-  inline warnings; that's not a reason to weaken the warning, it's a
-  reason to not rely on prose alone)
-- new mandatory rituals (default-on hooks, always-active skills) that
-  expand the proof tax for unrelated changes
+`.agents/**`, `.claude/skills/**`, `.claude/agents/**`,
+`.claude/hooks/**`, `.claude/settings.json` affect agent behavior.
+Check for:
+- Inline anti-pattern warnings inside the file. Inline prose warnings
+  alone are insufficient to prevent ritual drift; structural enforcement
+  (path-scoped `applyTo`, mandatory triggers, scoped routers) is what
+  actually catches it. Do not weaken the prose, but do not rely on it.
+- New mandatory rituals (default-on hooks, always-active skills,
+  unconditional gates) that expand the proof tax for unrelated changes.
 
 Deeper context: `REVIEW.md`, `docs/review/code_review.md`.

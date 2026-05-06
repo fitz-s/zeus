@@ -89,10 +89,9 @@ runtime-risk findings. If the diff has no Tier 0 / Tier 1 surface (see §4) or
 zero Critical/Important findings after a complete pass, you may emit Nits
 sparingly — never as filler.
 
-(Mapping note: the multi-agent debate / critic skill uses a separate caveat
-ladder LOW / MED / HIGH / CRITICAL for cycle-evidence bucketing. That ladder
-governs intra-cycle finding accumulation; this Critical/Important/Nit ladder
-governs PR review reporting. They are orthogonal.)
+Other ladders (e.g. internal evidence-bucketing scales used by review or
+debate workflows) are orthogonal to this PR-review severity model. When
+reporting on a PR, use this ladder.
 
 ---
 
@@ -157,6 +156,7 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 **Tier 3 — Docs / instructions / agent surfaces**
 - `AGENTS.md` (root and scoped `src/**/AGENTS.md`, `docs/**/AGENTS.md`,
   `tests/**/AGENTS.md`, `architecture/**/AGENTS.md`)
+- `.agents/**` (repo-local skills / handoff)
 - `.claude/skills/**`, `.claude/agents/**`, `.claude/hooks/**`,
   `.claude/settings.json`, `.claude/CLAUDE.md`
 - `.github/{copilot-instructions.md,instructions/**,pull_request_template.md,workflows/**}`

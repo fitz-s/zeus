@@ -447,10 +447,10 @@ manual Claude session):
    Exhaust Tier 0 (live money / runtime safety) before Tier 1
    (data / probability / persistence). Tier 3 (docs / agents) only
    if budget remains.
-4. Default-skip `.claude/orchestrator/**`, `docs/archives/**`,
-   `docs/artifacts/**`, `docs/reports/**`, `logs/**`, `raw/**`,
-   `state/**`, `evidence/**`, `.code-review-graph/**`, generated /
-   cache files — unless the change demonstrably alters runtime.
+4. Default-skip the canonical skip-list in
+   `docs/review/review_scope_map.md` (provenance archives, runtime
+   caches, generated/cache files, etc.) — unless the change
+   demonstrably alters runtime. Do not redefine the skip-list locally.
 5. Cite `architecture/invariants.yaml` invariant IDs (`INV-NN`) when
    findings touch invariant-protected behavior.
 6. For large PRs, state explicit coverage limits in the review.
@@ -462,6 +462,6 @@ manual Claude session):
 8. Severity model is identical across `REVIEW.md`,
    `docs/review/code_review.md`, `.github/copilot-instructions.md`,
    and `.github/instructions/*.instructions.md`. Drift between any two
-   is itself a Tier 3 finding.
+   is itself an **Important** finding (Tier 3 surface).
 
 The review doctrine surface is owned by `docs/review/AGENTS.md`.

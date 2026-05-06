@@ -14,11 +14,21 @@ The compressed reviewer-specific mirrors live outside this directory:
 - `.github/instructions/*.instructions.md` — Copilot path-scoped surface
 - `.github/pull_request_template.md` — author-facing AI Review Scope form
 
-## Authority order within review doctrine
+## Authority within review doctrine
 
-`code_review.md` (canonical) > `review_scope_map.md` (path table) >
-compressed mirrors. Drift between any two surfaces is a Tier 3 finding
-on the next review.
+Two distinct authorities, scoped to avoid circular precedence:
+
+- `code_review.md` is authoritative for **doctrine** — severity ladder,
+  large-PR rule, evidence rule, reporting template, reviewer behavior,
+  uncertainty handling.
+- `review_scope_map.md` is authoritative for **path → tier mapping** only.
+
+Compressed mirrors (root `REVIEW.md`, `.github/copilot-instructions.md`,
+`.github/instructions/*.instructions.md`) reconcile to whichever of the
+two canonical files governs the disagreement. Mirror-vs-canonical drift
+is itself an **Important** finding on the next review (the Tier of the
+file in question is Tier 3, but the severity is the dimension that
+matters).
 
 ## When to update
 

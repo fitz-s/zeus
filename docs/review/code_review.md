@@ -9,9 +9,14 @@ maintainers, manual Claude Code review sessions.
 
 The compressed mirror of this doctrine for Claude Code Review / ultrareview
 is `REVIEW.md`. The compressed mirror for GitHub Copilot Code Review is
-`.github/copilot-instructions.md`. **All three documents agree on severity,
-skip-list, Tier definitions, and large-PR behavior. If they disagree, this
-file wins and the others must be reconciled to it.**
+`.github/copilot-instructions.md`. **Authority carve-out:**
+`review_scope_map.md` is authoritative for path → tier mapping (the path
+table only). This file (`code_review.md`) is authoritative for the doctrine
+itself: severity ladder semantics, large-PR rule, evidence rule, reporting
+template, skip-list semantics, reviewer behavior contract. The compressed
+mirrors must be reconciled to whichever of these two files is authoritative
+for the disagreement; mirror-vs-canonical drift is reconciled toward the
+canonical.
 
 ---
 
@@ -149,15 +154,13 @@ Critical/Important after a complete pass, you may emit a small set of
 Nits (≤ 5). Never use Nits as filler. Never let Nits drown a Critical
 finding by sheer volume.
 
-### Cross-system mapping
+### Other ladders are orthogonal
 
-The multi-agent debate / critic skill (`.claude/skills/multi-agent-debate-and-execution/`)
-uses a separate caveat ladder LOW / MED / HIGH / CRITICAL for cycle-evidence
-bucketing during adversarial debate cycles. That ladder governs
-intra-cycle evidence accumulation; the Critical/Important/Nit ladder above
-governs PR review reporting. They are orthogonal and should not be merged.
-When operating inside a debate cycle, follow the cycle's caveat ladder;
-when reporting on a PR, follow this one.
+Internal review or debate workflows may use a separate evidence-bucketing
+scale (e.g. LOW / MED / HIGH / CRITICAL) for their own purposes. Those
+scales govern intra-workflow evidence accumulation and are orthogonal to
+the Critical / Important / Nit ladder above. PR review reporting uses
+this ladder; do not merge.
 
 ---
 
@@ -279,9 +282,10 @@ Default-skip paths (review only if change mutates runtime behavior):
 - Generated files, fixture data, prompt archives, large model outputs
 
 Burden of proof: a PR touching a skip-list path needs the AI Review Scope
-section to explicitly call out why it merits review (e.g.,
-`.claude/hooks/pre-merge-contamination-check.sh` change does affect
-contamination remediation).
+section to explicitly call out why it merits review (e.g., a hook file
+in `.claude/hooks/` whose change materially affects pre-commit / pre-merge
+enforcement, or a `.code-review-graph/` schema bump that changes the
+review graph contract).
 
 ---
 

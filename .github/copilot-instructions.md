@@ -32,25 +32,27 @@ remains. Skip-list only if change demonstrably alters runtime.
 
 ## Tier 3 — docs / agent surfaces
 
-`AGENTS.md` (root + scoped), `.claude/**`, `.github/**`,
+`AGENTS.md` (root + scoped), `.agents/**`, `.claude/**`, `.github/**`,
 `architecture/**`, `docs/authority/**`, `docs/operations/current_*.md`,
 `docs/reference/**`, `docs/review/**`.
 
 ## Skip — only if change demonstrably alters runtime
 
-`.claude/orchestrator/**`, `.code-review-graph/**`, `.omc/**`, `.omx/**`,
-`.zeus/**`, `.zpkt-cache/**`, `docs/archives/**`, `docs/artifacts/**`,
-`docs/reports/**`, `docs/operations/archive/**`, closed
-`docs/operations/task_*/**`, `logs/**`, `raw/**`, `state/**`,
-`evidence/**`, generated/cache files (locks, logs, `__pycache__`).
+`.claude/orchestrator/**`, `.claude/worktrees/**`, `.code-review-graph/**`,
+`.omc/**`, `.omx/**`, `.zeus/**`, `.zeus-githooks/**`, `.zpkt-cache/**`,
+`docs/archives/**`, `docs/artifacts/**`, `docs/reports/**`,
+`docs/operations/archive/**`, closed `docs/operations/task_*/**`,
+`logs/**`, `raw/**`, `state/**`, `evidence/**`, generated/cache files.
+Canonical list: `docs/review/review_scope_map.md`.
 
 ## Severity
 
 **Critical** (block): live-money loss; venue identity error (market_id,
 condition_id, token_id, YES/NO); SettlementSemantics bypass
 (`wmo_half_up` vs `oracle_truncate`-HKO-only); transaction split (INV-08);
-RED not cancel+sweep (INV-19); advisory risk (INV-05); authority-loss →
-RuntimeError (INV-20); void on CHAIN_UNKNOWN (INV-18); secret exposure;
+RED not cancel+sweep (INV-19); advisory risk (INV-05); authority-loss
+raising RuntimeError instead of read-only (INV-20); void on CHAIN_UNKNOWN
+(INV-18); secret exposure;
 market-order where limit-order is law; LLM as authority (INV-10);
 `place_limit_order` outside gateway (INV-24); V2 preflight bypass
 (INV-25); venue side effect missing `venue_commands` (INV-28, 30);
@@ -67,8 +69,8 @@ authority/workflow/control/supervisor surfaces, truth-owning
 Day0 low via historical Platt (INV-16); `runtime_posture` not blocking
 entry (INV-26).
 
-**Nit**: style / formatting / typos. **Suppress all Nits when
-Critical/Important findings exist.**
+**Nit**: style / formatting / typos. **Suppress when
+Critical/Important exist.**
 
 ## Evidence + coverage
 
@@ -85,7 +87,5 @@ list reviewed slice + unreviewed paths, recommend slice review or split PR.
 Per finding: `Severity | Path:line | What | Why | Fix | Evidence (INV-NN)`.
 Top: `Reviewed: <by tier>; Skipped: <paths>; Coverage: full|partial; Findings: N C, N I, N N, N U`.
 
-Authority on disagreement: code > docs; DB > JSON; chain > cache.
-Scoped `src/**/AGENTS.md` is authoritative for module rules.
-
-Deeper: `REVIEW.md`, `docs/review/code_review.md`, `architecture/invariants.yaml`.
+Deeper: `REVIEW.md`, `docs/review/code_review.md`,
+`docs/review/review_scope_map.md`, `architecture/invariants.yaml`.

@@ -26,7 +26,7 @@
 - [ ] probability / calibration / economics (`src/calibration/**`, `src/signal/**`, `src/risk_allocator/**`, executable-cost economics)
 - [ ] persistence / replay / reporting (`src/state/**`, migrations, schema, derived JSON exports)
 - [ ] tests only (no source change)
-- [ ] docs / instructions only (`AGENTS.md`, `.claude/**`, `.github/**`, `architecture/**`, `docs/**`)
+- [ ] docs / instructions only (`AGENTS.md`, `.agents/**`, `.claude/**`, `.github/**`, `architecture/**`, `docs/**`)
 - [ ] generated / mechanical refactor (rename, codemod, formatter)
 
 ### High-risk paths changed (Tier 0 / Tier 1 — must be reviewed)
