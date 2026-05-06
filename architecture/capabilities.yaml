@@ -309,9 +309,10 @@ capabilities:
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/exchange_reconcile.py
+      - src/execution/settlement_commands.py
       - state/zeus_trades.db
     original_intent:
-      intent_test: "diff touches chain reconciliation, fill acknowledgment, or void-on-divergence path"
+      intent_test: "diff touches chain reconciliation, fill acknowledgment, void-on-divergence path, or on-chain redeem"
       does_not_fit: refuse_with_advice
       scope_keywords: [chain, reconcile, fill, void, on_chain]
       out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]

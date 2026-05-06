@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterator, Mapping, Optional
 
+from src.architecture.decorators import capability
 from src.control.cutover_guard import CutoverPending, redemption_decision
 from src.contracts.fx_classification import FXClassification
 from src.state.collateral_ledger import require_pusd_redemption_allowed
@@ -305,6 +306,7 @@ def request_redeem(
             conn.close()
 
 
+@capability("on_chain_mutation", lease=True)
 def submit_redeem(
     command_id: str,
     adapter: Any,
@@ -320,6 +322,8 @@ def submit_redeem(
     If the adapter returns a tx hash, ``REDEEM_TX_HASHED`` becomes the recovery
     anchor; later ``reconcile_pending_redeems`` follows chain receipt truth.
     """
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("on_chain_mutation")
 
     _ = ledger  # R1 keeps the public seam; collateral accounting remains Q-FX gated.
     command_id = _require_nonempty("command_id", command_id)
