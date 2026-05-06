@@ -35,6 +35,9 @@ CAPABILITIES_YAML = REPO_ROOT / "architecture" / "capabilities.yaml"
 PHASE_4_DEFERRED_PATHS: set[str] = {
     "src/execution/venue_adapter.py",
     "src/execution/live_executor.py",
+    # Phase 4.C: venue adapter for live_venue_submit capability; file not yet created
+    # (capabilities.yaml pre-registers this path; actual kernel is venue_adapter.py)
+    "src/venue/polymarket_adapter.py",
 }
 
 # Capabilities whose ALL hard_kernel_paths are non-py (docs, YAML, DB).

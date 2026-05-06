@@ -1,6 +1,7 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Live mode only: places limit orders via Polymarket CLOB API.
+Gate 2 routing: routes to LiveExecutor (via venue_adapter) when ZEUS_MODE=live,
+else routes to ShadowExecutor for paper/replay/backtest paths.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Optional
+from typing import Any, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
@@ -1094,6 +1095,27 @@ def create_exit_order_intent(
     )
 
 
+
+
+def submit_order(order: Any, *, mode: Optional[str] = None) -> Any:
+    """Gate 2 top-level router: live path uses VenueAdapterExecutor, shadow uses ShadowExecutorImpl.
+
+    C-4 shim: routes based on ZEUS_MODE env var (or explicit mode kwarg).
+    Live callers should prefer execute_final_intent / execute_intent directly;
+    this shim exists for backwards-compat call sites that cannot yet pass a token.
+
+    @untyped_for_compat is NOT applied here because this shim is new code, not
+    a legacy site.  Deprecated callers should migrate to the typed ABC paths.
+    """
+    from src.config import get_mode as _get_mode
+
+    resolved_mode = mode or _get_mode()
+    if resolved_mode == "live":
+        from src.execution.venue_adapter import VenueAdapterExecutor
+        return VenueAdapterExecutor().submit(order)
+    else:
+        from src.execution.shadow_executor import ShadowExecutorImpl
+        return ShadowExecutorImpl().submit(order)
 
 
 def place_sell_order(
