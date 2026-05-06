@@ -117,6 +117,21 @@ class LiveAuthToken:
     LiveExecutor ABC will produce a type error at any call site that does not
     pass a correctly-typed token.  ShadowExecutor.submit has no token parameter
     by design, making cross-path confusion a compile-time error.
+
+    Trust boundary (OD-K0-1b 2026-05-06):
+        The phantom catches accidental misuse — forgetting to mint a token,
+        passing the wrong arg, or routing through a non-Live path.  It does
+        NOT defend against deliberate adversarial code inside src/execution/
+        that uses object.__setattr__, ctypes, or pickle to forge a token.
+        Such code already has access to _mint_token() and the same blast
+        radius via the legitimate construction path.
+
+        The trust boundary is the src/execution/ package itself.  Defense
+        against malicious internals is enforced by code review of changes
+        to src/execution/, not by type-system primitives Python does not
+        provide.  The frozen+slots dataclass closes the casual __dict__
+        forgery vector (test_live_auth_token_unforgeable_via_dict_write);
+        the __setattr__ slot-write vector is accepted residual risk.
     """
 
     _issued_at: str
