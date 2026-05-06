@@ -32,6 +32,8 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Optional
 
+from src.architecture.decorators import capability, protects
+
 
 # ---------------------------------------------------------------------------
 # State transition table (INV-28 / implementation_plan.md §P1.S1)
@@ -410,6 +412,8 @@ def insert_submission_envelope(
     return envelope_id_value
 
 
+@capability("venue_command_write", lease=False)
+@protects("INV-21", "INV-04")
 def insert_command(
     conn: sqlite3.Connection,
     *,

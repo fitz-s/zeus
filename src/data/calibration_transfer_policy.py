@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.architecture.decorators import capability, protects
 from src.calibration.forecast_calibration_domain import ForecastCalibrationDomain
 from src.config import EntryForecastCalibrationPolicyId, EntryForecastConfig
 from src.contracts.ensemble_snapshot_provenance import (
@@ -56,6 +57,8 @@ class CalibrationTransferDecision:
         return self.status == "LIVE_ELIGIBLE"
 
 
+@capability("source_validity_flip", lease=True)
+@protects("INV-04", "INV-06")
 def evaluate_calibration_transfer_policy(
     *,
     config: EntryForecastConfig,

@@ -24,6 +24,7 @@ from typing import Literal, Optional
 
 import numpy as np
 
+from src.architecture.decorators import capability, protects
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import round_wmo_half_up_value, SettlementSemantics
 from src.state.db import (
@@ -2373,6 +2374,8 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
 # Public API
 # ---------------------------------------------------------------------------
 
+@capability("backtest_diagnostic_write", lease=False)
+@protects("INV-04")
 def run_replay(
     start_date: str,
     end_date: str,

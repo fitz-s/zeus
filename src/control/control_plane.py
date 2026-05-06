@@ -11,6 +11,7 @@ import traceback as _traceback
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+from src.architecture.decorators import capability, protects
 from src.config import state_path
 from src.control.gate_decision import GateDecision, ReasonCode
 from src.state.db import (
@@ -605,6 +606,8 @@ def process_commands() -> list[str]:
     return processed
 
 
+@capability("control_write", lease=False)
+@protects("INV-05", "INV-21")
 def enqueue_commands(new_commands: list[dict]) -> int:
     """Append commands to the durable control queue without duplicating identical payloads."""
     if not new_commands:

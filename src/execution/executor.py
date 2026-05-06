@@ -40,6 +40,7 @@ from src.contracts.execution_price import (
     ExecutionPriceContractError,
 )
 from src.types import BinEdge
+from src.architecture.decorators import capability, protects
 from src.state.db import get_connection, get_trade_connection_with_world
 
 logger = logging.getLogger(__name__)
@@ -974,6 +975,8 @@ def _legacy_entry_intent_from_final(
     )
 
 
+@capability("live_venue_submit", lease=True)
+@protects("INV-21", "INV-04")
 def execute_final_intent(
     intent: FinalExecutionIntent,
     conn: Optional[sqlite3.Connection] = None,
