@@ -1,0 +1,184 @@
+# Created: 2026-05-06
+# Last reused or audited: 2026-05-06
+# Authority basis: docs/operations/task_2026-05-06_hook_redesign/PLAN.md §2.2
+#   + critic-opus §0.5 amendments (evidence/hook_redesign_critic_opus.md)
+
+schema_version: 1
+metadata:
+  charter_version: 1.0.0
+  catalog_size: 11
+  sunset_default: 90d
+
+hooks:
+  - id: invariant_test
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Run pytest baseline before `git commit` to catch regressions.
+    blocked_when:
+      - regression_below_baseline
+    severity: BLOCKING
+    reversibility_class: TRUTH_REWRITE
+    bypass_policy:
+      class: structured_override
+      override_ids: [BASELINE_RATCHET, MAIN_REGRESSION, COTENANT_SHIM]
+      max_active_per_30d: 5
+      requires_evidence_file: true
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: src/architecture/hooks/invariant_test.py
+
+  - id: secrets_scan
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Run gitleaks against staged content for `git commit`.
+    blocked_when:
+      - secret_pattern_detected_in_staged
+    severity: BLOCKING
+    reversibility_class: ARCHIVE
+    bypass_policy:
+      class: structured_override
+      override_ids: [REVIEW_SAFE_TAG, OPERATOR_CLEARED]
+      requires_evidence_file: true
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: cotenant_staging_guard
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Block broad `git add` in main worktree (co-tenant absorption).
+    blocked_when:
+      - broad_git_add_in_main_worktree
+    severity: BLOCKING
+    reversibility_class: WORKING
+    bypass_policy:
+      class: structured_override
+      override_ids: [SOLO_AGENT, ISOLATED_WORKTREE]
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pre_checkout_uncommitted_overlap
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Refuse `git checkout <branch>` / `git switch <branch>` when the
+      working tree has tracked modifications that overlap with the
+      target branch's tree (silent revert risk).
+    blocked_when:
+      - tracked_modifications_overlap_target_branch
+    severity: BLOCKING
+    reversibility_class: TRUTH_REWRITE
+    bypass_policy:
+      class: structured_override
+      override_ids: [STASH_FIRST_VERIFIED, OPERATOR_DESTRUCTIVE]
+      requires_evidence_file: true
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pr_create_loc_accumulation
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Advise (not block) when `gh pr create` is invoked with <2 commits
+      or <80 LOC since branch base — accumulating reduces paid auto-reviews.
+    blocked_when: []
+    severity: ADVISORY
+    reversibility_class: WORKING
+    bypass_policy:
+      class: not_required
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pr_open_monitor_arm
+    event: PostToolUse
+    matcher: Bash
+    intent: >
+      After successful `gh pr create` or `gh pr ready`, emit
+      additionalContext instructing the agent to arm a Monitor on
+      `gh pr checks` + a poll on `gh pr view --json reviews,comments`.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: phase_close_commit_required
+    event: SubagentStop
+    matcher: "*"
+    intent: >
+      When a phase-class subagent returns and the working tree has tracked
+      changes not yet committed, emit additionalContext.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pre_merge_contamination
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      Conflict-first guidance + MERGE_AUDIT_EVIDENCE validation on
+      protected branches.
+    blocked_when:
+      - merge_audit_evidence_invalid_on_protected_branch
+    severity: BLOCKING
+    reversibility_class: TRUTH_REWRITE
+    bypass_policy:
+      class: structured_override
+      override_ids: [OPERATOR_OVERRIDE]
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: post_merge_cleanup
+    event: PostToolUse
+    matcher: Bash
+    intent: >
+      Soft cleanup checklist after `gh pr merge`.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pre_edit_architecture
+    event: PreToolUse
+    matcher: "Edit|Write|MultiEdit|NotebookEdit"
+    intent: >
+      Refuse edit to architecture/** without ARCH_PLAN_EVIDENCE.
+    blocked_when:
+      - edit_to_architecture_without_evidence
+    severity: BLOCKING
+    reversibility_class: ARCHIVE
+    bypass_policy:
+      class: structured_override
+      override_ids: [OPERATOR_OVERRIDE]
+      requires_evidence_file: true
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: pre_write_capability_gate
+    event: PreToolUse
+    matcher: "Edit|Write|MultiEdit|NotebookEdit"
+    intent: >
+      Topology Gate 1 — refuse writes to blocking-class capability paths.
+    blocked_when:
+      - write_to_blocking_capability_path_without_evidence
+    severity: BLOCKING
+    reversibility_class: cite_capability_class
+    bypass_policy:
+      class: structured_override
+      override_ids: [OPERATOR_OVERRIDE]
+      requires_evidence_file: true
+    sunset_date: 2026-08-04
+    telemetry:
+      ritual_signal_emitted: true
