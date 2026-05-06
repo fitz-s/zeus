@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
 """Polymarket authenticated user-channel ingest (R3 M3).
 
@@ -54,6 +54,7 @@ UNRESOLVED_LOT_STATES = (
     "EXIT_PENDING",
     "QUARANTINED",
 )
+TRADE_FILL_ECONOMICS_STATUSES = {"MATCHED", "MINED", "CONFIRMED"}
 
 
 class WSAuthMissing(RuntimeError):
@@ -135,7 +136,7 @@ def _positive_decimal(value: Any) -> bool:
 
 
 def _missing_trade_fill_economics(status: str, *, size: Any, price: Any) -> tuple[str, ...]:
-    if status not in {"MATCHED", "MINED", "CONFIRMED"}:
+    if status not in TRADE_FILL_ECONOMICS_STATUSES:
         return ()
     missing: list[str] = []
     if not _positive_decimal(size):
@@ -637,7 +638,7 @@ class PolymarketUserChannelIngestor:
                         "command_event": None,
                         "reason": "duplicate_trade_fact",
                     }
-                if not same_fill_economics:
+                if status in TRADE_FILL_ECONOMICS_STATUSES and not same_fill_economics:
                     self._append_command_event_if_legal(
                         conn,
                         command["command_id"],
