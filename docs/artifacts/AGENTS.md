@@ -12,6 +12,7 @@ over making binary artifacts default reads.
 | `tigge_cloud_wiring_snapshot_2026-04-19.md` | Dated local/cloud TIGGE wiring snapshot and 2026-04-21 rebalance evidence; not a durable runbook |
 | `tigge_data_training_handoff_2026-04-23.md` | Dated handoff for completed TIGGE raw/extraction/validation state and the next Zeus training steps |
 | `Zeus_May2_review_ strategy_update.md` | May 2 strategy update review artifact used as evidence for the Stage 0/1 execution plan; not authority |
+| `Zeus_May6_calibration_low_metric_shortage_and_fallback.md` | 2026-05-06 root-cause investigation artifact for the calibration READ-path: corrected fallback-chain semantics + Law 1 boundary-ambiguous LOW rejection; operator decision matrix for LOW-metric posture at launch; not authority |
 | `zeus_architecture_deep_map_2026-04-16.md` | Legacy architecture deep-map snapshot; extracted to `docs/reference/zeus_architecture_reference.md`, evidence only |
 
 ## Rules

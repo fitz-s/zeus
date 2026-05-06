@@ -120,6 +120,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-04_zeus_may3_review_remediation/MASTER_PLAN_v2.md` | lock-candidate remediation plan | Serialized T-1/T0/T1/T2/T3/T4 plan for corrected-live safety and orchestrated-delivery execution |
 | `task_2026-05-04_zeus_may3_review_remediation/ORCHESTRATOR_RUNBOOK.md` | lock-candidate orchestration runbook | Skill-derived coordinator prompt, role split, idle boot, critic-gate, verifier, and co-tenant staging protocol for the Round-5 plan |
 | `task_2026-05-04_zeus_may3_review_remediation/scope.yaml` | packet scope | Plan-finalization scope sidecar; source/script/test implementation requires narrower phase scopes |
+| `task_2026-05-06_calibration_quality_blockers/` | active packet container | 2026-05-06 launch-blocker remediation packet for calibration quality (12 inverted-slope Platts quarantined + fit-time guard) |
+| `task_2026-05-06_calibration_quality_blockers/QUARANTINE_LEDGER.md` | active packet evidence | Ledger of the 12 QUARANTINED platt_models_v2 buckets with reversibility queries and fallback-chain analysis |
 
 Archived packet evidence (physically moved to `docs/archives/packets/`) is
 listed in `docs/archive_registry.md`; do not re-list those packets here. When

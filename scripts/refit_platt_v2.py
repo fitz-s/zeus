@@ -74,6 +74,7 @@ class RefitStatsV2:
     buckets_skipped_maturity: int = 0
     buckets_fit: int = 0
     buckets_failed: int = 0
+    buckets_quarantined: int = 0
     refused: bool = False
     deactivated_rows: int = 0
     per_bucket: dict[str, str] = field(default_factory=dict)
@@ -352,6 +353,34 @@ def _fit_bucket(
         stats.per_bucket[bucket_key] = f"DRY {summary}"
         return
 
+    # Fit-time inverted-slope guard (2026-05-06 calibration quality report):
+    # A Platt with param_A < 0 inverts the forecast signal — higher forecast
+    # probability maps to LOWER calibrated probability. This is a degenerate
+    # fit (typically caused by extreme-low base rate climates where the
+    # in-sample sigmoid latches onto noise) and would lose money live.
+    #
+    # Run BEFORE deactivate_model_v2 + save_platt_model_v2 so a noisy refit
+    # never overwrites a previously healthy VERIFIED row with a QUARANTINED
+    # one (PR #70 Copilot review): the loader filters authority='VERIFIED',
+    # so writing QUARANTINED-replacing-VERIFIED would silently downgrade live
+    # serving from a real calibrator to the season-pool fallback. Instead we
+    # leave the existing row intact (if any) and report+count the quarantine.
+    # Operator can review the QUARANTINE log line and decide whether to accept
+    # the noisy refit or tighten regularisation.
+    # Threshold A<0 catches strict inversion; A in [0, 0.3) is weak but
+    # mathematically valid (kept VERIFIED).
+    if cal.A < 0:
+        quarantine_reason = f"INVERTED_SLOPE A={cal.A:+.4f} (Platt slope < 0)"
+        print(
+            f"QUARANTINE {bucket_key}: {quarantine_reason}; "
+            f"keeping existing VERIFIED row intact (if present); no save, no deactivate.",
+            file=sys.stderr,
+        )
+        print(f"QUAR {bucket_key:50s} {summary} [{quarantine_reason}]")
+        stats.buckets_quarantined += 1
+        stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
+        return
+
     deactivated = deactivate_model_v2(
         conn,
         metric_identity=metric_identity,
@@ -364,28 +393,6 @@ def _fit_bucket(
         input_space=cal.input_space,
     )
     stats.deactivated_rows += deactivated
-
-    # Fit-time inverted-slope guard (2026-05-06 calibration quality report):
-    # A Platt with param_A < 0 inverts the forecast signal — higher forecast
-    # probability maps to LOWER calibrated probability. This is a degenerate
-    # fit (typically caused by extreme-low base rate climates where the
-    # in-sample sigmoid latches onto noise) and would lose money live.
-    # Auto-quarantine the row at write time so the loader (which filters on
-    # authority='VERIFIED') falls through to the next layer of the manager's
-    # cluster→season→global→uncalibrated chain. Operator can review the
-    # refit_quarantine cause and either accept the fallback or refit with
-    # tighter regularisation. Threshold A<0 catches strict inversion;
-    # A in [0, 0.3) is weak but mathematically valid (kept VERIFIED).
-    save_authority = "VERIFIED"
-    quarantine_reason = ""
-    if cal.A < 0:
-        save_authority = "QUARANTINED"
-        quarantine_reason = f"INVERTED_SLOPE A={cal.A:+.4f} (Platt slope < 0)"
-        print(
-            f"QUARANTINE {bucket_key}: {quarantine_reason}; "
-            f"saving as authority='QUARANTINED' (loader will fall through to fallback chain).",
-            file=sys.stderr,
-        )
 
     save_platt_model_v2(
         conn,
@@ -403,19 +410,12 @@ def _fit_bucket(
         n_samples=n_eff,
         brier_insample=brier_insample,
         input_space=cal.input_space,
-        authority=save_authority,
+        authority="VERIFIED",
     )
 
-    status_tag = "OK" if save_authority == "VERIFIED" else "QUAR"
-    print(f"{status_tag:4s} {bucket_key:50s} {summary}{(' [' + quarantine_reason + ']') if quarantine_reason else ''}")
-    if save_authority == "VERIFIED":
-        stats.buckets_fit += 1
-        stats.per_bucket[bucket_key] = f"OK {summary}"
-    else:
-        # Quarantined fits don't count as live-eligible; track separately
-        # via per_bucket and stats.buckets_failed += 0 (fit succeeded but
-        # quarantined). Operator parses the per_bucket value.
-        stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
+    print(f"OK   {bucket_key:50s} {summary}")
+    stats.buckets_fit += 1
+    stats.per_bucket[bucket_key] = f"OK {summary}"
 
 
 def refit_v2(
@@ -633,6 +633,7 @@ def refit_v2(
     print(f"Buckets fit:             {stats.buckets_fit}")
     print(f"Buckets skipped:         {stats.buckets_skipped_maturity}")
     print(f"Buckets failed:          {stats.buckets_failed}")
+    print(f"Buckets quarantined:     {stats.buckets_quarantined}")
     if not dry_run:
         print(f"Prior rows replaced:     {stats.deactivated_rows}")
 
