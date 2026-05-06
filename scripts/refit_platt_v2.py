@@ -365,6 +365,28 @@ def _fit_bucket(
     )
     stats.deactivated_rows += deactivated
 
+    # Fit-time inverted-slope guard (2026-05-06 calibration quality report):
+    # A Platt with param_A < 0 inverts the forecast signal — higher forecast
+    # probability maps to LOWER calibrated probability. This is a degenerate
+    # fit (typically caused by extreme-low base rate climates where the
+    # in-sample sigmoid latches onto noise) and would lose money live.
+    # Auto-quarantine the row at write time so the loader (which filters on
+    # authority='VERIFIED') falls through to the next layer of the manager's
+    # cluster→season→global→uncalibrated chain. Operator can review the
+    # refit_quarantine cause and either accept the fallback or refit with
+    # tighter regularisation. Threshold A<0 catches strict inversion;
+    # A in [0, 0.3) is weak but mathematically valid (kept VERIFIED).
+    save_authority = "VERIFIED"
+    quarantine_reason = ""
+    if cal.A < 0:
+        save_authority = "QUARANTINED"
+        quarantine_reason = f"INVERTED_SLOPE A={cal.A:+.4f} (Platt slope < 0)"
+        print(
+            f"QUARANTINE {bucket_key}: {quarantine_reason}; "
+            f"saving as authority='QUARANTINED' (loader will fall through to fallback chain).",
+            file=sys.stderr,
+        )
+
     save_platt_model_v2(
         conn,
         metric_identity=metric_identity,
@@ -381,12 +403,19 @@ def _fit_bucket(
         n_samples=n_eff,
         brier_insample=brier_insample,
         input_space=cal.input_space,
-        authority="VERIFIED",
+        authority=save_authority,
     )
 
-    print(f"OK  {bucket_key:50s} {summary}")
-    stats.buckets_fit += 1
-    stats.per_bucket[bucket_key] = f"OK {summary}"
+    status_tag = "OK" if save_authority == "VERIFIED" else "QUAR"
+    print(f"{status_tag:4s} {bucket_key:50s} {summary}{(' [' + quarantine_reason + ']') if quarantine_reason else ''}")
+    if save_authority == "VERIFIED":
+        stats.buckets_fit += 1
+        stats.per_bucket[bucket_key] = f"OK {summary}"
+    else:
+        # Quarantined fits don't count as live-eligible; track separately
+        # via per_bucket and stats.buckets_failed += 0 (fit succeeded but
+        # quarantined). Operator parses the per_bucket value.
+        stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
 
 
 def refit_v2(
