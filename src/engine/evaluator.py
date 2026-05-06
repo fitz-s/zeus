@@ -51,8 +51,12 @@ from src.control.entry_forecast_promotion_evidence_io import (
 )
 from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
 from src.data.calibration_transfer_policy import (
+    MIN_TRANSFER_EVIDENCE_PAIRS,
+    POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
     evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
+    source_platt_transfer_evidence_valid,
+    target_transfer_cohort_evidence_valid,
 )
 from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
@@ -113,7 +117,10 @@ from src.contracts.executable_market_snapshot_v2 import (
 )
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
-from src.data.forecast_source_registry import SourceNotEnabled
+from src.data.forecast_source_registry import (
+    SourceNotEnabled,
+    calibration_source_id_for_lookup,
+)
 from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.market_fusion import (
     AuthorityViolation,
@@ -406,6 +413,207 @@ def _finite_day0_observation_float(
     return value
 
 
+def _finite_transfer_evidence_float(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _finite_transfer_brier(value: object) -> float | None:
+    result = _finite_transfer_evidence_float(value)
+    if result is None or not (0.0 <= result <= 1.0):
+        return None
+    return result
+
+
+def _finite_transfer_brier_threshold(value: object) -> float | None:
+    result = _finite_transfer_evidence_float(value)
+    if result is None or not (0.0 <= result <= 1.0):
+        return None
+    return result
+
+
+def _parse_transfer_evaluated_at(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _nonempty_str(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _transfer_logit_sigma_from_evidence(
+    conn,
+    *,
+    policy_id: object,
+    source_id: object,
+    target_source_id: object,
+    source_cycle: object,
+    target_cycle: object,
+    horizon_profile: object,
+    season: object,
+    cluster: object,
+    metric: object,
+    platt_model_key: object,
+    sigma_scale: float,
+    now: datetime | None,
+    staleness_days: int = 90,
+) -> float:
+    """Return transfer uncertainty only from fully-scoped promotion evidence.
+
+    Missing route identity is not a wildcard. In particular, an unavailable
+    Platt model key means the evaluator cannot prove which source calibrator the
+    evidence describes, so it must preserve pre-transfer behavior (sigma=0.0).
+    """
+    from src.strategy.market_analysis import compute_transfer_logit_sigma as _compute_sigma
+
+    route = (
+        _nonempty_str(policy_id),
+        _nonempty_str(source_id),
+        _nonempty_str(target_source_id),
+        _nonempty_str(source_cycle),
+        _nonempty_str(target_cycle),
+        _nonempty_str(horizon_profile),
+        _nonempty_str(season),
+        _nonempty_str(cluster),
+        _nonempty_str(metric),
+        _nonempty_str(platt_model_key),
+    )
+    if any(part is None for part in route):
+        return 0.0
+    (
+        policy_id_s,
+        source_id_s,
+        target_source_id_s,
+        source_cycle_s,
+        target_cycle_s,
+        horizon_profile_s,
+        season_s,
+        cluster_s,
+        metric_s,
+        platt_model_key_s,
+    ) = route
+    try:
+        row = conn.execute(
+            """
+            SELECT status, n_pairs, brier_source, brier_target, brier_diff,
+                   brier_diff_threshold, evaluated_at
+              FROM validated_calibration_transfers
+             WHERE policy_id        = ?
+               AND source_id        = ?
+               AND target_source_id = ?
+               AND source_cycle     = ?
+               AND target_cycle     = ?
+               AND season           = ?
+               AND cluster          = ?
+               AND metric           = ?
+               AND horizon_profile  = ?
+               AND platt_model_key  = ?
+             LIMIT 1
+            """,
+            (
+                policy_id_s,
+                source_id_s,
+                target_source_id_s,
+                source_cycle_s,
+                target_cycle_s,
+                season_s,
+                cluster_s,
+                metric_s,
+                horizon_profile_s,
+                platt_model_key_s,
+            ),
+        ).fetchone()
+    except Exception:
+        return 0.0
+    if row is None or row[0] != "LIVE_ELIGIBLE":
+        return 0.0
+    try:
+        n_pairs = int(row[1])
+    except (TypeError, ValueError):
+        return 0.0
+    if n_pairs < MIN_TRANSFER_EVIDENCE_PAIRS:
+        return 0.0
+    brier_source = _finite_transfer_brier(row[2])
+    brier_target = _finite_transfer_brier(row[3])
+    if brier_source is None or brier_target is None:
+        return 0.0
+    brier_diff = _finite_transfer_evidence_float(row[4])
+    brier_diff_threshold = _finite_transfer_brier_threshold(row[5])
+    if brier_diff is None or brier_diff_threshold is None:
+        return 0.0
+    if not (-1.0 <= brier_diff <= 1.0):
+        return 0.0
+    if not math.isclose(
+        brier_diff,
+        brier_target - brier_source,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        return 0.0
+    if not source_platt_transfer_evidence_valid(
+        conn,
+        platt_model_key=platt_model_key_s,
+        source_id=source_id_s,
+        source_cycle=source_cycle_s,
+        horizon_profile=horizon_profile_s,
+        season=season_s,
+        cluster=cluster_s,
+        metric=metric_s,
+        brier_source=brier_source,
+        evaluated_at=row[6],
+    ):
+        return 0.0
+    if not target_transfer_cohort_evidence_valid(
+        conn,
+        target_source_id=target_source_id_s,
+        target_cycle=target_cycle_s,
+        horizon_profile=horizon_profile_s,
+        season=season_s,
+        cluster=cluster_s,
+        metric=metric_s,
+        platt_model_key=platt_model_key_s,
+        n_pairs=n_pairs,
+        brier_source=brier_source,
+        brier_target=brier_target,
+        brier_diff=brier_diff,
+        evaluated_at=row[6],
+    ):
+        return 0.0
+    if brier_diff < 0.0:
+        return 0.0
+    if brier_diff > brier_diff_threshold:
+        return 0.0
+    evaluated_at = _parse_transfer_evaluated_at(row[6])
+    if evaluated_at is None:
+        return 0.0
+    if now is not None:
+        compare_now = now
+        if compare_now.tzinfo is None:
+            compare_now = compare_now.replace(tzinfo=timezone.utc)
+        compare_now = compare_now.astimezone(timezone.utc)
+        if evaluated_at > compare_now:
+            return 0.0
+        if (compare_now - evaluated_at).total_seconds() > staleness_days * 86400:
+            return 0.0
+    return _compute_sigma(brier_diff, sigma_scale)
+
+
 def _day0_observation_quality_rejection_reason(
     city: City,
     observation: "Day0ObservationContext",
@@ -503,9 +711,8 @@ def _size_at_execution_price_boundary(
     P10E: shadow-off rollback path removed — fee-adjusted typed price is the
     only path. No feature flag; assert_kelly_safe() runs unconditionally.
 
-    Per-trade safety cap parameter removed 2026-05-04 along with
-    ``live_safety_cap_usd``; per-cycle exposure discipline now lives in
-    posture / RiskGuard / max-exposure gates only.
+    Per-trade safety-cap authority was removed 2026-05-04; per-cycle exposure
+    discipline now lives in posture / RiskGuard / max-exposure gates only.
     """
     raw_entry_price = float(entry_price)
     ep = ExecutionPrice(
@@ -2343,6 +2550,22 @@ def evaluate_candidate(
                     _sid_for_consistency = _candidate_sid
         except (TypeError, AttributeError):
             _sid_for_consistency = None
+        if _sid_for_consistency is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="FORECAST_PROVENANCE_INCOMPLETE",
+                rejection_reasons=[
+                    f"forecast data_version {_phase2_data_version!r} was present "
+                    "without source_id; calibration bucket identity cannot be "
+                    "proven"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
         if _sid_for_consistency is not None:
             _sid_family = source_family_from_source_id(_sid_for_consistency)
             if _sid_family is not None and _sid_family != _dv_family:
@@ -2373,12 +2596,33 @@ def evaluate_candidate(
     _phase2_cycle, _phase2_source_id, _phase2_horizon_profile = (
         derive_phase2_keys_from_ens_result(ens_result if isinstance(ens_result, dict) else None)
     )
+    _raw_phase2_source_id = _phase2_source_id
+    if _raw_phase2_source_id is not None:
+        _phase2_source_id = calibration_source_id_for_lookup(_raw_phase2_source_id)
+        if _phase2_source_id is None:
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="UNSUPPORTED_CALIBRATION_SOURCE_ID",
+                rejection_reasons=[
+                    f"forecast source_id={_raw_phase2_source_id!r} has no "
+                    "registered calibration bucket source_id; refusing Platt "
+                    "lookup instead of using schema defaults or legacy fallback"
+                ],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=entry_validations,
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+            )]
 
     # Phase 2 (2026-05-04, may4math.md F1): cycle-stratified Platt bucket
-    # selection. None defaults preserve legacy behavior — load_platt_model_v2
-    # hits schema-default bucket ('00','tigge_mars','full') when any field is
-    # unavailable.  Phase 2.5 transfer gate (PR #55) replaced by PR #56's
-    # MarketPhaseEvidence + oracle_evidence_status — see docs/operations/
+    # selection. Forecast source ids are canonicalized at the lookup boundary;
+    # unsupported non-empty source ids fail closed above instead of falling into
+    # schema defaults or legacy fallback. Missing legacy keys still preserve the
+    # old default behavior for pre-provenance snapshots. Phase 2.5 transfer gate
+    # (PR #55) replaced by PR #56's MarketPhaseEvidence + oracle_evidence_status
+    # — see docs/operations/
     # task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md.
     cal, cal_level = get_calibrator(
         conn, city, target_date,
@@ -2767,41 +3011,30 @@ def evaluate_candidate(
     if mapped_executable_outcomes < executable_count:
         market_is_complete = False
 
-    # Phase β bootstrap σ wiring (Issue 2.4): query validated_calibration_transfers
-    # for the active row matching this bucket. LIVE_ELIGIBLE row → compute σ from
-    # brier_diff. All other outcomes → σ=0.0 (byte-identical to pre-Phase-β).
-    # Default σ=0.0 preserves behaviour when the table doesn't exist (legacy DB)
-    # or no row is present (same-domain or no OOS evidence yet).
+    # Phase β bootstrap σ wiring: only fully-scoped transfer evidence can widen
+    # MarketAnalysis uncertainty. Missing Platt model key or route identity is
+    # not a wildcard; it preserves pre-transfer behavior (sigma=0.0).
     _transfer_logit_sigma: float = 0.0
     try:
-        from src.strategy.market_analysis import compute_transfer_logit_sigma as _compute_sigma
         _sigma_scale: float = float(settings["calibration"]["transfer_logit_sigma_scale"])
-        _sigma_row = conn.execute(
-            """
-            SELECT status, brier_diff
-              FROM validated_calibration_transfers
-             WHERE target_source_id = ?
-               AND target_cycle     = ?
-               AND season           = ?
-               AND cluster          = ?
-               AND metric           = ?
-               AND horizon_profile  = ?
-               AND platt_model_key  = ?
-             LIMIT 1
-            """,
-            (
-                _phase2_source_id or "",
-                _phase2_cycle or "",
-                season,
-                city.cluster,
-                temperature_metric.temperature_metric,
-                _phase2_horizon_profile or "",
-                getattr(cal, "_bucket_model_key", None) or "",  # σ lookup; falls back to "" for legacy cal
+        _transfer_logit_sigma = _transfer_logit_sigma_from_evidence(
+            conn,
+            policy_id=POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
+            source_id=getattr(cal, "_bucket_source_id", None),
+            target_source_id=_phase2_source_id,
+            source_cycle=getattr(cal, "_bucket_cycle", None),
+            target_cycle=_phase2_cycle,
+            horizon_profile=(
+                getattr(cal, "_bucket_horizon_profile", None)
+                or _phase2_horizon_profile
             ),
-        ).fetchone()
-        if _sigma_row is not None and _sigma_row[0] == "LIVE_ELIGIBLE":
-            _transfer_logit_sigma = _compute_sigma(float(_sigma_row[1]), _sigma_scale)
-        # TRANSFER_UNSAFE / INSUFFICIENT_SAMPLE → σ=0.0 (already SHADOW_ONLY upstream)
+            season=season,
+            cluster=city.cluster,
+            metric=temperature_metric.temperature_metric,
+            platt_model_key=getattr(cal, "_bucket_model_key", None),
+            sigma_scale=_sigma_scale,
+            now=decision_time,
+        )
     except Exception as _sigma_exc:
         logger.debug(
             "transfer_logit_sigma lookup failed (legacy DB or missing table): %s", _sigma_exc

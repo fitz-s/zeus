@@ -1,14 +1,19 @@
 # Created: 2026-05-05
 # Last reused/audited: 2026-05-05
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
+# Purpose: Lock OOS calibration-transfer evidence eligibility and non-promotion behavior.
+# Reuse: Run when calibration_pairs_v2 eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
 """Tests for scripts/evaluate_calibration_transfer_oos.py (Phase X.2)."""
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from scripts import evaluate_calibration_transfer_oos as oos_script
 from src.state.schema.v2_schema import apply_v2_schema
 from scripts.evaluate_calibration_transfer_oos import (
     DEFAULT_BRIER_DIFF_THRESHOLD,
@@ -44,8 +49,11 @@ def _insert_platt_model(
     param_A: float = 1.0,
     param_B: float = 0.0,
     param_C: float = 0.0,
-    brier_insample: float = 0.20,
+    brier_insample: float | None = 0.20,
+    n_samples: int = 100,
     is_active: int = 1,
+    authority: str = "VERIFIED",
+    input_space: str = "raw_probability",
 ) -> None:
     conn.execute(
         """
@@ -58,16 +66,21 @@ def _insert_platt_model(
         ) VALUES (
             ?, ?, ?, ?, 'v1',
             'raw_probability', ?, ?, ?,
-            '[]', 100, ?,
-            '2026-01-01T00:00:00', ?, 'VERIFIED',
+            '[]', ?, ?,
+            '2026-01-01T00:00:00', ?, ?,
             ?, ?, ?
         )
         """,
         (model_key, metric, cluster, season,
          param_A, param_B, param_C,
-         brier_insample, is_active,
-         cycle, source_id, horizon_profile),
+         n_samples, brier_insample, is_active,
+         authority, cycle, source_id, horizon_profile),
     )
+    if input_space != "raw_probability":
+        conn.execute(
+            "UPDATE platt_models_v2 SET input_space = ? WHERE model_key = ?",
+            (input_space, model_key),
+        )
     conn.commit()
 
 
@@ -85,30 +98,39 @@ def _insert_pairs(
     outcome: int = 1,
     start_pair_id: int = 0,
     target_date: str = "2026-03-01",
+    training_allowed: int = 1,
+    authority: str = "VERIFIED",
+    causality_status: str = "OK",
+    lead_days: float | None = None,
 ) -> None:
     """Insert n pairs with deterministic pair_ids starting at start_pair_id.
 
-    Every 5th row (pair_id % 5 == 0) is held-out per the OOS convention.
+    The latest 20% of decision groups are held out chronologically for OOS.
     Uses real calibration_pairs_v2 column names: temperature_metric, target_date.
     """
+    base_target_date = date.fromisoformat(target_date)
     rows = [
         (
             start_pair_id + i,
             "test_city",                # city NOT NULL
-            f"2020-01-01",              # target_date (same for all — uniqueness from lead_days below)
+            (base_target_date + timedelta(days=start_pair_id + i)).isoformat(),
             metric,                     # temperature_metric
             "high_temp",                # observation_field
             "bucket_a",                 # range_label
             p_raw,
             outcome,
-            float(start_pair_id + i),   # lead_days — globally unique per pair_id
+            1.0 + float((start_pair_id + i) % 7) if lead_days is None else lead_days,
             season,
             cluster,
             "2020-01-01T00:00:00",      # forecast_available_at NOT NULL
+            f"dg_{source_id}_{cycle}_{start_pair_id + i}",
             "v1",                       # data_version NOT NULL
             source_id,
             cycle,
             horizon_profile,
+            training_allowed,
+            authority,
+            causality_status,
         )
         for i in range(n)
     ]
@@ -118,9 +140,10 @@ def _insert_pairs(
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,
-            forecast_available_at, data_version,
-            source_id, cycle, horizon_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            forecast_available_at, decision_group_id, data_version,
+            source_id, cycle, horizon_profile,
+            training_allowed, authority, causality_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -176,7 +199,7 @@ def test_cross_domain_writes_row() -> None:
     conn = _make_conn()
     _insert_platt_model(conn, model_key="m_cross", source_id="tigge_mars", cycle="00",
                         param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.20)
-    # 500 pairs in target domain; 100 are held-out (pair_id % 5 == 0 → every 5th)
+    # 500 pairs in target domain; 100 are held out as the latest time block.
     _insert_pairs(
         conn, source_id="ecmwf_open_data", cycle="00",
         season="summer", cluster="cl_a", metric="high",
@@ -204,7 +227,7 @@ def test_insufficient_sample_status() -> None:
     _insert_platt_model(conn, model_key="m_insuff", source_id="tigge_mars", cycle="00",
                         brier_insample=0.20)
     # Insert fewer than MIN_PAIRS * 5 total (so held-out < MIN_PAIRS)
-    # MIN_PAIRS=200 held-out means need 1000 total; insert 100 → 20 held-out
+    # MIN_PAIRS=200 held-out means need 1000 total; insert 100 -> 20 held-out.
     _insert_pairs(
         conn, source_id="ecmwf_open_data", cycle="00",
         season="summer", cluster="cl_a", metric="high",
@@ -273,6 +296,319 @@ def test_live_eligible_status() -> None:
     row = _fetch_row(conn, "m_eligible")
     assert row["status"] == "LIVE_ELIGIBLE"
     assert row["brier_diff"] <= DEFAULT_BRIER_DIFF_THRESHOLD
+
+
+def test_time_blocked_holdout_uses_latest_decision_groups_not_pair_id_modulo() -> None:
+    """OOS evidence uses the latest time block, not row-id modulo sampling."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key="m_time_block", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        start_pair_id=1, n=800, p_raw=0.9, outcome=0,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        start_pair_id=801, n=200, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 1
+    assert summary["status_distribution"]["LIVE_ELIGIBLE"] == 1
+    row = _fetch_row(conn, "m_time_block")
+    assert row["status"] == "LIVE_ELIGIBLE"
+    assert row["n_pairs"] == MIN_PAIRS
+    assert date.fromisoformat(row["evidence_window_start"]) >= date(2028, 5, 10)
+
+
+def test_missing_decision_group_cannot_write_transfer_evidence() -> None:
+    """Rows without decision_group_id cannot prove chronological OOS basis."""
+    conn = _make_conn()
+    _insert_platt_model(conn, model_key="m_no_group", source_id="tigge_mars", cycle="00")
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+    conn.execute("UPDATE calibration_pairs_v2 SET decision_group_id = NULL")
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+
+
+@pytest.mark.parametrize(
+    "field,overrides",
+    [
+        ("training_allowed", {"training_allowed": 0}),
+        ("authority", {"authority": "UNVERIFIED"}),
+        ("causality_status", {"causality_status": "RUNTIME_ONLY_FALLBACK"}),
+    ],
+)
+def test_non_eligible_target_pairs_do_not_write_transfer_evidence(field: str, overrides: dict) -> None:
+    """Target evidence must be training-eligible before it can authorize transfer."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_ineligible_{field}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1, **overrides,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize("p_raw", [0.0, 1.0, -0.1, 2.0, float("inf")])
+def test_invalid_probability_target_pairs_do_not_write_transfer_evidence(p_raw: float) -> None:
+    """Target probabilities must already be valid evidence; Platt clamp is not authority."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_invalid_praw_{p_raw}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=p_raw, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize("lead_days", [-0.1, 0.0, 8.0, 999999.0, float("inf")])
+def test_invalid_lead_days_target_pairs_do_not_write_transfer_evidence(lead_days: float) -> None:
+    """Target lead_days is the OOS time basis; invalid values cannot authorize evidence."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_invalid_lead_{lead_days}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1, p_raw=0.7, outcome=1, lead_days=lead_days,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize(
+    "field,overrides",
+    [
+        ("source_id", {"source_id": ""}),
+        ("cycle", {"cycle": ""}),
+        ("season", {"season": ""}),
+        ("cluster", {"cluster": ""}),
+        ("horizon_profile", {"horizon_profile": ""}),
+    ],
+)
+def test_empty_target_identity_pairs_do_not_write_transfer_evidence(
+    field: str,
+    overrides: dict,
+) -> None:
+    """Target evidence rows require non-empty route identity before OOS scoring."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_empty_target_{field}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    pair_kwargs = dict(
+        source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+    pair_kwargs.update(overrides)
+    _insert_pairs(conn, **pair_kwargs)
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["rows_written"] == 0
+    assert summary["candidate_routes_evaluated"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize("authority", ["UNVERIFIED", "QUARANTINED"])
+def test_non_verified_source_platt_models_do_not_write_transfer_evidence(authority: str) -> None:
+    """Source Platt models must be verified before they can generate OOS evidence."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_source_{authority}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+        authority=authority,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["active_platt_models_iterated"] == 0
+    assert summary["rows_written"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize(
+    "field,overrides",
+    [
+        ("model_key", {"model_key": ""}),
+        ("source_id", {"source_id": ""}),
+        ("cycle", {"cycle": ""}),
+        ("season", {"season": ""}),
+        ("cluster", {"cluster": ""}),
+        ("horizon_profile", {"horizon_profile": ""}),
+    ],
+)
+def test_empty_source_platt_identity_does_not_write_transfer_evidence(
+    field: str,
+    overrides: dict,
+) -> None:
+    """Source Platt rows need non-empty route identity before becoming scoring authority."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, authority="VERIFIED", input_space="raw_probability", **overrides,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["active_platt_models_iterated"] == 0
+    assert summary["rows_written"] == 0
+    assert _count_rows(conn) == 0
+
+
+def test_immature_source_platt_model_does_not_write_transfer_evidence() -> None:
+    """A VERIFIED source Platt row still needs mature sample authority for transfer evidence."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key="m_immature_source", source_id="tigge_mars", cycle="00",
+        authority="VERIFIED", input_space="raw_probability", n_samples=1,
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["active_platt_models_iterated"] == 0
+    assert summary["rows_written"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize(
+    "field,overrides",
+    [
+        ("param_A", {"param_A": float("inf")}),
+        ("param_B", {"param_B": float("inf")}),
+        ("param_C", {"param_C": float("inf")}),
+        ("brier_insample_null", {"brier_insample": None}),
+        ("brier_insample_inf", {"brier_insample": float("inf")}),
+        ("brier_insample_gt_one", {"brier_insample": 2.0}),
+    ],
+)
+def test_invalid_source_platt_economics_do_not_write_transfer_evidence(
+    field: str,
+    overrides: dict,
+) -> None:
+    """Source Platt rows need finite parameters and Brier before scoring target economics."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_invalid_source_{field}", source_id="tigge_mars", cycle="00",
+        authority="VERIFIED", input_space="raw_probability", **overrides,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["active_platt_models_iterated"] == 0
+    assert summary["rows_written"] == 0
+    assert _count_rows(conn) == 0
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 2.0, "nan", "inf"])
+def test_invalid_brier_threshold_config_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    threshold: object,
+) -> None:
+    """Producer must not stamp LIVE_ELIGIBLE/TRANSFER_UNSAFE from invalid policy economics."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.json").write_text(
+        json.dumps(
+            {"calibration_transfer_brier_diff_threshold": {DEFAULT_POLICY_ID: threshold}}
+        )
+    )
+    monkeypatch.setattr(oos_script, "ZEUS_ROOT", tmp_path)
+
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key=f"m_invalid_threshold_{threshold}", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    with pytest.raises(ValueError, match="calibration_transfer_brier_diff_threshold"):
+        run_oos_evaluation(conn, now=_NOW)
+    assert _count_rows(conn) == 0
+
+
+def test_unsupported_platt_input_space_does_not_write_transfer_evidence() -> None:
+    """OOS scoring is raw-probability only until a typed transform is added."""
+    conn = _make_conn()
+    _insert_platt_model(
+        conn, model_key="m_width_space", source_id="tigge_mars", cycle="00",
+        param_A=1.0, param_B=0.0, param_C=0.0, brier_insample=0.09,
+        input_space="width_normalized_density",
+    )
+    _insert_pairs(
+        conn, source_id="ecmwf_open_data", cycle="00",
+        season="summer", cluster="cl_a", metric="high",
+        n=1000, p_raw=0.7, outcome=1,
+    )
+
+    summary = run_oos_evaluation(conn, now=_NOW)
+
+    assert summary["active_platt_models_iterated"] == 0
+    assert summary["rows_written"] == 0
+    assert _count_rows(conn) == 0
 
 
 # ---------------------------------------------------------------------------

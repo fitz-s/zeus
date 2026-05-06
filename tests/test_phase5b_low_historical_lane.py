@@ -669,7 +669,6 @@ class TestB078LowLaneTruthFilesRegistry:
 
         result = build_truth_metadata(
             tmp_path / LOW_LANE_PLATT_FILENAME,
-            mode="live",
             temperature_metric="low",
             data_version="tigge_mn2t6_local_calendar_day_min_v1",
             authority="VERIFIED",
@@ -691,7 +690,6 @@ class TestB078LowLaneTruthFilesRegistry:
         result = annotate_truth_payload(
             payload,
             tmp_path / LOW_LANE_PLATT_FILENAME,
-            mode="live",
             authority="VERIFIED",
             temperature_metric="low",
             data_version="tigge_mn2t6_local_calendar_day_min_v1",
@@ -715,7 +713,6 @@ class TestB078LowLaneTruthFilesRegistry:
         try:
             result = build_truth_metadata(
                 tmp_path / LOW_LANE_PLATT_FILENAME,
-                mode="live",
                 authority="VERIFIED",
                 # temperature_metric intentionally absent
             )

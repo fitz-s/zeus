@@ -45,6 +45,12 @@ _FULL_MARKET_PRICE_LINKAGE_SOURCES = (
     "CLOB_BEST_BID_ASK",
     "CLOB_ORDERBOOK",
 )
+_OUTCOME_FACT_AUTHORITY_COLUMNS = frozenset({
+    "settlement_truth_source",
+    "settlement_authority",
+    "evidence_class",
+    "learning_eligible",
+})
 
 
 @dataclass(frozen=True)
@@ -201,7 +207,19 @@ def check_economics_readiness(conn: Connection | None) -> EconomicsReadiness:
 
     if "outcome_fact" in existing_tables:
         try:
-            if _count_rows(conn, "outcome_fact", "outcome IS NOT NULL AND COALESCE(decision_snapshot_id, '') <> ''") <= 0:
+            columns = _table_columns(conn, "outcome_fact")
+            if not _OUTCOME_FACT_AUTHORITY_COLUMNS.issubset(columns):
+                blockers.append("outcome_fact_lacks_settlement_authority_provenance")
+            elif _count_rows(
+                conn,
+                "outcome_fact",
+                "outcome IS NOT NULL "
+                "AND COALESCE(decision_snapshot_id, '') <> '' "
+                "AND COALESCE(settlement_truth_source, '') <> '' "
+                "AND UPPER(COALESCE(settlement_authority, '')) = 'VERIFIED' "
+                "AND COALESCE(evidence_class, '') = 'settlement_authority' "
+                "AND learning_eligible = 1",
+            ) <= 0:
                 blockers.append("no_resolution_matched_outcome_facts")
         except Exception:
             blockers.append("invalid_schema:outcome_fact.outcome_snapshot")

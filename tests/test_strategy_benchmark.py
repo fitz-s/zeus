@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-06
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml
 # Purpose: Lock StrategyBenchmarkSuite evidence-grade and economics promotion gate.
 # Reuse: Run for A1 benchmark/promotion-gate changes and future strategy candidate wiring.
@@ -179,13 +179,19 @@ def test_promotion_requires_economics_evidence_grade():
     assert suite.promotion_decision(replay, simulated, read_only_live, economics=economics).verdict is PromotionVerdict.PROMOTE
 
 
-def test_benchmark_api_uses_evidence_class_names_not_runtime_paper_shadow():
-    assert "PAPER" not in BenchmarkEnvironment.__members__
+def test_benchmark_api_uses_evidence_class_names_not_non_live_execution_labels():
+    assert set(BenchmarkEnvironment.__members__) == {
+        "REPLAY",
+        "SIMULATED_VENUE",
+        "READ_ONLY_LIVE",
+        "PROMOTION_GRADE_ECONOMICS",
+    }
     assert "SHADOW" not in BenchmarkEnvironment.__members__
     assert "LIVE" not in BenchmarkEnvironment.__members__
+    assert {item.value for item in BenchmarkEnvironment}.isdisjoint({"legacy_env", "shadow", "live"})
 
     suite = StrategyBenchmarkSuite(read_only_live_corpora={STRATEGY: _corpus()})
-    assert not hasattr(suite, "evaluate_" + "paper")
+    assert not hasattr(suite, "evaluate_" + "legacy_env")
     assert not hasattr(suite, "evaluate_live_" + "shadow")
 
 
@@ -307,6 +313,68 @@ def test_strategy_benchmark_runs_missing_evidence_grade_fails_closed_without_mig
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(strategy_benchmark_runs)").fetchall()}
     assert "evidence_grade" not in cols
+
+
+def test_strategy_benchmark_runs_rebuilds_empty_legacy_environment_constraint():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE strategy_benchmark_runs (
+          run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          strategy_key TEXT NOT NULL,
+          environment TEXT NOT NULL CHECK (environment IN ('replay','paper','shadow','live')),
+          evidence_grade TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          metrics_json TEXT NOT NULL,
+          promotion_verdict TEXT
+        )
+        """
+    )
+    suite = StrategyBenchmarkSuite()
+    metrics = suite.evaluate_replay(STRATEGY, _corpus())
+
+    run_id = suite.record_benchmark_run(conn, metrics, PromotionVerdict.NEEDS_REVIEW)
+
+    row = conn.execute(
+        "SELECT run_id, environment, evidence_grade FROM strategy_benchmark_runs"
+    ).fetchone()
+    assert row == (run_id, "replay", "diagnostic_replay")
+
+
+def test_strategy_benchmark_runs_legacy_environment_rows_fail_closed_without_relabeling():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE strategy_benchmark_runs (
+          run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          strategy_key TEXT NOT NULL,
+          environment TEXT NOT NULL CHECK (environment IN ('replay','paper','shadow','live')),
+          evidence_grade TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          metrics_json TEXT NOT NULL,
+          promotion_verdict TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_benchmark_runs (
+          strategy_key, environment, evidence_grade, window_start, window_end, metrics_json, promotion_verdict
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (STRATEGY, "paper", "diagnostic_replay", NOW.isoformat(), NOW.isoformat(), "{}", "NEEDS_REVIEW"),
+    )
+    suite = StrategyBenchmarkSuite()
+    metrics = suite.evaluate_replay(STRATEGY, _corpus())
+
+    with pytest.raises(RuntimeError, match="legacy environment constraint"):
+        suite.record_benchmark_run(conn, metrics, PromotionVerdict.NEEDS_REVIEW)
+
+    assert conn.execute(
+        "SELECT environment FROM strategy_benchmark_runs WHERE run_id = 1"
+    ).fetchone() == ("paper",)
 
 
 def test_data_lake_fetch_replay_corpus_is_read_only_and_filterable():

@@ -43,7 +43,7 @@ def test_backfill_calibration_pairs_updates_cluster_and_clears_models(tmp_path, 
 def test_backfill_portfolio_state_updates_positions_and_recent_exits(tmp_path, monkeypatch):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    portfolio_path = state_dir / "positions-paper.json"
+    portfolio_path = state_dir / "positions-legacy.json"
     portfolio_path.write_text(json.dumps({
         "positions": [
             {"city": "Chicago", "cluster": "US-Midwest"},

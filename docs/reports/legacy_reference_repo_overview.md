@@ -23,7 +23,7 @@
 
 ## Runtime contexts
 
-Zeus is live-only. Paper mode was decommissioned in Phase 1; backtest and
+Zeus is live-only. The retired peer execution path was decommissioned in Phase 1; backtest and
 shadow are diagnostic contexts, not peer runtime modes.
 
 | Context | Authority | Purpose |

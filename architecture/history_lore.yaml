@@ -457,7 +457,7 @@ cards:
       - docs/operations/known_gaps.md
       - git log live-only cleanup commits
     failure_mode: >
-      Derived JSON caches, status summaries, or legacy paper files outrank
+      Derived JSON caches, status summaries, or non-live execution legacy files outrank
       canonical DB/event truth, causing risk, bankroll, and operator surfaces to
       diverge.
     trigger_context:
@@ -465,12 +465,12 @@ cards:
       - RiskGuard realized PnL
       - status_summary generation
       - strategy_tracker reporting
-      - paper/live cleanup
+      - non-live execution cleanup
     wrong_moves:
       - promote positions.json or status_summary.json into canonical truth
       - let fallback JSON hide projection failure
       - compute realized PnL from stale tracker/report artifacts
-      - treat paper artifacts as active live-only runtime state
+      - treat non-live execution artifacts as active live-only runtime state
     correct_rule: >
       Chain and canonical DB/event truth outrank derived caches. Fallbacks must
       be explicit, degraded, and operator-visible.
@@ -835,15 +835,15 @@ cards:
       - live-only cleanup
       - replay/backtest changes
       - shadow instrumentation
-      - paper-era artifact removal
+      - non-live execution artifact removal
     wrong_moves:
       - let backtest authorize live changes
       - let shadow observation gate live execution
-      - preserve paper as a peer runtime mode
+      - preserve non-live execution as a peer execution mode
       - mutate repo truth from external workspace tools
     correct_rule: >
       Live may act, backtest may evaluate, shadow may observe. Zeus is
-      live-only; paper-era peer mode is historical.
+      live-only; the retired peer execution mode is historical.
     antibodies:
       code:
         - src/main.py
@@ -856,13 +856,13 @@ cards:
         - python3 scripts/topology_doctor.py --strict
         - python3 scripts/check_kernel_manifests.py
     residual_risk: >
-      Historical paper artifacts and tests still exist, so agents must check
+      Historical non-live execution artifacts and tests still exist, so agents must check
       current live-only law before using them.
     invalidation_condition: >
       Only an explicit authority packet can add a new execution context or make
-      paper a peer mode again.
+      non-live execution a peer mode again.
     routing:
-      task_terms: [live, backtest, shadow, paper, execution mode, supervisor, Venus]
+      task_terms: [live, backtest, shadow, non-live execution, execution mode, supervisor, Venus]
       file_patterns:
         - src/main.py
         - src/engine/**
@@ -874,7 +874,7 @@ cards:
       - scripts/run_replay.py
     zero_context_digest: >
       Keep live/backtest/shadow separated: live acts, backtest evaluates, shadow
-      observes; paper is historical.
+      observes; the non-live execution is historical.
 
   - id: EXACT_SEMANTIC_TESTS_OVER_EXISTENCE_TESTS
     status: active_law
@@ -1094,7 +1094,7 @@ cards:
     downstream_blast_radius:
       - src/execution/executor.py
       - src/strategy/market_analysis.py
-      - tests/test_kelly_live_safety_cap.py
+      - tests/test_kelly.py::TestKellySize::test_no_per_trade_safety_cap_parameter
     zero_context_digest: >
       Kelly cost is not a bare probability. Preserve typed execution cost,
       token fee lookup, and explicit failure when fee truth is unavailable.
@@ -1309,12 +1309,12 @@ cards:
       - RiskGuard daily_loss/weekly_loss
       - status_summary realized_pnl
       - current regime PnL
-      - paper artifact cleanup
+      - non-live execution artifact cleanup
     wrong_moves:
       - compute daily_loss from all-time total_pnl or static baseline
       - let strategy_tracker JSON outrank durable settlement/exit events
       - hide portfolio_truth_source=working_state_fallback
-      - report effective_bankroll inconsistent with initial_bankroll + total_pnl
+      - fold total_pnl into effective_bankroll or wallet bankroll
     correct_rule: >
       Derived financial surfaces must reconcile to durable current-mode truth.
       Rolling loss is trailing-window semantics, not all-time loss relabeled.

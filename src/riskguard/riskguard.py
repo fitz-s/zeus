@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.config import get_mode, settings, STATE_DIR
+from src.config import settings, STATE_DIR
 from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,
@@ -31,7 +31,15 @@ from src.state.db import (
     query_strategy_health_snapshot,
     refresh_strategy_health,
 )
-from src.state.portfolio import PortfolioState, Position, load_portfolio
+from src.state.portfolio import (
+    ENTRY_ECONOMICS_LEGACY_UNKNOWN,
+    FILL_GRADE_ENTRY_AUTHORITIES,
+    FILL_GRADE_FILL_AUTHORITIES,
+    FILL_AUTHORITY_NONE,
+    PortfolioState,
+    Position,
+    load_portfolio,
+)
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 
@@ -70,6 +78,16 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
         if row.get(req) is None or str(row.get(req)) == "":
             raise ValueError(f"Canonical loader row missing critical field {req!r}")
 
+    entry_authority = str(row.get("entry_economics_authority") or ENTRY_ECONOMICS_LEGACY_UNKNOWN)
+    fill_authority = str(row.get("fill_authority") or FILL_AUTHORITY_NONE)
+    if entry_authority in FILL_GRADE_ENTRY_AUTHORITIES or fill_authority in FILL_GRADE_FILL_AUTHORITIES:
+        if str(row.get("entry_economics_source") or "") != "execution_fact":
+            raise ValueError("fill-grade loader row missing execution_fact source provenance")
+        if not str(row.get("execution_fact_intent_id") or ""):
+            raise ValueError("fill-grade loader row missing execution_fact_intent_id provenance")
+        if not str(row.get("execution_fact_filled_at") or ""):
+            raise ValueError("fill-grade loader row missing execution_fact_filled_at provenance")
+
     return Position(
         trade_id=str(row["trade_id"]),
         market_id=str(row["market_id"]),
@@ -79,11 +97,18 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
         bin_label=str(row.get("bin_label") or ""),
         direction=str(row["direction"]),
         unit=str(row["unit"]),
+        temperature_metric=str(row.get("temperature_metric") or "high"),
         env=str(row["env"]),
         size_usd=float(row["size_usd"]),
         shares=float(row.get("shares") or 0.0),
         cost_basis_usd=float(row.get("cost_basis_usd") or 0.0),
         entry_price=float(row.get("entry_price") or 0.0),
+        submitted_notional_usd=float(row.get("submitted_size_usd") or 0.0),
+        filled_cost_basis_usd=float(row.get("filled_cost_basis_usd") or 0.0),
+        entry_price_avg_fill=float(row.get("entry_price_avg_fill") or 0.0),
+        shares_filled=float(row.get("shares_filled") or 0.0),
+        entry_economics_authority=entry_authority,
+        fill_authority=fill_authority,
         p_posterior=float(row.get("p_posterior") or 0.0),
         entered_at=str(row.get("entered_at") or ""),
         day0_entered_at=str(row.get("day0_entered_at") or ""),
@@ -97,6 +122,9 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
         order_id=str(row.get("order_id") or ""),
         order_status=str(row.get("order_status") or ""),
         chain_state=str(row.get("chain_state") or ""),
+        token_id=str(row.get("token_id") or ""),
+        no_token_id=str(row.get("no_token_id") or ""),
+        condition_id=str(row.get("condition_id") or ""),
         exit_state=str(row.get("exit_state") or ""),
         last_monitor_prob=float(row.get("last_monitor_prob") or 0.0),
         last_monitor_edge=float(row.get("last_monitor_edge") or 0.0),
@@ -141,8 +169,8 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
     # If metadata_state has no bankroll (or 0/falsy), do NOT fall back to a config
     # literal — return 0.0 so downstream sizing fails-CLOSED and RiskGuard.tick()
     # surfaces DATA_DEGRADED via the bankroll_provider.current() check upstream.
-    # Removed 2026-05-04: previously fell back to settings.capital_base_usd
-    # ($150 fiction); see docs/operations/task_2026-05-01_bankroll_truth_chain/.
+    # Removed 2026-05-04: previously fell back to retired config-literal capital;
+    # see docs/operations/task_2026-05-01_bankroll_truth_chain/.
     bankroll = float(getattr(metadata_state, "bankroll", 0.0) or 0.0)
     portfolio = PortfolioState(
         positions=positions,
@@ -187,10 +215,10 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
         return None
 
     # P0-A cutover-day guard (followup_design.md §6.2, §7 hazard #3):
-    # Pre-cutover risk_state rows have `effective_bankroll = $150 + total_pnl`
-    # (config-constant fiction). After cutover, `effective_bankroll` is the real
-    # on-chain wallet (~$199). Without this guard, the first 24h after cutover
-    # would compute a fake ~$49 trailing loss = false RED → force_exit_review.
+    # Pre-cutover risk_state rows could store config-literal capital plus PnL as
+    # `effective_bankroll`. After cutover, `effective_bankroll` is the real
+    # on-chain wallet. Without this guard, trailing-loss math could compare
+    # different economic objects and trigger false RED → force_exit_review.
     # Only rows tagged `bankroll_truth_source="polymarket_wallet"` are eligible
     # references. Old rows (no field, or any other value) are filtered out.
     if str(details.get("bankroll_truth_source") or "") != "polymarket_wallet":
@@ -383,6 +411,8 @@ def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
     exits: list[dict] = []
     for row in rows:
+        if not row.get("metric_ready", False):
+            continue
         pnl = row.get("pnl")
         if pnl is None:
             continue
@@ -402,10 +432,19 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
-def _current_mode_realized_exits(conn: sqlite3.Connection, *, env: str) -> tuple[list[dict], str, bool]:
+def _current_mode_realized_exits(
+    conn: sqlite3.Connection,
+    *,
+    settlement_rows: list[dict] | None = None,
+) -> tuple[list[dict], str, bool]:
     """Returns (exits, source_name, degraded)."""
     if conn is None:
         return [], "none", False
+    if settlement_rows is not None:
+        exits = _canonical_recent_exits_from_settlement_rows(settlement_rows)
+        degraded = any(bool(row.get("is_degraded", False)) for row in settlement_rows)
+        return exits, "authoritative_settlement_rows", degraded and not exits
+
     outcome_fact_available = True
     try:
         rows = conn.execute(
@@ -564,7 +603,7 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
     return summary
 
 
-def _entry_execution_summary(conn: sqlite3.Connection, *, env: str, limit: int = 200) -> dict:
+def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> dict:
     """Entry execution summary from canonical position_events."""
     try:
         rows = conn.execute(
@@ -741,8 +780,8 @@ def tick() -> RiskLevel:
     # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
     # use the on-chain wallet, NOT the config constant routed through
     # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-    # cache exists, fail-closed at DATA_DEGRADED rather than silently fall
-    # back to the $150 fiction.
+    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
+    # back to retired config-literal capital.
     bankroll_of_record = bankroll_provider.current()
     if bankroll_of_record is None:
         now_ts = datetime.now(timezone.utc).isoformat()
@@ -776,9 +815,7 @@ def tick() -> RiskLevel:
         return RiskLevel.DATA_DEGRADED
 
     current_bankroll_usd = float(bankroll_of_record.value_usd)
-    current_env = get_mode()
-
-    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
     settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
     settlement_storage_source = (
         settlement_row_storage_sources[0]
@@ -802,20 +839,16 @@ def tick() -> RiskLevel:
         if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
             metric_ready_rows.append(row)
 
-    realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(zeus_conn, env=current_env)
-    if realized_exits:
-        portfolio = replace(portfolio, recent_exits=realized_exits)
-    else:
-        canonical_recent_exits = _canonical_recent_exits_from_settlement_rows(settlement_rows)
-        if canonical_recent_exits:
-            portfolio = replace(portfolio, recent_exits=canonical_recent_exits)
-            realized_truth_source = "authoritative_settlement_rows"
-            realized_degraded = False
+    realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
+        zeus_conn,
+        settlement_rows=settlement_rows,
+    )
+    portfolio = replace(portfolio, recent_exits=realized_exits)
 
     p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
     outcomes = [int(r["outcome"]) for r in metric_ready_rows]
     strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
-    entry_execution_summary = _entry_execution_summary(zeus_conn, env=current_env)
+    entry_execution_summary = _entry_execution_summary(zeus_conn)
     try:
         tracker = load_tracker()
         tracker_summary = tracker.summary()
@@ -894,21 +927,23 @@ def tick() -> RiskLevel:
     total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
     total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
 
-    if total_realized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
-        # Fallback for realized PnL in legacy tests or missing outcome_fact
-        total_realized_pnl = sum(float(ext.get("pnl", 0.0)) for ext in getattr(portfolio, "recent_exits", []) if isinstance(ext, dict))
-    
     if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
         # Fallback for unrealized PnL
         total_unrealized_pnl = sum(float(getattr(p, "unrealized_pnl", 0.0)) for p in getattr(portfolio, "positions", []))
 
     total_pnl = total_realized_pnl + total_unrealized_pnl
+    settlement_authority_missing_tables = list(
+        strategy_health_refresh.get("settlement_authority_missing_tables", [])
+    )
+    if settlement_authority_missing_tables:
+        realized_degraded = True
 
     # P0-A correction (followup_design.md §2.1, §7 Definition A):
     # current_equity = wallet_balance_usd ONLY. Do NOT add total_pnl — realized
     # PnL is already in the on-chain wallet (cash-settled exits move balance);
-    # adding it again double-counts. Unrealized PnL is paper-only and already
-    # excluded from equity by definition. Was: $150 + total_pnl (fictional).
+    # adding it again double-counts. Unrealized PnL is not live bankroll
+    # authority and is excluded from equity by definition. The retired path used
+    # config-literal capital plus total_pnl, which was a synthetic equity object.
     # Now: wallet (real, no math).
     current_total_value = round(current_bankroll_usd, 2)
     daily_loss_snapshot = _trailing_loss_snapshot(
@@ -970,7 +1005,8 @@ def tick() -> RiskLevel:
             "initial_bankroll": round(current_bankroll_usd, 2),
             # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
             # this provenance marker tells `_trailing_loss_reference` to skip
-            # pre-cutover rows whose `effective_bankroll` was the $150 fiction.
+            # pre-cutover rows whose `effective_bankroll` came from retired
+            # config-literal capital.
             # New rows after this code lands carry "polymarket_wallet"; old rows
             # have no `bankroll_truth_source` field at all → filtered out.
             "bankroll_truth_source": "polymarket_wallet",
@@ -985,6 +1021,8 @@ def tick() -> RiskLevel:
             "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
             "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
             "realized_pnl": round(total_realized_pnl, 2),
+            "realized_pnl_source": "strategy_health.realized_pnl_30d",
+            "realized_pnl_window_days": 30,
             "unrealized_pnl": round(total_unrealized_pnl, 2),
             "total_pnl": round(total_pnl, 2),
             "effective_bankroll": round(current_total_value, 2),
@@ -1035,6 +1073,7 @@ def tick() -> RiskLevel:
             "strategy_health_rows_written": strategy_health_refresh.get("rows_written", 0),
             "strategy_health_missing_required_tables": list(strategy_health_refresh.get("missing_required_tables", [])),
             "strategy_health_missing_optional_tables": list(strategy_health_refresh.get("missing_optional_tables", [])),
+            "strategy_health_settlement_authority_missing_tables": settlement_authority_missing_tables,
             "strategy_health_omitted_fields": list(strategy_health_refresh.get("omitted_fields", [])),
             "strategy_health_snapshot_status": strategy_health_snapshot["status"],
             "strategy_health_stale_strategy_keys": list(strategy_health_snapshot.get("stale_strategy_keys", [])),
@@ -1127,7 +1166,6 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     init_risk_db(risk_conn)
 
     zeus_conn = _get_runtime_trade_connection()
-    current_env = get_mode()
     now = datetime.now(timezone.utc).isoformat()
 
     if portfolio.authority != "canonical_db":
@@ -1137,7 +1175,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
         )
 
     thresholds = settings["riskguard"]
-    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50, env=current_env)
+    settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
 
     # P0-A second callsite (followup_design.md §2.4, §7 hazard #2):
     # tick_with_portfolio is the graceful-degradation entry used by callers

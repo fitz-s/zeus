@@ -48,6 +48,7 @@ from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
     ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
+    ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     PortfolioState,
     compute_settlement_close,
@@ -64,6 +65,7 @@ logger = logging.getLogger(__name__)
 _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES = frozenset({
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
     ENTRY_ECONOMICS_MODEL_EDGE_PRICE,
+    ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
 })
 
@@ -162,6 +164,17 @@ _HARVESTER_STAGE2_SHARED_TABLES = (
 _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 
 
+def _unsupported_calibration_source_id(
+    forecast_source: object,
+    data_version: object,
+) -> str:
+    """Explicit non-bucket source_id for audit-only calibration-pair rows."""
+    raw = str(forecast_source or data_version or "unknown").strip().lower()
+    token = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+    token = "_".join(part for part in token.split("_") if part)
+    return f"unsupported_{token or 'unknown'}"
+
+
 def _metric_identity_for(temperature_metric: str | MetricIdentity) -> MetricIdentity:
     return MetricIdentity.from_raw(temperature_metric)
 
@@ -181,6 +194,38 @@ def _forecast_source_from_version(source_model_version: str | None) -> str:
 
 def _is_training_forecast_source(source_model_version: str | None) -> bool:
     return _forecast_source_from_version(source_model_version) in _TRAINING_FORECAST_SOURCES
+
+
+def _emit_learning_write_blocked(reason: str) -> None:
+    _cnt_inc(
+        "harvester_learning_write_blocked_total",
+        labels={"reason": reason},
+    )
+    logger.warning(
+        "telemetry_counter event=harvester_learning_write_blocked_total "
+        "reason=%s",
+        reason,
+    )
+
+
+def _coerce_training_allowed_flag(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return False
+
+
+def _context_training_allowed(context: dict) -> bool:
+    if "snapshot_training_allowed" in context:
+        return bool(_coerce_training_allowed_flag(context.get("snapshot_training_allowed")))
+    return bool(_coerce_training_allowed_flag(context.get("snapshot_learning_ready", False)))
+
+
+def _causality_allows_learning(causality_status: object) -> bool:
+    return str(causality_status or "OK").strip().upper() == "OK"
 
 
 def _coerce_snapshot_id(snapshot_id: object) -> int | None:
@@ -276,6 +321,12 @@ def _dual_write_canonical_settlement_if_available(
     won: bool,
     outcome: int,
     phase_before: str | None = None,
+    settlement_authority: str = "UNKNOWN",
+    settlement_truth_source: str = "",
+    settlement_market_slug: str = "",
+    settlement_temperature_metric: str = "",
+    settlement_source: str = "",
+    settlement_value: object | None = None,
 ) -> bool:
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project
@@ -332,6 +383,12 @@ def _dual_write_canonical_settlement_if_available(
             sequence_no=_next_canonical_sequence_no(conn, trade_id),
             phase_before=resolved_phase_before,
             source_module="src.execution.harvester",
+            settlement_authority=settlement_authority,
+            settlement_truth_source=settlement_truth_source,
+            settlement_market_slug=settlement_market_slug,
+            settlement_temperature_metric=settlement_temperature_metric,
+            settlement_source=settlement_source,
+            settlement_value=settlement_value,
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
@@ -541,34 +598,20 @@ def maybe_write_learning_pair(
     Returns the number of pairs written (0 on any block).
     """
     source_model_version = context.get("source_model_version") or ""
-    snapshot_training_allowed = bool(
-        context.get("snapshot_training_allowed")
-        or context.get("snapshot_learning_ready", False)
-    )
+    snapshot_training_allowed = _context_training_allowed(context)
 
     # Pre-screen: missing authority — harvest_settlement will also check, but
     # we emit the counter here so the caller's log captures the rejection.
     if not str(source_model_version).strip() or not snapshot_training_allowed:
-        _cnt_inc(
-            "harvester_learning_write_blocked_total",
-            labels={"reason": "missing_source_model_version_or_lineage"},
-        )
-        logger.warning(
-            "telemetry_counter event=harvester_learning_write_blocked_total "
-            "reason=missing_source_model_version_or_lineage"
-        )
+        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+        return 0
+    if not _causality_allows_learning(context.get("snapshot_causality_status")):
+        _emit_learning_write_blocked("snapshot_causality_not_ok")
         return 0
 
     # Pre-screen: live/non-training source.
     if not _is_training_forecast_source(source_model_version):
-        _cnt_inc(
-            "harvester_learning_write_blocked_total",
-            labels={"reason": "live_praw_no_training_lineage"},
-        )
-        logger.warning(
-            "telemetry_counter event=harvester_learning_write_blocked_total "
-            "reason=live_praw_no_training_lineage"
-        )
+        _emit_learning_write_blocked("live_praw_no_training_lineage")
         return 0
 
     # Delegate to harvest_settlement which performs the same guards again
@@ -722,13 +765,24 @@ def run_harvester() -> dict:
                 continue
 
             # Canonical-authority write: SettlementSemantics gate + INV-14 + provenance_json.
-            _write_settlement_truth(
+            truth_result = _write_settlement_truth(
                 shared_conn, city, target_date, pm_bin_lo, pm_bin_hi,
                 event_slug=event.get("slug", ""),
                 obs_row=obs_row,
                 resolved_market_outcomes=resolved_market_outcomes,
                 temperature_metric=temperature_metric,
             )
+            if str(truth_result.get("authority") or "").upper() != "VERIFIED":
+                logger.warning(
+                    "harvester_live: refusing learning/position settlement for %s %s "
+                    "because settlement truth authority=%s reason=%s",
+                    city.name,
+                    target_date,
+                    truth_result.get("authority"),
+                    truth_result.get("reason"),
+                )
+                continue
+            winning_label = str(truth_result.get("winning_bin") or winning_label)
 
             # Extract all bin labels and use decision-time snapshots for calibration
             all_labels = _extract_all_bin_labels(event)
@@ -781,6 +835,12 @@ def run_harvester() -> dict:
                 winning_label,
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
+                settlement_authority="VERIFIED",
+                settlement_truth_source="harvester_live_verified_settlement",
+                settlement_market_slug=str(event.get("slug", "") or ""),
+                settlement_temperature_metric=temperature_metric,
+                settlement_source=str(city.settlement_source or ""),
+                settlement_value=truth_result.get("settlement_value"),
             )
             positions_settled += n_settled
             if n_settled > 0:
@@ -1503,11 +1563,15 @@ def get_snapshot_context(
         return None
     issue_time = row["issue_time"]
     training_allowed = row["training_allowed"]
-    learning_snapshot_ready = bool(issue_time) and training_allowed != 0
+    causality_status = str(row["causality_status"] or "OK")
+    causality_ok = _causality_allows_learning(causality_status)
+    learning_snapshot_ready = bool(issue_time) and training_allowed != 0 and causality_ok
     if not issue_time:
         learning_blocked_reason = "missing_forecast_issue_time"
     elif training_allowed == 0:
         learning_blocked_reason = "snapshot_training_not_allowed"
+    elif not causality_ok:
+        learning_blocked_reason = "snapshot_causality_not_ok"
     else:
         learning_blocked_reason = ""
     try:
@@ -1522,7 +1586,7 @@ def get_snapshot_context(
             "snapshot_learning_ready": learning_snapshot_ready,
             "learning_blocked_reason": learning_blocked_reason,
             "snapshot_source": row["snapshot_source"],
-            "snapshot_causality_status": row["causality_status"],
+            "snapshot_causality_status": causality_status,
         }
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -1738,14 +1802,7 @@ def harvest_settlement(
             city.name,
             target_date,
         )
-        _cnt_inc(
-            "harvester_learning_write_blocked_total",
-            labels={"reason": "missing_forecast_issue_time"},
-        )
-        logger.warning(
-            "telemetry_counter event=harvester_learning_write_blocked_total "
-            "reason=missing_forecast_issue_time"
-        )
+        _emit_learning_write_blocked("missing_forecast_issue_time")
         return 0
     if bias_corrected is None:
         try:
@@ -1757,6 +1814,13 @@ def harvest_settlement(
         raise ValueError(
             "source_model_version is required when harvesting calibration pairs"
         )
+    coerced_snapshot_training_allowed = _coerce_training_allowed_flag(snapshot_training_allowed)
+    if p_raw_vector and coerced_snapshot_training_allowed is False:
+        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+        return 0
+    if p_raw_vector and not _causality_allows_learning(causality_status):
+        _emit_learning_write_blocked("snapshot_causality_not_ok")
+        return 0
     metric_identity = _metric_identity_for(
         getattr(city, "temperature_metric", temperature_metric)
         if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low"
@@ -1775,46 +1839,58 @@ def harvest_settlement(
     if not resolved_pair_data_version:
         resolved_pair_data_version = metric_identity.data_version
     training_requested = (
-        bool(snapshot_training_allowed)
-        if snapshot_training_allowed is not None
+        coerced_snapshot_training_allowed
+        if coerced_snapshot_training_allowed is not None
         else _is_training_forecast_source(source_model_version)
     )
     resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
     # Phase 2.6 (2026-05-04): derive cycle/source_id/horizon_profile from the
     # forecast issue_time + data_version so calibration_pairs_v2 rows land in
-    # the correct stratified bucket. Falls back to None when issue_time is
-    # missing or data_version doesn't resolve to a registered source_family —
-    # the writer's schema-default branch handles that case.
+    # the correct stratified bucket.
+    #
+    # Object-meaning invariant (Wave7): schema/helper defaults are not source
+    # evidence. Unsupported data_version rows are audit-only evidence and must
+    # carry an explicit non-bucket source_id, never the TIGGE schema default.
     _phase2_cycle: Optional[str] = None
     _phase2_source_id_field: Optional[str] = None
     _phase2_horizon_profile: Optional[str] = None
     try:
         if isinstance(issue_time, str) and len(issue_time) >= 13:
             _phase2_cycle = issue_time[11:13]
+            if not _phase2_cycle.isdigit():
+                _phase2_cycle = None
+        if p_raw_vector and _phase2_cycle is None:
+            _emit_learning_write_blocked("invalid_forecast_issue_time")
+            return 0
         from src.calibration.forecast_calibration_domain import (
             derive_source_id_from_data_version,
         )
         _src_id = derive_source_id_from_data_version(resolved_pair_data_version)
         if _src_id is not None:
             _phase2_source_id_field = _src_id
+        else:
+            _phase2_source_id_field = _unsupported_calibration_source_id(
+                resolved_forecast_source,
+                resolved_pair_data_version,
+            )
         if _phase2_cycle is not None:
             _phase2_horizon_profile = (
                 "full" if _phase2_cycle in ("00", "12") else "short"
             )
     except (ImportError, AttributeError, TypeError, ValueError) as _exc:
         # Phase 2.6 hardening (2026-05-04, critic-opus MINOR 10): explicit
-        # exception list rather than bare Exception so a real bug doesn't
-        # get swallowed silently. We log+continue (writer's schema-default
-        # branch produces well-formed rows from None args). If a future
-        # exception type needs to fall through here, add it explicitly so
-        # the maintainer is forced to think about whether silent fallback
-        # is right for that case.
+        # exception list rather than bare Exception so a real bug doesn't get
+        # swallowed silently. For p_raw writes, unknown stratification authority
+        # degrades to no learning row rather than schema-default TIGGE identity.
         logger.warning(
             "Phase 2.6 stratification derivation failed for %s/%s; falling "
-            "back to schema defaults: %s: %s",
+            "back to non-learning state: %s: %s",
             city.name, target_date, type(_exc).__name__, _exc,
         )
+        if p_raw_vector:
+            _emit_learning_write_blocked("forecast_source_identity_unavailable")
+            return 0
         _phase2_cycle = None
         _phase2_source_id_field = None
         _phase2_horizon_profile = None
@@ -1882,11 +1958,27 @@ def _settle_positions(
     city: str, target_date: str, winning_label: str,
     settlement_records: Optional[list[SettlementRecord]] = None,
     strategy_tracker=None,
+    *,
+    settlement_authority: str = "UNKNOWN",
+    settlement_truth_source: str = "",
+    settlement_market_slug: str = "",
+    settlement_temperature_metric: str = "high",
+    settlement_source: str = "",
+    settlement_value: object | None = None,
 ) -> int:
     """Settle held positions that match this market. Log P&L."""
     settled = 0
     _canonical_exit = _get_canonical_exit_flag()
     settlement_records = settlement_records if settlement_records is not None else []
+    settlement_metric = str(settlement_temperature_metric or "high").strip().lower()
+    if settlement_metric not in {"high", "low"}:
+        logger.warning(
+            "Skipping settlement for %s %s: invalid settlement_temperature_metric=%r",
+            city,
+            target_date,
+            settlement_temperature_metric,
+        )
+        return 0
 
     # P6: Load the authoritative phase from position_current for each trade in
     # this market. Positions already in a terminal DB phase are excluded before
@@ -1913,6 +2005,15 @@ def _settle_positions(
 
     for pos in list(portfolio.positions):
         if pos.city != city or pos.target_date != target_date:
+            continue
+        position_metric = str(getattr(pos, "temperature_metric", "high") or "high").strip().lower()
+        if position_metric != settlement_metric:
+            logger.warning(
+                "Skipping settlement for %s: position metric %s does not match settlement metric %s",
+                pos.trade_id,
+                position_metric,
+                settlement_metric,
+            )
             continue
         try:
             entry_provenance = pos.entry_method or pos.selected_method or "unknown"
@@ -2062,6 +2163,12 @@ def _settle_positions(
             "edge_source": pos.edge_source,
             "strategy": pos.strategy,
             "decision_snapshot_id": pos.decision_snapshot_id,
+            "settlement_authority": settlement_authority,
+            "settlement_truth_source": settlement_truth_source,
+            "settlement_market_slug": settlement_market_slug,
+            "settlement_temperature_metric": settlement_temperature_metric,
+            "settlement_source": settlement_source,
+            "settlement_value": settlement_value,
         })
         log_settlement_event(
             conn,
@@ -2078,6 +2185,12 @@ def _settle_positions(
             won=won,
             outcome=outcome,
             phase_before=phase_before,
+            settlement_authority=settlement_authority,
+            settlement_truth_source=settlement_truth_source,
+            settlement_market_slug=settlement_market_slug,
+            settlement_temperature_metric=settlement_temperature_metric,
+            settlement_source=settlement_source,
+            settlement_value=settlement_value,
         )
 
         # SD-1: write settlement outcome back to trade_decisions

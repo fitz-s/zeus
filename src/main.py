@@ -109,8 +109,9 @@ def _harvester_cycle():
     """Phase 1.5 harvester split: trading-side P&L resolver.
 
     Reads world.settlements (written by ingest-side harvester_truth_writer)
-    and settles positions + writes decision_log. Falls back to legacy
-    run_harvester() if resolver import fails (backward compat during transition).
+    and settles positions + writes decision_log. If the resolver is unavailable,
+    fail closed; the trading daemon must not fall back to the legacy integrated
+    harvester path, which can derive and write settlement truth in the same lane.
     """
     from src.data.dual_run_lock import acquire_lock
     from src.state.db import get_trade_connection, get_world_connection
@@ -127,13 +128,17 @@ def _harvester_cycle():
             finally:
                 trade_conn.close()
                 world_conn.close()
-        except ImportError:
-            # Fallback during Phase 1.5 transition: use legacy harvester
-            logger.warning(
-                "harvester_pnl_resolver not importable; falling back to legacy run_harvester"
+        except ImportError as exc:
+            logger.error(
+                "harvester_pnl_resolver unavailable; refusing legacy run_harvester fallback: %s",
+                exc,
             )
-            from src.execution.harvester import run_harvester
-            result = run_harvester()
+            result = {
+                "status": "resolver_unavailable_fail_closed",
+                "positions_settled": 0,
+                "decision_log_rows_written": 0,
+                "errors": 1,
+            }
     logger.info("Harvester: %s", result)
 
 
@@ -658,9 +663,8 @@ def main():
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
-    # Capital truth: query on-chain wallet via bankroll_provider. Removed
-    # 2026-05-04: previously logged settings.capital_base_usd ($150 fiction)
-    # at startup, which masked the real wallet balance during boot diagnostics.
+    # Capital truth: query on-chain wallet via bankroll_provider. Startup must
+    # never log retired config-literal capital as if it were wallet truth.
     try:
         from src.runtime.bankroll_provider import current as _bankroll_current
         _record = _bankroll_current()

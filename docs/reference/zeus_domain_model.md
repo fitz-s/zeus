@@ -153,7 +153,7 @@ Three reconciliation rules (run every cycle before trading):
 2. **Local exists, NOT on chain** → VOID immediately (local state is a hallucination)
 3. **Chain exists, NOT local** → QUARANTINE 48h (unknown asset, forced exit eval)
 
-Reconciliation is mandatory on every cycle (Zeus is live; paper mode was decommissioned in Phase 1).
+Reconciliation is mandatory on every cycle (Zeus is live; non-live execution was decommissioned in Phase 1).
 
 **Key file**: `src/state/chain_reconciliation.py`
 
@@ -280,7 +280,7 @@ When facing N surface-level problems, do not write N patches. Find K structural 
 
 **Examples from Zeus:**
 - 22 chain-safety mechanisms = 5 structural decisions
-- 10 mode-isolation mechanisms = 3 structural decisions (historical; paper mode decommissioned Phase 1)
+- 10 mode-isolation mechanisms = 3 structural decisions (historical; non-live execution decommissioned Phase 1)
 - The `state_path()` function = 1 structural decision that covers all per-process file isolation
 
 The test for a structural decision: does it eliminate a *class* of problems, or just one instance? If one instance, it is a patch. If a class, it is a structural decision.

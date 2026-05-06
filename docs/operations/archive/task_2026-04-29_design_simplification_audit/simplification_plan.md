@@ -47,25 +47,26 @@ Acceptance gates:
 - A status summary over trade DB plus attached world DB reports world v2 row counts, not empty trade shadows.
 - Replay cannot silently promote diagnostic-only snapshot references.
 
-## Principle 3: Runtime Modes Are Not Evidence Classes
+## Principle 3: Runtime State Is Not An Evidence Class
 
 Target design:
 
-- Zeus runtime mode is live only.
-- Evidence classes are named as evidence classes: `simulated_venue_evidence`, `read_only_live_evidence`, `diagnostic_replay`, not `paper`/`shadow` runtime modes.
+- Zeus runtime state is code-authoritative live state.
+- Evidence classes are named as evidence classes: `simulated_venue_evidence`, `read_only_live_evidence`, `diagnostic_replay`, not execution selectors.
 - Test fakes live under `tests/fakes` and implement the live adapter protocol without production branches.
 
 Implementation sequence:
 
-1. Move/rename benchmark `PAPER` and `SHADOW` concepts to evidence-class names.
-2. Remove production `paper_mode` branch from monitor refresh.
+1. Move/rename benchmark `obsolete simulated-venue label` and `SHADOW` concepts to evidence-class names.
+2. Remove the production non-live execution branch from monitor refresh.
 3. Keep fake venue parity tests, but require fakes to stay test-only.
-4. Add source scanner preventing `paper_mode` in production engine/execution code.
+4. Add source scanner preventing non-live execution branch tokens in production engine/execution code.
 
 Acceptance gates:
 
-- `rg "paper_mode" src/engine src/execution` returns no production branch.
-- `ZEUS_MODE` missing raises outside test-only helpers.
+- Production source scan for non-live execution branch tokens under `src/engine`
+  and `src/execution` returns no production branch.
+- `ZEUS_MODE` cannot select runtime state outside inert test metadata.
 - Fake venue imports cannot import credentials or live network clients.
 
 ## Principle 4: Feature Flags May Disable Authority, Not Change Money Semantics Forever
@@ -185,7 +186,7 @@ Target design:
 
 Implementation sequence:
 
-1. Rename benchmark `PAPER`/`SHADOW` concepts to evidence-grade names.
+1. Rename benchmark `obsolete simulated-venue label`/`SHADOW` concepts to evidence-grade names.
 2. Make replay outputs carry typed evidence grade instead of limitations text only.
 3. Make strategy promotion docs and tests depend on evidence-grade contracts.
 4. Keep economics tombstoned until market-event, price-history, sizing, and selection parity contracts pass.
@@ -194,7 +195,7 @@ Implementation sequence:
 Acceptance gates:
 
 - Diagnostic replay and snapshot-only fallbacks cannot satisfy promotion or economics gates.
-- No docs or code claim "paper mode" is a live readiness requirement after paper runtime decommission.
+- No docs or code claim the non-live execution branch is a live readiness requirement after decommission.
 - Promotion decisions cite evidence grade and missing parity dimensions explicitly.
 
 ## Principle 10: One Time-Causality Contract
@@ -240,7 +241,7 @@ Implementation sequence:
 Acceptance gates:
 
 - `ECONOMICS` cannot run when market-price linkage is partial, timing is reconstructed, trade facts are not CONFIRMED for learning, or selection/sizing parity differs from live.
-- A strategy cannot be marked promotion-ready from replay/paper/shadow names or simulated venue evidence alone.
+- A strategy cannot be marked promotion-ready from replay/simulated/shadow names or simulated venue evidence alone.
 - A staged-live run records every dollar of expected and realized PnL into alpha, spread, fee, slippage, failed-settlement, and capital-lock components.
 - A post-loss attribution report can separate model/physics error from execution slippage, source degradation, stale market identity, fill finality, calibration immaturity, and selection/sizing drift.
 
@@ -260,8 +261,8 @@ Finding coverage:
 
 Work:
 
-1. Replace paper/shadow promotion wording with typed evidence grades.
-2. Make missing `ZEUS_MODE` fail outside test-only helpers.
+1. Replace simulated/shadow promotion wording with typed evidence grades.
+2. Remove environment selector authority outside inert test metadata.
 3. Keep economics as the only promotion-authoritative PnL proof.
 4. Add scanners/tests that diagnostic replay, simulated venue evidence, and read-only live evidence cannot authorize promotion alone.
 
@@ -330,12 +331,12 @@ Phase 1G implemented fourth source-policy/replay slice on 2026-04-29:
 
 Phase 1H implemented the first runtime-mode residue slice on 2026-04-29:
 
-- Production `src/engine/monitor_refresh.py` no longer has a `paper_mode`
+- Production `src/engine/monitor_refresh.py` no longer has an non-live execution branch
   branch or Gamma current-price fallback.
 - Monitor pricing now uses only live-shaped CLOB quotes: YES/NO token selection
   plus `get_best_bid_ask()`, best bid for Day0, VWMP otherwise.
 - `tests/test_runtime_guards.py` now scans production `src/engine` and
-  `src/execution` Python files to prevent `paper_mode` reintroduction.
+  `src/execution` Python files to prevent non-live execution branch reintroduction.
 - This closes the monitor-refresh production branch portion of DSA-07 without
   changing executor/venue behavior, mutating DB rows, or renaming benchmark
   evidence classes.
@@ -343,7 +344,7 @@ Phase 1H implemented the first runtime-mode residue slice on 2026-04-29:
 Phase 1I implemented the strategy benchmark evidence-grade naming slice on
 2026-04-29:
 
-- Strategy benchmark public concepts no longer expose `PAPER`, `SHADOW`, or
+- Strategy benchmark public concepts no longer expose `obsolete simulated-venue label`, `SHADOW`, or
   `LIVE` environment names as promotion concepts.
 - Promotion decisions now validate `EvidenceGrade` rather than legacy
   environment labels.
@@ -756,7 +757,7 @@ These are not blockers to starting repair. Run the relevant probe at the start o
 1. Build a call graph of all `fetch_ensemble()` call sites and all direct Open-Meteo HTTP calls.
 2. Build a call graph of all `shadow_signals`, `probability_trace_fact`, `ensemble_snapshots`, and `ensemble_snapshots_v2` consumers.
 3. Build a source inventory from local DB by table and source field, classifying `entry`, `monitor`, `learning`, `diagnostic`, and `status` consumers.
-4. Build a production-code scanner for mode residue: `paper`, `shadow`, `fake`, `simulated`, `fallback`, `default live`, and compare against an allowlist.
+4. Build a production-code scanner for mode residue: non-live execution branch, `shadow`, `fake`, `simulated`, `fallback`, `default live`, and compare against an allowlist.
 5. Build a market-identity flow test from Gamma payload to CLOB envelope.
 6. Build an exposure-ledger reconciliation test across partial fill, cancel remainder, chain view, and settlement projection.
 7. Build a composed capability matrix for entry/exit/cancel/redeem under source degradation, risk levels, collateral, heartbeat, and cutover states.

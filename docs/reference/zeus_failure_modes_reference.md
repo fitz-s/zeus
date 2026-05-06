@@ -185,14 +185,16 @@ where `_is_missing_local_hour()` returns True. Coverage tracking at daily
 grain (not hourly) prevents DST spring-forward's 23-hour day from
 false-positive as a coverage hole.
 
-### 4.4 Cross-mode truth file collision
+### 4.4 Runtime truth-file authority collision
 
-**Failure**: Live mode reading a truth file written by backtest mode, or
-vice versa. The data is valid for the wrong mode.
+**Failure**: Live runtime code consumes a JSON truth file carrying retired
+selector metadata or diagnostic/backtest provenance as if it were live runtime
+truth.
 
-**Invariant**: `read_mode_truth_json()` validates the file's `mode` tag
-matches the caller's `mode` parameter. Mismatch → `ModeMismatchError`.
-`mode=None` is explicitly rejected (not silently defaulted).
+**Invariant**: `read_runtime_truth_json()` reads only the code-authoritative live
+runtime state path and rejects retired selector tags with
+`RuntimeStateMismatchError`. Replay and backtest use their own stores and must
+not route through runtime truth files.
 
 ---
 
@@ -244,7 +246,7 @@ timeouts are hard-coded: `opening_hunt=14400s`, `update_reaction=3600s`,
 |------|---------------|
 | INV-05 | Risk advisory forbidden — `get_current_level()` defaults to RED |
 | INV-21 | `ExecutionPrice.assert_kelly_safe()` typed boundary |
-| B077/SD-A | `ModeMismatchError` in truth file reads |
+| B077/SD-A | `RuntimeStateMismatchError` in runtime truth file reads |
 | B081 | Shared `apply_settlement_rounding()` dispatch |
 | K4 | Authority hard gate in `compute_alpha()` |
 | P6 | `_settle_positions()` DB-level dedup anchor |

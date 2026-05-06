@@ -1,6 +1,9 @@
 # Created: 2026-05-05
 # Last reused/audited: 2026-05-05
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
+# Purpose: Evaluate out-of-sample calibration-transfer evidence without promoting it to live authority.
+# Reuse: Run in --dry-run by default; use --no-dry-run only under daemon-lock/operator-gated evidence production.
 """OOS evaluator: writes ``validated_calibration_transfers`` rows.
 
 Phase X.2 of the calibration-transfer evidence pipeline.  Iterates all
@@ -12,11 +15,11 @@ a row in ``validated_calibration_transfers``.
 
 OOS held-out split convention
 ------------------------------
-No time-based train/test column exists on ``calibration_pairs_v2``.
-We use a deterministic 80/20 split keyed on ``pair_id``:
-    held-out: pair_id % 5 == 0
-    training: pair_id % 5 != 0
-This is stable across reruns — same pairs are always held out.
+Rows are grouped by ``decision_group_id`` and split chronologically by
+``forecast_available_at``/``target_date``. The held-out cohort is the latest
+20% of decision groups for the route. Row-id modulo splits are forbidden
+because they preserve row identity while changing the evidence object from
+time-forward OOS skill into row-random pseudo-OOS skill.
 
 Usage (from zeus repo root, zeus venv active)::
 
@@ -51,6 +54,9 @@ from typing import Iterator
 ZEUS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ZEUS_ROOT))
 
+from src.config import calibration_maturity_thresholds
+from src.data.calibration_transfer_policy import select_time_blocked_transfer_pairs
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -60,6 +66,28 @@ logger = logging.getLogger("oos_evaluator")
 DEFAULT_POLICY_ID = "OOS_BRIER_DIFF_v1"
 DEFAULT_BRIER_DIFF_THRESHOLD = 0.005
 MIN_PAIRS = 200
+_, _, MIN_SOURCE_PLATT_SAMPLES = calibration_maturity_thresholds()
+MIN_TRANSFER_LEAD_DAYS = 1.0
+MAX_TRANSFER_LEAD_DAYS = 7.0
+_TARGET_PAIR_ELIGIBILITY_SQL = """
+           AND training_allowed    = 1
+           AND causality_status    = 'OK'
+           AND authority           = 'VERIFIED'
+           AND TRIM(source_id)     <> ''
+           AND TRIM(cycle)         <> ''
+           AND TRIM(season)        <> ''
+           AND TRIM(cluster)       <> ''
+           AND TRIM(horizon_profile) <> ''
+           AND p_raw IS NOT NULL
+           AND p_raw > 0.0
+           AND p_raw < 1.0
+           AND lead_days IS NOT NULL
+           AND lead_days >= 1.0
+           AND lead_days <= 7.0
+           AND outcome IN (0, 1)
+           AND decision_group_id IS NOT NULL
+           AND TRIM(decision_group_id) <> ''
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +120,35 @@ def _brier_score(predictions: list[float], outcomes: list[int]) -> float:
         return float("nan")
     total = sum((p - o) ** 2 for p, o in zip(predictions, outcomes))
     return total / n
+
+
+def _finite_float(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _finite_probability(value: object) -> float | None:
+    result = _finite_float(value)
+    if result is None or not (0.0 < result < 1.0):
+        return None
+    return result
+
+
+def _finite_brier(value: object) -> float | None:
+    result = _finite_float(value)
+    if result is None or not (0.0 <= result <= 1.0):
+        return None
+    return result
+
+
+def _nonempty_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +190,20 @@ def _load_brier_threshold(policy_id: str) -> float:
     try:
         settings_path = ZEUS_ROOT / "config" / "settings.json"
         data = json.loads(settings_path.read_text())
-        raw = data.get("calibration_transfer_brier_diff_threshold", DEFAULT_BRIER_DIFF_THRESHOLD)
-        if isinstance(raw, dict):
-            return float(raw.get(policy_id, DEFAULT_BRIER_DIFF_THRESHOLD))
-        return float(raw)
     except Exception as exc:
         logger.warning("Could not load brier threshold from settings.json: %s; using default", exc)
-        return DEFAULT_BRIER_DIFF_THRESHOLD
+        raw = DEFAULT_BRIER_DIFF_THRESHOLD
+    else:
+        raw = data.get("calibration_transfer_brier_diff_threshold", DEFAULT_BRIER_DIFF_THRESHOLD)
+        if isinstance(raw, dict):
+            raw = raw.get(policy_id, DEFAULT_BRIER_DIFF_THRESHOLD)
+    threshold = _finite_brier(raw)
+    if threshold is None:
+        raise ValueError(
+            "calibration_transfer_brier_diff_threshold must be finite and in [0, 1] "
+            f"for policy_id={policy_id!r}; got {raw!r}"
+        )
+    return threshold
 
 
 # ---------------------------------------------------------------------------
@@ -150,37 +214,73 @@ def _iter_active_platt_models(conn, limit: int | None = None) -> Iterator[dict]:
     """Yield active Platt model rows as dicts."""
     sql = """
         SELECT model_key, temperature_metric AS metric, cluster, season,
-               data_version, param_A, param_B, param_C,
-               brier_insample, cycle, source_id, horizon_profile
+               data_version, param_A, param_B, param_C, input_space,
+               brier_insample, n_samples, cycle, source_id, horizon_profile
           FROM platt_models_v2
          WHERE is_active = 1
+           AND authority = 'VERIFIED'
+           AND input_space = 'raw_probability'
+           AND TRIM(model_key) <> ''
+           AND TRIM(temperature_metric) <> ''
+           AND TRIM(cluster) <> ''
+           AND TRIM(season) <> ''
+           AND TRIM(cycle) <> ''
+           AND TRIM(source_id) <> ''
+           AND TRIM(horizon_profile) <> ''
          ORDER BY model_key
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     for row in conn.execute(sql).fetchall():
+        param_A = _finite_float(row[5])
+        param_B = _finite_float(row[6])
+        param_C = _finite_float(row[7])
+        brier_insample = _finite_brier(row[9])
+        if None in (param_A, param_B, param_C, brier_insample):
+            continue
+        try:
+            n_samples = int(row[10])
+        except (TypeError, ValueError):
+            continue
+        if n_samples < MIN_SOURCE_PLATT_SAMPLES:
+            continue
+        identity = {
+            "model_key": _nonempty_text(row[0]),
+            "metric": _nonempty_text(row[1]),
+            "cluster": _nonempty_text(row[2]),
+            "season": _nonempty_text(row[3]),
+            "cycle": _nonempty_text(row[11]),
+            "source_id": _nonempty_text(row[12]),
+            "horizon_profile": _nonempty_text(row[13]),
+        }
+        if any(value is None for value in identity.values()):
+            continue
         yield {
-            "model_key": row[0],
-            "metric": row[1],
-            "cluster": row[2],
-            "season": row[3],
+            "model_key": identity["model_key"],
+            "metric": identity["metric"],
+            "cluster": identity["cluster"],
+            "season": identity["season"],
             "data_version": row[4],
-            "param_A": row[5],
-            "param_B": row[6],
-            "param_C": row[7],
-            "brier_insample": row[8],
-            "cycle": row[9],
-            "source_id": row[10],
-            "horizon_profile": row[11],
+            "param_A": param_A,
+            "param_B": param_B,
+            "param_C": param_C,
+            "input_space": row[8],
+            "brier_insample": brier_insample,
+            "n_samples": n_samples,
+            "cycle": identity["cycle"],
+            "source_id": identity["source_id"],
+            "horizon_profile": identity["horizon_profile"],
         }
 
 
 def _enumerate_target_domains(conn) -> list[tuple[str, str]]:
     """Return distinct (source_id, cycle) pairs present in calibration_pairs_v2."""
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT source_id, cycle
           FROM calibration_pairs_v2
+         WHERE 1 = 1
+{_TARGET_PAIR_ELIGIBILITY_SQL}
          ORDER BY source_id, cycle
         """
     ).fetchall()
@@ -198,7 +298,7 @@ def _fetch_held_out_pairs(
     horizon_profile: str,
     target_source_id_filter: str | None,
 ) -> list[dict]:
-    """Fetch held-out pairs (pair_id % 5 == 0) for the given route.
+    """Fetch the chronological held-out pairs for the given route.
 
     Column mapping: ``temperature_metric`` = metric (high|low),
     ``target_date`` = the observation date used as the evidence window proxy.
@@ -206,10 +306,10 @@ def _fetch_held_out_pairs(
     if target_source_id_filter is not None and target_source_id != target_source_id_filter:
         return []
     rows = conn.execute(
-        """
+        f"""
         SELECT pair_id, p_raw, lead_days, outcome,
-               MIN(target_date) AS window_start,
-               MAX(target_date) AS window_end
+               target_date, forecast_available_at, decision_group_id,
+               range_label
           FROM calibration_pairs_v2
          WHERE source_id           = ?
            AND cycle               = ?
@@ -217,53 +317,40 @@ def _fetch_held_out_pairs(
            AND cluster             = ?
            AND temperature_metric  = ?
            AND horizon_profile     = ?
-           AND (pair_id % 5)       = 0
-         GROUP BY pair_id, p_raw, lead_days, outcome
-         ORDER BY pair_id
+{_TARGET_PAIR_ELIGIBILITY_SQL}
+         GROUP BY pair_id, p_raw, lead_days, outcome, target_date,
+                  forecast_available_at, decision_group_id, range_label
+         ORDER BY forecast_available_at, target_date, pair_id
         """,
         (target_source_id, target_cycle, season, cluster, metric, horizon_profile),
     ).fetchall()
-    return [
-        {
+    candidates = []
+    for r in rows:
+        p_raw = _finite_probability(r[1])
+        lead_days = _finite_float(r[2])
+        outcome = int(r[3]) if r[3] in (0, 1) else None
+        if (
+            p_raw is None
+            or lead_days is None
+            or not (MIN_TRANSFER_LEAD_DAYS <= lead_days <= MAX_TRANSFER_LEAD_DAYS)
+            or outcome is None
+        ):
+            continue
+        candidates.append({
             "pair_id": r[0],
-            "p_raw": r[1],
-            "lead_days": r[2],
-            "outcome": r[3],
-            "window_start": r[4],
-            "window_end": r[5],
-        }
-        for r in rows
-    ]
-
-
-def _fetch_date_window(
-    conn,
-    *,
-    target_source_id: str,
-    target_cycle: str,
-    season: str,
-    cluster: str,
-    metric: str,
-    horizon_profile: str,
-) -> tuple[str, str]:
-    """Return (min_target_date, max_target_date) for the route's held-out pairs."""
-    row = conn.execute(
-        """
-        SELECT MIN(target_date), MAX(target_date)
-          FROM calibration_pairs_v2
-         WHERE source_id           = ?
-           AND cycle               = ?
-           AND season              = ?
-           AND cluster             = ?
-           AND temperature_metric  = ?
-           AND horizon_profile     = ?
-           AND (pair_id % 5)       = 0
-        """,
-        (target_source_id, target_cycle, season, cluster, metric, horizon_profile),
-    ).fetchone()
-    if row is None or row[0] is None:
-        return ("", "")
-    return (str(row[0]), str(row[1]))
+            "p_raw": p_raw,
+            "lead_days": lead_days,
+            "outcome": outcome,
+            "target_date": r[4],
+            "forecast_available_at": r[5],
+            "decision_group_id": r[6],
+            "range_label": r[7],
+        })
+    result = select_time_blocked_transfer_pairs(candidates)
+    for pair in result:
+        pair["window_start"] = pair["target_date"]
+        pair["window_end"] = pair["target_date"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -485,15 +572,8 @@ def run_oos_evaluation(
                 status = "INSUFFICIENT_SAMPLE"
                 brier_target = 0.0
                 brier_diff = 0.0
-                window_start, window_end = _fetch_date_window(
-                    conn,
-                    target_source_id=tgt_source_id,
-                    target_cycle=tgt_cycle,
-                    season=model["season"],
-                    cluster=model["cluster"],
-                    metric=model["metric"],
-                    horizon_profile=model["horizon_profile"],
-                )
+                window_start = pairs[0]["window_start"] if pairs else ""
+                window_end = pairs[-1]["window_end"] if pairs else ""
             else:
                 A = model["param_A"]
                 B = model["param_B"]
@@ -504,10 +584,7 @@ def run_oos_evaluation(
                 ]
                 outcomes = [p["outcome"] for p in pairs]
                 brier_target = _brier_score(predictions, outcomes)
-                brier_source = (
-                    model["brier_insample"] if model["brier_insample"] is not None else 0.0
-                )
-                brier_diff = brier_target - brier_source
+                brier_diff = brier_target - model["brier_insample"]
 
                 if brier_diff > brier_diff_threshold:
                     status = "TRANSFER_UNSAFE"
@@ -554,8 +631,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="OOS evaluator: writes validated_calibration_transfers rows."
     )
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Compute evidence but do not write to DB.")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="Compute evidence but do not write to DB (default).")
+    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false",
+                        help="Write validated_calibration_transfers rows after daemon-lock check.")
+    parser.set_defaults(dry_run=True)
     parser.add_argument("--policy-id", default=DEFAULT_POLICY_ID,
                         help=f"Policy ID (default: {DEFAULT_POLICY_ID}).")
     parser.add_argument("--target-source-id", default=None,

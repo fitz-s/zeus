@@ -126,3 +126,31 @@ def test_replay_eligibility_count_matches_design(db_with_mixed_provenance):
         temperature_metric="high",
     )
     assert len(rows) == 4
+
+
+def test_replay_calibration_lookup_keys_canonicalize_source_bucket() -> None:
+    from src.engine.replay import _replay_calibration_lookup_keys
+
+    supported, cycle, source_id, horizon = _replay_calibration_lookup_keys({
+        "data_version": "tigge_mx2t6_local_calendar_day_max_v1",
+        "issue_time": "2026-04-30T12:00:00+00:00",
+    })
+
+    assert supported is True
+    assert cycle == "12"
+    assert source_id == "tigge_mars"
+    assert horizon == "full"
+
+
+def test_replay_calibration_lookup_keys_block_diagnostic_source_defaults() -> None:
+    from src.engine.replay import _replay_calibration_lookup_keys
+
+    supported, cycle, source_id, horizon = _replay_calibration_lookup_keys({
+        "data_version": "diagnostic_forecast_rows.v1",
+        "issue_time": "2026-04-30T12:00:00+00:00",
+    })
+
+    assert supported is False
+    assert cycle is None
+    assert source_id is None
+    assert horizon is None

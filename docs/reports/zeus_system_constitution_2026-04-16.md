@@ -47,7 +47,7 @@ size = f* × kelly_mult × bankroll
 
 **INV-05 / §P9.7 cascade floor:** `dynamic_kelly_mult` raises `ValueError` if the result is ≤ 0.0 or NaN, refusing to fabricate a floor. If all sizing gates trigger, the trade is rejected rather than sized at an artificial minimum.
 
-- **Safety cap:** `live_safety_cap_usd` = **$5.00** — Kelly output is hard-clipped at this ceiling (`kelly_size()` parameter `safety_cap_usd`). This is a Phase 1 maturity rail.
+- **Exposure discipline:** Kelly output is not hard-clipped by a per-trade config cap. Bankroll truth comes from the wallet bankroll provider; entry discipline is enforced by RiskGuard, posture, executable-price, and max-exposure gates.
 - **Fee-adjusted sizing:** When `EXECUTION_PRICE_SHADOW=true` (default), Kelly receives the fee-adjusted entry price via `ExecutionPrice.with_taker_fee()`. Polymarket fee = `fee_rate × p × (1-p)` (convex — highest at p=0.50). This prevents systematic oversizing (INV-12 / D3 resolution, `src/contracts/execution_price.py`).
 
 **Secondary objectives (implicit, not formally ranked):**
@@ -62,7 +62,7 @@ size = f* × kelly_mult × bankroll
 | Zeus does NOT trade market orders | `order_type: "limit_only"` in settings; `place_limit_order()` is the only order method | `src/execution/executor.py`, `src/data/polymarket_client.py` |
 | Zeus does NOT do market-making | One-sided positions only. `MarketAnalysis.find_edges()` evaluates buy_yes OR buy_no per bin, never both simultaneously. No spread-capture logic exists | `src/strategy/market_analysis.py` |
 | Zeus does NOT optimize for Sharpe ratio | No Sharpe calculation anywhere in the codebase. Kelly criterion is the sole sizing authority | `src/strategy/kelly.py` |
-| Paper/dry_run mode is dead | `get_mode()` raises `ValueError` if `ZEUS_MODE ∉ {"live"}`. `ACTIVE_MODES = ("live",)`. Settings constructor validates mode consistency | `src/config.py:get_mode()` |
+| Runtime state is not selected by env vars | `get_mode()` returns `"live"` from code authority. Replay, backtest, shadow, simulation, and test doubles use their own APIs/stores rather than `ZEUS_MODE` selection. | `src/config.py:get_mode()` |
 | Zeus does NOT use mid-price | `vwmp()` raises `ValueError("Illiquid market: VWMP total size is 0")` when liquidity is zero. Comment: "never use mid-price for edge calculations (VWMP required)" | `src/strategy/market_fusion.py:vwmp()` |
 | Zeus does NOT blend GFS into probability | GFS is crosscheck-only. `model_agreement()` returns `AGREE`/`SOFT_DISAGREE`/`CONFLICT` — no blending path exists | `src/signal/model_agreement.py` |
 | Zeus does NOT trade low-temperature markets (currently) | `infer_temperature_metric()` returns "low" only on explicit keywords; the signal and bin topology paths support `temperature_metric="low"` but no live strategy targets it | `src/data/market_scanner.py` |
@@ -400,10 +400,9 @@ class EpistemicContext:
 
 | Parameter | Value | Source | Note |
 |-----------|-------|--------|------|
-| `capital_base_usd` | **$150.00** | `settings.json` | Static reference point |
-| Live bankroll | `PortfolioState.bankroll` | `working_state_metadata` table → `load_portfolio()` | Dynamic, updated each cycle |
-| `live_safety_cap_usd` | **$5.00** | `kelly_size()` parameter | Phase 1 maturity rail — Kelly output hard-clipped |
-| `smoke_test_portfolio_cap_usd` | **$5.00** | `settings.json` (optional key) | Blocks new entries when sum of open `cost_basis_usd` ≥ cap. One-time guard; should be removed after first full lifecycle |
+| Live bankroll of record | On-chain wallet value | `src/runtime/bankroll_provider.py` | Canonical bankroll/equity source for live sizing and status |
+| Live bankroll projection | `PortfolioState.bankroll` | `working_state_metadata` table → `load_portfolio()` | Derived portfolio projection; must not override wallet truth |
+| Per-cycle exposure discipline | RiskGuard/posture/max-exposure gates | `riskguard`, `cycle_runner.py`, `risk_limits.py` | No per-trade hard cap; entries fail closed when authority or exposure gates cannot prove safety |
 | `daily_baseline_total` | `PortfolioState.daily_baseline_total` | Set from bankroll at daily reset | Reference for daily loss % calculation |
 | `weekly_baseline_total` | `PortfolioState.weekly_baseline_total` | Set from bankroll at weekly reset | Reference for weekly loss % calculation |
 
@@ -425,15 +424,14 @@ RiskGuard runs as a **separate process** (`src/riskguard/riskguard.py`) with its
 
 **Level composition:** `overall_level(*levels)` takes the max of all individual metric levels. This means a single RED metric overrides all GREEN metrics.
 
-**Entry gate in cycle_runner:** `_risk_allows_new_entries(risk_level)` returns `True` only for `GREEN`. Even `DATA_DEGRADED` blocks new entries. Additionally, the cycle runner checks 8 separate entry-blocking conditions:
+**Entry gate in cycle_runner:** `_risk_allows_new_entries(risk_level)` returns `True` only for `GREEN`. Even `DATA_DEGRADED` blocks new entries. Additionally, the cycle runner checks these entry-blocking conditions:
 1. `chain_sync_unavailable` — chain reconciliation failed
 2. `portfolio_quarantined` — any position in quarantine state
 3. `force_exit_review_daily_loss_red` — daily loss RED (B5)
 4. `risk_level={YELLOW|ORANGE|RED}` — risk system escalation
 5. `entry_bankroll_unavailable` — wallet balance unverifiable
 6. `entry_bankroll_non_positive` — no capital available
-7. `smoke_test_portfolio_cap_reached` — one-time cap hit
-8. `near_max_exposure` — portfolio heat ≥ 95% of `max_portfolio_heat_pct`
+7. `near_max_exposure` — portfolio heat ≥ 95% of `max_portfolio_heat_pct`
 
 ### 6.3 Risk Metrics Thresholds (from `settings.json:riskguard`)
 
@@ -448,7 +446,9 @@ RiskGuard runs as a **separate process** (`src/riskguard/riskguard.py`) with its
 
 **Trailing loss calculation:** `_trailing_loss_snapshot()` reads historical `risk_state` rows to find a reference equity point. Reference selection:
 - Looks back by `lookback` timedelta to find the most recent valid reference row
-- Validates internal consistency: `abs(initial_bankroll + total_pnl - effective_bankroll) ≤ $0.01`
+- Validates internal consistency: `initial_bankroll` and `effective_bankroll`
+  must denote the same wallet-equity object within `$0.01`; `total_pnl` stays
+  analytics/reporting evidence and is not folded into bankroll truth.
 - Reference staleness tolerance: **2 hours** (`TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE`)
 - If no valid reference found → `DATA_DEGRADED` (not a false GREEN, not a false RED)
 
@@ -466,7 +466,7 @@ RiskGuard runs as a **separate process** (`src/riskguard/riskguard.py`) with its
 | Micro-position hold floor | **$1.00** | `evaluate_exit_triggers()` Layer 8: positions with `size_usd < 1.0` are never sold, held to settlement | `src/execution/exit_triggers.py` |
 
 **Risk limits enforcement flow:**
-1. Kelly sizes the trade → `kelly_size()` returns raw USD amount (clipped at `safety_cap_usd = $5.00`)
+1. Kelly sizes the trade → `kelly_size()` returns raw USD amount from wallet-backed bankroll and the dynamic multiplier
 2. `check_position_allowed()` validates against all limits
 3. Returns `(allowed: bool, reason: str)` — rejected trades get a logged reason
 
@@ -742,7 +742,7 @@ Each step logs `"OK"` or `"FAIL: {stderr}"` independently. Partial success is to
 
 `src/main.py:main()` enforces a strict 6-step boot:
 
-1. **Mode validation**: `ZEUS_MODE` env var must exist and equal `"live"`. Paper mode explicitly rejected with `sys.exit()`. Any other value → `sys.exit()`.
+1. **Live-only runtime state**: `get_mode()` returns `"live"` from code authority; `ZEUS_MODE` is historical compatibility metadata, not a selector. Runtime state path helpers fail closed on any caller-supplied value other than `"live"`.
 2. **World DB schema init**: `init_schema()` on `get_world_connection()` — creates all world tables (`ensemble_snapshots`, `calibration_pairs`, `observations`, etc.)
 3. **Trade DB schema init**: `init_schema()` on `get_trade_connection()` — creates trade tables (`position_events`, `position_current`, `execution_log`, etc.)
 4. **Startup data health check** (`_startup_data_health_check(conn)`):
@@ -816,7 +816,7 @@ Process state is the **current working snapshot** of the system. It is derived f
 | Artifact | Storage | Authoritative Source | Rebuild Method |
 |----------|---------|---------------------|----------------|
 | `portfolio.json` | File (state/) | `position_events` → `position_current` | Replay `position_events` |
-| `working_state_metadata` | zeus_trades.db table | Bankroll from initial capital + cumulative P&L | Replay all settlements |
+| `working_state_metadata` | zeus_trades.db table | Derived runtime metadata; wallet bankroll remains separate from analytics P&L | Replay canonical wallet/risk/status facts and settlements |
 | `risk_state.db` | Separate SQLite | RiskGuard 60s tick output | Recompute from settlement data |
 | `daemon-heartbeat.json` | File (state/) | 60s heartbeat write | Restart daemon |
 | `status_summary.json` | File (state/) | `write_status()` per cycle | Next cycle regenerates |
@@ -870,7 +870,7 @@ Process State (working snapshots, mutable, derived)
 
 | Variable | Required | Purpose | Validation |
 |----------|----------|---------|------------|
-| `ZEUS_MODE` | **Yes** | Mode enforcement | Must equal `"live"`. Paper mode → `sys.exit()`. Missing → `sys.exit()`. |
+| `ZEUS_MODE` | No | Historical compatibility metadata for old launch surfaces | Ignored by `get_mode()`; runtime state authority comes from code and live-only path helpers. |
 | `WU_API_KEY` | Yes (for observation_client) | Weather Underground API | Empty string → `SystemExit` |
 | `OPENCLAW_HOME` | No (default `~/.openclaw`) | Root path for keychain resolver | Used in subprocess credential resolution |
 | `ZEUS_DISCORD_WEBHOOK` | No | Override Keychain webhook URL | If set, used instead of Keychain lookup |
@@ -900,7 +900,7 @@ These computations must produce **bit-identical** results for the same inputs be
 | INV-02 | `round_wmo_half_up_values()` | `src/contracts/settlement_semantics.py` | float array, precision | `floor(x + 0.5)` — asymmetric half-up. Must match Polymarket settlement rounding. |
 | INV-03 | `calibrate_and_normalize()` | `src/calibration/platt.py` | p_raw, lead_days, A/B/C params | `sigmoid(A × logit(p_raw) + B × lead_days + C)` with P_CLAMP = [0.01, 0.99]. |
 | INV-04 | `compute_posterior()` | `src/strategy/market_fusion.py` | p_cal, p_market, alpha, bins | `α_per_bin × p_cal + (1−α) × p_market`, normalized to sum=1.0. Vig treatment applied to complete markets. |
-| INV-05 | `kelly_size()` | `src/strategy/kelly.py` | p_posterior, entry_price, bankroll, kelly_mult, safety_cap | `f* = (p - entry) / (1 - entry) × kelly_mult × bankroll`, clipped at `safety_cap_usd`. |
+| INV-05 | `kelly_size()` | `src/strategy/kelly.py` | p_posterior, entry_price, bankroll, kelly_mult | `f* = (p - entry) / (1 - entry) × kelly_mult × bankroll`; exposure gates are separate downstream authority. |
 | INV-06 | `dynamic_kelly_mult()` | `src/strategy/kelly.py` | ci_width, lead_days, win_rate, heat, drawdown | Cascade of multiplicative reductions. Result ≤ 0.0 or NaN → `ValueError` (refuses to fabricate floor). |
 | INV-07 | `fdr_filter()` / `benjamini_hochberg_mask()` | `src/strategy/fdr_filter.py`, `selection_family.py` | edges with p_values, fdr_alpha=0.10 | BH procedure: sort by p-value ascending, find largest k where `p[k] ≤ α × k/m`. |
 | INV-08 | `bin_probability_from_values()` | `src/types/market.py` | measured values, bin bounds | Fraction of values falling within bin range (inclusive). |
@@ -915,7 +915,7 @@ These computations must produce **bit-identical** results for the same inputs be
 | BEH-04 | Chain reconciliation: same chain state → same SYNCED/VOID/QUARANTINE action | `chain_reconciliation.py` | `test_lifecycle.py` |
 | BEH-05 | Settlement: same Gamma events → same settlement records and calibration pairs | `harvester.py` | `test_pnl_flow_and_audit.py` |
 | BEH-06 | Gate_50 irrevocability: once `_gate_50_state = "passed"/"failed"`, never re-evaluated | `riskguard/metrics.py` | `test_riskguard.py` |
-| BEH-07 | Mode rejection: `ZEUS_MODE != "live"` → `sys.exit()` | `config.py:get_mode()` | `test_config.py` |
+| BEH-07 | Runtime state authority: environment input cannot select alternate runtime state or execution paths | `config.py:get_mode()`, `config.py:runtime_state_path()` | `test_config.py` |
 | BEH-08 | Wallet fail-closed: `get_balance()` exception → daemon exits at startup | `main.py:_startup_wallet_check()` | `test_wallet_source.py` |
 | BEH-09 | Limit-only enforcement: no code path exists that sends a market order | `executor.py`, `polymarket_client.py` | `test_executor.py`, `test_live_execution.py` |
 | BEH-10 | `authority_verified=False` → `AuthorityViolation` raised, edge computation blocked | `market_fusion.py:compute_alpha()` | `test_authority_gate.py` |
@@ -1189,7 +1189,7 @@ Zeus depends on external systems and conditions that are assumed but not verifie
 | EA-03 | Polygon chain (chain_id=137) settles all CLOB trades | py_clob_client design assumption | Chain reconciliation would find mismatches | QUARANTINE path for unknown chain positions |
 | EA-04 | Gamma API accurately reports settlement outcomes | Settlement truth source for harvester | Wrong P&L, wrong calibration pairs | No independent settlement verification exists |
 | EA-05 | Polymarket temperature markets use consistent bin naming conventions | `_parse_temp_range()` regex patterns | City/bin mismatch → market skipped or wrong bin assignment | Title parsing with extensive regex; unknown formats logged and skipped |
-| EA-06 | Orderbook depth is sufficient for limit order fills at stated prices | VWMP computation assumes non-zero liquidity | `ValueError("Illiquid market")` raised | Orders sized to $5 max; iceberg slicing for >$100 |
+| EA-06 | Orderbook depth is sufficient for limit order fills at stated prices | VWMP computation assumes non-zero liquidity | `ValueError("Illiquid market")` raised | Executable-price/depth gates and exposure limits bound entries; iceberg slicing for larger orders |
 
 ### 15.2 Data Source Assumptions
 
@@ -1338,7 +1338,7 @@ Zeus runs as a **macOS launchd daemon** under the user's login session:
 
 | Component | Process | Lifecycle |
 |-----------|---------|-----------|
-| Zeus daemon | `ZEUS_MODE=live python -m src.main` | launchd `KeepAlive` (auto-restart on crash) |
+| Zeus daemon | `python -m src.main` | launchd `KeepAlive` (auto-restart on crash) |
 | RiskGuard | `python -m src.riskguard.riskguard` | Separate launchd service, 60s tick |
 | ETL scripts | Subprocess children of daemon | Spawned by `_etl_recalibrate()`, timeout 300-600s |
 | WU daily | Subprocess child of daemon | Spawned by `_wu_daily_collection()` |
@@ -1422,9 +1422,8 @@ Zeus has **80+ test files** covering mathematical invariants, behavioral contrac
 |-----------|--------|-----------|
 | `test_market_analysis.py` | Double bootstrap CI, edge detection, bin probability | INV-01, INV-08 |
 | `test_platt.py` | Platt calibration fitting, prediction, bootstrap | INV-03 |
-| `test_kelly.py` | Kelly sizing formula, safety cap, cascade bounds | INV-05, INV-06 |
+| `test_kelly.py` | Kelly sizing formula, no per-trade cap parameter, cascade bounds | INV-05, INV-06 |
 | `test_kelly_cascade_bounds.py` | `dynamic_kelly_mult()` cascade produces no floor | INV-06 |
-| `test_kelly_live_safety_cap.py` | `live_safety_cap_usd = $5.00` enforcement | INV-05 |
 | `test_fdr.py` | BH procedure correctness | INV-07 |
 | `test_bootstrap_symmetry.py` | Bootstrap produces symmetric CIs | INV-01 |
 | `test_calibration_manager.py` | Maturity levels, hierarchical fallback, bucket routing | INV-03 |
@@ -1447,7 +1446,7 @@ Zeus has **80+ test files** covering mathematical invariants, behavioral contrac
 | `test_lifecycle.py` | Position lifecycle state machine | BEH-04 |
 | `test_executor.py` | Order creation, limit-only enforcement | BEH-09 |
 | `test_live_execution.py` | Live execution path | BEH-09 |
-| `test_live_safety_invariants.py` | Live mode safety guarantees | BEH-07, BEH-08 |
+| `test_live_safety_invariants.py` | Live execution safety guarantees | BEH-07, BEH-08 |
 | `test_authority_gate.py` | UNVERIFIED data rejection | BEH-10 |
 | `test_pnl_flow_and_audit.py` | Settlement → P&L → calibration pair flow | BEH-05 |
 | `test_wallet_source.py` | Wallet check fail-closed | BEH-08 |

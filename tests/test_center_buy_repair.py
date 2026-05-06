@@ -213,7 +213,7 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         _candidate(),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -234,7 +234,7 @@ def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monk
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -270,7 +270,7 @@ def test_missing_forecast_evidence_blocks_before_snapshot_persistence(monkeypatc
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -299,7 +299,7 @@ def test_missing_available_at_blocks_before_snapshot_persistence(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -327,7 +327,7 @@ def test_future_forecast_evidence_blocks_before_snapshot_persistence(monkeypatch
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -358,7 +358,7 @@ def test_available_at_before_issue_blocks_before_snapshot_persistence(monkeypatc
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -377,7 +377,7 @@ def test_level4_raw_probability_entry_blocks_before_edge_selection(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -399,7 +399,7 @@ def test_empty_decision_snapshot_id_blocks_before_edge_selection(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
@@ -428,7 +428,7 @@ def test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection(monkeyp
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
         conn=None,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,

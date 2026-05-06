@@ -58,6 +58,31 @@ _ALLOWED_DEPTH_STATUSES = frozenset(
 _ALLOWED_DEPTH_PROOF_SOURCES = frozenset(
     {"CLOB_SWEEP", "PASSIVE_LIMIT", "UNVERIFIED"}
 )
+_FINAL_INTENT_FORBIDDEN_RECOMPUTE_INPUTS = frozenset(
+    {
+        "p_posterior",
+        "posterior",
+        "p_market",
+        "market_prior",
+        "vwmp",
+        "entry_price",
+        "bin_edge",
+        "BinEdge",
+        "edge",
+    }
+)
+_FINAL_INTENT_FORBIDDEN_RECOMPUTE_PREFIXES = (
+    "p_posterior",
+    "posterior",
+    "p_market",
+    "market_prior",
+    "vwmp",
+    "entry_price",
+    "bin_edge",
+    "binedge",
+    "edge_context",
+    "legacy_edge",
+)
 
 
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
@@ -86,6 +111,18 @@ def _context_time(value: str) -> datetime | None:
 
 def _valid_payload_hash(value: str) -> bool:
     return len(value) == 64 and all(char in _HEX_CHARS for char in value)
+
+
+def _is_final_intent_recompute_input_name(name: str) -> bool:
+    normalized = str(name or "").strip()
+    normalized_lower = normalized.lower()
+    exact_lower = {
+        str(value).lower()
+        for value in _FINAL_INTENT_FORBIDDEN_RECOMPUTE_INPUTS
+    }
+    return normalized_lower in exact_lower or normalized_lower.startswith(
+        _FINAL_INTENT_FORBIDDEN_RECOMPUTE_PREFIXES
+    )
 
 
 def _as_decimal(value: Any, field_name: str) -> Decimal:
@@ -607,6 +644,10 @@ class ExecutionIntent:
     # before persistence/submission. Do not populate this from forecast
     # decision_snapshot_id; it is market/execution truth, not model truth.
     executable_snapshot_id: str = ""
+    executable_snapshot_hash: str = ""
+    executable_cost_basis_id: str = ""
+    executable_cost_basis_hash: str = ""
+    pricing_semantics_version: str = ""
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
@@ -1172,6 +1213,7 @@ class ExecutableTradeHypothesis:
 
     def assert_matches_cost_basis(self, cost_basis: ExecutableCostBasis) -> None:
         checks = {
+            "direction": (self.direction, cost_basis.direction),
             "selected_token_id": (
                 self.selected_token_id,
                 cost_basis.selected_token_id,
@@ -1324,9 +1366,21 @@ class FinalExecutionIntent:
         self.assert_submit_ready()
 
     def assert_no_recompute_inputs(self) -> None:
-        """Marker: corrected execution should not require posterior, VWMP, or BinEdge."""
+        """Fail closed if legacy pricing inputs are attached to final submit authority."""
+
+        forbidden = sorted(
+            name
+            for name in vars(self)
+            if _is_final_intent_recompute_input_name(name)
+        )
+        if forbidden:
+            raise ValueError(
+                "FinalExecutionIntent carries forbidden recompute inputs: "
+                + ",".join(forbidden)
+            )
 
     def assert_submit_ready(self) -> None:
+        self.assert_no_recompute_inputs()
         missing = [
             name
             for name in (

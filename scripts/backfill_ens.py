@@ -50,6 +50,7 @@ def get_settlements_in_window(conn, days_back: int = 93) -> list[dict]:
            AND COALESCE(e.temperature_metric, 'high') = 'high'
         WHERE s.target_date >= ?
           AND s.temperature_metric = 'high'
+          AND s.authority = 'VERIFIED'
           AND e.snapshot_id IS NULL
         ORDER BY s.target_date DESC
     """, (cutoff,)).fetchall()

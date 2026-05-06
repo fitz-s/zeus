@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill truth metadata onto existing mode-suffixed state files."""
+"""Backfill truth metadata onto existing runtime state files."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.truth_files import backfill_truth_metadata_for_modes
+from src.state.truth_files import backfill_truth_metadata
 
 
 def run() -> list[dict]:
-    return backfill_truth_metadata_for_modes()
+    return backfill_truth_metadata()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit per-city data readiness for paper runtime and archive work."""
+"""Audit per-city data readiness for diagnostic runtime and archive work."""
 from __future__ import annotations
 
 import argparse
@@ -34,6 +34,24 @@ def _date_bounds(conn: sqlite3.Connection, table: str, city: str, *, date_col: s
         (city,),
     )
     return {"min_date": row["min_date"], "max_date": row["max_date"]}
+
+
+def _verified_high_settlement_summary(conn: sqlite3.Connection, city: str) -> dict:
+    row = _fetch_one(
+        conn,
+        """
+        SELECT COUNT(*) AS n, MIN(target_date) AS min_date, MAX(target_date) AS max_date
+        FROM settlements
+        WHERE city = ?
+          AND authority = 'VERIFIED'
+          AND temperature_metric = 'high'
+        """,
+        (city,),
+    )
+    return {
+        "count": int(row["n"] or 0),
+        "dates": {"min_date": row["min_date"], "max_date": row["max_date"]},
+    }
 
 
 def _alias_values(city) -> tuple[str, ...]:
@@ -114,7 +132,8 @@ def audit_city_data_readiness() -> dict:
     rows = []
     for city_name in sorted(cities_by_name):
         city = cities_by_name[city_name]
-        settlement_rows = _count(conn, "settlements", city_name)
+        settlement_summary = _verified_high_settlement_summary(conn, city_name)
+        settlement_rows = settlement_summary["count"]
         observation_rows = _count(conn, "observations", city_name)
         forecast_skill_rows = _count(conn, "forecast_skill", city_name)
         model_bias_rows = _count(conn, "model_bias", city_name)
@@ -128,6 +147,8 @@ def audit_city_data_readiness() -> dict:
             FROM settlements s
             WHERE s.city = ?
               AND s.settlement_value IS NOT NULL
+              AND s.temperature_metric = 'high'
+              AND s.authority = 'VERIFIED'
               AND NOT EXISTS (
                   SELECT 1
                   FROM observations o
@@ -166,7 +187,7 @@ def audit_city_data_readiness() -> dict:
             "city": city_name,
             "cluster": city.cluster,
             "settlement_rows": settlement_rows,
-            "settlement_dates": _date_bounds(conn, "settlements", city_name),
+            "settlement_dates": settlement_summary["dates"],
             "observation_rows": observation_rows,
             "missing_settlement_observations": missing_observations,
             "market_event_rows": market_events["rows"],

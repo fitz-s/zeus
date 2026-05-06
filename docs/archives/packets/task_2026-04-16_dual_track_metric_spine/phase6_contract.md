@@ -50,7 +50,7 @@ Upstream: `remaining_member_maxes_for_day0(temperature_metric=LOW)` already disp
 
 - Decouple the evaluator.py:825 + monitor_refresh.py:306 fixes from guard removal (both must land same commit)
 - Bundle Phase 7 scope (rebuild_v2 METRIC_SPECS iteration, `_tigge_common.py` extraction, replay migration to `historical_forecasts_v2`)
-- Re-add paper mode
+- Re-add obsolete non-live runtime
 - Modify `validate_snapshot_contract`, `PortfolioState.authority`, `ModeMismatchError`, `CalibrationMetricSpec` semantics (all locked 5A/5B)
 - Add `--track` CLI flags; use spec dataclass pattern (precedent: METRIC_SPECS)
 - Mock-heavy tests (use synthetic inputs against real public entry points)

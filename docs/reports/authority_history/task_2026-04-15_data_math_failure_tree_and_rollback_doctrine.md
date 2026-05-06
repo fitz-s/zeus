@@ -7,7 +7,7 @@ Status: packet-scoped doctrine
 ### A. Stale-authority contradiction
 Signal:
 - code and active prose disagree
-- a touched surface still implies paper support
+- a touched surface still implies non-live execution support
 - replay prose overclaims parity
 Action:
 - fix the prose to match code truth

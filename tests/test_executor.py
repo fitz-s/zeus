@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
@@ -84,17 +84,19 @@ def _ensure_snapshot(
     *,
     token_id: str,
     direction: str = "buy_yes",
+    snapshot_id: str | None = None,
     final_limit_price: Decimal = Decimal("0.33"),
     snapshot_top_ask: Decimal | None = None,
     snapshot_top_bid: Decimal | None = None,
     ask_size: str = "100",
     bid_size: str = "100",
+    raw_orderbook_hash: str = "c" * 64,
 ) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     assert conn is not None
-    snapshot_id = f"snap-{direction}-{token_id}"
+    snapshot_id = snapshot_id or f"snap-{direction}-{token_id}"
     if get_snapshot(conn, snapshot_id) is not None:
         return snapshot_id
     selected_is_no = str(direction).endswith("_no")
@@ -160,7 +162,7 @@ def _ensure_snapshot(
             ),
             raw_gamma_payload_hash="a" * 64,
             raw_clob_market_info_hash="b" * 64,
-            raw_orderbook_hash="c" * 64,
+            raw_orderbook_hash=raw_orderbook_hash,
             authority_tier="CLOB",
             captured_at=_NOW,
             freshness_deadline=_NOW + timedelta(days=365),
@@ -224,6 +226,8 @@ def _final_execution_intent(
     decision_source_context=_DEFAULT_DECISION_SOURCE,
     snapshot_top_ask: Decimal | None = None,
     snapshot_top_bid: Decimal | None = None,
+    snapshot_id: str | None = None,
+    raw_orderbook_hash: str = "c" * 64,
     ask_size: str = "100",
     bid_size: str = "100",
 ) -> FinalExecutionIntent:
@@ -233,11 +237,13 @@ def _final_execution_intent(
         _TEST_CONN,
         token_id=token_id,
         direction=direction,
+        snapshot_id=snapshot_id,
         final_limit_price=final_limit_price,
         snapshot_top_ask=snapshot_top_ask,
         snapshot_top_bid=snapshot_top_bid,
         ask_size=ask_size,
         bid_size=bid_size,
+        raw_orderbook_hash=raw_orderbook_hash,
     )
     from src.state.snapshot_repo import get_snapshot
 
@@ -354,7 +360,7 @@ class TestPortfolio:
         loaded = load_portfolio(path)
 
         # 2026-05-04: load_portfolio() no longer seeds bankroll from
-        # settings.capital_base_usd ($150 fiction). Default is 0.0 —
+        # retired config-literal capital. Default is 0.0 —
         # bankroll truth flows from bankroll_provider in live paths.
         assert loaded.bankroll == pytest.approx(0.0)
         assert len(loaded.positions) == 1
@@ -667,6 +673,225 @@ class TestExecutor:
         assert result.status == "rejected"
         assert result.reason == "final_order_type_mismatch: intent=FOK selected=GTC"
 
+    def test_execute_final_intent_rejects_submit_connection_snapshot_hash_drift(
+        self,
+        monkeypatch,
+    ):
+        from src.state.db import init_schema
+
+        final_intent = _final_execution_intent(
+            token_id="yes-token-submit-drift-final",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        submit_conn = sqlite3.connect(":memory:")
+        submit_conn.row_factory = sqlite3.Row
+        init_schema(submit_conn)
+        _ensure_snapshot(
+            submit_conn,
+            token_id="yes-token-submit-drift-final",
+            snapshot_id=final_intent.snapshot_id,
+            final_limit_price=Decimal("0.33"),
+            raw_orderbook_hash="f" * 64,
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                captured["client_created"] = True
+
+            def v2_preflight(self):
+                captured["preflight"] = True
+
+            def place_limit_order(self, **kwargs):
+                captured["submit"] = kwargs
+                return {"orderID": "should-not-submit", "status": "OPEN"}
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        try:
+            result = execute_final_intent(
+                final_intent,
+                conn=submit_conn,
+                snapshot_conn=_TEST_CONN,
+                decision_id="decision-final-drift",
+            )
+
+            assert result.status == "rejected"
+            assert result.reason == "corrected_execution_identity:snapshot_hash_mismatch"
+            assert captured == {}
+            assert submit_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        finally:
+            submit_conn.close()
+
+    def test_execute_final_intent_rejects_existing_idempotent_command_with_old_corrected_identity(
+        self,
+        monkeypatch,
+    ):
+        token_id = "yes-token-existing-final"
+        old_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-existing-old",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        new_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-existing-new",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+            raw_orderbook_hash="f" * 64,
+        )
+        submitted = []
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                submitted.append((token_id, price, size, side, order_type))
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id=f"existing-{len(submitted)}",
+                )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        first = execute_final_intent(old_intent, conn=_TEST_CONN, decision_id="decision-existing")
+        second = execute_final_intent(new_intent, conn=_TEST_CONN, decision_id="decision-existing")
+
+        assert first.status == "pending"
+        assert second.status == "rejected"
+        assert second.reason == "corrected_execution_identity:existing_command_snapshot_id_mismatch"
+        assert len(submitted) == 1
+
+    def test_execute_final_intent_rejects_economic_unknown_with_old_corrected_identity(
+        self,
+        monkeypatch,
+    ):
+        token_id = "yes-token-economic-unknown-final"
+        old_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-economic-old",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        new_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-economic-new",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+            raw_orderbook_hash="f" * 64,
+        )
+        submitted = []
+
+        class TimeoutClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                submitted.append((token_id, price, size, side, order_type))
+                raise RuntimeError("simulated post-submit timeout")
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", TimeoutClient)
+
+        first = execute_final_intent(old_intent, conn=_TEST_CONN, decision_id="decision-economic-old")
+        second = execute_final_intent(new_intent, conn=_TEST_CONN, decision_id="decision-economic-new")
+
+        assert first.status == "unknown_side_effect"
+        assert second.status == "rejected"
+        assert second.reason == "corrected_execution_identity:existing_command_snapshot_id_mismatch"
+        assert len(submitted) == 1
+        assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
+    def test_execute_final_intent_rejects_idempotency_race_with_old_corrected_identity(
+        self,
+        monkeypatch,
+    ):
+        from src.state import venue_command_repo
+
+        token_id = "yes-token-race-final"
+        old_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-race-old",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+        new_intent = _final_execution_intent(
+            token_id=token_id,
+            snapshot_id="snap-race-new",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+            raw_orderbook_hash="f" * 64,
+        )
+        submitted = []
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                submitted.append((token_id, price, size, side, order_type))
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id=f"race-{len(submitted)}",
+                )
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "FOK")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+
+        first = execute_final_intent(old_intent, conn=_TEST_CONN, decision_id="decision-race")
+        assert first.status == "pending"
+
+        real_find = venue_command_repo.find_command_by_idempotency_key
+        calls = {"n": 0}
+
+        def racing_find(conn, key):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return real_find(conn, key)
+
+        def racing_insert(*args, **kwargs):
+            raise sqlite3.IntegrityError("simulated idempotency race")
+
+        monkeypatch.setattr(venue_command_repo, "find_command_by_idempotency_key", racing_find)
+        monkeypatch.setattr(venue_command_repo, "insert_command", racing_insert)
+
+        second = execute_final_intent(new_intent, conn=_TEST_CONN, decision_id="decision-race")
+
+        assert second.status == "rejected"
+        assert second.reason == "corrected_execution_identity:existing_command_snapshot_id_mismatch"
+        assert len(submitted) == 1
+        assert calls["n"] == 2
+
     @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
     def test_execute_final_intent_submits_allocator_immediate_order_type_when_frozen(
         self,
@@ -819,46 +1044,6 @@ class TestExecutor:
     def test_execute_final_intent_requires_final_intent_contract(self):
         with pytest.raises(TypeError, match="FinalExecutionIntent"):
             execute_final_intent(object(), conn=_TEST_CONN)  # type: ignore[arg-type]
-
-    @pytest.mark.skip(reason="Phase2: paper mode removed")
-    def test_paper_fill(self):
-        edge = BinEdge(
-            bin=Bin(low=39, high=40, label="39-40", unit="F"),
-            direction="buy_yes", edge=0.10,
-            ci_lower=0.03, ci_upper=0.17,
-            p_model=0.50, p_market=0.40, p_posterior=0.50,
-            entry_price=0.40, p_value=0.02, vwmp=0.42,
-        )
-        edge_context = EdgeContext(
-            p_raw=np.array([0.50]),
-            p_cal=np.array([0.50]),
-            p_market=np.array([0.40]),
-            p_posterior=0.50,
-            forward_edge=0.10,
-            alpha=0.65,
-            confidence_band_upper=0.17,
-            confidence_band_lower=0.03,
-            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-            decision_snapshot_id="test-snap",
-            n_edges_found=1,
-            n_edges_after_fdr=1,
-        )
-        intent = create_execution_intent(
-            edge_context=edge_context,
-            edge=edge,
-            size_usd=5.0,
-            mode="opening_hunt",
-            market_id="m1",
-            token_id="yes-token",
-            no_token_id="no-token",
-            **_snapshot_kwargs("yes-token"),
-        )
-        result = execute_intent(intent, edge.vwmp, edge.bin.label)
-
-        assert result.status == "filled"
-        assert result.fill_price is not None
-        assert 0.01 <= result.fill_price <= 0.99
-        assert result.trade_id is not None
 
     def test_create_exit_order_intent_carries_boundary_fields(self):
         intent = create_exit_order_intent(

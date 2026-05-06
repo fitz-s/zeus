@@ -763,7 +763,7 @@ Repair principle:
 | Prerequisites          | Static gates and live reachability tests.                                                                                                                                            |
 | Exit criteria          | Complement fallback removed/quarantined; compatibility helper live-disabled; corrected paths cannot call legacy price helpers; diagnostic replay labeled; docs stale claims removed. |
 | Tests/gates            | Static grep gates and integration reachability tests.                                                                                                                                |
-| Rollback               | Quarantine before delete; keep legacy diagnostic adapters behind explicit non-live flags.                                                                                            |
+| Rollback               | Quarantine before delete; keep legacy diagnostic adapters retired/diagnostic-only with no execution-mode selector.                                                                    |
 | Hidden branches closed | Orphans, compatibility helpers, diagnostic complement, stale docs.                                                                                                                   |
 | Unresolved unknowns    | Any code path whose reachability remains uncertain stays quarantined, not deleted.                                                                                                   |
 
@@ -1331,7 +1331,7 @@ rg "market_id.*token_id|token_id.*market_id|legacy:" src tests scripts
 
 | Orphan path                                                        | Risk                               | Current evidence                                                               | Decision                                                               | Prerequisite tests                          | Rollback                                        |
 | ------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------- |
-| `market_analysis_family_scan` buy-NO complement fallback           | Executable NO price from `1 - YES` | Confirmed fallback. ([GitHub][27])                                             | Quarantine diagnostic-only first, then delete if no live reachability. | Native NO required; complement static gate. | Restore diagnostic helper behind non-live flag. |
+| `market_analysis_family_scan` buy-NO complement fallback           | Executable NO price from `1 - YES` | Confirmed fallback. ([GitHub][27])                                             | Quarantine diagnostic-only first, then delete if no live reachability. | Native NO required; complement static gate. | Restore as diagnostic-only helper with no execution-mode selector. |
 | Adapter `submit_limit_order()` compatibility helper                | Placeholder identity may submit    | Helper fabricates `legacy:{token_id}` and yes=no token. ([GitHub][25])         | Live-disable; retain only for legacy tests if needed.                  | Placeholder no SDK call in live.            | Re-enable only in test/fake venue mode.         |
 | Legacy `compute_native_limit_price` in corrected-adjacent executor | Executor price authority           | Import remains. ([GitHub][6])                                                  | Static-gate out of corrected path; later isolate legacy module.        | No corrected call stack.                    | Keep legacy diagnostic.                         |
 | `BinEdge.entry_price/vwmp` cost authority                          | Scalar aliasing                    | Fields remain. ([GitHub][2])                                                   | Quarantine; remove from corrected cost/sizing.                         | Static gate.                                | Legacy display only.                            |
@@ -2281,7 +2281,7 @@ Closeout evidence:
 - Complement path labeled diagnostic.
 
 Rollback:
-- Retain complement only behind non-live diagnostic flag.
+- Retain complement only as diagnostic-only evidence with no execution-mode selector.
 
 Do not opportunistically refactor.
 Do not alter posterior math beyond quote/cost separation.
@@ -2881,7 +2881,7 @@ Closeout evidence:
 - Quarantined path list.
 
 Rollback:
-- Restore quarantined diagnostic helper behind non-live flag.
+- Restore quarantined diagnostic helper only as diagnostic-only evidence with no execution-mode selector.
 
 Do not opportunistically refactor.
 Do not delete live-reachable code until test proves non-reachability.

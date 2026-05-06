@@ -233,7 +233,7 @@ AP-4 (source role collapse) has TWO distinct shapes. Diagnosis MUST distinguish 
 - If date ranges **overlap** between labels → Shape A (muddled) or needs deeper audit
 - Example Shape B observed in P-G: Taipei (CWA Mar 16-22 / NOAA Mar 23-Apr 4 / WU Apr 5-15), Tel Aviv (WU Mar 10-22 / NOAA Mar 23-Apr 15), HK (WU Mar 13-14 / HKO Mar 16-Apr 15 with Mar 20 gap). All 3 cleanly disjoint → Shape B.
 
-**Packet test**: before prescribing "relabel", check date-range SQL. If disjoint, the label is historically correct; the problem is obs-collector coverage. Reaching for relabel to paper over a collector gap is AP-4 in reverse.
+**Packet test**: before prescribing "relabel", check date-range SQL. If disjoint, the label is historically correct; the problem is obs-collector coverage. Reaching for relabel to obsolete non-live runtime over a collector gap is AP-4 in reverse.
 
 ---
 
@@ -257,7 +257,7 @@ Rollback, QUARANTINE, resume, or halt? Specify per error type. If the packet has
 Which function, which line, which transaction? If there are 2+ commits in the path, name each and justify why they're not atomic (per INV-08).
 
 **Q6. How do we verify CORRECTLY?**
-Every AC must be tested with (a) a scenario where it SHOULD pass and (b) a scenario where it SHOULD fail. Verified on paper or in sandbox before adoption. No awk-range checks; no trivial-pass greps.
+Every AC must be tested with (a) a scenario where it SHOULD pass and (b) a scenario where it SHOULD fail. Verified on obsolete non-live runtime or in sandbox before adoption. No awk-range checks; no trivial-pass greps.
 
 **Q7. What new hazard does this introduce?**
 Every fix creates the possibility of a new bug. Name it. Flag it. Mitigate it.

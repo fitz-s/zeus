@@ -109,7 +109,7 @@ def evaluate_exit_triggers(
         )
 
     # Layer 8: Micro-position hold (< $1 never sold, hold to settlement)
-    if position.size_usd < 1.0:
+    if position.effective_cost_basis_usd < 1.0:
         return None
 
     # Compute forward edge natively extracted from bounded context object
@@ -165,7 +165,7 @@ def _evaluate_buy_yes_exit(
 
     # Layer 4: EV gate — only exit if selling is better than holding
     if best_bid is not None:
-        shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0
+        shares = position.effective_shares
         net_sell = shares * best_bid
         net_hold = _declared_zero_cost_hold_value(shares, position.p_posterior).net_value
         if net_sell <= net_hold:
@@ -226,7 +226,7 @@ def _evaluate_buy_no_exit(
     if position.neg_edge_count >= consecutive_needed:
         # EV gate: don't exit if holding to settlement is worth more than selling now
         if best_bid is not None:
-            shares = position.size_usd / position.entry_price if position.entry_price > 0 else 0.0
+            shares = position.effective_shares
             net_sell = shares * float(best_bid)
             net_hold = _declared_zero_cost_hold_value(shares, current_edge_context.p_posterior).net_value
             if net_sell <= net_hold:

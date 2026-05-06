@@ -521,12 +521,80 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
         f"_settle_positions not reached ({len(settle_calls)}); "
         "likely winning_label NameError regression"
     )
+    assert settle_calls[0][1]["settlement_authority"] == "VERIFIED"
+    assert settle_calls[0][1]["settlement_truth_source"] == "harvester_live_verified_settlement"
+    assert settle_calls[0][1]["settlement_temperature_metric"] == "high"
+    assert settle_calls[0][1]["settlement_value"] == 17.0
     # harvest_settlement is inside `if stage2_ready:` branch; stage2 mocked False
     # in this test, so it should NOT be called. Separate test can exercise stage2=True.
     assert len(harvest_calls) == 0, (
         f"harvest_settlement unexpectedly called ({len(harvest_calls)}) with stage2_ready=False"
     )
     assert result.get("disabled_by_flag") is not True
+
+
+def test_T12b_quarantined_truth_does_not_settle_positions_or_train(monkeypatch, tmp_path):
+    """Relationship guard: QUARANTINED settlement truth cannot become P&L or learning authority."""
+    from src.execution import harvester as hv
+
+    event = _event_with_market(
+        "resolved", ["Yes", "No"], ["1", "0"],
+        question="Will the highest temperature in London be 17°C on April 15?",
+    )
+    event["title"] = "Highest temperature in London on April 15?"
+    event["slug"] = "highest-temperature-in-london-on-april-15-2026"
+    london = _mock_city("London", unit="C", st="wu_icao")
+
+    write_calls = []
+    snapshot_calls = []
+    settle_calls = []
+    harvest_calls = []
+
+    def _fake_write(*a, **kw):
+        write_calls.append((a, kw))
+        return {
+            "authority": "QUARANTINED",
+            "settlement_value": 18.0,
+            "winning_bin": None,
+            "reason": "harvester_live_obs_outside_bin",
+        }
+
+    monkeypatch.setattr(hv, "_match_city", lambda title, slug: london)
+    monkeypatch.setattr(hv, "_extract_target_date", lambda ev: "2026-04-15")
+    monkeypatch.setattr(hv, "_fetch_settled_events", lambda: [event])
+    dummy_db_path = tmp_path / "quarantined.db"
+    dummy_conn = sqlite3.connect(dummy_db_path, isolation_level=None)
+    monkeypatch.setattr(hv, "get_trade_connection", lambda: dummy_conn)
+    monkeypatch.setattr(hv, "get_world_connection", lambda: dummy_conn)
+    monkeypatch.setattr(hv, "_lookup_settlement_obs",
+        lambda conn, city, td, **kw: {"id": 1, "source": "wu_icao_history",
+                                      "high_temp": 18.3, "unit": "C",
+                                      "fetched_at": "2026-04-15T12:00:00Z"})
+    monkeypatch.setattr(hv, "_preflight_harvester_stage2_db_shape",
+                        lambda trade, shared: {"stage2_status": "ready"})
+    monkeypatch.setattr(hv, "load_portfolio", lambda: None)
+    monkeypatch.setattr(hv, "_write_settlement_truth", _fake_write)
+    monkeypatch.setattr(hv, "_snapshot_contexts_for_market",
+                        lambda *a, **kw: snapshot_calls.append((a, kw)) or ([], []))
+    monkeypatch.setattr(hv, "harvest_settlement", lambda *a, **kw: harvest_calls.append((a, kw)) or 0)
+    monkeypatch.setattr(hv, "_settle_positions", lambda *a, **kw: settle_calls.append((a, kw)) or 0)
+    monkeypatch.setattr(hv, "store_settlement_records", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "get_tracker", lambda: None)
+    monkeypatch.setattr(hv, "save_tracker", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "1")
+
+    try:
+        result = hv.run_harvester()
+    finally:
+        dummy_conn.close()
+
+    assert len(write_calls) == 1
+    assert snapshot_calls == []
+    assert harvest_calls == []
+    assert settle_calls == []
+    assert result["positions_settled"] == 0
+    assert result["pairs_created"] == 0
 
 
 # ---- S2.5 format-unification structural antibody ----

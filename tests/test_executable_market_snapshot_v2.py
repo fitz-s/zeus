@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
@@ -1310,6 +1310,50 @@ def test_executable_hypothesis_direct_constructor_rejects_stale_identity():
         replace(hypothesis, payoff_probability=Decimal("0.65"))
 
 
+def test_executable_hypothesis_direction_must_match_cost_basis():
+    cost_basis = _buy_no_cost_basis()
+    mismatched_id = ExecutableTradeHypothesis.expected_hypothesis_id(
+        event_id="event-1",
+        bin_id="75F+",
+        direction="buy_yes",
+        selected_token_id=cost_basis.selected_token_id,
+        payoff_probability=Decimal("0.64"),
+        posterior_distribution_id="posterior:model-only:1",
+        market_prior_id=None,
+        executable_snapshot_id=cost_basis.quote_snapshot_id,
+        executable_snapshot_hash=cost_basis.quote_snapshot_hash,
+        executable_cost_basis_id=cost_basis.cost_basis_id,
+        executable_cost_basis_hash=cost_basis.cost_basis_hash,
+        order_policy=cost_basis.order_policy,
+        fdr_family_id="family:event-1:2026-04-30",
+    )
+    mismatched = ExecutableTradeHypothesis(
+        event_id="event-1",
+        bin_id="75F+",
+        direction="buy_yes",
+        selected_token_id=cost_basis.selected_token_id,
+        payoff_probability=Decimal("0.64"),
+        posterior_distribution_id="posterior:model-only:1",
+        market_prior_id=None,
+        executable_snapshot_id=cost_basis.quote_snapshot_id,
+        executable_snapshot_hash=cost_basis.quote_snapshot_hash,
+        executable_cost_basis_id=cost_basis.cost_basis_id,
+        executable_cost_basis_hash=cost_basis.cost_basis_hash,
+        order_policy=cost_basis.order_policy,
+        fdr_family_id="family:event-1:2026-04-30",
+        fdr_hypothesis_id=mismatched_id,
+    )
+
+    with pytest.raises(ValueError, match="direction does not match cost basis"):
+        mismatched.assert_matches_cost_basis(cost_basis)
+    with pytest.raises(ValueError, match="direction does not match cost basis"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=mismatched,
+            cost_basis=cost_basis,
+            order_type="FOK",
+        )
+
+
 def test_final_execution_intent_carries_cost_basis_fields_without_recompute_inputs():
     cost_basis = _buy_no_cost_basis(snapshot=_no_snapshot(neg_risk=True))
     hypothesis = _hypothesis(cost_basis)
@@ -1333,6 +1377,28 @@ def test_final_execution_intent_carries_cost_basis_fields_without_recompute_inpu
     assert intent.neg_risk is True
     intent.assert_no_recompute_inputs()
     intent.assert_submit_ready()
+
+
+def test_final_execution_intent_rejects_dynamic_recompute_inputs():
+    cost_basis = _buy_no_cost_basis(snapshot=_no_snapshot(neg_risk=True))
+    hypothesis = _hypothesis(cost_basis)
+    intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+        hypothesis=hypothesis,
+        cost_basis=cost_basis,
+        order_type="FOK",
+    )
+
+    object.__setattr__(intent, "p_posterior", Decimal("0.64"))
+
+    with pytest.raises(ValueError, match="forbidden recompute inputs: p_posterior"):
+        intent.assert_no_recompute_inputs()
+    with pytest.raises(ValueError, match="forbidden recompute inputs: p_posterior"):
+        intent.assert_submit_ready()
+
+    object.__delattr__(intent, "p_posterior")
+    object.__setattr__(intent, "p_market_vector", [Decimal("0.50")])
+    with pytest.raises(ValueError, match="forbidden recompute inputs: p_market_vector"):
+        intent.assert_no_recompute_inputs()
 
 
 def test_final_execution_intent_enforces_adverse_slippage_budget_for_buys_and_sells():

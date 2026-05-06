@@ -1,6 +1,9 @@
 # Created: 2026-04-28
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-05
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md; task_2026-04-29 Phase 1A/1B evaluator gates.
+# Lifecycle: created=2026-04-28; last_reviewed=2026-05-05; last_reused=2026-05-05
+# Purpose: Cross-module P&L flow, CI-threshold, status-summary bankroll, and hardcoded-audit tests.
+# Reuse: Run after P&L/status-summary/riskguard/reporting boundary changes.
 """Cross-module P&L flow, CI-threshold, and hardcoded-audit tests."""
 
 from __future__ import annotations
@@ -534,7 +537,7 @@ def test_unrealized_pnl_updates_with_market():
 @pytest.mark.skip(reason="BI-05")
 def test_total_pnl_combines_realized_and_unrealized():
     portfolio = PortfolioState(
-        bankroll=150.0,
+        bankroll=211.37,
         recent_exits=[_recent_exit(3.0)],
     )
 
@@ -1007,9 +1010,9 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
         lambda conn, not_before=None: {
             "by_strategy": {
                 "center_buy": {
-                    "settlement_count": 2,
-                    "settlement_pnl": 1.25,
-                    "settlement_accuracy": 0.5,
+                    "settlement_count": 99,
+                    "settlement_pnl": 99.0,
+                    "settlement_accuracy": 0.99,
                     "no_trade_count": 3,
                     "no_trade_stage_counts": {"EDGE_INSUFFICIENT": 2, "RISK_REJECTED": 1},
                     "entry_attempted": 4,
@@ -1017,9 +1020,9 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
                     "entry_rejected": 3,
                 },
                 "opening_inertia": {
-                    "settlement_count": 0,
-                    "settlement_pnl": 0.0,
-                    "settlement_accuracy": None,
+                    "settlement_count": 8,
+                    "settlement_pnl": 8.0,
+                    "settlement_accuracy": 0.8,
                     "no_trade_count": 2,
                     "no_trade_stage_counts": {"MARKET_FILTER": 2},
                     "entry_attempted": 0,
@@ -1039,12 +1042,23 @@ def test_inv_status_strategy_merges_learning_surface(monkeypatch, tmp_path):
 
     assert status["strategy"]["center_buy"]["settlement_count"] == 2
     assert status["strategy"]["center_buy"]["settlement_pnl"] == 1.25
+    assert status["strategy"]["center_buy"]["settlement_accuracy"] == 0.5
+    assert status["strategy"]["center_buy"]["settlement_source"] == "strategy_health"
+    assert status["strategy"]["center_buy"]["settlement_window"] == "30d"
+    assert status["strategy"]["center_buy"]["learning_settlement_count"] == 99
+    assert status["strategy"]["center_buy"]["learning_settlement_pnl"] == 99.0
+    assert status["strategy"]["center_buy"]["learning_settlement_accuracy"] == 0.99
+    assert status["strategy"]["center_buy"]["learning_settlement_source"] == "learning_surface"
     assert status["strategy"]["center_buy"]["no_trade_count"] == 3
     assert status["strategy"]["center_buy"]["no_trade_stage_counts"]["EDGE_INSUFFICIENT"] == 2
     assert status["strategy"]["center_buy"]["entry_rejected"] == 3
     assert status["strategy"]["center_buy"]["recommended_gate"] is True
     assert status["strategy"]["center_buy"]["recommended_gate_reasons"] == ["edge_compression"]
     assert status["strategy"]["opening_inertia"]["open_positions"] == 0
+    assert status["strategy"]["opening_inertia"]["settlement_count"] == 0
+    assert status["strategy"]["opening_inertia"]["settlement_pnl"] == 0.0
+    assert status["strategy"]["opening_inertia"]["learning_settlement_count"] == 8
+    assert status["strategy"]["opening_inertia"]["learning_settlement_pnl"] == 8.0
     assert status["strategy"]["opening_inertia"]["gated"] is True
     assert status["strategy"]["opening_inertia"]["no_trade_stage_counts"]["MARKET_FILTER"] == 2
 
@@ -1182,14 +1196,15 @@ def test_inv_status_fallback_bankroll_uses_initial_bankroll(monkeypatch, tmp_pat
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
     # 2026-05-04: status_summary now derives initial_bankroll from
-    # bankroll_provider.current() (the conftest.py fixture returns $150),
-    # not from the (removed) settings.capital_base_usd config literal.
-    expected_initial = 150.0
+    # bankroll_provider.current() (the conftest.py fixture returns wallet truth),
+    # not from the removed config-cap literal.
+    expected_initial = 211.37
     expected_total = 1.25 + 1.5
 
     assert status["portfolio"]["initial_bankroll"] == pytest.approx(expected_initial)
     assert status["portfolio"]["total_pnl"] == pytest.approx(expected_total)
-    assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial + expected_total)
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial)
+    assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
     assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
 
 
@@ -1205,7 +1220,7 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
         json.dumps(
             {
                 "timestamp": "2026-04-02T00:00:00Z",
-                "process": {"pid": 1, "mode": "paper", "version": "zeus_v2"},
+                "process": {"pid": 1, "mode": "live", "version": "zeus_v2"},
                 "risk": {"level": "GREEN"},
                 "portfolio": {"open_positions": 0, "total_exposure_usd": 0.0},
                 "cycle": {"entries_blocked_reason": "risk_level=ORANGE", "failed": False},
@@ -1380,7 +1395,7 @@ def test_inv_control_pause_stops_entries(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [{"city": NYC}])
@@ -1907,7 +1922,7 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     )
 
     portfolio = PortfolioState(
-        bankroll=150.0,
+        bankroll=211.37,
         recent_exits=[_recent_exit(3.0)],
         positions=[_position(bin_label="41-42°F", last_monitor_market_price=0.08)],
     )
@@ -2011,29 +2026,6 @@ def test_inv_kelly_uses_effective_bankroll(monkeypatch):
     assert epistemic["forecast_context"]["location"]["season"] == "MAM"
     assert epistemic["forecast_context"]["location"]["bias_corrected"] is False
     assert epistemic["forecast_context"]["location"]["offset"] == 0.0
-
-
-@pytest.mark.skip(reason="Phase2: paper_mode removed")
-def test_inv_entry_bankroll_contract_is_explicit_in_paper_mode():
-    portfolio = PortfolioState(
-        bankroll=150.0,
-        recent_exits=[_recent_exit(3.0)],
-        positions=[_position(last_monitor_market_price=0.08)],
-    )
-
-    class DummyClob:
-        paper_mode = True
-
-    bankroll, summary = cycle_runtime.entry_bankroll_for_cycle(
-        portfolio,
-        DummyClob(),
-        deps=cycle_runner,
-    )
-
-    assert bankroll == pytest.approx(min(float(cycle_runner.settings.capital_base_usd), portfolio.initial_bankroll))
-    assert summary["entry_bankroll_contract"] == "paper_effective_bankroll_capped_by_config"
-    assert summary["bankroll_truth_source"] == "portfolio.initial_bankroll"
-    assert summary["wallet_balance_used"] is False
 
 
 def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
@@ -2142,7 +2134,7 @@ def test_inv_tighten_risk_reduces_kelly_multiplier(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=object(),
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2256,7 +2248,7 @@ def test_inv_strategy_policy_gate_yields_risk_rejected(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=object(),
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2380,7 +2372,7 @@ def test_inv_strategy_policy_allocation_multiplier_reduces_final_size(monkeypatc
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=object(),
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2502,7 +2494,7 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=object(),
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2630,7 +2622,7 @@ def test_inv_manual_override_beats_automatic_risk_action_on_active_evaluator_pat
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=conn,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2759,7 +2751,7 @@ def test_inv_expired_manual_override_restores_automatic_risk_action_on_active_ev
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=conn,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(
             max_single_position_pct=0.10,
@@ -2876,7 +2868,7 @@ def test_inv_evaluator_epistemic_context_includes_model_bias_reference(monkeypat
     decisions = evaluator_module.evaluate_candidate(
         candidate,
         conn=conn,
-        portfolio=PortfolioState(bankroll=150.0),
+        portfolio=PortfolioState(bankroll=211.37),
         clob=DummyClob(),
         limits=evaluator_module.RiskLimits(),
         decision_time=datetime(2026, 4, 3, 23, 0, tzinfo=timezone.utc),
@@ -2896,8 +2888,8 @@ def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
     conn.close()
 
     portfolio = PortfolioState(
-        bankroll=150.0,
-        daily_baseline_total=150.0,
+        bankroll=211.37,
+        daily_baseline_total=211.37,
         recent_exits=[_recent_exit(-13.0)],
     )
 
@@ -2921,7 +2913,7 @@ def test_inv_daily_loss_enforced(monkeypatch, tmp_path):
     assert details["total_pnl"] == pytest.approx(-13.0)
 
 
-def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
+def test_inv_riskguard_does_not_promote_legacy_settlement_pnl(monkeypatch, tmp_path):
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(zeus_db)
@@ -2951,7 +2943,7 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
     conn.commit()  # Fix B: store_settlement_records no longer commits internally.
     conn.close()
 
-    portfolio = PortfolioState(bankroll=150.0)
+    portfolio = PortfolioState(bankroll=211.37)
 
     def _fake_get_connection(path=None):
         if path == riskguard_module.RISK_DB_PATH:
@@ -2969,11 +2961,15 @@ def test_inv_riskguard_reads_real_pnl(monkeypatch, tmp_path):
 
     assert row["win_rate"] is None
     assert details["probability_directional_accuracy"] == pytest.approx(0.5)
-    assert details["realized_pnl"] == pytest.approx(4.5)
-    assert details["total_pnl"] == pytest.approx(4.5)
+    assert details["settlement_storage_source"] == "decision_log"
+    assert details["settlement_metric_ready_count"] == 0
+    assert details["realized_pnl"] == pytest.approx(0.0)
+    assert details["total_pnl"] == pytest.approx(0.0)
+    assert details["realized_pnl_source"] == "strategy_health.realized_pnl_30d"
+    assert details["realized_pnl_window_days"] == 30
 
 
-def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch, tmp_path):
+def test_inv_status_summary_does_not_promote_legacy_realized_truth(monkeypatch, tmp_path):
     zeus_db = tmp_path / "zeus.db"
     risk_db = tmp_path / "risk_state.db"
     status_path = tmp_path / "status_summary.json"
@@ -3012,7 +3008,7 @@ def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch
         return get_connection(zeus_db)
 
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
     monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
     monkeypatch.setattr(status_summary_module, "state_path", lambda name: risk_db if name == "risk_state.db" else tmp_path / name)
     monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(zeus_db))
@@ -3038,12 +3034,14 @@ def test_inv_status_summary_converges_to_current_mode_realized_truth(monkeypatch
     status_summary_module.write_status({"mode": "test"})
     status = json.loads(status_path.read_text())
 
-    assert status["portfolio"]["realized_pnl"] == pytest.approx(4.5)
-    assert status["portfolio"]["total_pnl"] == pytest.approx(4.5)
+    assert status["risk"]["details"]["settlement_storage_source"] == "decision_log"
+    assert status["risk"]["details"]["settlement_metric_ready_count"] == 0
+    assert status["portfolio"]["realized_pnl"] == pytest.approx(0.0)
+    assert status["portfolio"]["total_pnl"] == pytest.approx(0.0)
     # P0-A DEF A (followup_design.md §2.1): effective_bankroll == wallet_balance,
-    # NOT wallet+pnl. Was 150+4.5=154.5 under DEF B; now equals the wallet
-    # snapshot (default conftest provider returns 150.0).
-    assert status["portfolio"]["effective_bankroll"] == pytest.approx(150.0)
+    # NOT wallet+pnl. The retired DEF B path added PnL to a fixed bankroll;
+    # now the value equals the wallet snapshot.
+    assert status["portfolio"]["effective_bankroll"] == pytest.approx(211.37)
 
 
 def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
@@ -3072,7 +3070,7 @@ def test_inv_settlement_flows_to_brier(monkeypatch, tmp_path):
         return get_connection(zeus_db)
 
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(
@@ -3155,13 +3153,13 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
     # P0-A masking-test repoint (architect_memo §6, followup_design §2.1):
     # this test's axis is "INV settlement source = position_events"; bankroll
     # is now provider-sourced. Monkeypatch bankroll_provider.current() so the
-    # test stops enshrining PortfolioState(bankroll=150) as a truth source.
+    # test stops enshrining PortfolioState.bankroll as a truth source.
     from src.runtime import bankroll_provider as _bp
     monkeypatch.setattr(
         _bp,
         "current",
         lambda **_kw: _bp.BankrollOfRecord(
-            value_usd=150.0,
+            value_usd=211.37,
             fetched_at="2026-04-01T00:00:00+00:00",
             source="polymarket_wallet",
             authority="canonical",
@@ -3215,7 +3213,7 @@ def test_inv_riskguard_falls_back_to_legacy_settlement_source(monkeypatch, tmp_p
         return get_connection(zeus_db)
 
     monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
-    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
 
     riskguard_module.tick()
     row = get_connection(risk_db).execute(
@@ -3243,7 +3241,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
@@ -3262,7 +3260,7 @@ def test_inv_strategy_tracker_receives_trades(monkeypatch, tmp_path):
     # DummyClob lacks get_positions_from_api/get_balance → chain sync and wallet fail → entries blocked.
     # Stub both so chain_ready=True and entry_bankroll is set and discovery phase runs.
     monkeypatch.setattr(cycle_runner, "_run_chain_sync", lambda portfolio, clob, conn: ({}, True))
-    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (150.0, {}))
+    monkeypatch.setattr(cycle_runner, "_entry_bankroll_for_cycle", lambda portfolio, clob: (211.37, {}))
     monkeypatch.setattr(control_plane_module, "process_commands", lambda: [])
     monkeypatch.setattr(status_summary_module, "write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(
@@ -3408,7 +3406,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     monkeypatch.setattr(
         harvester_module,
         "load_portfolio",
-        lambda: PortfolioState(bankroll=150.0, positions=[]),
+        lambda: PortfolioState(bankroll=211.37, positions=[]),
     )
     monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
@@ -3463,7 +3461,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
         harvester_module,
         "load_portfolio",
         lambda: PortfolioState(
-            bankroll=150.0,
+            bankroll=211.37,
             positions=[
                 _position(
                     trade_id="stage2-skip-settles",
@@ -3568,7 +3566,7 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
         harvester_module,
         "load_portfolio",
         lambda: PortfolioState(
-            bankroll=150.0,
+            bankroll=211.37,
             positions=[_position(
                 trade_id="trade-open-fallback",
                 target_date="2026-04-01",
@@ -3670,7 +3668,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
         harvester_module,
         "load_portfolio",
         lambda: PortfolioState(
-            bankroll=150.0,
+            bankroll=211.37,
             positions=[_position(
                 trade_id="trade-open-ignored",
                 target_date="2026-04-01",
@@ -3808,7 +3806,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
         harvester_module,
         "load_portfolio",
         lambda: PortfolioState(
-            bankroll=150.0,
+            bankroll=211.37,
             positions=[_position(
                 trade_id="trade-open-ignored",
                 target_date="2026-04-01",
@@ -3953,7 +3951,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     _hconn = get_connection(db_path)
     monkeypatch.setattr(harvester_module, "get_trade_connection", lambda: _hconn)
     monkeypatch.setattr(harvester_module, "get_world_connection", lambda: _hconn)
-    monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=150.0, positions=[]))
+    monkeypatch.setattr(harvester_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37, positions=[]))
     monkeypatch.setattr(harvester_module, "save_portfolio", lambda *args, **kwargs: None)
     monkeypatch.setattr(harvester_module, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(harvester_module, "save_tracker", lambda tracker: None)
@@ -4039,7 +4037,7 @@ def test_query_position_current_status_view_ignores_terminal_trade_decision_shad
 def test_position_current_views_ignore_terminal_trade_decision_shadow_status_when_current_db_lags(tmp_path, monkeypatch):
     import src.state.db as db_module
 
-    current_db = tmp_path / "zeus-paper.db"
+    current_db = tmp_path / "zeus-current.db"
     legacy_db = tmp_path / "zeus.db"
 
     current_conn = get_connection(current_db)

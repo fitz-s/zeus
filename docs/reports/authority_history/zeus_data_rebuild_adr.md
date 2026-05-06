@@ -87,4 +87,4 @@ Soft flags (contamination_risk, confidence_weight) leave the decision of "how mu
 
 5. **HKO (Hong Kong) daily extract re-integration.** 296 rows from `hko_daily_extract` are currently in observations. Source authority is unclear. Verification and potential upgrade to VERIFIED is out of scope.
 
-6. **Automated authority maintenance.** K4 gates are hard asserts. Future work: a soft-warn mode during re-collection that gates paper/shadow trading on UNVERIFIED but allows live trading on TIGGE-VERIFIED only. Not in this rebuild — too many moving parts.
+6. **Automated authority maintenance.** K4 gates are hard asserts. Future work: a soft-warn mode during re-collection that gates diagnostic/shadow trading on UNVERIFIED but allows live trading on TIGGE-VERIFIED only. Not in this rebuild — too many moving parts.

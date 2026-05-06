@@ -83,7 +83,7 @@ Preflight confirmed: `READY: True, BLOCKERS: []`
 
 ## Step 5: rebuild_calibration_pairs_v2 ✅
 
-**Command**: `ZEUS_MODE=live python scripts/rebuild_calibration_pairs_v2.py --city Paris --start-date 2024-01-01 --end-date 2026-05-01 --no-dry-run --force`  
+**Command**: `python scripts/rebuild_calibration_pairs_v2.py --city Paris --start-date 2024-01-01 --end-date 2026-05-01 --no-dry-run --force`
 **Duration**: ~34 minutes (HIGH ~15 min compute + LOW ~19 min compute)  
 **Result**:
 - VERIFIED rows: 840,174 rows (2024-01-01 to 2026-05-01)
@@ -95,7 +95,7 @@ Preflight confirmed: `READY: True, BLOCKERS: []`
 
 ## Step 6: refit_platt_v2 ✅
 
-**Command**: `ZEUS_MODE=live python scripts/refit_platt_v2.py --cluster Paris --no-dry-run --force`  
+**Command**: `python scripts/refit_platt_v2.py --cluster Paris --no-dry-run --force`
 **Note**: HIGH completed first run; LOW initially failed with `database is locked` (riskguard daemon
 not unloaded). Daemons unloaded (`data-ingest`, `riskguard-live`, `live-trading`), LOW refit re-run
 successfully.

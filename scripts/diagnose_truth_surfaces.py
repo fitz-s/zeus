@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Purpose: Diagnose truth-surface health without promoting legacy projections.
+# Reuse: Use for read-only operator diagnostics; fact-table health is non-authoritative unless settlement authority fields say otherwise.
 """
 Diagnostic script: comprehensive truth surface health checks.
 
@@ -22,6 +25,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import STATE_DIR
+from scripts.verify_truth_surfaces import (
+    build_fact_table_authority_report,
+    format_fact_table_authority_detail,
+    format_fact_table_authority_evidence,
+)
 
 DEFAULT_DB = STATE_DIR / "zeus.db"
 RISK_DB = STATE_DIR / "risk_state-live.db"
@@ -218,15 +226,13 @@ def check_status_summary_completeness() -> dict:
 
 
 def check_fact_tables(cur) -> dict:
-    """Check 7: outcome_fact + execution_fact row counts. WARN if 0."""
-    outcome = _scalar(cur, "SELECT COUNT(*) FROM outcome_fact") or 0
-    execution = _scalar(cur, "SELECT COUNT(*) FROM execution_fact") or 0
-
-    empty = outcome == 0 and execution == 0
+    """Check 7: classify fact-table counts without promoting outcome_fact."""
+    report = build_fact_table_authority_report(cur)
+    authority_ready = report["authority_status"] == "authority_ready"
     return {
-        "status": WARN if empty else PASS,
-        "evidence": f"outcome_fact={outcome}, execution_fact={execution}",
-        "detail": "P4 deferred — not blocking" if empty else "",
+        "status": PASS if authority_ready else WARN,
+        "evidence": format_fact_table_authority_evidence(report),
+        "detail": format_fact_table_authority_detail(report),
     }
 
 

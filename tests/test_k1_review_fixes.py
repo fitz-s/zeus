@@ -1,6 +1,6 @@
 # Created: 2026-04-29
 # Last reused/audited: 2026-04-29
-# Authority basis: DSA-07 paper/live residue cleanup; K1 monitor authority gate reuse.
+# Authority basis: DSA-07 non-live execution residue cleanup; K1 monitor authority gate reuse.
 """K1 package-review fixes — authority gate in monitor, _parse_boolish_text, quarantine guard."""
 import pytest
 from unittest.mock import MagicMock, patch

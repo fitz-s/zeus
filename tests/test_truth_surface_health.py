@@ -1,16 +1,17 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-04-25
-# Authority basis: Venus sensing audit findings; P1 obs_v2 provenance identity packet.
+# Last reused/audited: 2026-05-06
+# Authority basis: Venus sensing audit findings; P1 obs_v2 provenance identity packet; Wave16 object-meaning diagnostic authority repair.
 """Truth-surface health tests — antibodies for Venus sensing audit findings.
 
 These tests verify cross-surface invariants that Venus detected as broken.
 They run against the live Zeus database, not test fixtures, because the
 invariants they check are about production state integrity.
 """
-# Lifecycle: created=2026-04-07; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
 # Purpose: Protect canonical truth surfaces and P0 training-readiness fail-closed checks.
 # Reuse: Inspect high-sensitivity skip metadata and live-DB assumptions before treating full-file results as closeout evidence.
 
+import json
 import re
 import sqlite3
 from datetime import date, datetime, timezone
@@ -56,8 +57,149 @@ def _fresh_training_readiness_world_db(tmp_path):
     return db_path
 
 
+def _seed_legacy_outcome_and_execution_facts(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE outcome_fact (
+            position_id TEXT PRIMARY KEY,
+            decision_snapshot_id TEXT,
+            settled_at TEXT,
+            pnl REAL,
+            outcome INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            terminal_exec_status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO outcome_fact (
+            position_id, decision_snapshot_id, settled_at, pnl, outcome
+        ) VALUES ('pos-legacy', 'snap-legacy', '2026-04-01T12:00:00+00:00', 9.5, 1)
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_fact (intent_id, terminal_exec_status) VALUES ('intent-1', 'filled')"
+    )
+
+
+def _seed_verified_settlement_authority(conn: sqlite3.Connection) -> None:
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            market_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            edge_source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_type TEXT,
+            position_id TEXT,
+            order_id TEXT,
+            snapshot_id TEXT,
+            strategy_key TEXT,
+            source_module TEXT,
+            payload_json TEXT,
+            occurred_at TEXT,
+            sequence_no INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, city, target_date, market_id, bin_label, direction, edge_source
+        ) VALUES (
+            'pos-verified', 'NYC', '2026-04-01', 'm-verified', '39-40°F', 'buy_yes', 'center_buy'
+        )
+        """
+    )
+    payload = {
+        "contract_version": "position_settled.v1",
+        "winning_bin": "39-40°F",
+        "position_bin": "39-40°F",
+        "won": True,
+        "outcome": 1,
+        "p_posterior": 0.72,
+        "exit_price": 1.0,
+        "pnl": 4.25,
+        "exit_reason": "SETTLEMENT",
+        "settlement_authority": "VERIFIED",
+        "settlement_truth_source": "world.settlements",
+        "settlement_market_slug": "nyc-high-verified",
+        "settlement_temperature_metric": "high",
+        "settlement_source": "WU",
+        "settlement_value": 40.0,
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_type, position_id, order_id, snapshot_id, strategy_key,
+            source_module, payload_json, occurred_at, sequence_no
+        ) VALUES (
+            'SETTLED', 'pos-verified', 'order-verified', 'snap-verified',
+            'center_buy', 'harvester', ?, '2026-04-01T12:00:00+00:00', 1
+        )
+        """,
+        (json.dumps(payload),),
+    )
+
+
 def _blocker_codes(report):
     return {item["code"] for item in report["blockers"]}
+
+
+def test_truth_surface_fact_table_check_rejects_legacy_outcome_fact_as_authority():
+    conn = sqlite3.connect(":memory:")
+    _seed_legacy_outcome_and_execution_facts(conn)
+
+    status, detail = truth_surfaces.check_7_fact_tables_populated(conn.cursor())
+
+    assert status == truth_surfaces.FAIL
+    assert "outcome_fact=1 (authority=legacy_lifecycle_projection_not_settlement_authority)" in detail
+    assert "terminal_execution_fact_rows=1" in detail
+    assert "settlement_authority_ready_rows=0" in detail
+    assert "settlement_authority_ready_rows_missing" in detail
+
+
+def test_truth_surface_fact_table_check_passes_with_verified_settlement_authority():
+    conn = sqlite3.connect(":memory:")
+    _seed_legacy_outcome_and_execution_facts(conn)
+    _seed_verified_settlement_authority(conn)
+
+    status, detail = truth_surfaces.check_7_fact_tables_populated(conn.cursor())
+
+    assert status == truth_surfaces.PASS
+    assert "settlement_authority_ready_rows=1" in detail
+    assert "settlement_learning_eligible_rows=1" in detail
+    assert "blocking_reasons=[]" in detail
+
+
+def test_diagnose_truth_surfaces_warns_on_legacy_outcome_fact_only():
+    from scripts import diagnose_truth_surfaces
+
+    conn = sqlite3.connect(":memory:")
+    _seed_legacy_outcome_and_execution_facts(conn)
+
+    result = diagnose_truth_surfaces.check_fact_tables(conn.cursor())
+
+    assert result["status"] == truth_surfaces.WARN
+    assert "legacy_lifecycle_projection_not_settlement_authority" in result["evidence"]
+    assert "settlement_authority_ready_rows_missing" in result["detail"]
 
 
 def _ready_p4_state_dir(tmp_path):
@@ -1909,7 +2051,7 @@ class TestSettlementFreshness:
 
 @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monkeypatch):
-    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setenv("ZEUS_MODE", "legacy_env")
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -1938,7 +2080,7 @@ def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monke
         ) VALUES (
             'ORDER_FILLED', 'trade-1', 'entered', '', 'snap-1',
             'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
-            'test', '{}', '2099-04-01T11:45:45.242861+00:00', 'paper'
+            'test', '{}', '2099-04-01T11:45:45.242861+00:00', 'legacy_env'
         )
         """
     )
@@ -1953,7 +2095,7 @@ def test_portfolio_loader_ignores_same_phase_legacy_entry_shadow(tmp_path, monke
 
 @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypatch):
-    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setenv("ZEUS_MODE", "legacy_env")
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -1982,7 +2124,7 @@ def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypa
         ) VALUES (
             'POSITION_EXIT_RECORDED', 'shadow-trade', 'economically_closed', '', 'snap-1',
             'Dallas', '2099-04-07', 'm1', '76-77°F', 'buy_no', 'opening_inertia', 'opening_inertia',
-            'test', '{\"pnl\":0.05}', '2099-04-07T11:14:30.687958+00:00', 'paper'
+            'test', '{\"pnl\":0.05}', '2099-04-07T11:14:30.687958+00:00', 'legacy_env'
         )
         """
     )
@@ -1997,7 +2139,7 @@ def test_portfolio_loader_marks_semantic_exit_shadow_as_stale(tmp_path, monkeypa
 
 @pytest.mark.skip(reason="P9/Phase2: legacy position_events_legacy or backfill eliminated")
 def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shadow_event_exists(tmp_path, monkeypatch):
-    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setenv("ZEUS_MODE", "legacy_env")
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
@@ -2026,7 +2168,7 @@ def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shado
         ) VALUES (
             'POSITION_ENTRY_RECORDED', 'pending-trade', 'entered', '', 'snap-1',
             'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
-            'test', '{}', '2099-04-01T11:45:46.000000+00:00', 'paper'
+            'test', '{}', '2099-04-01T11:45:46.000000+00:00', 'legacy_env'
         )
         """
     )
@@ -2039,7 +2181,7 @@ def test_portfolio_loader_keeps_older_semantic_advance_stale_even_if_newer_shado
         ) VALUES (
             'ORDER_FILLED', 'pending-trade', 'entered', '', 'snap-1',
             'NYC', '2099-04-01', 'm1', '39-40°F', 'buy_yes', 'center_buy', 'center_buy',
-            'test', '{}', '2099-04-01T11:45:47.000000+00:00', 'paper'
+            'test', '{}', '2099-04-01T11:45:47.000000+00:00', 'legacy_env'
         )
         """
     )

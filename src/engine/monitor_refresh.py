@@ -26,6 +26,7 @@ from src.contracts import (
 )
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
+from src.data.forecast_source_registry import calibration_source_id_for_lookup
 from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
@@ -109,7 +110,38 @@ def _ens_result_phase2_keys(ens_result: dict) -> tuple[
     from src.calibration.forecast_calibration_domain import (
         derive_phase2_keys_from_ens_result,
     )
-    return derive_phase2_keys_from_ens_result(ens_result)
+    cycle, source_id, horizon_profile = derive_phase2_keys_from_ens_result(ens_result)
+    return cycle, calibration_source_id_for_lookup(source_id), horizon_profile
+
+
+def _monitor_calibrator_for_ens_result(
+    *,
+    conn,
+    city,
+    target_date: str,
+    temperature_metric: str,
+    ens_result: dict,
+):
+    """Load monitor calibrator only when source identity has bucket authority."""
+
+    _cycle, _source_id, _horizon = _ens_result_phase2_keys(ens_result)
+    raw_source_id = ens_result.get("source_id") if isinstance(ens_result, dict) else None
+    if raw_source_id and _source_id is None:
+        logger.warning(
+            "Monitor forecast source %r has no calibration bucket authority; "
+            "skipping Platt recalibration",
+            raw_source_id,
+        )
+        return None, 4
+    return get_calibrator(
+        conn,
+        city,
+        target_date,
+        temperature_metric=temperature_metric,
+        cycle=_cycle,
+        source_id=_source_id,
+        horizon_profile=_horizon,
+    )
 
 
 def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
@@ -272,13 +304,12 @@ def _refresh_ens_member_counting(
     # operators can audit silent-HIGH events.
     # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): thread Phase 2 stratification
     # axes so monitor exit calibration uses the same bucket the entry side did.
-    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
-    cal, cal_level = get_calibrator(
-        conn, city, position.target_date,
+    cal, cal_level = _monitor_calibrator_for_ens_result(
+        conn=conn,
+        city=city,
+        target_date=position.target_date,
         temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
-        cycle=_mr_cycle,
-        source_id=_mr_source_id,
-        horizon_profile=_mr_horizon,
+        ens_result=ens_result,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -632,13 +663,12 @@ def _refresh_day0_observation(
     # already fired audit log at function entry).
     # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): same Phase 2 stratification
     # threading as the ensemble exit lane above.
-    _mr_cycle, _mr_source_id, _mr_horizon = _ens_result_phase2_keys(ens_result)
-    cal, cal_level = get_calibrator(
-        conn, city, position.target_date,
+    cal, cal_level = _monitor_calibrator_for_ens_result(
+        conn=conn,
+        city=city,
+        target_date=position.target_date,
         temperature_metric=_position_metric_str,
-        cycle=_mr_cycle,
-        source_id=_mr_source_id,
-        horizon_profile=_mr_horizon,
+        ens_result=ens_result,
     )
     if cal is not None and len(all_bins) > 1:
         p_cal_vector = calibrate_and_normalize(
@@ -817,7 +847,8 @@ def _check_persistence_anomaly(
             row = conn.execute(
                 "SELECT settlement_value FROM settlements "
                 "WHERE city = ? AND target_date = ? "
-                "AND temperature_metric = 'high' LIMIT 1",
+                "AND temperature_metric = 'high' "
+                "AND authority = 'VERIFIED' LIMIT 1",
                 (city_name, d),
             ).fetchone()
             if row and row["settlement_value"] is not None:
@@ -974,11 +1005,15 @@ def _detect_whale_toxicity_from_orderbook(
 
     observed = False
     basis_price = float(held_best_ask if held_best_ask is not None else held_best_bid)
-    position_notional = max(
-        _WHALE_TOXICITY_MIN_NOTIONAL_USD,
-        float(getattr(position, "effective_cost_basis_usd", 0.0) or 0.0),
-        float(getattr(position, "size_usd", 0.0) or 0.0),
-    )
+    effective_cost_basis = float(getattr(position, "effective_cost_basis_usd", 0.0) or 0.0)
+    if getattr(position, "has_fill_economics_authority", False):
+        position_notional = max(_WHALE_TOXICITY_MIN_NOTIONAL_USD, effective_cost_basis)
+    else:
+        position_notional = max(
+            _WHALE_TOXICITY_MIN_NOTIONAL_USD,
+            effective_cost_basis,
+            float(getattr(position, "size_usd", 0.0) or 0.0),
+        )
     now_utc = now or datetime.now(timezone.utc)
 
     for outcome in adjacent:

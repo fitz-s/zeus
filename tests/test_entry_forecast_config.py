@@ -126,11 +126,11 @@ def test_entry_forecast_config_is_separate_from_ensemble_primary() -> None:
 
 def test_entry_forecast_invalid_rollout_mode_fails_closed(tmp_path) -> None:
     data = _settings_data()
-    data["entry_forecast"]["rollout_mode"] = "paper"
+    data["entry_forecast"]["rollout_mode"] = "legacy_env"
     path = tmp_path / "settings-invalid-rollout.json"
     path.write_text(json.dumps(data))
 
-    with pytest.raises(ValueError, match="paper"):
+    with pytest.raises(ValueError, match="legacy_env"):
         entry_forecast_config(Settings(path=path))
 
 

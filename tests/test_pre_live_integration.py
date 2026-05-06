@@ -1,6 +1,6 @@
 # Created: 2026-04-29
 # Last reused/audited: 2026-04-29
-# Authority basis: DSA-07 paper/live residue cleanup; transitional monitor integration reuse.
+# Authority basis: DSA-07 non-live execution residue cleanup; transitional monitor integration reuse.
 import pytest
 import numpy as np
 from src.contracts.semantic_types import Direction, EntryMethod

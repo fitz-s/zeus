@@ -31,8 +31,8 @@ from src.state.strategy_tracker import StrategyTracker
 
 
 class _NullClob:
-    def __init__(self, paper_mode=True):
-        self.paper_mode = paper_mode
+    def __init__(self):
+        pass
 
 
 def _patch_cycle(monkeypatch):
@@ -40,7 +40,7 @@ def _patch_cycle(monkeypatch):
     un-patched so individual tests can inject faults there."""
     monkeypatch.setattr(cr, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(cr, "get_connection", lambda: sqlite3.connect(":memory:"))
-    monkeypatch.setattr(cr, "load_portfolio", lambda: PortfolioState(bankroll=150.0))
+    monkeypatch.setattr(cr, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
     monkeypatch.setattr(cr, "save_portfolio", lambda _: None)
     monkeypatch.setattr(cr, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cr, "save_tracker", lambda _: None)

@@ -21,7 +21,7 @@ ZEUS_MODE=unset
 ```
 
 ## Verdict (CORRECTED 2026-05-04T16:55:00Z — see Erratum below)
-- Live trading daemon (src.main / ZEUS_MODE=live): **NOT RUNNING** (process scan shows no `src.main`).
+- Live trading daemon (`python -m src.main`): **NOT RUNNING** (process scan shows no `src.main`).
 - RiskGuard daemon: **RUNNING** — PID 14177 actively executing `python -m src.riskguard.riskguard` for 12+ hours; launchd label `com.zeus.riskguard-live` actively loaded.
 - data-ingest daemon (com.zeus.data-ingest, PID 4571): RUNNING — read-only ingest, NOT flagged as T0.1/T0.2 blocker by current plan.
 - heartbeat-sensor (com.zeus.heartbeat-sensor): label loaded, no PID — informational.

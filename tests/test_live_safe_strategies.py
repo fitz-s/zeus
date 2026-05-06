@@ -260,9 +260,9 @@ def test_assert_live_safe_strategies_raises_on_unsafe_set(monkeypatch):
     assert "_test_ghost_strategy" in msg, f"SystemExit message must name the offender: {msg!r}"
 
 
-def test_assert_live_safe_strategies_ignores_retired_paper_env(monkeypatch):
+def test_assert_live_safe_strategies_ignores_retired_non_live_env(monkeypatch):
     """The retired ZEUS_MODE switch cannot bypass live strategy allowlisting."""
-    monkeypatch.setenv("ZEUS_MODE", "paper")
+    monkeypatch.setenv("ZEUS_MODE", "legacy_env")
     from src.control.control_plane import assert_live_safe_strategies_under_live_mode
 
     with pytest.raises(SystemExit):

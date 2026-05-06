@@ -260,6 +260,8 @@ def run_baseline() -> dict:
     settlements = conn.execute("""
         SELECT city, target_date, winning_bin, settlement_value
         FROM settlements
+        WHERE authority = 'VERIFIED'
+          AND temperature_metric = 'high'
         ORDER BY target_date
     """).fetchall()
     print(f"\nTotal settlements: {len(settlements)}")

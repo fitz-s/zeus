@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,10 +47,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    from sklearn.linear_model import LogisticRegression as _LogisticRegression  # noqa: F401
+except ModuleNotFoundError:
+    sklearn_stub = types.ModuleType("sklearn")
+    linear_model_stub = types.ModuleType("sklearn.linear_model")
+
+    class _MissingLogisticRegression:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("scikit-learn is required for calibration training")
+
+    linear_model_stub.LogisticRegression = _MissingLogisticRegression
+    sklearn_stub.linear_model = linear_model_stub
+    sys.modules.setdefault("sklearn", sklearn_stub)
+    sys.modules.setdefault("sklearn.linear_model", linear_model_stub)
+
 from src.backtest.economics import check_economics_readiness
 from src.config import City
 from src.execution import harvester as harvester_mod
 from src.state.db import init_schema, log_market_event_outcome_v2, log_settlement_v2
+from src.state.portfolio import (
+    ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
+    PortfolioState,
+    Position,
+)
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
@@ -238,6 +260,84 @@ def test_harvester_high_and_low_same_city_date_do_not_overwrite(harvester_conn):
         ("high", 88.0),
         ("low", 64.0),
     ]
+
+
+def test_verified_high_settlement_cannot_settle_low_position_same_city_date(harvester_conn):
+    low_position = Position(
+        trade_id="low-position",
+        market_id="m-low",
+        city="dual_metric_city",
+        cluster="north",
+        target_date="2026-04-24",
+        bin_label="62-65°F",
+        direction="buy_yes",
+        unit="F",
+        temperature_metric="low",
+        size_usd=10.0,
+        entry_price=0.40,
+        shares=25.0,
+        cost_basis_usd=10.0,
+        p_posterior=0.60,
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        state="entered",
+    )
+    portfolio = PortfolioState(positions=[low_position])
+
+    settled = harvester_mod._settle_positions(
+        harvester_conn,
+        portfolio,
+        city="dual_metric_city",
+        target_date="2026-04-24",
+        winning_label="85-89°F",
+        settlement_temperature_metric="high",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_value=88.0,
+    )
+
+    chronicle_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM chronicle WHERE event_type = 'SETTLEMENT'"
+    ).fetchone()[0]
+    canonical_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE event_type = 'SETTLED'"
+    ).fetchone()[0]
+
+    assert settled == 0
+    assert chronicle_count == 0
+    assert canonical_count == 0
+
+
+def test_optimistic_match_price_is_not_settlement_pnl_authority():
+    pos = Position(
+        trade_id="optimistic-match",
+        market_id="m1",
+        city="testville",
+        cluster="north",
+        target_date="2026-04-24",
+        bin_label="62-65°F",
+        direction="buy_yes",
+        unit="F",
+        temperature_metric="high",
+        size_usd=5.04,
+        entry_price=0.42,
+        shares=12.0,
+        cost_basis_usd=5.04,
+        p_posterior=0.60,
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        state="pending_tracked",
+        entry_economics_authority=ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
+        fill_authority=FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
+        entry_price_avg_fill=0.42,
+        shares_filled=12.0,
+        filled_cost_basis_usd=5.04,
+    )
+
+    with pytest.raises(ValueError, match="settlement P&L requires fill-derived economics"):
+        harvester_mod._settlement_economics_for_position(pos)
 
 
 def test_physical_quantity_is_not_legacy_string(harvester_conn):
@@ -1030,7 +1130,8 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
     assert count == 3
     rows = harvester_conn.execute(
         """
-        SELECT data_version, training_allowed, causality_status, snapshot_id
+        SELECT data_version, training_allowed, causality_status, snapshot_id,
+               cycle, source_id, horizon_profile
         FROM calibration_pairs_v2
         WHERE city = ?
         """,
@@ -1041,6 +1142,235 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
         assert row["data_version"] == "openmeteo_ecmwf_ifs025_live_v1"
         assert row["training_allowed"] == 0
         assert row["snapshot_id"] == 123
+        assert row["cycle"] == "00"
+        assert row["source_id"] == "unsupported_openmeteo"
+        assert row["horizon_profile"] == "full"
+
+
+def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harvester_conn):
+    apply_v2_schema(harvester_conn)
+    city = _make_city("malformed_issue_time")
+
+    count = harvester_mod.harvest_settlement(
+        harvester_conn,
+        city,
+        target_date="2026-04-24",
+        winning_bin_label="86-88°F",
+        bin_labels=["85°F or below", "86-88°F", "89°F or higher"],
+        p_raw_vector=[0.2, 0.5, 0.3],
+        lead_days=1.0,
+        forecast_issue_time="not-a-forecast-cycle",
+        forecast_available_at="2026-04-23T00:00:00Z",
+        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        settlement_value=87.0,
+        temperature_metric="high",
+        snapshot_id="130",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn):
+    """An explicit not-training snapshot cannot become calibration-pair truth."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city("snapshot_training_disallowed")
+
+    count = harvester_mod.harvest_settlement(
+        harvester_conn,
+        city,
+        target_date="2026-04-24",
+        winning_bin_label="86-88°F",
+        bin_labels=["85°F or below", "86-88°F", "89°F or higher"],
+        p_raw_vector=[0.2, 0.5, 0.3],
+        lead_days=1.0,
+        forecast_issue_time="2026-04-23T00:00:00Z",
+        forecast_available_at="2026-04-23T00:00:00Z",
+        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        settlement_value=87.0,
+        temperature_metric="high",
+        snapshot_training_allowed=False,
+        snapshot_id="124",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+def test_context_explicit_training_disallow_overrides_learning_ready(harvester_conn):
+    """Wrapper must preserve explicit training disallow over readiness fallback."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city("context_training_disallowed")
+    context = {
+        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "snapshot_training_allowed": False,
+        "snapshot_learning_ready": True,
+        "p_raw_vector": [0.2, 0.5, 0.3],
+        "issue_time": "2026-04-23T00:00:00Z",
+        "available_at": "2026-04-23T00:00:00Z",
+        "lead_days": 1.0,
+        "forecast_source": "tigge",
+        "decision_snapshot_id": 125,
+        "snapshot_causality_status": "OK",
+    }
+
+    count = harvester_mod.maybe_write_learning_pair(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        "86-88°F",
+        ["85°F or below", "86-88°F", "89°F or higher"],
+        context,
+        "high",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
+    """Runtime/fallback snapshot causality cannot become training truth."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city("snapshot_causality_blocked")
+
+    count = harvester_mod.harvest_settlement(
+        harvester_conn,
+        city,
+        target_date="2026-04-24",
+        winning_bin_label="86-88°F",
+        bin_labels=["85°F or below", "86-88°F", "89°F or higher"],
+        p_raw_vector=[0.2, 0.5, 0.3],
+        lead_days=1.0,
+        forecast_issue_time="2026-04-23T00:00:00Z",
+        forecast_available_at="2026-04-23T00:00:00Z",
+        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        settlement_value=87.0,
+        temperature_metric="high",
+        snapshot_training_allowed=True,
+        causality_status="RUNTIME_ONLY_FALLBACK",
+        snapshot_id="128",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
+    """Wrapper must treat non-OK causality as non-training evidence."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city("context_causality_blocked")
+    context = {
+        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "snapshot_training_allowed": True,
+        "snapshot_learning_ready": True,
+        "p_raw_vector": [0.2, 0.5, 0.3],
+        "issue_time": "2026-04-23T00:00:00Z",
+        "available_at": "2026-04-23T00:00:00Z",
+        "lead_days": 1.0,
+        "forecast_source": "tigge",
+        "decision_snapshot_id": 129,
+        "snapshot_causality_status": "RUNTIME_ONLY_FALLBACK",
+    }
+
+    count = harvester_mod.maybe_write_learning_pair(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        "86-88°F",
+        ["85°F or below", "86-88°F", "89°F or higher"],
+        context,
+        "high",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+@pytest.mark.parametrize("flag_value", ["False", "0", "true"])
+def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn, flag_value):
+    """Serialized flags are not authoritative training permission."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city(f"serialized_direct_{flag_value}")
+
+    count = harvester_mod.harvest_settlement(
+        harvester_conn,
+        city,
+        target_date="2026-04-24",
+        winning_bin_label="86-88°F",
+        bin_labels=["85°F or below", "86-88°F", "89°F or higher"],
+        p_raw_vector=[0.2, 0.5, 0.3],
+        lead_days=1.0,
+        forecast_issue_time="2026-04-23T00:00:00Z",
+        forecast_available_at="2026-04-23T00:00:00Z",
+        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        settlement_value=87.0,
+        temperature_metric="high",
+        snapshot_training_allowed=flag_value,
+        snapshot_id="126",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
+
+
+@pytest.mark.parametrize("flag_value", ["False", "0", "true"])
+def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_conn, flag_value):
+    """Serialized context flags cannot override the fail-closed training gate."""
+    apply_v2_schema(harvester_conn)
+    city = _make_city(f"serialized_context_{flag_value}")
+    context = {
+        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "snapshot_training_allowed": flag_value,
+        "snapshot_learning_ready": True,
+        "p_raw_vector": [0.2, 0.5, 0.3],
+        "issue_time": "2026-04-23T00:00:00Z",
+        "available_at": "2026-04-23T00:00:00Z",
+        "lead_days": 1.0,
+        "forecast_source": "tigge",
+        "decision_snapshot_id": 127,
+        "snapshot_causality_status": "OK",
+    }
+
+    count = harvester_mod.maybe_write_learning_pair(
+        harvester_conn,
+        city,
+        "2026-04-24",
+        "86-88°F",
+        ["85°F or below", "86-88°F", "89°F or higher"],
+        context,
+        "high",
+    )
+
+    assert count == 0
+    pair_count = harvester_conn.execute(
+        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        (city.name,),
+    ).fetchone()[0]
+    assert pair_count == 0
 
 
 def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):

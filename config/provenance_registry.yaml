@@ -362,7 +362,7 @@ constants:
     declared_target: risk_cap
     data_basis: >
       Require 2 consecutive negative cycles before firing EDGE_REVERSAL exit.
-      Single-cycle exits were too noisy in early paper trading.
+      Single-cycle exits were too noisy in early diagnostic trading.
       2 cycles is a minimum smoothing heuristic, not statistically validated.
       This is the D4 asymmetry constant: entry uses bootstrap + FDR, exit uses
       2-cycle observation. Documented here to flag the asymmetry explicitly.

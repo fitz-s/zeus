@@ -23,7 +23,7 @@ class TestGetMode:
         assert get_mode() == "live"
 
     def test_get_mode_ignores_retired_non_live_env_var(self, monkeypatch):
-        monkeypatch.setenv("ZEUS_MODE", "paper")
+        monkeypatch.setenv("ZEUS_MODE", "legacy_env")
         from src.config import get_mode
         assert get_mode() == "live"
 
